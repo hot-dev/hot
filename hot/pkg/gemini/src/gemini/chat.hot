@@ -103,12 +103,14 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::chat/generate("gemini-2.0-flash", GenerateContentRequest({
-        contents: [Content({
+    ::chat ::gemini::chat
+
+    response ::chat/generate("gemini-2.0-flash", ::chat/GenerateContentRequest({
+        contents: [::chat/Content({
             role: "user",
-            parts: [Part({text: "Say hello!"})]
+            parts: [::chat/Part({text: "Say hello!"})]
         })],
-        generationConfig: GenerationConfig({maxOutputTokens: 50})
+        generationConfig: ::chat/GenerationConfig({maxOutputTokens: 50})
     }))
 
     text first(response.candidates).content.parts[0].text
@@ -117,16 +119,18 @@ meta {
     **With system instruction**
 
     ```hot
-    response ::gemini::chat/generate("gemini-2.0-flash", GenerateContentRequest({
-        contents: [Content({
+    ::chat ::gemini::chat
+
+    response ::chat/generate("gemini-2.0-flash", ::chat/GenerateContentRequest({
+        contents: [::chat/Content({
             role: "user",
-            parts: [Part({text: "What is 2+2?"})]
+            parts: [::chat/Part({text: "What is 2+2?"})]
         })],
-        systemInstruction: Content({
+        systemInstruction: ::chat/Content({
             role: "user",
-            parts: [Part({text: "You are a math assistant. Reply with just the answer."})]
+            parts: [::chat/Part({text: "You are a math assistant. Reply with just the answer."})]
         }),
-        generationConfig: GenerationConfig({maxOutputTokens: 50})
+        generationConfig: ::chat/GenerationConfig({maxOutputTokens: 50})
     }))
     ```
     """
@@ -159,12 +163,14 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::chat/generate-stream("gemini-2.0-flash", GenerateContentRequest({
-        contents: [Content({
+    ::chat ::gemini::chat
+
+    response ::chat/generate-stream("gemini-2.0-flash", ::chat/GenerateContentRequest({
+        contents: [::chat/Content({
             role: "user",
-            parts: [Part({text: "Count from 1 to 5."})]
+            parts: [::chat/Part({text: "Count from 1 to 5."})]
         })],
-        generationConfig: GenerationConfig({maxOutputTokens: 100})
+        generationConfig: ::chat/GenerationConfig({maxOutputTokens: 100})
     }))
 
     response.status // => 200
@@ -219,7 +225,7 @@ meta {
     **With a per-call API key**
 
     ```hot
-    answer ::gemini::chat/chat("gemini-2.0-flash", "Hello!", {api-key: "tenant-key"})
+    answer ::gemini::chat/chat("gemini-2.0-flash", "Hello!", {api-key: ::hot::ctx/get("tenant.gemini.key")})
     ```
     """
 }
@@ -298,7 +304,7 @@ meta {
     **Example**
 
     ```hot
-    part ::gemini::chat/image-part("image/png", base64-data)
+    part ::gemini::chat/image-part("image/png", "iVBORw0KGgo=")
     part.inlineData.mimeType // => "image/png"
     ```
     """
@@ -346,7 +352,22 @@ fn (text: Str): Content {
 }
 
 // Extract text from a single parsed JSON chunk
-extract-text-from-data fn (data): Str {
+extract-text-from-data
+meta {
+    doc: """
+    The text of the first part of the first candidate in a parsed response
+    or stream chunk, or an empty string when there is none. For a raw stream
+    event, use `extract-chunk-text`.
+
+    **Example**
+
+    ```hot
+    ::gemini::chat/extract-text-from-data({candidates: [{content: {parts: [{text: "Hi"}]}}]})  // "Hi"
+    ::gemini::chat/extract-text-from-data({candidates: []})  // ""
+    ```
+    """
+}
+fn (data): Str {
     cond {
         is-null(data) => { "" }
         => {
@@ -386,11 +407,9 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::chat/generate-stream("gemini-2.0-flash", request)
-    for-each(response.body, (event) {
-        text ::gemini::chat/extract-chunk-text(event)
-        // text contains the partial response text from this chunk
-    })
+    ::gemini::chat/extract-chunk-text({data: {candidates: [{content: {parts: [{text: "Hello"}]}}]}})  // "Hello"
+    ::gemini::chat/extract-chunk-text({data: "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}"})  // "Hi"
+    ::gemini::chat/extract-chunk-text({data: null})  // ""
     ```
     """
 }
@@ -426,7 +445,21 @@ fn (event): Str {
 }
 
 // Check if a single parsed data object indicates completion
-is-data-done fn (data): Bool {
+is-data-done
+meta {
+    doc: """
+    True when the first candidate of a parsed response or stream chunk has a
+    `finishReason`. For a raw stream event, use `is-stream-done`.
+
+    **Example**
+
+    ```hot
+    ::gemini::chat/is-data-done({candidates: [{finishReason: "STOP"}]})  // true
+    ::gemini::chat/is-data-done({candidates: [{content: {parts: []}}]})  // false
+    ```
+    """
+}
+fn (data): Bool {
     cond {
         is-null(data) => { false }
         => {
@@ -453,11 +486,8 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::chat/generate-stream("gemini-2.0-flash", request)
-    for-each(response.body, (event) {
-        done ::gemini::chat/is-stream-done(event)
-        // done is true when the model has finished generating
-    })
+    ::gemini::chat/is-stream-done({data: {candidates: [{finishReason: "STOP"}]}})  // true
+    ::gemini::chat/is-stream-done({data: {candidates: [{content: {parts: []}}]}})  // false
     ```
     """
 }

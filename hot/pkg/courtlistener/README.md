@@ -8,7 +8,7 @@ Add it to your project's deps in `hot.hot`:
 
 ```hot
 hot.project.my-app.deps {
-  "hot.dev/courtlistener": "0.1.1"
+  "hot.dev/courtlistener": "0.1.2"
 }
 ```
 

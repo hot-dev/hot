@@ -75,7 +75,19 @@ type {
 
 create-message-body
 meta {
-    doc: """The form parameters `create-message` sends: every set field of the request, unset ones omitted. Exposed for testing."""
+    doc: """
+    The form parameters `create-message` sends: every set field of the
+    request, unset ones omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::messages ::twilio::messages
+
+    req ::messages/CreateMessageRequest({To: "+15558675310", From: "+15017122661", Body: "Hi"})
+    ::messages/create-message-body(req).Body  // "Hi"
+    ```
+    """
 }
 fn (request: CreateMessageRequest): Map {
   filter-vals(untype(request), is-some)
@@ -219,7 +231,17 @@ ListMessagesResponse type {
 
 list-messages-query
 meta {
-    doc: """The query string `list-messages` sends. Exposed for testing."""
+    doc: """
+    The query string `list-messages` sends. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::messages ::twilio::messages
+
+    ::messages/list-messages-query(::messages/ListMessagesRequest({DateSentAfter: "2026-11-01", PageSize: 20}))  // "?DateSent%3E=2026-11-01&PageSize=20"
+    ```
+    """
 }
 fn (request: ListMessagesRequest): Str {
   ::twilio::api/query-string({
@@ -304,7 +326,24 @@ UpdateMessageRequest type {
 update-message
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """POST /Accounts/{AccountSid}/Messages/{Sid}.json - Update a message. Set `Body: ""` to redact message content. Set `Status: "canceled"` to cancel a scheduled message."""
+    doc: """
+    POST /Accounts/{AccountSid}/Messages/{Sid}.json - Update a message. Set
+    `Body: ""` to redact message content. Set `Status: "canceled"` to cancel
+    a scheduled message.
+
+    **Example**
+
+    ```hot
+    ::messages ::twilio::messages
+
+    // Redact the body of a sent message
+    redacted ::messages/update-message(::messages/UpdateMessageRequest({sid: "SM123", Body: ""}))
+    redacted.body
+
+    // Cancel a scheduled message
+    ::messages/update-message(::messages/UpdateMessageRequest({sid: "SM456", Status: "canceled"}))
+    ```
+    """
 }
 fn
 (request: UpdateMessageRequest): Message {
@@ -334,7 +373,19 @@ DeleteMessageRequest type {
 delete-message
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """DELETE /Accounts/{AccountSid}/Messages/{Sid}.json - Delete a message record. The message content is permanently removed."""
+    doc: """
+    DELETE /Accounts/{AccountSid}/Messages/{Sid}.json - Delete a message
+    record. The message content is permanently removed.
+
+    **Example**
+
+    ```hot
+    ::messages ::twilio::messages
+
+    deleted ::messages/delete-message(::messages/DeleteMessageRequest({sid: "SM123"}))
+    if(deleted, "Message removed")
+    ```
+    """
 }
 fn
 (request: DeleteMessageRequest): Bool {
@@ -373,7 +424,20 @@ ListMediaResponse type {
 list-media
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media.json - List media resources attached to a message (e.g. inbound MMS images). Each entry's `sid` and `content_type` feed `get-media-content`."""
+    doc: """
+    GET /Accounts/{AccountSid}/Messages/{MessageSid}/Media.json - List media
+    resources attached to a message (e.g. inbound MMS images). Each entry's
+    `sid` and `content_type` feed `get-media-content`.
+
+    **Example**
+
+    ```hot
+    ::messages ::twilio::messages
+
+    page ::messages/list-media(::messages/ListMediaRequest({message_sid: "MM123", PageSize: 10}))
+    map(page.media_list, %.content_type)
+    ```
+    """
 }
 fn
 (request: ListMediaRequest): ListMediaResponse {

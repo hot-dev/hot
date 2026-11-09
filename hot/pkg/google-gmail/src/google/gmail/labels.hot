@@ -18,7 +18,17 @@ LABEL_FIELDS ["labelListVisibility", "messageListVisibility", "color"]
 
 list-labels
 meta {
-    doc: """GET /users/me/labels - every label in the mailbox: `{labels: [{id, name, type, ...}]}` (not paginated). Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/labels - every label in the mailbox: `{labels: [{id, name,
+    type, ...}]}` (not paginated). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    result ::google::gmail::labels/list-labels()
+    map(result.labels, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -30,7 +40,17 @@ fn
 
 get-label
 meta {
-    doc: """GET /users/me/labels/{id} - one label with its message and thread counts. Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/labels/{id} - one label with its message and thread
+    counts. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    label ::google::gmail::labels/get-label("INBOX")
+    label.messagesUnread
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -42,7 +62,17 @@ fn
 
 find-label
 meta {
-    doc: """The label whose name equals `name` (case-insensitive), or null. Scope: `gmail.readonly`."""
+    doc: """
+    The label whose name equals `name` (case-insensitive), or null. Scope:
+    `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    label ::google::gmail::labels/find-label("clients/acme")
+    if(is-some(label), label.id, "no such label")
+    ```
+    """
 }
 fn
 (name: Str): Map? {
@@ -56,7 +86,18 @@ fn
 
 build-label
 meta {
-    doc: """The label body for `create-label` (pure): `{name}` plus any of `labelListVisibility` (`labelShow`, `labelShowIfUnread`, `labelHide`), `messageListVisibility` (`show`, `hide`) and `color` (`{textColor, backgroundColor}` from Gmail's palette) found in `opts`."""
+    doc: """
+    The label body for `create-label` (pure): `{name}` plus any of
+    `labelListVisibility` (`labelShow`, `labelShowIfUnread`, `labelHide`),
+    `messageListVisibility` (`show`, `hide`) and `color` (`{textColor,
+    backgroundColor}` from Gmail's palette) found in `opts`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::labels/build-label("Clients/Acme", {labelListVisibility: "labelHide"})  // {name: "Clients/Acme", labelListVisibility: "labelHide"}
+    ```
+    """
 }
 fn (name: Str, opts: Map): Map {
   ::gmail/compact({...filter-keys(opts, (k) { in(k, LABEL_FIELDS) }), name: name})
@@ -64,7 +105,21 @@ fn (name: Str, opts: Map): Map {
 
 create-label
 meta {
-    doc: """POST /users/me/labels - create a user label. Options: see `build-label`. Gmail rejects a duplicate name with 409; use `ensure-label` to reuse an existing one. Scope: `gmail.labels`."""
+    doc: """
+    POST /users/me/labels - create a user label. Options: see `build-label`.
+    Gmail rejects a duplicate name with 409; use `ensure-label` to reuse an
+    existing one. Scope: `gmail.labels`.
+
+    **Example**
+
+    ```hot
+    label ::google::gmail::labels/create-label("Clients/Acme", {
+      labelListVisibility: "labelShow",
+      color: {textColor: "#ffffff", backgroundColor: "#16a766"}
+    })
+    label.id
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -76,7 +131,17 @@ fn
 
 ensure-label
 meta {
-    doc: """The label named `name`, created when missing. Scopes: `gmail.readonly` and `gmail.labels`."""
+    doc: """
+    The label named `name`, created when missing. Scopes: `gmail.readonly`
+    and `gmail.labels`.
+
+    **Example**
+
+    ```hot
+    label ::google::gmail::labels/ensure-label("Clients/Acme")
+    ::google::gmail::messages/modify-message("18f2a", [label.id], [])
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -93,7 +158,17 @@ fn
 
 update-label
 meta {
-    doc: """PATCH /users/me/labels/{id} - change the given fields of a user label (`name`, `labelListVisibility`, `messageListVisibility`, `color`). Scope: `gmail.labels`."""
+    doc: """
+    PATCH /users/me/labels/{id} - change the given fields of a user label
+    (`name`, `labelListVisibility`, `messageListVisibility`, `color`).
+    Scope: `gmail.labels`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::labels/update-label("Label_12", {name: "Clients/Acme Corp", messageListVisibility: "hide"})
+    ```
+    """
 }
 fn
 (id: Str, changes: Map): Map {
@@ -105,7 +180,16 @@ fn
 
 delete-label
 meta {
-    doc: """DELETE /users/me/labels/{id} - delete a user label (it is removed from every message; the messages stay). Returns true. Scope: `gmail.labels`."""
+    doc: """
+    DELETE /users/me/labels/{id} - delete a user label (it is removed from
+    every message; the messages stay). Returns true. Scope: `gmail.labels`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::labels/delete-label("Label_12")
+    ```
+    """
 }
 fn
 (id: Str): Bool {

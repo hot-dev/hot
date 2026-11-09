@@ -18,13 +18,28 @@ meta {
 
 ::ctx ::hot::ctx
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no API key is set, or when `api-key` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key}` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables). An Err when no API key is
+    set, or when `api-key` is in `opts` but blank or null (that never falls
+    back to context). Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::exa::api/resolve-from({api-key: "tenant-key"}, {"exa.api.key": "ctx-key"})  // {api-key: "tenant-key"}
+    ::exa::api/resolve-from({}, {"exa.api.key": "ctx-key"})  // {api-key: "ctx-key"}
+    is-err(::exa::api/resolve-from({api-key: ""}, {"exa.api.key": "ctx-key"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opt-key non-blank(get(opts, "api-key"))

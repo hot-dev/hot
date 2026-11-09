@@ -21,7 +21,20 @@ DONE_STATUSES ["in_review", "approved", "rejected"]
 
 validate-create
 meta {
-    doc: """`params` (compacted) when it has a `name` and at least one address, otherwise an Err naming the missing fields (never their values). Exposed for testing."""
+    doc: """
+    `params` (compacted) when it has a `name` and at least one address,
+    otherwise an Err naming the missing fields (never their values). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::businesses/validate-create({name: "Acme", addresses: [{full_address: "123 Main St, Austin, TX"}], tags: null})
+    // {name: "Acme", addresses: [{full_address: "123 Main St, Austin, TX"}]}
+
+    is-err(::middesk::businesses/validate-create({name: "Acme"}))  // true
+    ```
+    """
 }
 fn (params: Map): Map {
   body ::api/compact(untype(params))
@@ -79,7 +92,24 @@ fn
 
 verify-tin
 meta {
-    doc: """Create a business that runs only a TIN match (`orders: [{product: "tin"}]`): the IRS name/TIN check. `address` is required by Middesk; pass `{full_address: ...}` or the line fields. Read the result from `tin` on the business once the `business.updated` webhook arrives."""
+    doc: """
+    Create a business that runs only a TIN match (`orders: [{product:
+    "tin"}]`): the IRS name/TIN check. `address` is required by Middesk;
+    pass `{full_address: ...}` or the line fields. Read the result from
+    `tin` on the business once the `business.updated` webhook arrives.
+
+    **Example**
+
+    ```hot
+    biz ::middesk::businesses/verify-tin("Acme Robotics LLC", "12-3410000", {
+      address_line1: "123 Main St", city: "Austin", state: "TX", postal_code: "78701"
+    })
+
+    // After the business.updated webhook
+    report ::middesk::businesses/get-business(biz.id)
+    report.tin.verified
+    ```
+    """
 }
 fn
 (name: Str, tin: Str, address: Map): Map {
@@ -99,6 +129,14 @@ meta {
     `website`, `formation`, `industry_classification`, `orders`,
     `documents`, `policy_results` and more. Summarize it with
     `::middesk::decisions/summarize`.
+
+    **Example**
+
+    ```hot
+    report ::middesk::businesses/get-business("biz_a1b2c3")
+    report.status
+    map(report.review.tasks, %.key)
+    ```
     """
 }
 fn
@@ -135,7 +173,17 @@ fn
 
 collect-businesses
 meta {
-    doc: """Up to `limit` businesses matching `params` (see `list-businesses`), following `has_more`."""
+    doc: """
+    Up to `limit` businesses matching `params` (see `list-businesses`),
+    following `has_more`.
+
+    **Example**
+
+    ```hot
+    in-review ::middesk::businesses/collect-businesses({status: "in_review"}, 200)
+    map(in-review, %.id)
+    ```
+    """
 }
 fn
 (params: Map, limit: Int): Vec {
@@ -147,7 +195,17 @@ fn
 
 find-by-external-id
 meta {
-    doc: """The business (list item) with this `external_id`, or null. Fetch the full report with `get-business`."""
+    doc: """
+    The business (list item) with this `external_id`, or null. Fetch the
+    full report with `get-business`.
+
+    **Example**
+
+    ```hot
+    hit ::middesk::businesses/find-by-external-id("acct-42")
+    if(is-null(hit), "not onboarded", ::middesk::businesses/get-business(hit.id))
+    ```
+    """
 }
 fn
 (external-id: Str): Map? {
@@ -166,7 +224,17 @@ fn
 
 update-business
 meta {
-    doc: """PATCH /businesses/{id} - Update `name`, `tin`, `addresses`, `website`, `phone_numbers`, `people`, `external_id`, `unique_external_id`, `tags` or `status`. Middesk allows 5 updates per 15 seconds per business."""
+    doc: """
+    PATCH /businesses/{id} - Update `name`, `tin`, `addresses`, `website`,
+    `phone_numbers`, `people`, `external_id`, `unique_external_id`, `tags`
+    or `status`. Middesk allows 5 updates per 15 seconds per business.
+
+    **Example**
+
+    ```hot
+    ::middesk::businesses/update-business("biz_a1b2c3", {website: {url: "https://acme.example"}, tags: ["priority"]})
+    ```
+    """
 }
 fn
 (business-id: Str, params: Map): Map {
@@ -205,7 +273,18 @@ fn
 
 get-review
 meta {
-    doc: """GET /businesses/{id}/review - The review: `tasks` (`{key, category, label, sub_label, status: success|failure|warning|neutral, message, sources}`), `completed_at`, `assignee`."""
+    doc: """
+    GET /businesses/{id}/review - The review: `tasks` (`{key, category,
+    label, sub_label, status: success|failure|warning|neutral, message,
+    sources}`), `completed_at`, `assignee`.
+
+    **Example**
+
+    ```hot
+    review ::middesk::businesses/get-review("biz_a1b2c3")
+    filter(review.tasks, eq(%.status, "failure"))
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -217,7 +296,17 @@ fn
 
 get-policy-results
 meta {
-    doc: """GET /businesses/{id}/policy_results - Results of your enabled Middesk policies for this business."""
+    doc: """
+    GET /businesses/{id}/policy_results - Results of your enabled Middesk
+    policies for this business.
+
+    **Example**
+
+    ```hot
+    results ::middesk::businesses/get-policy-results("biz_a1b2c3")
+    results
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -229,7 +318,17 @@ fn
 
 get-timeline
 meta {
-    doc: """GET /businesses/{id}/timeline - The business's audit timeline. `params`: `page`, `per_page` (max 100), `start_date`, `end_date`, `event_types`."""
+    doc: """
+    GET /businesses/{id}/timeline - The business's audit timeline. `params`:
+    `page`, `per_page` (max 100), `start_date`, `end_date`, `event_types`.
+
+    **Example**
+
+    ```hot
+    timeline ::middesk::businesses/get-timeline("biz_a1b2c3", {per_page: 100})
+    timeline
+    ```
+    """
 }
 fn
 (business-id: Str, params: Map): Map {
@@ -241,7 +340,17 @@ fn
 
 get-latest-risk-assessment
 meta {
-    doc: """GET /businesses/{id}/risk_assessments/latest - The newest risk assessment (requires the `risk` product)."""
+    doc: """
+    GET /businesses/{id}/risk_assessments/latest - The newest risk
+    assessment (requires the `risk` product).
+
+    **Example**
+
+    ```hot
+    assessment ::middesk::businesses/get-latest-risk-assessment("biz_a1b2c3")
+    assessment
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -253,7 +362,18 @@ fn
 
 get-pdf
 meta {
-    doc: """GET /businesses/{id}/pdf - The business report as a PDF (`Bytes`). It can contain TINs and people's details: store it like the report, never log it."""
+    doc: """
+    GET /businesses/{id}/pdf - The business report as a PDF (`Bytes`). It
+    can contain TINs and people's details: store it like the report, never
+    log it.
+
+    **Example**
+
+    ```hot
+    pdf ::middesk::businesses/get-pdf("biz_a1b2c3")
+    if(is-err(pdf), ::middesk::api/error-status(pdf), length(pdf))
+    ```
+    """
 }
 fn
 (business-id: Str): Bytes {
@@ -265,7 +385,18 @@ fn
 
 is-done
 meta {
-    doc: """True when the report is complete: status `in_review`, `approved` or `rejected`. Use it from a webhook handler or a schedule instead of waiting in a run."""
+    doc: """
+    True when the report is complete: status `in_review`, `approved` or
+    `rejected`. Use it from a webhook handler or a schedule instead of
+    waiting in a run.
+
+    **Example**
+
+    ```hot
+    ::middesk::businesses/is-done({status: "in_review"})  // true
+    ::middesk::businesses/is-done({status: "pending"})  // false
+    ```
+    """
 }
 fn (business: Any): Bool {
   status if(is-map(business), get(business, "status"), null)

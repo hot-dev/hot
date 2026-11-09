@@ -47,6 +47,17 @@ meta {
 
     Returns a connection handle, or an Err. Foreign keys are ON and the
     busy timeout is 5s.
+
+    **Example**
+
+    ```hot
+    ::sql ::hot::sqlite
+    conn ::sql/open("/tmp/app.db")
+    ::sql/close(conn)
+
+    // Read-only, so nothing is committed back
+    reader ::sql/open({path: "/tmp/app.db", read-only: true})
+    ```
     """
 }
 fn
@@ -61,6 +72,16 @@ meta {
     parameters. Returns `{rows-affected, last-insert-id}` or an Err.
     One statement per call; parameter count must match the statement.
     Bindable types: Int, Dec, Str, Bytes, Bool (as 0/1), null.
+
+    **Example**
+
+    ```hot
+    ::sql ::hot::sqlite
+    conn ::sql/open("/tmp/app.db")
+    ::sql/execute(conn, "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT)", [])
+    result ::sql/execute(conn, "INSERT INTO t (name) VALUES (?)", ["Ada"])
+    result.last-insert-id
+    ```
     """
 }
 fn (conn: Any, sql: Str, params: Vec): Map {
@@ -73,6 +94,15 @@ meta {
     Run one SELECT with `?` positional parameters. Returns a Vec of row
     Maps keyed by column name, or an Err. Column types map to Int, Dec
     (REAL), Str, Bytes (BLOB), and null.
+
+    **Example**
+
+    ```hot
+    ::sql ::hot::sqlite
+    conn ::sql/open("/tmp/app.db")
+    rows ::sql/query(conn, "SELECT id, name FROM t WHERE name = ?", ["Ada"])
+    map(rows, %.name)
+    ```
     """
 }
 fn (conn: Any, sql: Str, params: Vec): Vec {
@@ -86,6 +116,15 @@ meta {
     closing (durability point for long-lived connections). No-op in
     `direct` mode and for read-only opens. Errs on conflict — the
     stored file changed since checkout.
+
+    **Example**
+
+    ```hot
+    ::sql ::hot::sqlite
+    conn ::sql/open("app.db")
+    ::sql/execute(conn, "INSERT INTO t (name) VALUES (?)", ["Ada"])
+    ::sql/sync(conn)
+    ```
     """
 }
 fn (conn: Any): Bool {
@@ -98,6 +137,14 @@ meta {
     Close the connection. In service mode this commits the checkout
     first (an Err leaves the connection open so data can be read back
     out) and removes the scratch copy. Idempotent.
+
+    **Example**
+
+    ```hot
+    ::sql ::hot::sqlite
+    conn ::sql/open("/tmp/app.db")
+    ::sql/close(conn)
+    ```
     """
 }
 fn (conn: Any): Bool {

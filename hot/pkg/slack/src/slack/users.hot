@@ -27,7 +27,22 @@ UsersConversationsResponse type {
 
 users-conversations
 meta {
-    doc: """GET /users.conversations - List conversations the calling user may access. Filter by `types` (e.g., "public_channel,private_channel") and `exclude_archived`. Supports cursor-based pagination."""
+    doc: """
+    GET /users.conversations - List conversations the calling user may
+    access. Filter by `types` (e.g., "public_channel,private_channel") and
+    `exclude_archived`. Supports cursor-based pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-conversations(::slack::users/UsersConversationsRequest({
+      types: "public_channel,private_channel",
+      exclude_archived: true,
+      limit: 100
+    }))
+    map(response.channels, %.name)
+    ```
+    """
 }
 fn
 (request: UsersConversationsRequest): UsersConversationsResponse {
@@ -53,7 +68,17 @@ UsersDeletePhotoResponse type {
 
 users-delete-photo
 meta {
-    doc: """POST /users.deletePhoto - Delete the user profile photo. Resets to the default avatar."""
+    doc: """
+    POST /users.deletePhoto - Delete the user profile photo. Resets to the
+    default avatar.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-delete-photo(::slack::users/UsersDeletePhotoRequest({}))
+    response.ok
+    ```
+    """
 }
 fn
 (request: UsersDeletePhotoRequest): UsersDeletePhotoResponse {
@@ -86,7 +111,20 @@ UsersGetPresenceResponse type {
 
 users-get-presence
 meta {
-    doc: """GET /users.getPresence - Get user presence information. Returns the user's current `presence` status ("active" or "away") and connection details."""
+    doc: """
+    GET /users.getPresence - Get user presence information. Returns the
+    user's current `presence` status ("active" or "away") and connection
+    details.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-get-presence(::slack::users/UsersGetPresenceRequest({
+      user: "U1234567"
+    }))
+    response.presence
+    ```
+    """
 }
 fn
 (request: UsersGetPresenceRequest): UsersGetPresenceResponse {
@@ -111,7 +149,22 @@ UsersIdentityResponse type {
 
 users-identity
 meta {
-    doc: """GET /users.identity - Get a user's identity (Sign in with Slack). Requires the `identity.basic` scope. Returns user name, email, and team info."""
+    doc: """
+    GET /users.identity - Get a user's identity (Sign in with Slack).
+    Requires the `identity.basic` scope. Returns user name, email, and team
+    info.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-identity()
+    response.user
+    response.team
+
+    // With a per-call token
+    ::slack::users/users-identity({api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (): UsersIdentityResponse {
@@ -227,7 +280,24 @@ UsersLookupByEmailResponse type {
 
 users-lookup-by-email
 meta {
-    doc: """GET /users.lookupByEmail - Find a user with an email address. Returns the matching user object or an error if not found."""
+    doc: """
+    GET /users.lookupByEmail - Find a user with an email address. Returns
+    the matching user object or an error if not found.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-lookup-by-email(::slack::users/UsersLookupByEmailRequest({
+      email: "maria@example.com"
+    }))
+    response.user.id
+
+    // With a per-call token
+    ::slack::users/users-lookup-by-email(::slack::users/UsersLookupByEmailRequest({
+      email: "maria@example.com"
+    }), {api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (request: UsersLookupByEmailRequest): UsersLookupByEmailResponse {
@@ -253,7 +323,17 @@ UsersSetActiveResponse type {
 
 users-set-active
 meta {
-    doc: """POST /users.setActive - Mark the calling user as active. This updates the user's presence to "active"."""
+    doc: """
+    POST /users.setActive - Mark the calling user as active. This updates
+    the user's presence to "active".
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-set-active(::slack::users/UsersSetActiveRequest({}))
+    response.ok
+    ```
+    """
 }
 fn
 (request: UsersSetActiveRequest): UsersSetActiveResponse {
@@ -283,7 +363,22 @@ UsersSetPhotoResponse type {
 
 users-set-photo
 meta {
-    doc: """POST /users.setPhoto - Set the user profile photo. Pass the `image` data and optional crop coordinates (`crop_x`, `crop_y`, `crop_w`)."""
+    doc: """
+    POST /users.setPhoto - Set the user profile photo. Pass the `image` data
+    and optional crop coordinates (`crop_x`, `crop_y`, `crop_w`).
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-set-photo(::slack::users/UsersSetPhotoRequest({
+      image: "iVBORw0KGgoAAAANSUhEUg",
+      crop_x: 0,
+      crop_y: 0,
+      crop_w: 256
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: UsersSetPhotoRequest): UsersSetPhotoResponse {
@@ -310,7 +405,19 @@ UsersSetPresenceResponse type {
 
 users-set-presence
 meta {
-    doc: """POST /users.setPresence - Set the user presence. Pass `presence: "auto"` to let Slack manage presence, or `"away"` to manually set as away."""
+    doc: """
+    POST /users.setPresence - Set the user presence. Pass `presence: "auto"`
+    to let Slack manage presence, or `"away"` to manually set as away.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/users-set-presence(::slack::users/UsersSetPresenceRequest({
+      presence: "away"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: UsersSetPresenceRequest): UsersSetPresenceResponse {
@@ -340,7 +447,17 @@ DndEndDndResponse type {
 
 dnd-end-dnd
 meta {
-    doc: """POST /dnd.endDnd - End the current user's Do Not Disturb session immediately."""
+    doc: """
+    POST /dnd.endDnd - End the current user's Do Not Disturb session
+    immediately.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/dnd-end-dnd(::slack::users/DndEndDndRequest({}))
+    response.ok
+    ```
+    """
 }
 fn
 (request: DndEndDndRequest): DndEndDndResponse {
@@ -370,7 +487,17 @@ DndEndSnoozeResponse type {
 
 dnd-end-snooze
 meta {
-    doc: """POST /dnd.endSnooze - End the current user's snooze mode. Returns the updated DND schedule."""
+    doc: """
+    POST /dnd.endSnooze - End the current user's snooze mode. Returns the
+    updated DND schedule.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/dnd-end-snooze(::slack::users/DndEndSnoozeRequest({}))
+    response.snooze_enabled
+    ```
+    """
 }
 fn
 (request: DndEndSnoozeRequest): DndEndSnoozeResponse {
@@ -403,7 +530,19 @@ DndInfoResponse type {
 
 dnd-info
 meta {
-    doc: """GET /dnd.info - Retrieve a user's current DND status. Returns whether DND is enabled, next scheduled DND times, and snooze state."""
+    doc: """
+    GET /dnd.info - Retrieve a user's current DND status. Returns whether
+    DND is enabled, next scheduled DND times, and snooze state.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/dnd-info(::slack::users/DndInfoRequest({
+      user: "U1234567"
+    }))
+    response.dnd_enabled
+    ```
+    """
 }
 fn
 (request: DndInfoRequest): DndInfoResponse {
@@ -433,7 +572,19 @@ DndSetSnoozeResponse type {
 
 dnd-set-snooze
 meta {
-    doc: """POST /dnd.setSnooze - Turn on Do Not Disturb mode for the current user. Specify `num_minutes` for the snooze duration."""
+    doc: """
+    POST /dnd.setSnooze - Turn on Do Not Disturb mode for the current user.
+    Specify `num_minutes` for the snooze duration.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/dnd-set-snooze(::slack::users/DndSetSnoozeRequest({
+      num_minutes: 60
+    }))
+    response.snooze_endtime
+    ```
+    """
 }
 fn
 (request: DndSetSnoozeRequest): DndSetSnoozeResponse {
@@ -461,7 +612,19 @@ DndTeamInfoResponse type {
 
 dnd-team-info
 meta {
-    doc: """GET /dnd.teamInfo - Retrieve DND status for users on a team. Pass a comma-separated list of user IDs."""
+    doc: """
+    GET /dnd.teamInfo - Retrieve DND status for users on a team. Pass a
+    comma-separated list of user IDs.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/dnd-team-info(::slack::users/DndTeamInfoRequest({
+      users: "U1234567,U2345678"
+    }))
+    get(response.users, "U1234567")
+    ```
+    """
 }
 fn
 (request: DndTeamInfoRequest): DndTeamInfoResponse {
@@ -497,7 +660,22 @@ UsergroupsCreateResponse type {
 
 usergroups-create
 meta {
-    doc: """POST /usergroups.create - Create a user group. Provide a `name` and optionally a `handle` (mention name), `description`, and default `channels`."""
+    doc: """
+    POST /usergroups.create - Create a user group. Provide a `name` and
+    optionally a `handle` (mention name), `description`, and default
+    `channels`.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-create(::slack::users/UsergroupsCreateRequest({
+      name: "On-call",
+      handle: "oncall",
+      description: "Engineers on call this week"
+    }))
+    response.usergroup.id
+    ```
+    """
 }
 fn
 (request: UsergroupsCreateRequest): UsergroupsCreateResponse {
@@ -526,7 +704,19 @@ UsergroupsDisableResponse type {
 
 usergroups-disable
 meta {
-    doc: """POST /usergroups.disable - Disable an existing user group. Disabled groups can no longer be mentioned or used."""
+    doc: """
+    POST /usergroups.disable - Disable an existing user group. Disabled
+    groups can no longer be mentioned or used.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-disable(::slack::users/UsergroupsDisableRequest({
+      usergroup: "S1234567"
+    }))
+    response.usergroup.date_delete
+    ```
+    """
 }
 fn
 (request: UsergroupsDisableRequest): UsergroupsDisableResponse {
@@ -555,7 +745,19 @@ UsergroupsEnableResponse type {
 
 usergroups-enable
 meta {
-    doc: """POST /usergroups.enable - Re-enable a disabled user group. The group can be mentioned and used again."""
+    doc: """
+    POST /usergroups.enable - Re-enable a disabled user group. The group can
+    be mentioned and used again.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-enable(::slack::users/UsergroupsEnableRequest({
+      usergroup: "S1234567"
+    }))
+    response.usergroup.id
+    ```
+    """
 }
 fn
 (request: UsergroupsEnableRequest): UsergroupsEnableResponse {
@@ -585,7 +787,21 @@ UsergroupsListResponse type {
 
 usergroups-list
 meta {
-    doc: """GET /usergroups.list - List all user groups in a workspace. Set `include_disabled: true` to include disabled groups and `include_users: true` to include member lists."""
+    doc: """
+    GET /usergroups.list - List all user groups in a workspace. Set
+    `include_disabled: true` to include disabled groups and `include_users:
+    true` to include member lists.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-list(::slack::users/UsergroupsListRequest({
+      include_users: true,
+      include_disabled: true
+    }))
+    map(response.usergroups, %.handle)
+    ```
+    """
 }
 fn
 (request: UsergroupsListRequest): UsergroupsListResponse {
@@ -618,7 +834,20 @@ UsergroupsUpdateResponse type {
 
 usergroups-update
 meta {
-    doc: """POST /usergroups.update - Update an existing user group. Change the name, handle, description, or default channels."""
+    doc: """
+    POST /usergroups.update - Update an existing user group. Change the
+    name, handle, description, or default channels.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-update(::slack::users/UsergroupsUpdateRequest({
+      usergroup: "S1234567",
+      description: "Engineers on call this month"
+    }))
+    response.usergroup.description
+    ```
+    """
 }
 fn
 (request: UsergroupsUpdateRequest): UsergroupsUpdateResponse {
@@ -647,7 +876,19 @@ UsergroupsUsersListResponse type {
 
 usergroups-users-list
 meta {
-    doc: """GET /usergroups.users.list - List users in a user group. Returns a Vec of user IDs. Set `include_disabled: true` to include deactivated users."""
+    doc: """
+    GET /usergroups.users.list - List users in a user group. Returns a Vec
+    of user IDs. Set `include_disabled: true` to include deactivated users.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-users-list(::slack::users/UsergroupsUsersListRequest({
+      usergroup: "S1234567"
+    }))
+    response.users
+    ```
+    """
 }
 fn
 (request: UsergroupsUsersListRequest): UsergroupsUsersListResponse {
@@ -677,7 +918,21 @@ UsergroupsUsersUpdateResponse type {
 
 usergroups-users-update
 meta {
-    doc: """POST /usergroups.users.update - Update the list of users in a user group. Pass a comma-separated list of user IDs in `users`. This replaces the entire member list."""
+    doc: """
+    POST /usergroups.users.update - Update the list of users in a user
+    group. Pass a comma-separated list of user IDs in `users`. This replaces
+    the entire member list.
+
+    **Example**
+
+    ```hot
+    response ::slack::users/usergroups-users-update(::slack::users/UsergroupsUsersUpdateRequest({
+      usergroup: "S1234567",
+      users: "U1234567,U2345678"
+    }))
+    response.usergroup.id
+    ```
+    """
 }
 fn
 (request: UsergroupsUsersUpdateRequest): UsergroupsUsersUpdateResponse {
@@ -752,7 +1007,27 @@ UsersProfileSetResponse type {
 
 users-profile-set
 meta {
-    doc: """POST /users.profile.set - Set a user's profile information. Update a single field with `name`/`value`, or pass a full `profile` map to update multiple fields at once."""
+    doc: """
+    POST /users.profile.set - Set a user's profile information. Update a
+    single field with `name`/`value`, or pass a full `profile` map to update
+    multiple fields at once.
+
+    **Example**
+
+    ```hot
+    // One field
+    response ::slack::users/users-profile-set(::slack::users/UsersProfileSetRequest({
+      name: "title",
+      value: "Staff Engineer"
+    }))
+    response.profile
+
+    // Several at once
+    ::slack::users/users-profile-set(::slack::users/UsersProfileSetRequest({
+      profile: {status_text: "On leave", status_emoji: ":palm_tree:"}
+    }))
+    ```
+    """
 }
 fn
 (request: UsersProfileSetRequest): UsersProfileSetResponse {

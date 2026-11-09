@@ -61,10 +61,10 @@ meta {
     secure ::tls/upgrade(conn)
 
     // Private CA
-    secure ::tls/upgrade(conn, TlsOptions({ca-pem: read-file("ca.pem")}))
+    secure ::tls/upgrade(conn, ::tls/TlsOptions({ca-pem: read-file("ca.pem")}))
 
     // Mutual TLS
-    secure ::tls/upgrade(conn, TlsOptions({
+    secure ::tls/upgrade(conn, ::tls/TlsOptions({
         client-cert-pem: read-file("client.pem"),
         client-key-pem: read-file("client.key"),
     }))
@@ -94,8 +94,10 @@ meta {
     **Example**
 
     ```hot
+    ::tls ::hot::tls
     ::b64 ::hot::base64
 
+    conn ::hot::tcp/connect("db.example.com", 5432)
     secure ::tls/upgrade(conn)
     binding ::b64/encode(::tls/peer-cert-hash(secure))
     ```

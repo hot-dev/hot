@@ -19,7 +19,18 @@ DEFAULT_TOLERANCE_SECONDS 1800
 
 parse-signature-header
 meta {
-    doc: """Split an `ElevenLabs-Signature` header into `{timestamp, signatures}` (`timestamp` is the `t=` value as a Str, or null; `signatures` every `v0=` value). Exposed for testing."""
+    doc: """
+    Split an `ElevenLabs-Signature` header into `{timestamp, signatures}`
+    (`timestamp` is the `t=` value as a Str, or null; `signatures` every
+    `v0=` value). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::webhooks/parse-signature-header("t=1700000000,v0=abc123")
+    // {timestamp: "1700000000", signatures: ["abc123"]}
+    ```
+    """
 }
 fn (header: Str): Map {
   reduce(split(header, ","), (acc, part) {
@@ -96,7 +107,9 @@ fn
 
 // True when the signed unix-seconds timestamp is within tolerance of now,
 // in either direction. Malformed timestamps fail closed.
-timestamp-fresh fn (timestamp: Str, tolerance-seconds: Int): Bool {
+timestamp-fresh
+meta {no-doc: true}
+fn (timestamp: Str, tolerance-seconds: Int): Bool {
   digits ::hot::regex/is-match(timestamp, "^[0-9]{1,12}$")
   cond {
     not(digits) => { false }

@@ -71,7 +71,21 @@ type {
 
 token-error
 meta {
-    doc: """Build a `TokenError`. The 1-arity form wraps a plain message; the 2-arity form prefixes the payload of a failed `::oauth2` call (`{status, body}` or a transport error)."""
+    doc: """
+    Build a `TokenError`. The 1-arity form wraps a plain message; the
+    2-arity form prefixes the payload of a failed `::oauth2` call (`{status,
+    body}` or a transport error).
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/token-error("dropbox: no credentials").message  // "dropbox: no credentials"
+
+    e ::dropbox::auth/token-error("dropbox: token refresh failed", {status: 400, body: {error: "invalid_grant"}})
+    e.message  // "dropbox: token refresh failed: invalid_grant"
+    e.error-code  // "invalid_grant"
+    ```
+    """
 }
 fn
 (message: Str): TokenError {
@@ -99,13 +113,24 @@ fn
   })
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
 mark-values
 meta {
-    doc: """Register the non-blank `values` as secrets for this run's call records (`::hot::ctx/mark-secret`)."""
+    doc: """
+    Register the non-blank `values` as secrets for this run's call records
+    (`::hot::ctx/mark-secret`).
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/mark-values([::hot::ctx/get("tenant.dropbox.token")])
+    ```
+    """
 }
 fn (values: Vec): Vec {
   ::ctx/mark-secret(filter(values, (v) { not(::dropbox/is-blank(v)) }))
@@ -113,7 +138,19 @@ fn (values: Vec): Vec {
 
 mark-tokens
 meta {
-    doc: """Mark the tokens of a token response as secrets and return the response unchanged."""
+    doc: """
+    Mark the tokens of a token response as secrets and return the response
+    unchanged.
+
+    **Example**
+
+    ```hot
+    // Tokens from your own ::oauth2 call
+    tokens ::oauth2/refresh(::dropbox/TOKEN_URL, {client-id: "abc123appkey", refresh-token: ::hot::ctx/get("dropbox.refresh.token")})
+    safe ::dropbox::auth/mark-tokens(tokens)
+    safe.expires_in
+    ```
+    """
 }
 fn (tokens: Map): Map {
   mark-values(map(TOKEN_RESPONSE_SECRETS, (k) { get(tokens, k) }))
@@ -126,7 +163,17 @@ fn (tokens: Map): Map {
 
 has-primary-credential
 meta {
-    doc: """True when `source` carries a primary credential: `token` or `refresh-token`."""
+    doc: """
+    True when `source` carries a primary credential: `token` or
+    `refresh-token`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/has-primary-credential({})  // false
+    ::dropbox::auth/has-primary-credential({token: ""})  // false
+    ```
+    """
 }
 fn (source: Map): Bool {
   or(not(::dropbox/is-blank(source.token)), not(::dropbox/is-blank(get(source, "refresh-token"))))
@@ -140,7 +187,16 @@ meta {
         "dropbox.app.key": {required: false, secret: false},
         "dropbox.app.secret": {required: false}
     },
-    doc: """The credential source read from context, in the same shape as `opts`."""
+    doc: """
+    The credential source read from context, in the same shape as `opts`.
+
+    **Example**
+
+    ```hot
+    source ::dropbox::auth/ctx-source()
+    ::dropbox::auth/has-primary-credential(source)
+    ```
+    """
 }
 fn (): Map {
   {
@@ -153,7 +209,18 @@ fn (): Map {
 
 merge-sources
 meta {
-    doc: """Pick the credential source for a call: `opts` when it carries a primary credential, otherwise `ctx`. A refresh token in `opts` without an app key borrows the context app key and secret. Pure; `resolve-credentials` passes the live context."""
+    doc: """
+    Pick the credential source for a call: `opts` when it carries a primary
+    credential, otherwise `ctx`. A refresh token in `opts` without an app
+    key borrows the context app key and secret. Pure; `resolve-credentials`
+    passes the live context.
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/merge-sources({}, {app-key: "abc123appkey"})  // {app-key: "abc123appkey"}
+    ```
+    """
 }
 fn (opts: Map, ctx: Map): Map {
   cond {
@@ -172,6 +239,12 @@ meta {
     credentials: `{kind: "token", token}` or `{kind: "refresh",
     refresh-token, app-key, app-secret?}`. Returns a `TokenError` when
     nothing usable is set or a refresh token lacks its app key. Pure.
+
+    **Example**
+
+    ```hot
+    is-err(::dropbox::auth/credentials-from({}))  // true
+    ```
     """
 }
 fn (source: Map): Map {
@@ -203,7 +276,17 @@ fn (source: Map): Map {
 
 blank-credential
 meta {
-    doc: """The first credential key `opts` has with a blank or null value, else null (pure)."""
+    doc: """
+    The first credential key `opts` has with a blank or null value, else
+    null (pure).
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/blank-credential({token: ""})  // "token"
+    ::dropbox::auth/blank-credential({})  // null
+    ```
+    """
 }
 fn (opts: Map): Str? {
   find-first(BLANK_CHECKED_KEYS, (k) { and(in(k, keys(opts)), ::dropbox/is-blank(get(opts, k))) })
@@ -211,7 +294,19 @@ fn (opts: Map): Str? {
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: credentials for a call from `opts` first, then `ctx` (a source Map, see `ctx-source`). An Err when a credential key is in `opts` but blank or null; otherwise as `credentials-from(merge-sources(opts, ctx))`. Exposed for testing; `resolve-credentials` feeds it the context."""
+    doc: """
+    The one resolver, pure: credentials for a call from `opts` first, then
+    `ctx` (a source Map, see `ctx-source`). An Err when a credential key is
+    in `opts` but blank or null; otherwise as
+    `credentials-from(merge-sources(opts, ctx))`. Exposed for testing;
+    `resolve-credentials` feeds it the context.
+
+    **Example**
+
+    ```hot
+    is-err(::dropbox::auth/resolve-from({token: ""}, {}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx: Map): Map {
   blank blank-credential(opts)
@@ -225,7 +320,25 @@ fn (opts: Map, ctx: Map): Map {
 
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence). Credentials from `opts` are marked as secrets first, and never written to context."""
+    doc: """
+    Resolve the credentials for a call from `opts` and context (see the
+    namespace doc for precedence). Credentials from `opts` are marked as
+    secrets first, and never written to context.
+
+    **Example**
+
+    ```hot
+    creds ::dropbox::auth/resolve-credentials()
+    creds.kind
+
+    // Per call: one tenant's stored refresh token
+    tenant ::dropbox::auth/resolve-credentials({
+      refresh-token: ::hot::ctx/get("tenant.refresh.token"),
+      app-key: "abc123appkey"
+    })
+    tenant.kind
+    ```
+    """
 }
 fn
 (): Map {
@@ -242,7 +355,17 @@ fn
 
 token-cache-key
 meta {
-    doc: """The context key a minted token is cached under (a SHA-256 of the app key and refresh token, so neither appears in the key), or null for explicit access tokens."""
+    doc: """
+    The context key a minted token is cached under (a SHA-256 of the app key
+    and refresh token, so neither appears in the key), or null for explicit
+    access tokens.
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/token-cache-key({kind: "token"})  // null
+    ```
+    """
 }
 fn (creds: Map): Str? {
   cond {
@@ -256,7 +379,17 @@ fn (creds: Map): Str? {
 
 cache-entry
 meta {
-    doc: """The cached form of a token response: `{access-token, expires-at}` (epoch ms), expiring `EXPIRY_MARGIN_SECONDS` early. Dropbox's `expires_in` is 14400 (4 hours) today."""
+    doc: """
+    The cached form of a token response: `{access-token, expires-at}` (epoch
+    ms), expiring `EXPIRY_MARGIN_SECONDS` early. Dropbox's `expires_in` is
+    14400 (4 hours) today.
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/cache-entry({expires_in: 14400}, 0).expires-at  // 14100000
+    ```
+    """
 }
 fn (tokens: Map, now: Int): Map {
   raw or(tokens.expires_in, 14400)
@@ -269,14 +402,34 @@ fn (tokens: Map, now: Int): Map {
 
 is-fresh
 meta {
-    doc: """True when a cache entry exists and has not reached its (margin-adjusted) expiry."""
+    doc: """
+    True when a cache entry exists and has not reached its (margin-adjusted)
+    expiry.
+
+    **Example**
+
+    ```hot
+    ::dropbox::auth/is-fresh(null, 1000)  // false
+    ```
+    """
 }
 fn (entry: Any, now: Int): Bool {
   and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
 }
 
 evict-token
-meta {doc: """Drop a cached token (e.g. after a 401). No-op for a null key."""}
+meta {
+    doc: """
+    Drop a cached token (e.g. after a 401). No-op for a null key.
+
+    **Example**
+
+    ```hot
+    creds ::dropbox::auth/resolve-credentials()
+    ::dropbox::auth/evict-token(::dropbox::auth/token-cache-key(creds))
+    ```
+    """
+}
 fn (cache-key: Str?): Bool {
   cond {
     is-null(cache-key) => { false }
@@ -289,7 +442,18 @@ fn (cache-key: Str?): Bool {
 
 refresh-token-grant
 meta {
-    doc: """Exchange a refresh token for an access token at `https://api.dropboxapi.com/oauth2/token` (no cache). Returns the token response (`access_token`, `expires_in`, `token_type`) or a `TokenError`."""
+    doc: """
+    Exchange a refresh token for an access token at
+    `https://api.dropboxapi.com/oauth2/token` (no cache). Returns the token
+    response (`access_token`, `expires_in`, `token_type`) or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    tokens ::dropbox::auth/refresh-token-grant("abc123appkey", ::hot::ctx/get("dropbox.app.secret"), ::hot::ctx/get("dropbox.refresh.token"))
+    tokens.access_token
+    ```
+    """
 }
 fn (app-key: Str, app-secret: Str?, refresh-token: Str): Map {
   mark-values([app-secret, refresh-token])
@@ -308,6 +472,14 @@ meta {
     cache. Returns `{token, cache-key, cached}` (`cached` is true when the
     token came from the cache, so a 401 should evict and retry), or a
     `TokenError`.
+
+    **Example**
+
+    ```hot
+    auth ::dropbox::auth/bearer(::dropbox::auth/resolve-credentials())
+    auth.token
+    auth.cached
+    ```
     """
 }
 fn (creds: Map): Map {
@@ -346,9 +518,9 @@ meta {
 
     // Per call: one tenant's stored refresh token
     token2 ::dropbox::auth/access-token({
-      refresh-token: "tenant-refresh-token",
+      refresh-token: ::hot::ctx/get("tenant.refresh.token"),
       app-key: "abc123appkey",
-      app-secret: "app-secret"
+      app-secret: ::hot::ctx/get("dropbox.app.secret")
     })
     ```
     """

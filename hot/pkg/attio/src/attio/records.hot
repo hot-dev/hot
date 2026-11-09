@@ -4,7 +4,17 @@
 
 list-objects
 meta {
-    doc: """GET /objects - The workspace's objects (system `people`/`companies`/`deals` and custom ones) with their slugs."""
+    doc: """
+    GET /objects - The workspace's objects (system
+    `people`/`companies`/`deals` and custom ones) with their slugs.
+
+    **Example**
+
+    ```hot
+    objects ::attio::records/list-objects()
+    map(objects.data, %.api_slug)
+    ```
+    """
 }
 fn
 (): Map {
@@ -16,7 +26,17 @@ fn
 
 get-object
 meta {
-    doc: """GET /objects/{object} - One object's configuration (`api_slug`, singular/plural nouns). Requires the Object Configuration scope."""
+    doc: """
+    GET /objects/{object} - One object's configuration (`api_slug`,
+    singular/plural nouns). Requires the Object Configuration scope.
+
+    **Example**
+
+    ```hot
+    people ::attio::records/get-object("people")
+    people.api_slug
+    ```
+    """
 }
 fn
 (object: Str): Map {
@@ -33,7 +53,18 @@ fn
 
 list-attributes
 meta {
-    doc: """GET /objects/{object}/attributes - An object's attributes (`api_slug`, `type`, `is_required`, ...). Attribute slugs are the keys `create-record` values use. Requires the Object Configuration scope."""
+    doc: """
+    GET /objects/{object}/attributes - An object's attributes (`api_slug`,
+    `type`, `is_required`, ...). Attribute slugs are the keys
+    `create-record` values use. Requires the Object Configuration scope.
+
+    **Example**
+
+    ```hot
+    attributes ::attio::records/list-attributes("people")
+    map(attributes.data, %.api_slug)
+    ```
+    """
 }
 fn
 (object: Str): Map {
@@ -74,7 +105,17 @@ fn
 
 get-record
 meta {
-    doc: """GET /objects/{object}/records/{id} - One record with all attribute values."""
+    doc: """
+    GET /objects/{object}/records/{id} - One record with all attribute
+    values.
+
+    **Example**
+
+    ```hot
+    person ::attio::records/get-record("people", ::attio::recordsEC)
+    person.values.email_addresses
+    ```
+    """
 }
 fn
 (object: Str, record-id: Str): Map {
@@ -95,6 +136,13 @@ meta {
     POST /objects/{object}/records - Create a record from attribute
     `values` (Attio's value shapes, e.g.
     `{email_addresses: [{email_address: "a@b.c"}]}`).
+
+    **Example**
+
+    ```hot
+    company ::attio::records/create-record("companies", {name: [{value: "Example Inc"}], domains: [{domain: "example.com"}]})
+    company.id.record_id
+    ```
     """
 }
 fn
@@ -142,7 +190,16 @@ fn
 
 update-record
 meta {
-    doc: """PATCH /objects/{object}/records/{id} - Update the given attribute values of a record."""
+    doc: """
+    PATCH /objects/{object}/records/{id} - Update the given attribute values
+    of a record.
+
+    **Example**
+
+    ```hot
+    ::attio::records/update-record("people", ::attio::recordsEC, {job_title: [{value: "CTO"}]})
+    ```
+    """
 }
 fn
 (object: Str, record-id: Str, values: Map): Map {
@@ -159,7 +216,15 @@ fn
 
 delete-record
 meta {
-    doc: """DELETE /objects/{object}/records/{id} - Delete a record."""
+    doc: """
+    DELETE /objects/{object}/records/{id} - Delete a record.
+
+    **Example**
+
+    ```hot
+    ::attio::records/delete-record("people", ::attio::recordsEC)
+    ```
+    """
 }
 fn
 (object: Str, record-id: Str): Any {

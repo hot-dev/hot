@@ -32,7 +32,17 @@ BASE_URL "https://api.search.brave.com/res/v1"
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` for a key. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::brave::search/build-request("/web/search?q=rust", "test-token")
+    req.url  // "https://api.search.brave.com/res/v1/web/search?q=rust"
+    req.headers  // {X-Subscription-Token: "test-token", Accept: "application/json"}
+    ```
+    """
 }
 fn (path: Str, api-key: Str): HttpRequest {
   HttpRequest({
@@ -45,7 +55,27 @@ fn (path: Str, api-key: Str): HttpRequest {
   })
 }
 
-get-json fn
+get-json
+meta {
+    doc: """
+    GET a path under `/res/v1` and return the decoded JSON, or an Err
+    carrying `::brave::search::http/HttpError`. `search` uses it. Call it
+    directly for an endpoint this package has no function for. The optional
+    second argument is an API key, or an `opts` Map (see
+    `::brave::search::api`).
+
+    **Example**
+
+    ```hot
+    out ::brave::search/get-json("/web/search?q=rust&count=3")
+    map(out.web.results, (r) { r.url })
+
+    // With per-call credentials
+    ::brave::search/get-json("/web/search?q=rust", {api-key: ::hot::ctx/get("tenant-b.brave.key")})
+    ```
+    """
+}
+fn
 (path: Str): Any {
   get-json(path, {})
 },

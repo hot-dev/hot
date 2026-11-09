@@ -4,7 +4,17 @@
 
 get-self
 meta {
-    doc: """GET /self - The token's own metadata (`active`, `scope`, workspace id/name/slug). The cheapest way to smoke-test a key."""
+    doc: """
+    GET /self - The token's own metadata (`active`, `scope`, workspace
+    id/name/slug). The cheapest way to smoke-test a key.
+
+    **Example**
+
+    ```hot
+    me ::attio::workspace/get-self()
+    me.active
+    ```
+    """
 }
 fn
 (): Map {
@@ -16,7 +26,19 @@ fn
 
 list-members
 meta {
-    doc: """GET /workspace_members - The workspace's members (`{data: [{id: {workspace_member_id}, first_name, email_address, access_level}]}`). Member ids are what comment authorship and task assignment need. Requires the User Management scope."""
+    doc: """
+    GET /workspace_members - The workspace's members (`{data: [{id:
+    {workspace_member_id}, first_name, email_address, access_level}]}`).
+    Member ids are what comment authorship and task assignment need.
+    Requires the User Management scope.
+
+    **Example**
+
+    ```hot
+    members ::attio::workspace/list-members()
+    map(members.data, %.email_address)
+    ```
+    """
 }
 fn
 (): Map {

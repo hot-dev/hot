@@ -19,7 +19,9 @@ query ::cipherowl::api/query
 
 MAX_BATCH_BALANCES 100
 
-network-path fn (network: Str): Str {
+network-path
+meta {no-doc: true}
+fn (network: Str): Str {
   n ::api/validate-network(network)
   cond {
     is-err(n) => { n }
@@ -29,7 +31,17 @@ network-path fn (network: Str): Str {
 
 list-networks
 meta {
-    doc: """The networks the Onchain Service supports: `{chains: [{network, name, symbol, supportsTokens}]}`."""
+    doc: """
+    The networks the Onchain Service supports: `{chains: [{network, name,
+    symbol, supportsTokens}]}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::onchain/list-networks()
+    map(out.chains, (c) { c.network })
+    ```
+    """
 }
 fn
 (): Map {
@@ -65,7 +77,18 @@ fn
 
 batch-balances-request
 meta {
-    doc: """The spec for a batch balance read: 1 to 100 addresses. Exposed for testing."""
+    doc: """
+    The spec for a batch balance read: 1 to 100 addresses. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::onchain/batch-balances-request("ethereum_mainnet", ["0x0000000000000000000000000000000000000001"])
+    spec.path  // "/api/onchain/v1/networks/ethereum_mainnet/balances:batchget"
+    is-err(::cipherowl::onchain/batch-balances-request("ethereum_mainnet", []))  // true
+    ```
+    """
 }
 fn (network: Str, addresses: Vec<Str>): Map {
   cond {
@@ -83,7 +106,18 @@ fn (network: Str, addresses: Vec<Str>): Map {
 
 batch-balances
 meta {
-    doc: """Balances for up to 100 addresses: `{network, chain, balances: [...]}` in request order. A failed address carries its own `error` instead of failing the call."""
+    doc: """
+    Balances for up to 100 addresses: `{network, chain, balances: [...]}` in
+    request order. A failed address carries its own `error` instead of
+    failing the call.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::onchain/batch-balances("ethereum_mainnet", ["0x0000000000000000000000000000000000000001", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"])
+    map(out.balances, (b) { b.balance })
+    ```
+    """
 }
 fn
 (network: Str, addresses: Vec<Str>): Map {
@@ -95,7 +129,16 @@ fn
 
 get-transaction-scripts
 meta {
-    doc: """The scripts of one transaction (Bitcoin-family networks only, currently `bitcoin_mainnet`)."""
+    doc: """
+    The scripts of one transaction (Bitcoin-family networks only, currently
+    `bitcoin_mainnet`).
+
+    **Example**
+
+    ```hot
+    ::cipherowl::onchain/get-transaction-scripts("bitcoin_mainnet", "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+    ```
+    """
 }
 fn
 (network: Str, txid: Str): Map {
@@ -108,7 +151,18 @@ fn
 
 transactions-request
 meta {
-    doc: """The spec for one page of an address's transactions. `options` takes `page` (1-based), `pageSize` (default 25, max 100) and `opReturnOnly`. Exposed for testing."""
+    doc: """
+    The spec for one page of an address's transactions. `options` takes
+    `page` (1-based), `pageSize` (default 25, max 100) and `opReturnOnly`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::onchain/transactions-request("bitcoin_mainnet", "bc1qexample", {page: 2}).path
+    // "/api/onchain/v1/networks/bitcoin_mainnet/addresses/bc1qexample/transactions/scripts?page=2"
+    ```
+    """
 }
 fn (network: Str, address: Str, options: Map): Map {
   base network-path(network)
@@ -118,7 +172,9 @@ fn (network: Str, address: Str, options: Map): Map {
   }
 }
 
-transactions-spec fn (base: Str, address: Str, options: Map): Map {
+transactions-spec
+meta {no-doc: true}
+fn (base: Str, address: Str, options: Map): Map {
   {
     method: "GET",
     path: `${base}/addresses/${seg(trim(address))}/transactions/scripts${query({
@@ -132,7 +188,22 @@ transactions-spec fn (base: Str, address: Str, options: Map): Map {
 
 list-address-transactions
 meta {
-    doc: """One page of an address's transactions: `{network, chain, address, transactions, page, totalPages, totalItems}`. Page numbers start at 1; the next page exists while `page` is below `totalPages` (see `next-page`)."""
+    doc: """
+    One page of an address's transactions: `{network, chain, address,
+    transactions, page, totalPages, totalItems}`. Page numbers start at 1;
+    the next page exists while `page` is below `totalPages` (see
+    `next-page`).
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::onchain/list-address-transactions("bitcoin_mainnet", "bc1qexample", {page: 1, pageSize: 50})
+    page.transactions
+
+    // The next page, or null on the last one
+    ::cipherowl::onchain/next-page(page)
+    ```
+    """
 }
 fn
 (network: Str, address: Str, options: Map): Map {
@@ -144,7 +215,17 @@ fn
 
 next-page
 meta {
-    doc: """The next 1-based `page` number for a numbered page, or null on the last page. Pure."""
+    doc: """
+    The next 1-based `page` number for a numbered page, or null on the last
+    page. Pure.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::onchain/next-page({page: 1, totalPages: 3})  // 2
+    ::cipherowl::onchain/next-page({page: 3, totalPages: 3})  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   current get(or(page, {}), "page")

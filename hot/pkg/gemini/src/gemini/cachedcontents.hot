@@ -172,7 +172,7 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::cachedcontents/list(CachedContentsListRequest({
+    result ::gemini::cachedcontents/list(::gemini::cachedcontents/CachedContentsListRequest({
         page-size: "10",
         page-token: ""
     }))
@@ -228,12 +228,14 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::cachedcontents/create(CachedContentsCreateRequest({
+    ::cached ::gemini::cachedcontents
+
+    result ::cached/create(::cached/CachedContentsCreateRequest({
         model: "models/gemini-2.0-flash",
         displayName: "My cached context",
-        contents: [Content({
+        contents: [::cached/Content({
             role: "user",
-            parts: [Part({text: "This is a large document to cache..."})]
+            parts: [::cached/Part({text: "This is a large document to cache..."})]
         })],
         ttl: "3600s"
     }))
@@ -282,7 +284,7 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::cachedcontents/get(CachedContentsGetRequest({
+    result ::gemini::cachedcontents/get(::gemini::cachedcontents/CachedContentsGetRequest({
         name: "cachedContents/abc123"
     }))
 
@@ -333,7 +335,7 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::cachedcontents/update("cachedContents/abc123", "ttl", CachedContentsUpdateRequest({
+    result ::gemini::cachedcontents/update("cachedContents/abc123", "ttl", ::gemini::cachedcontents/CachedContentsUpdateRequest({
         ttl: "7200s"
     }))
 
@@ -370,7 +372,7 @@ meta {
     **Example**
 
     ```hot
-    ::gemini::cachedcontents/delete(CachedContentsDeleteRequest({
+    ::gemini::cachedcontents/delete(::gemini::cachedcontents/CachedContentsDeleteRequest({
         name: "cachedContents/abc123"
     }))
     ```

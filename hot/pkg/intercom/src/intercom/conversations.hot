@@ -16,7 +16,22 @@ meta {
 
 list-conversations
 meta {
-    doc: """GET /conversations - One page of conversations, newest first: `{type, conversations, pages, total_count}`. `options`: `per_page` (default 20, max 150) and `starting_after` (from `::intercom::api/next-cursor(page)`)."""
+    doc: """
+    GET /conversations - One page of conversations, newest first: `{type,
+    conversations, pages, total_count}`. `options`: `per_page` (default 20,
+    max 150) and `starting_after` (from
+    `::intercom::api/next-cursor(page)`).
+
+    **Example**
+
+    ```hot
+    page ::intercom::conversations/list-conversations({per_page: 50})
+    length(page.conversations)
+
+    // The next page
+    more ::intercom::conversations/list-conversations({per_page: 50, starting_after: ::intercom::api/next-cursor(page)})
+    ```
+    """
 }
 fn
 (): Any {
@@ -31,7 +46,18 @@ fn
 
 get-conversation
 meta {
-    doc: """GET /conversations/{id} - A conversation with its `conversation_parts` (messages, notes, assignment and state changes). `options`: `display_as: "plaintext"`, `include_translations`."""
+    doc: """
+    GET /conversations/{id} - A conversation with its `conversation_parts`
+    (messages, notes, assignment and state changes). `options`: `display_as:
+    "plaintext"`, `include_translations`.
+
+    **Example**
+
+    ```hot
+    convo ::intercom::conversations/get-conversation("215473041", {display_as: "plaintext"})
+    map(convo.conversation_parts.conversation_parts, %.body)
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -79,7 +105,17 @@ fn
 
 search-all-conversations
 meta {
-    doc: """Run `search-conversations` across pages (150 per page) until `limit` conversations or the last page. Returns a Vec."""
+    doc: """
+    Run `search-conversations` across pages (150 per page) until `limit`
+    conversations or the last page. Returns a Vec.
+
+    **Example**
+
+    ```hot
+    convos ::intercom::conversations/search-all-conversations({field: "open", operator: "=", value: true}, 500)
+    length(convos)
+    ```
+    """
 }
 fn
 (query: Map, limit: Int): Vec {
@@ -98,7 +134,19 @@ fn
 
 build-reply-body
 meta {
-    doc: """Build an admin reply body: `message_type` ("comment", "note" or "quick_reply"), `type: "admin"`, `admin_id` and `body`, plus `options` (`attachment_urls`, `skip_notifications`, `created_at`). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Build an admin reply body: `message_type` ("comment", "note" or
+    "quick_reply"), `type: "admin"`, `admin_id` and `body`, plus `options`
+    (`attachment_urls`, `skip_notifications`, `created_at`). Unset options
+    are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/build-reply-body("comment", "814860", "Thanks!", {skip_notifications: true})
+    // {skip_notifications: true, message_type: "comment", type: "admin", admin_id: "814860", body: "Thanks!"}
+    ```
+    """
 }
 fn (message-type: Str, admin-id: Str, body: Str, options: Map): Map {
   ::api/compact({...options, message_type: message-type, type: "admin", admin_id: admin-id, body: body})
@@ -107,7 +155,23 @@ fn (message-type: Str, admin-id: Str, body: Str, options: Map): Map {
 reply
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """POST /conversations/{id}/reply - Reply to the customer as the configured admin (visible to them). `body` may be HTML. `options`: `attachment_urls`, `skip_notifications`."""
+    doc: """
+    POST /conversations/{id}/reply - Reply to the customer as the configured
+    admin (visible to them). `body` may be HTML. `options`:
+    `attachment_urls`, `skip_notifications`.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/reply("215473041", "Thanks for the report! A fix ships this week.")
+
+    // With an attachment, sent quietly
+    ::intercom::conversations/reply("215473041", "Here is the export.", {
+      attachment_urls: ["https://example.com/export.csv"],
+      skip_notifications: true
+    })
+    ```
+    """
 }
 fn
 (conversation-id: Str, body: Str): Any {
@@ -126,7 +190,16 @@ fn
 add-note
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """POST /conversations/{id}/reply with `message_type: note` - An internal note teammates see but the customer doesn't."""
+    doc: """
+    POST /conversations/{id}/reply with `message_type: note` - An internal
+    note teammates see but the customer doesn't.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/add-note("215473041", "Customer is on the enterprise plan. Escalate to tier 2.")
+    ```
+    """
 }
 fn
 (conversation-id: Str, body: Str): Any {
@@ -145,7 +218,17 @@ fn
 
 build-close-body
 meta {
-    doc: """Close body: `{message_type: "close", type: "admin", admin_id, body?}`. Exposed for testing."""
+    doc: """
+    Close body: `{message_type: "close", type: "admin", admin_id, body?}`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/build-close-body("814860", "All set.")  // {message_type: "close", type: "admin", admin_id: "814860", body: "All set."}
+    ::intercom::conversations/build-close-body("814860", null)  // {message_type: "close", type: "admin", admin_id: "814860"}
+    ```
+    """
 }
 fn (admin-id: Str, body: Str?): Map {
   ::api/compact({message_type: "close", type: "admin", admin_id: admin-id, body: body})
@@ -153,7 +236,16 @@ fn (admin-id: Str, body: Str?): Map {
 
 build-snooze-body
 meta {
-    doc: """Snooze body: `{message_type: "snoozed", admin_id, snoozed_until}` (Unix seconds). Exposed for testing."""
+    doc: """
+    Snooze body: `{message_type: "snoozed", admin_id, snoozed_until}` (Unix
+    seconds). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/build-snooze-body("814860", 1767225600)  // {message_type: "snoozed", admin_id: "814860", snoozed_until: 1767225600}
+    ```
+    """
 }
 fn (admin-id: Str, snoozed-until: Int): Map {
   {message_type: "snoozed", admin_id: admin-id, snoozed_until: snoozed-until}
@@ -161,7 +253,15 @@ fn (admin-id: Str, snoozed-until: Int): Map {
 
 build-open-body
 meta {
-    doc: """Open body: `{message_type: "open", admin_id}`. Exposed for testing."""
+    doc: """
+    Open body: `{message_type: "open", admin_id}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/build-open-body("814860")  // {message_type: "open", admin_id: "814860"}
+    ```
+    """
 }
 fn (admin-id: Str): Map {
   {message_type: "open", admin_id: admin-id}
@@ -174,6 +274,13 @@ meta {
     assignee_id, body?, skip_reopen?}`. `type` is the assignee kind,
     `"admin"` or `"team"`; `admin_id` is the admin performing it.
     `assignee_id` `"0"` unassigns. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/build-assign-body("814860", "5017691", {type: "team"})
+    // {message_type: "assignment", type: "team", admin_id: "814860", assignee_id: "5017691"}
+    ```
     """
 }
 fn (admin-id: Str, assignee-id: Str, options: Map): Map {
@@ -187,7 +294,9 @@ fn (admin-id: Str, assignee-id: Str, options: Map): Map {
   })
 }
 
-manage fn
+manage
+meta {no-doc: true}
+fn
 (conversation-id: Str, body: Map): Any {
   manage(conversation-id, body, {})
 },
@@ -198,7 +307,18 @@ manage fn
 close-conversation
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """Close a conversation, optionally with a closing message to the customer."""
+    doc: """
+    Close a conversation, optionally with a closing message to the customer.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/close-conversation("215473041")
+
+    // With a closing message to the customer
+    ::intercom::conversations/close-conversation("215473041", "Glad that fixed it. Closing this out.")
+    ```
+    """
 }
 fn
 (conversation-id: Str): Any {
@@ -217,7 +337,15 @@ fn
 open-conversation
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """Reopen a snoozed or closed conversation."""
+    doc: """
+    Reopen a snoozed or closed conversation.
+
+    **Example**
+
+    ```hot
+    ::intercom::conversations/open-conversation("215473041")
+    ```
+    """
 }
 fn
 (conversation-id: Str): Any {
@@ -238,7 +366,7 @@ meta {
 
     ```hot
     tomorrow add(::hot::time/epoch-seconds(), 86400)
-    ::intercom::conversations/snooze-conversation(conversation-id, tomorrow)
+    ::intercom::conversations/snooze-conversation("215473041", tomorrow)
     ```
     """
 }
@@ -261,7 +389,7 @@ meta {
     **Example**
 
     ```hot
-    ::intercom::conversations/assign-conversation(conversation-id, "814860", {type: "team", body: "Billing question"})
+    ::intercom::conversations/assign-conversation("215473041", "814860", {type: "team", body: "Billing question"})
     ```
     """
 }

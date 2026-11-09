@@ -61,8 +61,8 @@ meta {
     call(::hot::math/rand)  // 0.7234...
 
     // Preserve a recoverable domain Err as a value
-    result call(maybe-fetch, [id], OnErr.Preserve)
-    if-err(result, (e) { fallback(e) })
+    result call(div, [10, 0], OnErr.Preserve)
+    if-err(result, (e) { println(e) })
     ```
     """
 }
@@ -101,7 +101,7 @@ meta {
     map([[1, 2], [3, 4]], apply(%, add))  // [3, 7]
 
     // Preserve a recoverable domain Err as a value
-    result apply([id], maybe-fetch, OnErr.Preserve)
+    result apply([10, 0], div, OnErr.Preserve)
     ```
     """
 }
@@ -152,6 +152,13 @@ meta {
 
     The `once: true` flag ensures this handler runs only once per event,
     even when multiple projects are deployed in the same environment.
+
+    **Example**
+
+    ```hot
+    // The handler calls ::myapp::orders/process({order_id: "123"})
+    send("hot:call", {fn: "::myapp::orders/process", args: [{order_id: "123"}]})
+    ```
     """
 }
 fn (event: Map): Any {
@@ -169,6 +176,13 @@ meta {
 
     The `once: true` flag ensures this handler runs only once per event,
     even when multiple projects are deployed in the same environment.
+
+    **Example**
+
+    ```hot
+    // The handler calls ::myapp::reports/daily("2026-10-14")
+    send("hot:schedule", {fn: "::myapp::reports/daily", args: ["2026-10-14"]})
+    ```
     """
 }
 fn (event: Map): Any {
@@ -208,7 +222,7 @@ meta {
     // Schedule for 10 minutes from now
     send("hot:schedule:new", {
         fn: "::myapp::reminders/send",
-        args: [{user_id: user.id}],
+        args: [{user_id: "u-1"}],
         schedule: "in 10 minutes"
     })
 

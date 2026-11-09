@@ -18,7 +18,21 @@ CALCULATION_TYPES ["Recalculate", "Full", "FullRebuild"]
 
 create-session
 meta {
-    doc: """POST /workbook/createSession. Returns `{id, persistChanges}`. Changes are saved unless `opts.persist` is false."""
+    doc: """
+    POST /workbook/createSession. Returns `{id, persistChanges}`. Changes
+    are saved unless `opts.persist` is false.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::excel::workbooks/create-session("/Reports/Q3.xlsx")
+    ::microsoft::excel/read-values("/Reports/Q3.xlsx", "Data", "A1:B2", {session: session.id})
+    ::microsoft::excel::workbooks/close-session("/Reports/Q3.xlsx", session)
+
+    // A what-if session: changes are discarded when it ends
+    ::microsoft::excel::workbooks/create-session("/Reports/Q3.xlsx", {persist: false})
+    ```
+    """
 }
 fn
 (item: Any): Map {
@@ -30,7 +44,16 @@ fn
 
 close-session
 meta {
-    doc: """POST /workbook/closeSession. `session` is an id or a session Map."""
+    doc: """
+    POST /workbook/closeSession. `session` is an id or a session Map.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::excel::workbooks/create-session("/Reports/Q3.xlsx")
+    ::microsoft::excel::workbooks/close-session("/Reports/Q3.xlsx", session)
+    ```
+    """
 }
 fn
 (item: Any, session: Any): Map {
@@ -42,7 +65,17 @@ fn
 
 refresh-session
 meta {
-    doc: """POST /workbook/refreshSession: keep an idle session alive. `session` is an id or a session Map."""
+    doc: """
+    POST /workbook/refreshSession: keep an idle session alive. `session` is
+    an id or a session Map.
+
+    **Example**
+
+    ```hot
+    session ::microsoft::excel::workbooks/create-session("/Reports/Q3.xlsx")
+    ::microsoft::excel::workbooks/refresh-session("/Reports/Q3.xlsx", session)
+    ```
+    """
 }
 fn
 (item: Any, session: Any): Map {
@@ -87,7 +120,17 @@ fn
 
 calculation-body
 meta {
-    doc: """The `calculate` body (pure); an Err for a type other than `Recalculate`, `Full` or `FullRebuild`."""
+    doc: """
+    The `calculate` body (pure); an Err for a type other than `Recalculate`,
+    `Full` or `FullRebuild`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::workbooks/calculation-body("Full")  // {calculationType: "Full"}
+    is-err(::microsoft::excel::workbooks/calculation-body("Everything"))  // true
+    ```
+    """
 }
 fn (kind: Str): Map {
   if(in(kind, CALCULATION_TYPES), {calculationType: kind}, err(`microsoft-excel: calculation type must be one of ${join(CALCULATION_TYPES, ", ")}, got ${to-json(kind)}`))
@@ -95,7 +138,19 @@ fn (kind: Str): Map {
 
 calculate
 meta {
-    doc: """POST /workbook/application/calculate. `kind` is `Recalculate` (the default), `Full` or `FullRebuild`; an Err for anything else."""
+    doc: """
+    POST /workbook/application/calculate. `kind` is `Recalculate` (the
+    default), `Full` or `FullRebuild`; an Err for anything else.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::workbooks/calculate("/Reports/Q3.xlsx")
+
+    // Rebuild every dependency, inside a session
+    ::microsoft::excel::workbooks/calculate("/Reports/Q3.xlsx", "FullRebuild", {session: "s1"})
+    ```
+    """
 }
 fn
 (item: Any): Map {

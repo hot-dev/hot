@@ -4,25 +4,43 @@
 ::uri ::hot::uri
 query-string ::hot::uri/query-string
 
-checks-path fn (owner: Str, repo: Str, suffix: Str): Str {
+checks-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, suffix: Str): Str {
   `/repos/${owner}/${repo}${suffix}`
 }
 
-check-run-path fn (owner: Str, repo: Str, check-run-id: Any): Str {
+check-run-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, check-run-id: Any): Str {
   checks-path(owner, repo, `/check-runs/${check-run-id}`)
 }
 
-check-suite-path fn (owner: Str, repo: Str, check-suite-id: Any): Str {
+check-suite-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, check-suite-id: Any): Str {
   checks-path(owner, repo, `/check-suites/${check-suite-id}`)
 }
 
-ref-checks-path fn (owner: Str, repo: Str, ref: Str, resource: Str): Str {
+ref-checks-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, ref: Str, resource: Str): Str {
   checks-path(owner, repo, `/commits/${::uri/encode(ref)}/${resource}`)
 }
 
 get-check-run
 meta {
-    doc: """GET /repos/{owner}/{repo}/check-runs/{check_run_id} - One check run and its structured output summary."""
+    doc: """
+    GET /repos/{owner}/{repo}/check-runs/{check_run_id} - One check run and
+    its structured output summary.
+
+    **Example**
+
+    ```hot
+    check ::github::checks/get-check-run("acme", "api", 4242)
+    check.output.summary
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, check-run-id: Any): Map {
@@ -39,6 +57,14 @@ meta {
     GitHub Actions and external CI for a SHA, branch, or tag. `params`
     supports `check_name`, `status`, `filter` ("latest"/"all"), `app_id`,
     `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::checks/list-check-runs-for-ref("acme", "api", "main", {filter: "latest"})
+    failed filter(result.check_runs, eq(%.conclusion, "failure"))
+    map(failed, %.name)
+    ```
     """
 }
 fn
@@ -59,6 +85,13 @@ meta {
     GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations -
     Structured file, line, severity, and message evidence. `params` supports
     `per_page` and `page`.
+
+    **Example**
+
+    ```hot
+    notes ::github::checks/list-check-run-annotations("acme", "api", 4242, {per_page: 50})
+    map(notes, `${%.path}:${%.start_line} ${%.message}`)
+    ```
     """
 }
 fn
@@ -77,7 +110,17 @@ fn
 
 get-check-suite
 meta {
-    doc: """GET /repos/{owner}/{repo}/check-suites/{check_suite_id} - One check suite."""
+    doc: """
+    GET /repos/{owner}/{repo}/check-suites/{check_suite_id} - One check
+    suite.
+
+    **Example**
+
+    ```hot
+    suite ::github::checks/get-check-suite("acme", "api", 777)
+    suite.conclusion
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, check-suite-id: Any): Map {
@@ -93,6 +136,13 @@ meta {
     GET /repos/{owner}/{repo}/commits/{ref}/check-suites - Check suites for
     a SHA, branch, or tag. `params` supports `app_id`, `check_name`,
     `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::checks/list-check-suites-for-ref("acme", "api", "v1.2.0")
+    map(result.check_suites, %.status)
+    ```
     """
 }
 fn
@@ -113,6 +163,13 @@ meta {
     GET /repos/{owner}/{repo}/check-suites/{check_suite_id}/check-runs -
     Check runs in one suite. `params` supports `check_name`, `status`,
     `filter` ("latest"/"all"), `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::checks/list-check-runs-for-suite("acme", "api", 777, {status: "completed"})
+    map(result.check_runs, %.name)
+    ```
     """
 }
 fn

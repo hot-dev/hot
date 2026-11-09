@@ -96,14 +96,35 @@ type {
 // ---------------------------------------------------------------------------
 
 is-blank
-meta {doc: """True for null, `""` and whitespace-only strings."""}
+meta {
+    doc: """
+    True for null, `""` and whitespace-only strings.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/is-blank("   ")  // true
+    ::xero::oauth/is-blank("x")  // false
+    ```
+    """
+}
 fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
 int-or-null
 meta {
-    doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
+    doc: """
+    An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so
+    bad input never halts a run.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/int-or-null("42")  // 42
+    ::xero::oauth/int-or-null("4.2")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -115,7 +136,19 @@ fn (value: Any): Int? {
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose credential is missing must not run on the project's. Exposed for testing."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an Err, never a fallback to context: a tenant
+    whose credential is missing must not run on the project's. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/blank-option({access-token: ""}, ["access-token", "refresh-token"])  // "access-token"
+    ::xero::oauth/blank-option({}, ["access-token"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-blank(get(opts, name))) })
@@ -123,20 +156,46 @@ fn (opts: Map, names: Vec): Str? {
 
 mark-tokens
 meta {
-    doc: """Mask the tokens in a token-endpoint response and return it unchanged. Only the tokens: marking the whole body would also hide values like `token_type` and `scope`. Exposed for testing."""
+    doc: """
+    Mask the tokens in a token-endpoint response and return it unchanged.
+    Only the tokens: marking the whole body would also hide values like
+    `token_type` and `scope`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::xero::oauth/mark-tokens({access_token: ::hot::ctx/get("xero.access.token"), token_type: "Bearer"})
+    body.token_type
+    ```
+    """
 }
 fn (body: Map): Map {
   ::ctx/mark-secret([get(body, "access_token"), get(body, "refresh_token"), get(body, "id_token")])
   body
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
 token-error
 meta {
-    doc: """Build a `TokenError` from a message, or from a prefix and a failed token response (`{status, body}`) or transport error."""
+    doc: """
+    Build a `TokenError` from a message, or from a prefix and a failed token
+    response (`{status, body}`) or transport error.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/token-error("xero: no credentials").message  // "xero: no credentials"
+
+    e ::xero::oauth/token-error("xero: token refresh failed", {status: 400, body: {error: "invalid_grant"}})
+    e.message  // "xero: token refresh failed: invalid_grant"
+    e.error-code  // "invalid_grant"
+    ```
+    """
 }
 fn
 (message: Str): TokenError {
@@ -164,7 +223,17 @@ fn
 }
 
 basic-auth
-meta {doc: """`Basic base64(client-id:client-secret)` for token calls."""}
+meta {
+    doc: """
+    `Basic base64(client-id:client-secret)` for token calls.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/basic-auth("id", "secret")  // "Basic aWQ6c2VjcmV0"
+    ```
+    """
+}
 fn (client-id: Str, client-secret: Str): Str {
   pair `${client-id}:${client-secret}`
   `Basic ${::b64/encode(Bytes(pair))}`
@@ -176,7 +245,23 @@ meta {
         "xero.client.id": {required: false, secret: false},
         "xero.client.secret": {required: false}
     },
-    doc: """The app's `{client-id, client-secret}` from `opts`, else context, with a per-call secret marked so it is masked in call records. The secret may be null for PKCE apps unless `require-secret` is true. A key in `opts` that is blank or null is a `TokenError`, never a fallback to context; a PKCE app leaves `client-secret` out."""
+    doc: """
+    The app's `{client-id, client-secret}` from `opts`, else context, with a
+    per-call secret marked so it is masked in call records. The secret may
+    be null for PKCE apps unless `require-secret` is true. A key in `opts`
+    that is blank or null is a `TokenError`, never a fallback to context; a
+    PKCE app leaves `client-secret` out.
+
+    **Example**
+
+    ```hot
+    app ::xero::oauth/app-credentials({client-id: "APP-ID"}, false)
+    app.client-id
+
+    // A secret is required for confidential grants
+    confidential ::xero::oauth/app-credentials({client-secret: ::hot::ctx/get("acme.xero.client-secret")}, true)
+    ```
+    """
 }
 fn (opts: Map, require-secret: Bool): Map {
   ::ctx/mark-secret(get(opts, "client-secret"))
@@ -196,7 +281,18 @@ fn (opts: Map, require-secret: Bool): Map {
 
 normalize-scopes
 meta {
-    doc: """Scopes as a space-separated Str from a Vec or a space/comma-separated Str (duplicates removed); `""` for none."""
+    doc: """
+    Scopes as a space-separated Str from a Vec or a space/comma-separated
+    Str (duplicates removed); `""` for none.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/normalize-scopes("openid, email openid")  // "openid email"
+    ::xero::oauth/normalize-scopes(["openid", "email"])  // "openid email"
+    ::xero::oauth/normalize-scopes(null)  // ""
+    ```
+    """
 }
 fn (scopes: Any): Str {
   raw cond {
@@ -253,7 +349,19 @@ fn
 
 callback-params
 meta {
-    doc: """Read Xero's redirect: `{code, state, error, error-description}` from the request query (null when absent)."""
+    doc: """
+    Read Xero's redirect: `{code, state, error, error-description}` from the
+    request query (null when absent).
+
+    **Example**
+
+    ```hot
+    params ::xero::oauth/callback-params({query: {code: "abc", state: "csrf-123"}})
+    params.code  // "abc"
+    params.state  // "csrf-123"
+    params.error  // null
+    ```
+    """
 }
 fn (request: Map): Map {
   q or(get(request, "query"), {})
@@ -275,6 +383,19 @@ meta {
     Build (without sending) the token-endpoint `HttpRequest` (pure): a
     form-encoded grant `body`, with HTTP Basic client auth when there is a
     secret, or `client_id` in the body for PKCE apps.
+
+    **Example**
+
+    ```hot
+    body {grant_type: "refresh_token", refresh_token: "RT"}
+    req ::xero::oauth/build-token-request(body, "APP-ID", "APP-SECRET")
+    req.url  // "https://identity.xero.com/connect/token"
+    contains(req.headers.Authorization, "Basic ")  // true
+
+    // A PKCE app sends its client id in the body
+    pkce ::xero::oauth/build-token-request(body, "APP-ID", null)
+    contains(pkce.body, "client_id=APP-ID")  // true
+    ```
     """
 }
 fn (body: Map, client-id: Str, client-secret: Str?): HttpRequest {
@@ -285,13 +406,26 @@ fn (body: Map, client-id: Str, client-secret: Str?): HttpRequest {
   HttpRequest({method: "POST", url: ::xero/TOKEN_URL, headers: headers, body: ::uri/encode-query(form)})
 }
 
-without-client fn (body: Map): Map {
+without-client
+meta {no-doc: true}
+fn (body: Map): Map {
   delete(delete(body, "client_id"), "client_secret")
 }
 
 build-exchange-body
 meta {
-    doc: """The `authorization_code` grant body; `code-verifier` completes a PKCE flow."""
+    doc: """
+    The `authorization_code` grant body; `code-verifier` completes a PKCE
+    flow.
+
+    **Example**
+
+    ```hot
+    body ::xero::oauth/build-exchange-body("CODE", "https://app.example.com/oauth/xero", null)
+    body.grant_type  // "authorization_code"
+    body.code  // "CODE"
+    ```
+    """
 }
 fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
   without-client(::oauth2/build-exchange-body(filter-vals({
@@ -303,14 +437,34 @@ fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
 }
 
 build-refresh-body
-meta {doc: """The `refresh_token` grant body."""}
+meta {
+    doc: """
+    The `refresh_token` grant body.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/build-refresh-body("RT")  // {grant_type: "refresh_token", refresh_token: "RT"}
+    ```
+    """
+}
 fn (refresh-token: Str): Map {
   without-client(::oauth2/build-refresh-body({client-id: "", refresh-token: refresh-token}))
 }
 
 build-client-credentials-body
 meta {
-    doc: """The `client_credentials` grant body for a Custom Connection; `scope` may be empty to get every scope the connection was granted."""
+    doc: """
+    The `client_credentials` grant body for a Custom Connection; `scope` may
+    be empty to get every scope the connection was granted.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/build-client-credentials-body("accounting.contacts")  // {grant_type: "client_credentials", scope: "accounting.contacts"}
+    ::xero::oauth/build-client-credentials-body("")  // {grant_type: "client_credentials"}
+    ```
+    """
 }
 fn (scope: Str): Map {
   filter-vals({grant_type: "client_credentials", scope: if(is-empty(scope), null, scope)}, is-some)
@@ -318,7 +472,19 @@ fn (scope: Str): Map {
 
 token-set
 meta {
-    doc: """Turn a token response into a `TokenSet` (pure). `sent-refresh-token` is the token the request used (null otherwise); `now` is epoch ms."""
+    doc: """
+    Turn a token response into a `TokenSet` (pure). `sent-refresh-token` is
+    the token the request used (null otherwise); `now` is epoch ms.
+
+    **Example**
+
+    ```hot
+    tokens ::xero::oauth/token-set({access_token: "AT", refresh_token: "RT-2", expires_in: 1800}, "RT-1", 1000)
+    tokens.refresh-token  // "RT-2"
+    tokens.rotated  // true
+    tokens.expires-at  // 1801000
+    ```
+    """
 }
 fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
   returned get(body, "refresh_token")
@@ -336,7 +502,9 @@ fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
   })
 }
 
-send-token-request fn (req: HttpRequest, prefix: Str): Map {
+send-token-request
+meta {no-doc: true}
+fn (req: HttpRequest, prefix: Str): Map {
   response http-request(req)
   cond {
     is-err(response) => { err(token-error(prefix, err-message(response))) }
@@ -347,7 +515,24 @@ send-token-request fn (req: HttpRequest, prefix: Str): Map {
 
 exchange-code
 meta {
-    doc: """Exchange the authorization `code` for a `TokenSet`. Options: `client-id`, `client-secret` (else context; omit the secret for PKCE apps), `code-verifier`."""
+    doc: """
+    Exchange the authorization `code` for a `TokenSet`. Options:
+    `client-id`, `client-secret` (else context; omit the secret for PKCE
+    apps), `code-verifier`.
+
+    **Example**
+
+    ```hot
+    tokens ::xero::oauth/exchange-code("CODE-FROM-CALLBACK", "https://app.example.com/oauth/xero")
+    tokens.expires-in
+
+    // A PKCE app sends the verifier it used for authorize-url
+    pkce ::xero::oauth/exchange-code("CODE-FROM-CALLBACK", "https://app.example.com/oauth/xero", {
+      code-verifier: ::hot::ctx/get("acme.xero.code-verifier")
+    })
+    pkce.refresh-token
+    ```
+    """
 }
 fn
 (code: Str, redirect-uri: Str): TokenSet {
@@ -376,6 +561,15 @@ meta {
     `tokens.refresh-token` before using the access token. A reused or
     expired refresh token gives `error-code: "invalid_grant"`; the user
     must connect again. Options: `client-id`, `client-secret`.
+
+    **Example**
+
+    ```hot
+    tokens ::xero::oauth/refresh(::hot::ctx/get("xero.refresh.token"))
+
+    // Persist this before using the access token
+    tokens.refresh-token
+    ```
     """
 }
 fn
@@ -402,6 +596,13 @@ meta {
     (Vec or Str) may be empty to receive every scope the connection was
     granted. No refresh token; ask again when it expires (30 minutes).
     Options: `client-id`, `client-secret`.
+
+    **Example**
+
+    ```hot
+    tokens ::xero::oauth/client-credentials(["accounting.contacts.read"])
+    tokens.expires-in
+    ```
     """
 }
 fn
@@ -424,7 +625,18 @@ fn
 
 build-revoke-request
 meta {
-    doc: """Build the revocation `HttpRequest` (RFC 7009: form `token=...`, Basic client auth). Pure."""
+    doc: """
+    Build the revocation `HttpRequest` (RFC 7009: form `token=...`, Basic
+    client auth). Pure.
+
+    **Example**
+
+    ```hot
+    req ::xero::oauth/build-revoke-request("RT", "APP-ID", "APP-SECRET")
+    req.url  // "https://identity.xero.com/connect/revocation"
+    req.body  // "token=RT"
+    ```
+    """
 }
 fn (token: Str, client-id: Str, client-secret: Str): HttpRequest {
   HttpRequest({
@@ -437,7 +649,16 @@ fn (token: Str, client-id: Str, client-secret: Str): HttpRequest {
 
 revoke
 meta {
-    doc: """Revoke a refresh token: every connection it authorised is removed. Returns true, or a `TokenError`."""
+    doc: """
+    Revoke a refresh token: every connection it authorised is removed.
+    Returns true, or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    ::xero::oauth/revoke(::hot::ctx/get("xero.refresh.token"))
+    ```
+    """
 }
 fn
 (refresh-token: Str): Bool {
@@ -472,6 +693,13 @@ meta {
     `xero-tenant-id` (`xero.tenant.id` or `opts.tenant-id`).
     `auth-event-id` (from the access token's `authentication_event_id`
     claim) limits the list to the organisations just connected.
+
+    **Example**
+
+    ```hot
+    orgs ::xero::oauth/connections(::hot::ctx/get("xero.access.token"))
+    map(orgs, %.tenantId)
+    ```
     """
 }
 fn
@@ -495,7 +723,17 @@ fn
 
 delete-connection
 meta {
-    doc: """DELETE /connections/{id} - disconnect one organisation (the connection `id`, not the tenant id). Returns true, or a `TokenError`."""
+    doc: """
+    DELETE /connections/{id} - disconnect one organisation (the connection
+    `id`, not the tenant id). Returns true, or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    orgs ::xero::oauth/connections(::hot::ctx/get("xero.access.token"))
+    ::xero::oauth/delete-connection(::hot::ctx/get("xero.access.token"), first(orgs).id)
+    ```
+    """
 }
 fn (access-token: Str, connection-id: Str): Bool {
   ::ctx/mark-secret(access-token)

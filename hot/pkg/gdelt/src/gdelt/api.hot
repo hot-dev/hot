@@ -33,7 +33,16 @@ PACKAGE_AGENT "hot-dev-gdelt-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::gdelt::api/given("  ")  // false
+    ::gdelt::api/given("x")   // true
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -43,7 +52,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -53,7 +64,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -113,11 +126,15 @@ type {
     message: Str
 }
 
-short-text fn (text: Str): Str {
+short-text
+meta {no-doc: true}
+fn (text: Str): Str {
   if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { short-text(trim(body)) }
     is-map(body) => { or(get(body, "error"), get(body, "message")) }
@@ -125,7 +142,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -136,7 +155,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 429, headers: {}, body: "Please limit requests"}
+    e ::gdelt::api/http-error(response, "https://api.gdeltproject.org/api/v2/doc/doc")
+    e.status   // 429
+    e.message  // "gdelt: HTTP 429: Please limit requests"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -154,7 +185,17 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 query-error
 meta {
-    doc: """Build a `QueryError` from GDELT's text. Exposed for testing."""
+    doc: """
+    Build a `QueryError` from GDELT's text. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    e ::gdelt::api/query-error("Your query was too short.", "https://api.gdeltproject.org/api/v2/doc/doc")
+    e.text     // "Your query was too short."
+    e.message  // "gdelt: Your query was too short."
+    ```
+    """
 }
 fn (text: Str, url: Str): QueryError {
   QueryError({source: SOURCE, url: url, text: text, message: `${SOURCE}: ${short-text(text)}`})
@@ -166,7 +207,17 @@ fn (text: Str, url: Str): QueryError {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::gdelt::api/query-string({mode: "ArtList", format: "json", sort: null})  // "?mode=ArtList&format=json"
+    ::gdelt::api/query-string({sort: " "})                                    // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -178,6 +229,14 @@ meta {
     The decoded body of a 2xx response (pure). A Map or Vec passes
     through and JSON text is decoded. An Err carrying `QueryError` for
     anything else, or for JSON that doesn't parse.
+
+    **Example**
+
+    ```hot
+    url "https://api.gdeltproject.org/api/v2/doc/doc"
+    ::gdelt::api/parse-body("{\"articles\": []}", url)            // {articles: []}
+    is-err(::gdelt::api/parse-body("Your query was too short.", url))  // true
+    ```
     """
 }
 fn (body: Any, url: Str): Any {
@@ -200,6 +259,17 @@ meta {
     GET a GDELT URL with `headers`, returning the `HttpResponse` on 2xx
     or an Err carrying `HttpError`. A transport failure passes through
     as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::gdelt::api/request(
+      "GET",
+      "https://api.gdeltproject.org/api/v2/doc/doc?query=climate&mode=ArtList&format=json",
+      {Accept: "application/json"}
+    )
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -218,7 +288,17 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError` or `QueryError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError` or `QueryError`.
+
+    **Example**
+
+    ```hot
+    body ::gdelt::api/get-json("https://api.gdeltproject.org/api/v2/doc/doc?query=climate&mode=ArtList&format=json", {})
+    ::gdelt/article-list(body)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})

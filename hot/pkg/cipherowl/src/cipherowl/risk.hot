@@ -19,7 +19,17 @@ query ::cipherowl::api/query
 
 reason-path
 meta {
-    doc: """`/api/reason/v2/chains/{chain}/addresses/{address}/{kind}` plus the query, with chain, address and hops validated. Exposed for testing."""
+    doc: """
+    `/api/reason/v2/chains/{chain}/addresses/{address}/{kind}` plus the
+    query, with chain, address and hops validated. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::risk/reason-path("evm", "0x0000000000000000000000000000000000000001", "detail", {hops: 2})
+    // "/api/reason/v2/chains/evm/addresses/0x0000000000000000000000000000000000000001/detail?hops=2"
+    ```
+    """
 }
 fn (chain: Str, address: Str, kind: Str, options: Map): Str {
   c ::api/validate-chain(chain)
@@ -72,7 +82,18 @@ fn
 
 risk-breakdown
 meta {
-    doc: """The matched risk categories: `{chain, address, config, risks: [{type ("DIRECT" | "INDIRECT"), category, direction, percentage, hops, totalUsdValue}], version}`."""
+    doc: """
+    The matched risk categories: `{chain, address, config, risks: [{type
+    ("DIRECT" | "INDIRECT"), category, direction, percentage, hops,
+    totalUsdValue}], version}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::risk/risk-breakdown("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox", hops: 2})
+    map(out.risks, (r) { r.category })
+    ```
+    """
 }
 fn
 (chain: Str, address: Str): Map {
@@ -96,6 +117,13 @@ meta {
     standardLabel, ...}], version}`. `totalUsdValue` can be the string
     `"Infinity"` for a directly flagged address; `paths` lists the
     counterparty addresses on each exposure path.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::risk/risk-detail("evm", "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", {config: "co-sandbox"})
+    ::cipherowl::risk/parse-detail(out).found-risk
+    ```
     """
 }
 fn
@@ -112,7 +140,18 @@ fn
 
 chain-capabilities
 meta {
-    doc: """`{capabilities: {<network>: {chainClass, screening, reporting, research}}}`. `chainClass` is the chain to pass as `{chain}` elsewhere (e.g. `ethereum` → `evm`)."""
+    doc: """
+    `{capabilities: {<network>: {chainClass, screening, reporting,
+    research}}}`. `chainClass` is the chain to pass as `{chain}` elsewhere
+    (e.g. `ethereum` → `evm`).
+
+    **Example**
+
+    ```hot
+    caps ::cipherowl::risk/chain-capabilities()
+    ::cipherowl::risk/networks-for-chain(caps, "evm")
+    ```
+    """
 }
 fn
 (): Map {
@@ -124,7 +163,17 @@ fn
 
 networks-for-chain
 meta {
-    doc: """The network names in a `chain-capabilities` result whose `chainClass` is `chain`. Pure."""
+    doc: """
+    The network names in a `chain-capabilities` result whose `chainClass` is
+    `chain`. Pure.
+
+    **Example**
+
+    ```hot
+    caps {capabilities: {base: {chainClass: "evm"}, ethereum: {chainClass: "evm"}, tron: {chainClass: "tron"}}}
+    ::cipherowl::risk/networks-for-chain(caps, "evm")  // ["base", "ethereum"]
+    ```
+    """
 }
 fn (capabilities: Any, chain: Str): Vec<Str> {
   caps or(get(or(capabilities, {}), "capabilities"), {})
@@ -133,7 +182,20 @@ fn (capabilities: Any, chain: Str): Vec<Str> {
 
 chain-class-of
 meta {
-    doc: """The chain class for `chain` from a `chain-capabilities` result: `chain` itself when it is already a class in `::cipherowl/CHAINS`, the network's `chainClass` when listed, otherwise `chain` unchanged (CipherOwl's 400 then names the supported set). Pure. Exposed for testing."""
+    doc: """
+    The chain class for `chain` from a `chain-capabilities` result: `chain`
+    itself when it is already a class in `::cipherowl/CHAINS`, the network's
+    `chainClass` when listed, otherwise `chain` unchanged (CipherOwl's 400
+    then names the supported set). Pure. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    caps {capabilities: {base: {chainClass: "evm"}}}
+    ::cipherowl::risk/chain-class-of("base", caps)  // "evm"
+    ::cipherowl::risk/chain-class-of("tron", caps)  // "tron"
+    ```
+    """
 }
 fn (chain: Str, capabilities: Any): Str {
   c lowercase(trim(chain))
@@ -153,6 +215,16 @@ meta {
     screening and risk reasons) rejects a specific chain such as `base`
     and wants its class (`evm`). A class passes through without a call;
     anything else costs one `chain-capabilities` request.
+
+    **Example**
+
+    ```hot
+    // A class passes through without a request
+    ::cipherowl::risk/chain-class("evm")
+
+    // A specific chain costs one chain-capabilities request
+    ::cipherowl::risk/chain-class("base")
+    ```
     """
 }
 fn
@@ -176,7 +248,17 @@ fn
 
 direction-of
 meta {
-    doc: """A direction in lowercase: `send`, `receive`, `direct`, or `unspecified` for anything else. Exposed for testing."""
+    doc: """
+    A direction in lowercase: `send`, `receive`, `direct`, or `unspecified`
+    for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::risk/direction-of("RECEIVE")  // "receive"
+    ::cipherowl::risk/direction-of(null)  // "unspecified"
+    ```
+    """
 }
 fn (value: Any): Str {
   word if(is-str(value), lowercase(trim(value)), "")
@@ -185,7 +267,18 @@ fn (value: Any): Str {
 
 epoch-seconds-or-null
 meta {
-    doc: """Unix seconds from CipherOwl's exposure timestamps, which arrive as strings (`"1652499489"`); null when absent or not numeric. Exposed for testing."""
+    doc: """
+    Unix seconds from CipherOwl's exposure timestamps, which arrive as
+    strings (`"1652499489"`); null when absent or not numeric. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::risk/epoch-seconds-or-null("1652499489")  // 1652499489
+    ::cipherowl::risk/epoch-seconds-or-null("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   n ::api/number-or-null(value)
@@ -202,6 +295,14 @@ meta {
     `{category, direction, hops, usd-value, contribution}`, largest
     contribution first. `computed-at` is when the score was computed,
     not when the exposure happened.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::risk/parse-score({riskScore: 82, riskBand: "High Risk", breakdown: [{category: "ofac", direction: "RECEIVE", hops: 1, riskContribution: 82}]})
+    out.band  // "high"
+    first(out.breakdown).direction  // "receive"
+    ```
     """
 }
 fn (body: Any): Map {
@@ -231,7 +332,22 @@ fn (body: Any): Map {
 
 parse-reason
 meta {
-    doc: """Normalize one detail reason: `{category, direction, hops, total-usd-value (null for "Infinity"), total-percentage, first-exposure-at, last-exposure-at (Unix seconds), paths (each a Vec of addresses, risk source first), partial (paths is a sample), label, standard-label}`. Exposed for testing."""
+    doc: """
+    Normalize one detail reason: `{category, direction, hops,
+    total-usd-value (null for "Infinity"), total-percentage,
+    first-exposure-at, last-exposure-at (Unix seconds), paths (each a Vec of
+    addresses, risk source first), partial (paths is a sample), label,
+    standard-label}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::risk/parse-reason({category: "ofac", direction: "DIRECT", totalUsdValue: "Infinity", paths: [{addresses: ["0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"]}]})
+    out.direction  // "direct"
+    out.total-usd-value  // null
+    out.paths  // [["0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704"]]
+    ```
+    """
 }
 fn (raw: Map): Map {
   {
@@ -251,7 +367,20 @@ fn (raw: Map): Map {
 
 parse-detail
 meta {
-    doc: """Normalize a `risk-detail` result: `{chain, requested-chain, address, config, found-risk, reasons}` with each reason from `parse-reason`. The paths are counterparty addresses: wallet-risk evidence to keep with the case, not in logs."""
+    doc: """
+    Normalize a `risk-detail` result: `{chain, requested-chain, address,
+    config, found-risk, reasons}` with each reason from `parse-reason`. The
+    paths are counterparty addresses: wallet-risk evidence to keep with the
+    case, not in logs.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::risk/parse-detail({foundRisk: true, reasons: [{category: "ofac", direction: "SEND", hops: 2}]})
+    out.found-risk  // true
+    first(out.reasons).hops  // 2
+    ```
+    """
 }
 fn (body: Any): Map {
   b if(is-map(body), body, {})

@@ -59,7 +59,18 @@ DeleteInboundRuleResponse type {
 
 
 delete-single-trigger
-meta {doc: """Delete a single inbound rule trigger by its ID."""}
+meta {
+    doc: """
+    Delete a single inbound rule trigger by its ID.
+
+    **Example**
+
+    ```hot
+    deleted ::postmark::delete/delete-single-trigger(::postmark::delete/DeleteInboundRuleRequest({triggerid: "1234"}))
+    deleted.Message
+    ```
+    """
+}
 fn
 (request: DeleteInboundRuleRequest): DeleteInboundRuleResponse {
   delete-single-trigger(request, {})

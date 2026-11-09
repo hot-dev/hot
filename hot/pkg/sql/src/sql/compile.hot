@@ -23,21 +23,29 @@ meta {
 
 ::regex ::hot::regex
 
-at fn (s: Str, i: Int): Str {
+at
+meta {no-doc: true}
+fn (s: Str, i: Int): Str {
   slice(s, i, add(i, 1))
 }
 
-is-name-char fn (c: Str): Bool {
+is-name-char
+meta {no-doc: true}
+fn (c: Str): Bool {
   ::regex/is-match(c, "^[A-Za-z0-9_]$")
 }
 
 // Named placeholders (and dollar-quote tags) start like identifiers.
-is-name-start fn (c: Str): Bool {
+is-name-start
+meta {no-doc: true}
+fn (c: Str): Bool {
   ::regex/is-match(c, "^[A-Za-z_]$")
 }
 
 // Position (0-based) of `name` in `names`, or -1.
-name-index fn (names: Vec, name: Str): Int {
+name-index
+meta {no-doc: true}
+fn (names: Vec, name: Str): Int {
   found reduce(names, (acc, entry) {
     cond {
       gte(acc.idx, 0) => { acc }
@@ -49,7 +57,9 @@ name-index fn (names: Vec, name: Str): Int {
 }
 
 // Collect a run of name characters starting at `i`; returns {name, next}.
-collect-name fn (sql: Str, i: Int): Map {
+collect-name
+meta {no-doc: true}
+fn (sql: Str, i: Int): Map {
   cond {
     gte(i, length(sql)) => { {name: "", next: i} }
     is-name-char(at(sql, i)) => {
@@ -63,7 +73,9 @@ collect-name fn (sql: Str, i: Int): Map {
 // Match a dollar-quote opener at `i` (which holds "$"): `$$` or `$tag$`
 // where tag is identifier-shaped. Returns the full opener or "" when this
 // `$` does not start a dollar quote.
-dollar-quote-tag fn (sql: Str, i: Int): Str {
+dollar-quote-tag
+meta {no-doc: true}
+fn (sql: Str, i: Int): Str {
   len length(sql)
   next if(lt(add(i, 1), len), at(sql, add(i, 1)), "")
   cond {
@@ -82,7 +94,9 @@ dollar-quote-tag fn (sql: Str, i: Int): Str {
 }
 
 // Lexing switches derived from placeholder style + dialect.
-scan-opts fn (style: Str, dialect: Str): Map {
+scan-opts
+meta {no-doc: true}
+fn (style: Str, dialect: Str): Map {
   {
     style: style,
     // MySQL strings treat backslash as an escape by default
@@ -160,7 +174,9 @@ fn
 // Character scanner. `mode` is one of "sql", "squote", "dquote", "btick",
 // "line", "block", "dollarq"; `depth` tracks nested block comments and
 // `tag` the active dollar-quote opener.
-scan fn (sql: Str, i: Int, opts: Map, out: Str, names: Vec, mode: Str, depth: Int, tag: Str): Map {
+scan
+meta {no-doc: true}
+fn (sql: Str, i: Int, opts: Map, out: Str, names: Vec, mode: Str, depth: Int, tag: Str): Map {
   len length(sql)
   cond {
     gte(i, len) => { {sql: out, names: names} }

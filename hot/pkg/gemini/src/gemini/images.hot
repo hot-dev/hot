@@ -76,7 +76,7 @@ meta {
 
     **Example**
     ```hot
-    response generate({
+    response ::gemini::images/generate({
         prompt: "A serene lake at sunset",
         numberOfImages: 2,
         aspectRatio: "16:9"
@@ -137,21 +137,21 @@ meta {
 
     **Example**
     ```hot
-    result generate-to-file("uploads/sunset.png", "A serene lake at sunset")
+    result ::gemini::images/generate-to-file("uploads/sunset.png", "A serene lake at sunset")
 
     match result {
-        AIMedia.Image => {
+        ::ai::media/AIMedia.Image => {
             println(result.media.file.path)  // "uploads/sunset.png"
             println(result.prompt)           // "A serene lake at sunset"
         }
 
-        HttpError => { println("Error!") }
+        ::gemini::api/HttpError => { println("Error!") }
     }
     ```
 
     **With options**
     ```hot
-    result generate-to-file("output/city.png", {
+    result ::gemini::images/generate-to-file("output/city.png", {
         prompt: "A futuristic city at night",
         aspectRatio: "16:9",
         negativePrompt: "blurry, low quality"
@@ -239,7 +239,7 @@ meta {
 
     **Example**
     ```hot
-    result generate-batch-to-files("output", {
+    result ::gemini::images/generate-batch-to-files("output", {
         prompt: "A magical forest",
         numberOfImages: 3,
         aspectRatio: "1:1"
@@ -336,7 +336,7 @@ meta {
 
     **Example**
     ```hot
-    response generate-inline("Draw a cute robot watering plants")
+    response ::gemini::images/generate-inline("Draw a cute robot watering plants")
 
     // Response contains inline_data parts with base64 images
     parts response.candidates[0].content.parts
@@ -374,11 +374,11 @@ meta {
 
     **Example**
     ```hot
-    result generate-inline-to-file("output/robot.png", "Draw a cute robot")
+    result ::gemini::images/generate-inline-to-file("output/robot.png", "Draw a cute robot")
 
     match result {
-        AIMedia.Image => { println(result.media.file.path) }
-        HttpError => { println("Error!") }
+        ::ai::media/AIMedia.Image => { println(result.media.file.path) }
+        ::gemini::api/HttpError => { println("Error!") }
     }
     ```
     """

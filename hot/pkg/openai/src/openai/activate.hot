@@ -42,7 +42,19 @@ ActivateOrganizationCertificatesResponse type {
 
 activate-certificates-organization
 meta {
-    doc: """POST /organization/certificates/activate - Activate certificates for organization"""
+    doc: """
+    POST /organization/certificates/activate - Activate certificates for
+    organization
+
+    **Example**
+
+    ```hot
+    result ::openai::activate/activate-certificates-organization(::openai::activate/ActivateOrganizationCertificatesRequest({
+      certificate_ids: ["cert_abc123"]
+    }))
+    map(result.data, %.active)
+    ```
+    """
 }
 fn
 (request: ActivateOrganizationCertificatesRequest): ActivateOrganizationCertificatesResponse {
@@ -72,7 +84,19 @@ ActivateProjectCertificatesResponse type {
 
 activate-certificates-project
 meta {
-    doc: """POST /organization/projects/{project_id}/certificates/activate - Activate certificates for project"""
+    doc: """
+    POST /organization/projects/{project_id}/certificates/activate -
+    Activate certificates for project
+
+    **Example**
+
+    ```hot
+    result ::openai::activate/activate-certificates-project("proj_abc123", ::openai::activate/ActivateProjectCertificatesRequest({
+      certificate_ids: ["cert_abc123"]
+    }))
+    map(result.data, %.id)
+    ```
+    """
 }
 fn
 (project-id: Str, request: ActivateProjectCertificatesRequest): ActivateProjectCertificatesResponse {

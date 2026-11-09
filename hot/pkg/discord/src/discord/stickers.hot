@@ -13,7 +13,18 @@ GetStickerRequest type {
 
 get-sticker
 meta {
-    doc: """GET /stickers/{sticker_id} - Any sticker by id."""
+    doc: """
+    GET /stickers/{sticker_id} - Any sticker by id.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    sticker ::stickers/get-sticker(::stickers/GetStickerRequest({sticker_id: "2200000000000000000"}))
+    sticker.name
+    ```
+    """
 }
 fn
 (request: GetStickerRequest): Map {
@@ -25,7 +36,17 @@ fn
 
 list-sticker-packs
 meta {
-    doc: """GET /sticker-packs - Discord's standard sticker packs. Returns `{sticker_packs}`."""
+    doc: """
+    GET /sticker-packs - Discord's standard sticker packs. Returns
+    `{sticker_packs}`.
+
+    **Example**
+
+    ```hot
+    packs ::discord::stickers/list-sticker-packs()
+    map(packs.sticker_packs, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -41,7 +62,18 @@ ListGuildStickersRequest type {
 
 list-guild-stickers
 meta {
-    doc: """GET /guilds/{guild_id}/stickers - The guild's custom stickers."""
+    doc: """
+    GET /guilds/{guild_id}/stickers - The guild's custom stickers.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    stickers ::stickers/list-guild-stickers(::stickers/ListGuildStickersRequest({guild_id: "1000000000000000000"}), {token: ::hot::ctx/get("tenant-b.discord.bot.token")})
+    map(stickers, %.name)
+    ```
+    """
 }
 fn
 (request: ListGuildStickersRequest): Vec<Map> {
@@ -58,7 +90,21 @@ GetGuildStickerRequest type {
 
 get-guild-sticker
 meta {
-    doc: """GET /guilds/{guild_id}/stickers/{sticker_id} - One guild sticker."""
+    doc: """
+    GET /guilds/{guild_id}/stickers/{sticker_id} - One guild sticker.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    sticker ::stickers/get-guild-sticker(::stickers/GetGuildStickerRequest({
+      guild_id: "1000000000000000000",
+      sticker_id: "2200000000000000000"
+    }))
+    sticker.tags
+    ```
+    """
 }
 fn
 (request: GetGuildStickerRequest): Map {
@@ -126,7 +172,24 @@ ModifyGuildStickerRequest type {
 
 modify-guild-sticker
 meta {
-    doc: """PATCH /guilds/{guild_id}/stickers/{sticker_id} - Change a sticker's name, description or tags. Only fields you set are sent. Needs MANAGE_GUILD_EXPRESSIONS."""
+    doc: """
+    PATCH /guilds/{guild_id}/stickers/{sticker_id} - Change a sticker's
+    name, description or tags. Only fields you set are sent. Needs
+    MANAGE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    ::stickers/modify-guild-sticker(::stickers/ModifyGuildStickerRequest({
+      guild_id: "1000000000000000000",
+      sticker_id: "2200000000000000000",
+      name: "ship_it",
+      tags: "rocket"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyGuildStickerRequest): Map {
@@ -147,7 +210,22 @@ DeleteGuildStickerRequest type {
 
 delete-guild-sticker
 meta {
-    doc: """DELETE /guilds/{guild_id}/stickers/{sticker_id} - Delete a sticker. Needs MANAGE_GUILD_EXPRESSIONS."""
+    doc: """
+    DELETE /guilds/{guild_id}/stickers/{sticker_id} - Delete a sticker.
+    Needs MANAGE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::stickers ::discord::stickers
+
+    ::stickers/delete-guild-sticker(::stickers/DeleteGuildStickerRequest({
+      guild_id: "1000000000000000000",
+      sticker_id: "2200000000000000000",
+      reason: "Retired"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteGuildStickerRequest): Bool {

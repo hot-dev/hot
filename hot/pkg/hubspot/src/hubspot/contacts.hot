@@ -29,7 +29,16 @@ fn
 
 get-contact
 meta {
-    doc: """Fetch a contact by id; the 2-arity form selects `properties` to return."""
+    doc: """
+    Fetch a contact by id; the 2-arity form selects `properties` to return.
+
+    **Example**
+
+    ```hot
+    contact ::hubspot::contacts/get-contact("12345", ["email", "firstname"])
+    contact.properties.email
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -47,7 +56,15 @@ fn
 
 update-contact
 meta {
-    doc: """Update a contact's properties."""
+    doc: """
+    Update a contact's properties.
+
+    **Example**
+
+    ```hot
+    ::hubspot::contacts/update-contact("12345", {lifecyclestage: "customer"})
+    ```
+    """
 }
 fn
 (id: Str, properties: Map): Map {
@@ -59,7 +76,16 @@ fn
 
 find-by-email
 meta {
-    doc: """Search for a contact by exact email. Returns the contact or null."""
+    doc: """
+    Search for a contact by exact email. Returns the contact or null.
+
+    **Example**
+
+    ```hot
+    contact ::hubspot::contacts/find-by-email("ada@example.com")
+    if(is-some(contact), contact.id, null)
+    ```
+    """
 }
 fn
 (email: Str): Any {
@@ -79,7 +105,21 @@ fn
 
 search-contacts
 meta {
-    doc: """Search contacts — see `::hubspot::objects/build-search-body` for the options."""
+    doc: """
+    Search contacts — see `::hubspot::objects/build-search-body` for the
+    options.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::contacts/search-contacts({
+      filters: [{propertyName: "lifecyclestage", operator: "EQ", value: "lead"}],
+      properties: ["email", "firstname"],
+      limit: 50
+    })
+    map(out.results, %.id)
+    ```
+    """
 }
 fn
 (options: Map): Map {
@@ -117,7 +157,15 @@ fn
 
 archive-contact
 meta {
-    doc: """Archive a contact (recycle bin, restorable for 90 days)."""
+    doc: """
+    Archive a contact (recycle bin, restorable for 90 days).
+
+    **Example**
+
+    ```hot
+    ::hubspot::contacts/archive-contact("12345")
+    ```
+    """
 }
 fn
 (id: Str): Any {

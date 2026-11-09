@@ -81,6 +81,18 @@ meta {
     `https://user:pass@example.com/hook`, which Deepgram sends as Basic
     Auth. The password is masked in call records. Empty credentials never
     verify.
+
+    **Example**
+
+    ```hot
+    deepgram-callback
+    meta {webhook: {service: "deepgram", path: "/deepgram/callback"}}
+    fn (request) {
+      if(not(::deepgram::callbacks/verify-basic-auth(request, "deepgram", ::hot::ctx/get("deepgram.callback.password"))),
+        ::hot::http/HttpResponse({status: 401, body: "invalid callback"}),
+        ::deepgram/transcript(request.body))
+    }
+    ```
     """
 }
 fn (request: Map, username: Str?, password: Str?): Bool {
@@ -107,6 +119,14 @@ meta {
     header on every callback, so combine this with `verify-callback` or
     `verify-basic-auth` rather than relying on it alone. An empty
     `api-key-id` never verifies.
+
+    **Example**
+
+    ```hot
+    request {headers: {dg-token: "3f8a2c1e"}}
+    ::deepgram::callbacks/verify-dg-token(request, "3f8a2c1e")  // true
+    ::deepgram::callbacks/verify-dg-token(request, "other")  // false
+    ```
     """
 }
 fn (request: Map, api-key-id: Str?): Bool {

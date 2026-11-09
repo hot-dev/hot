@@ -26,7 +26,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-is-blank fn (value: Any): Bool {
+is-blank
+meta {no-doc: true}
+fn (value: Any): Bool {
   cond {
     is-str(value) => { is-empty(trim(value)) }
     => { true }
@@ -45,6 +47,16 @@ meta {
     stored credential is missing can't silently run on the project's
     credential. Nothing is written to ctx. Exposed for testing; `resolve`
     feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::postmark::api/resolve-from({server-token: "tenant-b-credential"}, {})  // {server-token: "tenant-b-credential"}
+    ::postmark::api/resolve-from({}, {"postmark.server.token": "project-credential"})  // {server-token: "project-credential"}
+
+    // A blank credential in opts never falls back to context
+    is-err(::postmark::api/resolve-from({server-token: ""}, {"postmark.server.token": "project-credential"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -85,7 +97,17 @@ fn (opts: Map): Map {
 
 encode-body
 meta {
-    doc: """The wire form of a request body: `""` means no body at all, anything else is JSON. Exposed for testing."""
+    doc: """
+    The wire form of a request body: `""` means no body at all, anything
+    else is JSON. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::postmark::api/encode-body("")  // ""
+    ::postmark::api/encode-body({Name: "Ada"})  // "{\"Name\":\"Ada\"}"
+    ```
+    """
 }
 fn (body: Any): Str {
   if(eq(body, ""), "", to-json(untype(body)))
@@ -94,7 +116,23 @@ fn (body: Any): Str {
 request
 meta {
     ctx: {"postmark.server.token": {required: false}},
-    doc: """Make an HTTP request with pre-filled service headers. Additional headers can be provided to merge/override defaults. With no token from either place, the call returns an Err (see `resolve`)."""
+    doc: """
+    Make an HTTP request with pre-filled service headers. Additional headers
+    can be provided to merge/override defaults. With no token from either
+    place, the call returns an Err (see `resolve`).
+
+    **Example**
+
+    ```hot
+    response ::postmark::api/request("GET", `${::postmark/BASE_URL}/server`)
+    response.body.Name
+
+    // One call on a tenant's server, with an extra header
+    ::postmark::api/request("GET", `${::postmark/BASE_URL}/server`, {"X-Trace": "abc"}, "", {
+        server-token: ::hot::ctx/get("tenant.postmark.token")
+    })
+    ```
+    """
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {

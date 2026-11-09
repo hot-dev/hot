@@ -22,7 +22,9 @@ MAX_LIMIT 200
 DEFAULT_LIMIT 100
 MAX_OFFSET 10000
 
-as-vec fn (value: Any): Vec {
+as-vec
+meta {no-doc: true}
+fn (value: Any): Vec {
   cond {
     is-null(value) => { [] }
     is-vec(value) => { value }
@@ -50,7 +52,18 @@ fn (scope: Str, template-key: Str, filters: Map): Map {
 
 encode-mdfilters
 meta {
-    doc: """The `mdfilters` query value (pure): a JSON array of filters. Accepts one filter Map or a Vec (Box allows exactly one)."""
+    doc: """
+    The `mdfilters` query value (pure): a JSON array of filters. Accepts one
+    filter Map or a Vec (Box allows exactly one).
+
+    **Example**
+
+    ```hot
+    filter-map ::box::search/md-filter("enterprise", "contract", {status: "signed"})
+    length(from-json(::box::search/encode-mdfilters(filter-map)))  // 1
+    ::box::search/encode-mdfilters(null)  // null
+    ```
+    """
 }
 fn (value: Any): Str? {
   filters as-vec(value)
@@ -72,6 +85,15 @@ meta {
     `enterprise_content` must be enabled by Box support), `trash_content`,
     `sort` (`relevance`, `modified_at`), `direction`, `offset`,
     `include_recent_shared_links`. `mdfilters` takes a `md-filter` Map.
+
+    **Example**
+
+    ```hot
+    params ::box::search/search-params("invoice", {limit: 10, file_extensions: ["pdf"]})
+    params.query  // "invoice"
+    params.limit  // 10
+    params.file_extensions  // ["pdf"]
+    ```
     """
 }
 fn (query: Str?, opts: Map): Map {

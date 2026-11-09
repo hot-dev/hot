@@ -19,7 +19,20 @@ ListDisputesRequest type {
 
 list-disputes
 meta {
-    doc: """GET /v1/disputes - List disputes, most recent first. Filter by `charge` or `payment_intent`. Check each dispute's `status` ("needs_response", "under_review", "won", "lost", ...)."""
+    doc: """
+    GET /v1/disputes - List disputes, most recent first. Filter by `charge`
+    or `payment_intent`. Check each dispute's `status` ("needs_response",
+    "under_review", "won", "lost", ...).
+
+    **Example**
+
+    ```hot
+    ::disputes ::stripe::disputes
+
+    page ::disputes/list-disputes(::disputes/ListDisputesRequest({payment_intent: "pi_123"}))
+    to-answer filter(page.data, eq(%.status, "needs_response"))
+    ```
+    """
 }
 fn
 (): Map {
@@ -34,7 +47,18 @@ fn
 
 get-dispute
 meta {
-    doc: """GET /v1/disputes/{dispute} - Retrieve a dispute by ID."""
+    doc: """
+    GET /v1/disputes/{dispute} - Retrieve a dispute by ID.
+
+    **Example**
+
+    ```hot
+    ::disputes ::stripe::disputes
+
+    dispute ::disputes/get-dispute("dp_123", {expand: ["charge"]})
+    dispute.evidence_details.due_by
+    ```
+    """
 }
 fn
 (dispute: Str): Map {
@@ -85,7 +109,19 @@ fn
 
 close-dispute
 meta {
-    doc: """POST /v1/disputes/{dispute}/close - Accept the dispute (concede it as lost). Irreversible."""
+    doc: """
+    POST /v1/disputes/{dispute}/close - Accept the dispute (concede it as
+    lost). Irreversible.
+
+    **Example**
+
+    ```hot
+    ::disputes ::stripe::disputes
+
+    closed ::disputes/close-dispute("dp_123")
+    closed.status
+    ```
+    """
 }
 fn
 (dispute: Str): Map {

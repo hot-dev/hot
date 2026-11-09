@@ -117,7 +117,17 @@ fn (opts: QwenOptions?): Map {
 
 request-options
 meta {
-    doc: """The `::openai::chat-tools/ChatRequestOptions` used for Qwen: `max_tokens`, stream usage on, and `extra-body(opts)`."""
+    doc: """
+    The `::openai::chat-tools/ChatRequestOptions` used for Qwen:
+    `max_tokens`, stream usage on, and `extra-body(opts)`.
+
+    **Example**
+
+    ```hot
+    ::qwen::ai/request-options(null).max-completion-tokens  // 4096
+    ::qwen::ai/request-options(::qwen::ai/QwenOptions({enable-search: true})).extra-body  // {enable_search: true}
+    ```
+    """
 }
 fn (opts: QwenOptions?): ::tools/ChatRequestOptions {
     o or(opts, QwenOptions({}))
@@ -138,6 +148,16 @@ meta {
     endpoint (see `::qwen::api/endpoint` and `endpoint-for`). Use it with
     `::openai::compatible/chat-fn` or `list-models`. Pass `key-name` when
     calls without a key should be an Err naming it.
+
+    **Example**
+
+    ```hot
+    ep ::qwen::api/endpoint-for("us", null, ::hot::ctx/get("qwen.api.key"))
+    provider ::qwen::ai/compatible(ep, ::qwen::ai/QwenOptions({enable-thinking: false}))
+
+    models ::openai::compatible/list-models(provider)
+    models.data
+    ```
     """
 }
 fn
@@ -158,6 +178,7 @@ fn
 
 opts-fn-for
 meta {
+    no-doc: true,
     doc: """Internal: a `chat-opts-fn` for `p` that also understands `region` and `workspace-id` in `provider-opts`."""
 }
 fn (p: ::compat/CompatibleProvider): Fn {
@@ -173,6 +194,7 @@ fn (p: ::compat/CompatibleProvider): Fn {
 
 stream-opts-fn-for
 meta {
+    no-doc: true,
     doc: """Internal: a `chat-stream-opts-fn` for `p` that also understands `region` and `workspace-id` in `provider-opts`."""
 }
 fn (p: ::compat/CompatibleProvider): Fn {
@@ -187,7 +209,10 @@ fn (p: ::compat/CompatibleProvider): Fn {
 }
 
 registration
-meta { doc: """Internal: the `ProviderRegistration` for `p`.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: the `ProviderRegistration` for `p`."""
+}
 fn (p: ::compat/CompatibleProvider): ::ai::chat/ProviderRegistration {
     ::ai::chat/ProviderRegistration({
         variant: QWEN_PROVIDER,
@@ -300,7 +325,7 @@ meta {
     opts ::ai::chat/ChatOptions({
         chat-opts-fn: ::qwen::ai/chat-opts-fn(null),
         model: "qwen3.8-flash",
-        provider-opts: {api-key: tenant-key, region: "us"}
+        provider-opts: {api-key: ::hot::ctx/get("tenant.qwen.key"), region: "us"}
     })
     ```
     """
@@ -311,7 +336,16 @@ fn (opts: QwenOptions?): Fn {
 
 chat-stream-fn
 meta {
-    doc: "A `::ai::chat/run-loop-stream` chat function for the ctx-configured endpoint."
+    doc: """
+    A `::ai::chat/run-loop-stream` chat function for the ctx-configured
+    endpoint.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({chat-stream-fn: ::qwen::ai/chat-stream-fn(null), model: "qwen3.8-flash"})
+    ```
+    """
 }
 fn (opts: QwenOptions?): Fn {
     ::compat/chat-stream-fn(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))
@@ -319,7 +353,21 @@ fn (opts: QwenOptions?): Fn {
 
 chat-stream-opts-fn
 meta {
-    doc: "A `::ai::chat/run-loop-stream` chat function for the ctx-configured endpoint that also takes `ChatOptions.provider-opts`, for `ChatOptions.chat-stream-opts-fn`."
+    doc: """
+    A `::ai::chat/run-loop-stream` chat function for the ctx-configured
+    endpoint that also takes `ChatOptions.provider-opts`, for
+    `ChatOptions.chat-stream-opts-fn`.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-stream-opts-fn: ::qwen::ai/chat-stream-opts-fn(null),
+        model: "qwen3.8-flash",
+        provider-opts: {api-key: ::hot::ctx/get("tenant.qwen.key"), region: "us"}
+    })
+    ```
+    """
 }
 fn (opts: QwenOptions?): Fn {
     stream-opts-fn-for(compatible(::qwen::api/configured-endpoint(), opts, KEY_NAME))

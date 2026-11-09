@@ -123,7 +123,21 @@ ListPhoneNumbersRequest type {
 
 list-phone-numbers
 meta {
-    doc: """GET /{waba-id}/phone_numbers - List the phone numbers registered to a WhatsApp Business Account (`data: [{id, display_phone_number, verified_name, quality_rating, status}]`). The `id` is the `phone_number_id` the send functions take."""
+    doc: """
+    GET /{waba-id}/phone_numbers - List the phone numbers registered to a
+    WhatsApp Business Account (`data: [{id, display_phone_number,
+    verified_name, quality_rating, status}]`). The `id` is the
+    `phone_number_id` the send functions take.
+
+    **Example**
+
+    ```hot
+    ::business ::whatsapp::business
+
+    numbers ::business/list-phone-numbers(::business/ListPhoneNumbersRequest({waba_id: "102938475610"}))
+    map(numbers.data, %.display_phone_number)
+    ```
+    """
 }
 fn
 (request: ListPhoneNumbersRequest): Map {

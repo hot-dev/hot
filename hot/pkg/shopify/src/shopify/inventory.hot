@@ -25,6 +25,13 @@ meta {
     `inventoryItem.id` is the id to pass. Options: `names` (quantity
     names, default available/on_hand/committed/incoming/reserved),
     `first`, `after`.
+
+    **Example**
+
+    ```hot
+    item ::shopify::inventory/get-inventory-levels("gid://shopify/InventoryItem/1", {names: ["available"]})
+    map(item.inventoryLevels.nodes, %.location.name)
+    ```
     """
 }
 fn
@@ -59,13 +66,17 @@ fn
   if-ok(data, %(%.inventoryItem))
 }
 
-with-change-from fn (change: Map): Map {
+with-change-from
+meta {no-doc: true}
+fn (change: Map): Map {
   // Required since 2026-04: an explicit null opts out of the check, so
   // it is set (not omitted) when the caller didn't give one.
   if(in("changeFromQuantity", keys(change)), change, {...change, changeFromQuantity: null})
 }
 
-idempotency-key fn (options: Map): Str {
+idempotency-key
+meta {no-doc: true}
+fn (options: Map): Str {
   or(get(options, "idempotencyKey"), Str(::hot::uuid/Uuid()))
 }
 
@@ -77,6 +88,17 @@ meta {
     defaults to an explicit null. Options: `name` (default
     `"available"`), `reason` (default `"correction"`),
     `referenceDocumentUri`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    input ::shopify::inventory/build-adjust-input([
+      {inventoryItemId: "gid://shopify/InventoryItem/1", locationId: "gid://shopify/Location/1", delta: -2}
+    ], {reason: "damaged"})
+    input.name  // "available"
+    input.reason  // "damaged"
+    first(input.changes).changeFromQuantity  // null
+    ```
     """
 }
 fn (changes: Vec, options: Map): Map {
@@ -100,8 +122,8 @@ meta {
 
     ```hot
     ::shopify::inventory/adjust-quantities([
-      {inventoryItemId: item-id, locationId: location-id, delta: -2, changeFromQuantity: 10}
-    ], {reason: "damaged", idempotencyKey: `damage-${ticket-id}`})
+      {inventoryItemId: "gid://shopify/InventoryItem/1", locationId: "gid://shopify/Location/1", delta: -2, changeFromQuantity: 10}
+    ], {reason: "damaged", idempotencyKey: "damage-8841"})
     ```
     """
 }
@@ -139,6 +161,17 @@ meta {
     defaults to an explicit null. Options: `name` (`"available"` default,
     or `"on_hand"`), `reason` (default `"correction"`),
     `referenceDocumentUri`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    input ::shopify::inventory/build-set-input([
+      {inventoryItemId: "gid://shopify/InventoryItem/1", locationId: "gid://shopify/Location/1", quantity: 12}
+    ], {name: "on_hand"})
+    input.name  // "on_hand"
+    input.reason  // "correction"
+    first(input.quantities).quantity  // 12
+    ```
     """
 }
 fn (quantities: Vec, options: Map): Map {
@@ -152,7 +185,19 @@ fn (quantities: Vec, options: Map): Map {
 
 set-quantities
 meta {
-    doc: """Set absolute quantities (`inventorySetQuantities`). Options as in `build-set-input` plus `idempotencyKey`. Returns the adjustment group."""
+    doc: """
+    Set absolute quantities (`inventorySetQuantities`). Options as in
+    `build-set-input` plus `idempotencyKey`. Returns the adjustment group.
+
+    **Example**
+
+    ```hot
+    group ::shopify::inventory/set-quantities([
+      {inventoryItemId: "gid://shopify/InventoryItem/1", locationId: "gid://shopify/Location/1", quantity: 12, changeFromQuantity: 10}
+    ], {reason: "correction", idempotencyKey: "count-8841"})
+    group.changes
+    ```
+    """
 }
 fn
 (quantities: Vec): Map {
@@ -182,7 +227,18 @@ fn
 
 set-on-hand-quantities
 meta {
-    doc: """Set on-hand quantities: `set-quantities` with `name: "on_hand"` (Shopify deprecated `inventorySetOnHandQuantities` in favour of this)."""
+    doc: """
+    Set on-hand quantities: `set-quantities` with `name: "on_hand"` (Shopify
+    deprecated `inventorySetOnHandQuantities` in favour of this).
+
+    **Example**
+
+    ```hot
+    ::shopify::inventory/set-on-hand-quantities([
+      {inventoryItemId: "gid://shopify/InventoryItem/1", locationId: "gid://shopify/Location/1", quantity: 40}
+    ])
+    ```
+    """
 }
 fn
 (quantities: Vec): Map {

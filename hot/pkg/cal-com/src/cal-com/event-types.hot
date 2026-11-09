@@ -6,11 +6,24 @@ meta {
 
 ::api ::cal-com::api
 
-v fn (): Str { ::cal-com/VERSION_EVENT_TYPES }
+v
+meta {no-doc: true}
+fn (): Str { ::cal-com/VERSION_EVENT_TYPES }
 
 list-event-types
 meta {
-    doc: """GET /event-types - The API key owner's event types (Vec). `options`: `username` with `eventSlug`, `usernames` (dynamic group events), `orgSlug`/`orgId`, `sortCreatedAt` ("asc"/"desc")."""
+    doc: """
+    GET /event-types - The API key owner's event types (Vec). `options`:
+    `username` with `eventSlug`, `usernames` (dynamic group events),
+    `orgSlug`/`orgId`, `sortCreatedAt` ("asc"/"desc").
+
+    **Example**
+
+    ```hot
+    event-types ::cal-com::event-types/list-event-types({sortCreatedAt: "desc"})
+    map(event-types, %.slug)
+    ```
+    """
 }
 fn
 (): Any {
@@ -25,7 +38,16 @@ fn
 
 get-event-type
 meta {
-    doc: """GET /event-types/{id} - One event type."""
+    doc: """
+    GET /event-types/{id} - One event type.
+
+    **Example**
+
+    ```hot
+    event-type ::cal-com::event-types/get-event-type(123)
+    event-type.lengthInMinutes
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -37,7 +59,21 @@ fn
 
 build-create-body
 meta {
-    doc: """Build the create body from the required `title`, `slug` and `lengthInMinutes` plus `options` (any other field the API accepts: `description`, `scheduleId`, `minimumBookingNotice`, `beforeEventBuffer`, `afterEventBuffer`, `slotInterval`, `locations`, `bookingFields`, `confirmationPolicy`, `hidden`, ...). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Build the create body from the required `title`, `slug` and
+    `lengthInMinutes` plus `options` (any other field the API accepts:
+    `description`, `scheduleId`, `minimumBookingNotice`,
+    `beforeEventBuffer`, `afterEventBuffer`, `slotInterval`, `locations`,
+    `bookingFields`, `confirmationPolicy`, `hidden`, ...). Unset options are
+    omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::event-types/build-create-body("Intro call", "intro-call", 30, {hidden: false, description: null})
+    // {hidden: false, title: "Intro call", slug: "intro-call", lengthInMinutes: 30}
+    ```
+    """
 }
 fn (title: Str, slug: Str, length-in-minutes: Int, options: Map): Map {
   ::api/compact({...options, title: title, slug: slug, lengthInMinutes: length-in-minutes})
@@ -71,7 +107,16 @@ fn
 
 update-event-type
 meta {
-    doc: """PATCH /event-types/{id} - Update an event type; `changes` takes the same fields as create. Unset fields are omitted (and left unchanged)."""
+    doc: """
+    PATCH /event-types/{id} - Update an event type; `changes` takes the same
+    fields as create. Unset fields are omitted (and left unchanged).
+
+    **Example**
+
+    ```hot
+    ::cal-com::event-types/update-event-type(123, {lengthInMinutes: 45, minimumBookingNotice: 240})
+    ```
+    """
 }
 fn
 (id: Any, changes: Map): Any {
@@ -83,7 +128,16 @@ fn
 
 delete-event-type
 meta {
-    doc: """DELETE /event-types/{id} - Delete an event type. Returns the deleted event type's summary."""
+    doc: """
+    DELETE /event-types/{id} - Delete an event type. Returns the deleted
+    event type's summary.
+
+    **Example**
+
+    ```hot
+    ::cal-com::event-types/delete-event-type(123)
+    ```
+    """
 }
 fn
 (id: Any): Any {

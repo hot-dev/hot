@@ -166,7 +166,16 @@ GETAudiencesIdResponse type {
 
 retrieve-single-audience
 meta {
-    doc: """Retrieve a single audience by its ID, including name and creation date."""
+    doc: """
+    Retrieve a single audience by its ID, including name and creation date.
+
+    **Example**
+
+    ```hot
+    audience ::resend::audiences/retrieve-single-audience(::resend::audiences/GETAudiencesIdRequest({id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    audience.name
+    ```
+    """
 }
 fn
 (request: GETAudiencesIdRequest): GETAudiencesIdResponse {
@@ -231,7 +240,18 @@ GETAudiencesAudienceIdContactsResponse type {
 
 
 retrieve-list-contacts
-meta {doc: """Retrieve all contacts belonging to a specific audience."""}
+meta {
+    doc: """
+    Retrieve all contacts belonging to a specific audience.
+
+    **Example**
+
+    ```hot
+    contacts ::resend::audiences/retrieve-list-contacts(::resend::audiences/GETAudiencesAudienceIdContactsRequest({audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    contacts.data
+    ```
+    """
+}
 fn
 (request: GETAudiencesAudienceIdContactsRequest): GETAudiencesAudienceIdContactsResponse {
   retrieve-list-contacts(request, {})
@@ -261,7 +281,26 @@ POSTAudiencesAudienceIdContactsResponse type {
 
 create-new-contact
 meta {
-    doc: """Add a new contact to an audience with email, optional name, and subscription status."""
+    doc: """
+    Add a new contact to an audience with email, optional name, and
+    subscription status.
+
+    **Example**
+
+    ```hot
+    contact ::resend::audiences/create-new-contact("78261eea-8f8b-4381-83c6-79fa7120f1cf", ::resend::audiences/POSTAudiencesAudienceIdContactsRequest({
+        email: "ada@example.com",
+        first_name: "Ada",
+        unsubscribed: false
+    }))
+    contact.id
+
+    // With a tenant's key
+    ::resend::audiences/create-new-contact("78261eea-8f8b-4381-83c6-79fa7120f1cf", ::resend::audiences/POSTAudiencesAudienceIdContactsRequest({email: "ada@example.com"}), {
+        api-key: ::hot::ctx/get("tenant.resend.key")
+    })
+    ```
+    """
 }
 fn
 (audience-id: Str, request: POSTAudiencesAudienceIdContactsRequest): POSTAudiencesAudienceIdContactsResponse {
@@ -294,7 +333,16 @@ GETAudiencesAudienceIdContactsEmailResponse type {
 
 retrieves-single-contact-by-email
 meta {
-    doc: """Retrieve a single contact from an audience by their email address."""
+    doc: """
+    Retrieve a single contact from an audience by their email address.
+
+    **Example**
+
+    ```hot
+    contact ::resend::audiences/retrieves-single-contact-by-email(::resend::audiences/GETAudiencesAudienceIdContactsEmailRequest({email: "ada@example.com", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    contact.id
+    ```
+    """
 }
 fn
 (request: GETAudiencesAudienceIdContactsEmailRequest): GETAudiencesAudienceIdContactsEmailResponse {
@@ -322,7 +370,17 @@ PATCHAudiencesAudienceIdContactsEmailResponse type {
 
 update-single-contact-by-email
 meta {
-    doc: """Update a contact's details by their email address within a specific audience."""
+    doc: """
+    Update a contact's details by their email address within a specific
+    audience.
+
+    **Example**
+
+    ```hot
+    result ::resend::audiences/update-single-contact-by-email(::resend::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({email: "ada@example.com", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    result.id
+    ```
+    """
 }
 fn
 (request: PATCHAudiencesAudienceIdContactsEmailRequest): PATCHAudiencesAudienceIdContactsEmailResponse {
@@ -351,7 +409,16 @@ DELETEAudiencesAudienceIdContactsEmailResponse type {
 
 remove-existing-contact-by-email
 meta {
-    doc: """Remove a contact from an audience by their email address."""
+    doc: """
+    Remove a contact from an audience by their email address.
+
+    **Example**
+
+    ```hot
+    result ::resend::audiences/remove-existing-contact-by-email(::resend::audiences/DELETEAudiencesAudienceIdContactsEmailRequest({email: "ada@example.com", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DELETEAudiencesAudienceIdContactsEmailRequest): DELETEAudiencesAudienceIdContactsEmailResponse {
@@ -384,7 +451,16 @@ GETAudiencesAudienceIdContactsIdResponse type {
 
 retrieve-single-contact-by-id
 meta {
-    doc: """Retrieve a single contact from an audience by their contact ID."""
+    doc: """
+    Retrieve a single contact from an audience by their contact ID.
+
+    **Example**
+
+    ```hot
+    contact ::resend::audiences/retrieve-single-contact-by-id(::resend::audiences/GETAudiencesAudienceIdContactsIdRequest({id: "e169aa45-1ecf-4183-9955-b1499d5701d3", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    contact.email
+    ```
+    """
 }
 fn
 (request: GETAudiencesAudienceIdContactsIdRequest): GETAudiencesAudienceIdContactsIdResponse {
@@ -414,7 +490,19 @@ PATCHAudiencesAudienceIdContactsIdResponse type {
 
 update-single-contact-by-id
 meta {
-    doc: """Update a contact's email, name, or subscription status by their contact ID."""
+    doc: """
+    Update a contact's email, name, or subscription status by their contact
+    ID.
+
+    **Example**
+
+    ```hot
+    updated ::resend::audiences/update-single-contact-by-id("e169aa45-1ecf-4183-9955-b1499d5701d3", "78261eea-8f8b-4381-83c6-79fa7120f1cf", ::resend::audiences/PATCHAudiencesAudienceIdContactsIdRequest({
+        unsubscribed: true
+    }))
+    updated.id
+    ```
+    """
 }
 fn
 (id: Str, audience-id: Str, request: PATCHAudiencesAudienceIdContactsIdRequest): PATCHAudiencesAudienceIdContactsIdResponse {
@@ -443,7 +531,16 @@ DELETEAudiencesAudienceIdContactsIdResponse type {
 
 remove-existing-contact-by-id
 meta {
-    doc: """Remove a contact from an audience by their contact ID."""
+    doc: """
+    Remove a contact from an audience by their contact ID.
+
+    **Example**
+
+    ```hot
+    result ::resend::audiences/remove-existing-contact-by-id(::resend::audiences/DELETEAudiencesAudienceIdContactsIdRequest({id: "e169aa45-1ecf-4183-9955-b1499d5701d3", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DELETEAudiencesAudienceIdContactsIdRequest): DELETEAudiencesAudienceIdContactsIdResponse {

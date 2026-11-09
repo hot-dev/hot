@@ -40,13 +40,26 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::notion::api/blank-credential({token: "  "}, ["token"])  // "token"
+    ::notion::api/blank-credential({token: "ntn_test"}, ["token"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -54,7 +67,17 @@ fn (opts: Map, names: Vec): Str? {
 
 settings-from
 meta {
-    doc: """The non-credential settings of a call (pure): `{base-url, api-version}` from `opts`, else the package defaults."""
+    doc: """
+    The non-credential settings of a call (pure): `{base-url, api-version}`
+    from `opts`, else the package defaults.
+
+    **Example**
+
+    ```hot
+    ::notion::api/settings-from({api-version: "2025-09-03"}).api-version  // "2025-09-03"
+    ::notion::api/settings-from({base-url: "https://proxy.example.com/v1/"}).base-url  // "https://proxy.example.com/v1"
+    ```
+    """
 }
 fn (opts: Map): Map {
   base-url or(non-blank(get(opts, "base-url")), ::notion/BASE_URL)
@@ -66,7 +89,23 @@ fn (opts: Map): Map {
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{token, base-url, api-version}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no token is set, when `token` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `token`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{token, base-url, api-version}` for a call from
+    `opts` first, then `ctx-values` (a Map of context variables), then
+    defaults. An Err when no token is set, when `token` is in `opts` but
+    blank or null (that never falls back to context), or when `opts` has
+    `base-url` without `token`. Exposed for testing; `resolve` feeds it the
+    context.
+
+    **Example**
+
+    ```hot
+    ctx-values {"notion.token": "ctx-token"}
+    ::notion::api/resolve-from({}, ctx-values).token  // "ctx-token"
+    ::notion::api/resolve-from({token: "call-token"}, ctx-values).token  // "call-token"
+    is-err(::notion::api/resolve-from({token: ""}, ctx-values))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   token or(non-blank(get(opts, "token")), non-blank(get(ctx-values, "notion.token")))
@@ -107,7 +146,20 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). `additional-headers` win over the defaults, and a `""` body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`).
+    `additional-headers` win over the defaults, and a `""` body sends no
+    `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved {token: "test-token", base-url: "https://api.notion.com/v1", api-version: "2022-06-28"}
+    req ::notion::api/build-request("POST", "/search", {}, {query: "roadmap"}, resolved)
+    req.url  // "https://api.notion.com/v1/search"
+    req.headers.Authorization  // "Bearer test-token"
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
   default-headers {
@@ -129,7 +181,22 @@ fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): 
 
 request
 meta {
-    doc: """Make an authenticated request to the Notion API. `path` is relative to api.notion.com/v1. Sends the required `Notion-Version` header."""
+    doc: """
+    Make an authenticated request to the Notion API. `path` is relative to
+    api.notion.com/v1. Sends the required `Notion-Version` header.
+
+    **Example**
+
+    ```hot
+    response ::notion::api/request("GET", "/users/me")
+    response.status
+
+    // Per-call credentials
+    ::notion::api/request("POST", "/search", {}, {query: "roadmap"}, {
+      token: ::hot::ctx/get("tenant.notion.token")
+    })
+    ```
+    """
 }
 fn
 (method: Str, path: Str): HttpResponse {
@@ -154,7 +221,23 @@ fn
 
 json
 meta {
-    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (Notion's error `code`/`message` are in `body`)."""
+    doc: """
+    Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err
+    carrying `HttpError` (Notion's error `code`/`message` are in `body`).
+
+    **Example**
+
+    ```hot
+    me ::notion::api/json("GET", "/users/me")
+    me.name
+
+    // Per-call credentials
+    found ::notion::api/json("POST", "/search", {}, {query: "roadmap"}, {
+      token: ::hot::ctx/get("tenant.notion.token")
+    })
+    found.results
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {

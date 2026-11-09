@@ -44,7 +44,16 @@ PACKAGE_AGENT "hot-dev-ffiec-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::ffiec::api/given("  ")  // false
+    ::ffiec::api/given("x")   // true
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -54,7 +63,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -64,7 +75,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -82,7 +95,11 @@ meta {
     **Example**
 
     ```hot
-    cfg ::ffiec::api/resolve({user-id: tenant.ffiec-user, token: tenant.ffiec-token})
+    cfg ::ffiec::api/resolve({
+      user-id: ::hot::ctx/get("tenant.ffiec-user"),
+      token: ::hot::ctx/get("tenant.ffiec-token")
+    })
+    cfg.base-url
     ```
     """
 }
@@ -119,6 +136,16 @@ meta {
     (pure), or an Err naming what to set. `Authentication` is the
     service's own header, not `Authorization`, and carries `Bearer
     {token}`. A token already starting with `Bearer ` is used as it is.
+
+    **Example**
+
+    ```hot
+    headers ::ffiec::api/auth-headers({
+      user-id: ::hot::ctx/get("ffiec.user-id"),
+      token: ::hot::ctx/get("ffiec.token")
+    })
+    headers.UserID
+    ```
     """
 }
 fn (cfg: Map): Map {
@@ -156,7 +183,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => {
       text trim(body)
@@ -175,7 +204,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -186,7 +217,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 403, headers: {}, body: {StatusCode: 403, Message: "Rate limit exceeded"}}
+    e ::ffiec::api/http-error(response, "https://ffieccdr.azure-api.us/public/RetrieveReportingPeriods")
+    e.status   // 403
+    e.message  // "ffiec: HTTP 403: Rate limit exceeded"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -212,6 +255,16 @@ meta {
     GET `url` with `headers`, returning the `HttpResponse` on 2xx or an
     Err carrying `HttpError`. A transport failure passes through as its
     own Err.
+
+    **Example**
+
+    ```hot
+    response ::ffiec::api/request("https://ffieccdr.azure-api.us/public/RetrieveUBPRReportingPeriods", {
+      UserID: ::hot::ctx/get("ffiec.user-id"),
+      Authentication: `Bearer ${::hot::ctx/get("ffiec.token")}`
+    })
+    response.body
+    ```
     """
 }
 fn (url: Str, headers: Map): HttpResponse {
@@ -230,7 +283,17 @@ fn (url: Str, headers: Map): HttpResponse {
 
 decode-list
 meta {
-    doc: """The list in a response (pure): `[]` for an empty one, such as a 204, and the decoded rows otherwise."""
+    doc: """
+    The list in a response (pure): `[]` for an empty one, such as a 204, and
+    the decoded rows otherwise.
+
+    **Example**
+
+    ```hot
+    ::ffiec::api/decode-list({status: 200, headers: {}, body: "[1474309, 540739]"})  // [1474309, 540739]
+    ::ffiec::api/decode-list({status: 204, headers: {}, body: null})                 // []
+    ```
+    """
 }
 fn (response: HttpResponse): Any {
   body response.body
@@ -252,7 +315,17 @@ fn (response: HttpResponse): Any {
 
 get-list
 meta {
-    doc: """GET a list resource and return its rows, or an Err carrying `HttpError`."""
+    doc: """
+    GET a list resource and return its rows, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    headers ::ffiec::api/auth-headers(::ffiec::api/resolve({}))
+    rows ::ffiec::api/get-list("https://ffieccdr.azure-api.us/public/RetrieveUBPRReportingPeriods", headers)
+    last(rows)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request(url, headers)

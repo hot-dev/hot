@@ -39,13 +39,26 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::attio::api/blank-credential({api-key: " "}, ["api-key"])  // "api-key"
+    ::attio::api/blank-credential({}, ["api-key"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -53,7 +66,21 @@ fn (opts: Map, names: Vec): Str? {
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key, base-url}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults. An
+    Err when no API key is set, when `api-key` is in `opts` but blank or
+    null (that never falls back to context), or when `opts` has `base-url`
+    without `api-key`. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::attio::api/resolve-from({api-key: "key-a"}, {"attio.api.key": "key-b"})  // {api-key: "key-a", base-url: "https://api.attio.com/v2"}
+    ::attio::api/resolve-from({}, {"attio.api.key": "key-b"}).api-key  // "key-b"
+    is-err(::attio::api/resolve-from({api-key: ""}, {"attio.api.key": "key-b"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   api-key or(non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "attio.api.key")))
@@ -95,7 +122,18 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). A
+    `""` body sends no `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::attio::api/build-request("GET", "/self", "", {api-key: "key-a", base-url: "https://api.attio.com/v2"})
+    req.url  // "https://api.attio.com/v2/self"
+    req.headers  // {Authorization: "Bearer key-a"}
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
   headers cond {
@@ -113,7 +151,9 @@ fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
   })
 }
 
-send-json fn (req: HttpRequest): Any {
+send-json
+meta {no-doc: true}
+fn (req: HttpRequest): Any {
   response ::hot::http/request(req)
   cond {
     is-err(response) => { response }

@@ -1,5 +1,6 @@
 ::mysql::decode ns
 meta {
+    no-doc: true,
     doc: """
     MySQL response decoding: OK/ERR/EOF packets, column definitions,
     and text- and binary-protocol result rows. Internal to the `mysql`

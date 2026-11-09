@@ -230,7 +230,32 @@ SearchOpensForOutboundMessagesResponse type {
 
 opens-all-messages
 meta {
-    doc: """Search open events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
+    doc: """
+    Search open events across all outbound messages with filters for
+    recipient, tag, client, OS, platform, and geography.
+
+    **Example**
+
+    ```hot
+    opens ::postmark::search/opens-all-messages(::postmark::search/SearchOpensForOutboundMessagesRequest({
+        count: "50",
+        offset: "0",
+        recipient: "ada@example.com",
+        tag: "",
+        client-name: "",
+        client-company: "",
+        client-family: "",
+        os-name: "",
+        os-family: "",
+        os-company: "",
+        platform: "",
+        country: "",
+        region: "",
+        city: ""
+    }))
+    opens.TotalCount
+    ```
+    """
 }
 fn
 (request: SearchOpensForOutboundMessagesRequest): SearchOpensForOutboundMessagesResponse {
@@ -270,7 +295,32 @@ SearchClicksForOutboundMessagesResponse type {
 
 clicks-all-messages
 meta {
-    doc: """Search click events across all outbound messages with filters for recipient, tag, client, OS, platform, and geography."""
+    doc: """
+    Search click events across all outbound messages with filters for
+    recipient, tag, client, OS, platform, and geography.
+
+    **Example**
+
+    ```hot
+    clicks ::postmark::search/clicks-all-messages(::postmark::search/SearchClicksForOutboundMessagesRequest({
+        count: "50",
+        offset: "0",
+        recipient: "ada@example.com",
+        tag: "",
+        client-name: "",
+        client-company: "",
+        client-family: "",
+        os-name: "",
+        os-family: "",
+        os-company: "",
+        platform: "",
+        country: "",
+        region: "",
+        city: ""
+    }))
+    clicks.TotalCount
+    ```
+    """
 }
 fn
 (request: SearchClicksForOutboundMessagesRequest): SearchClicksForOutboundMessagesResponse {

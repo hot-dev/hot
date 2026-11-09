@@ -27,7 +27,19 @@ seg ::middesk::api/seg
 
 order-body
 meta {
-    doc: """The body for `create-order`: `{product, subproducts?, options?}` with unset parts dropped. Exposed for testing."""
+    doc: """
+    The body for `create-order`: `{product, subproducts?, options?}` with
+    unset parts dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::orders/order-body("website", {subproducts: ["industry_classification"]})
+    // {product: "website", subproducts: ["industry_classification"]}
+
+    ::middesk::orders/order-body("liens", {})  // {product: "liens"}
+    ```
+    """
 }
 fn (product: Str, opts: Map): Map {
   subproducts get(opts, "subproducts")
@@ -67,7 +79,17 @@ fn
 
 list-orders
 meta {
-    doc: """GET /businesses/{id}/orders - A business's orders. `params`: `page`, `per_page`, `packages` (Vec of products, comma joined)."""
+    doc: """
+    GET /businesses/{id}/orders - A business's orders. `params`: `page`,
+    `per_page`, `packages` (Vec of products, comma joined).
+
+    **Example**
+
+    ```hot
+    orders ::middesk::orders/list-orders("biz_a1b2c3", {packages: ["liens", "website"]})
+    map(orders.data, %.status)
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -82,7 +104,16 @@ fn
 
 get-order
 meta {
-    doc: """GET /orders/{id} - Retrieve an order by id."""
+    doc: """
+    GET /orders/{id} - Retrieve an order by id.
+
+    **Example**
+
+    ```hot
+    order ::middesk::orders/get-order("ord_g7h8i9")
+    ::middesk::orders/is-done(order)
+    ```
+    """
 }
 fn
 (order-id: Str): Map {
@@ -94,7 +125,15 @@ fn
 
 update-order
 meta {
-    doc: """PUT /orders/{id} - Set an order's `assignee_id` or `status`."""
+    doc: """
+    PUT /orders/{id} - Set an order's `assignee_id` or `status`.
+
+    **Example**
+
+    ```hot
+    ::middesk::orders/update-order("ord_g7h8i9", {status: "approved"})
+    ```
+    """
 }
 fn
 (order-id: Str, params: Map): Map {
@@ -106,7 +145,17 @@ fn
 
 is-done
 meta {
-    doc: """True when an order has finished: status `completed`, `audited`, `approved` or `rejected`."""
+    doc: """
+    True when an order has finished: status `completed`, `audited`,
+    `approved` or `rejected`.
+
+    **Example**
+
+    ```hot
+    ::middesk::orders/is-done({status: "completed"})  // true
+    ::middesk::orders/is-done({status: "pending"})  // false
+    ```
+    """
 }
 fn (order: Any): Bool {
   status if(is-map(order), get(order, "status"), null)

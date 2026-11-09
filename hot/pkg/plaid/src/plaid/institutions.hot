@@ -12,6 +12,13 @@ meta {
     `offset` starts at 0. Options (Plaid's `options` object): `products`,
     `routing_numbers`, `oauth`, `include_optional_metadata` (logo, colour,
     URL), `include_auth_metadata`. Returns `{institutions, total}`.
+
+    **Example**
+
+    ```hot
+    page ::plaid::institutions/get-institutions(100, 0, ["US"], {include_optional_metadata: true})
+    map(page.institutions, %.name)
+    ```
     """
 }
 fn
@@ -32,7 +39,18 @@ fn
 
 get-institution
 meta {
-    doc: """POST /institutions/get_by_id: one institution (`ins_...`). Options: `include_optional_metadata`, `include_status` (per-product health), `include_auth_metadata`. Returns `{institution}`."""
+    doc: """
+    POST /institutions/get_by_id: one institution (`ins_...`). Options:
+    `include_optional_metadata`, `include_status` (per-product health),
+    `include_auth_metadata`. Returns `{institution}`.
+
+    **Example**
+
+    ```hot
+    out ::plaid::institutions/get-institution("ins_109508", ["US"], {include_status: true})
+    out.institution.name
+    ```
+    """
 }
 fn
 (institution-id: Str, country-codes: Vec<Str>): Map {

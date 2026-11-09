@@ -36,7 +36,18 @@ EXPIRY_MARGIN_SECONDS 60
 FALLBACK_EXPIRES_IN_SECONDS 3600
 
 token-request-body
-meta {doc: """The JSON body of the token request. Exposed for testing."""}
+meta {
+    doc: """
+    The JSON body of the token request. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::cipherowl::auth/token-request-body(::hot::ctx/get("cipherowl.client.id"), ::hot::ctx/get("cipherowl.client.secret"))
+    body.grant_type
+    ```
+    """
+}
 fn (client-id: Str, client-secret: Str): Map {
   {
     client_id: client-id,
@@ -48,7 +59,17 @@ fn (client-id: Str, client-secret: Str): Map {
 
 token-request
 meta {
-    doc: """The `HttpRequest` that mints a token at `{base-url}/oauth/token`. Exposed for testing."""
+    doc: """
+    The `HttpRequest` that mints a token at `{base-url}/oauth/token`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    request ::cipherowl::auth/token-request(::hot::ctx/get("cipherowl.client.id"), ::hot::ctx/get("cipherowl.client.secret"), ::cipherowl/BASE_URL)
+    request.url
+    ```
+    """
 }
 fn (client-id: Str, client-secret: Str, base-url: Str): HttpRequest {
   HttpRequest({
@@ -61,7 +82,18 @@ fn (client-id: Str, client-secret: Str, base-url: Str): HttpRequest {
 
 token-error
 meta {
-    doc: """The Err message for a failed token request: the HTTP status and the OAuth `error` code when the body has one. Never includes credentials or the response body. Exposed for testing."""
+    doc: """
+    The Err message for a failed token request: the HTTP status and the
+    OAuth `error` code when the body has one. Never includes credentials or
+    the response body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::auth/token-error(401, {error: "invalid_client"})  // "cipherowl: token request failed with HTTP 401 (invalid_client); check cipherowl.client.id and cipherowl.client.secret"
+    ::cipherowl::auth/token-error(500, "oops")  // "cipherowl: token request failed with HTTP 500"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   code if(is-map(body), get(body, "error"), null)
@@ -72,7 +104,18 @@ fn (status: Int, body: Any): Str {
 
 mint
 meta {
-    doc: """Mint a new access token (no cache). Returns the token response with the token masked in call records, or an Err."""
+    doc: """
+    Mint a new access token (no cache). Returns the token response with the
+    token masked in call records, or an Err.
+
+    **Example**
+
+    ```hot
+    tokens ::cipherowl::auth/mint(::hot::ctx/get("cipherowl.client.id"), ::hot::ctx/get("cipherowl.client.secret"), ::cipherowl/BASE_URL)
+    tokens.access_token
+    tokens.expires_in
+    ```
+    """
 }
 fn (client-id: Str, client-secret: Str, base-url: Str): Map {
   response ::hot::http/request(token-request(client-id, client-secret, base-url))
@@ -94,7 +137,18 @@ fn (client-id: Str, client-secret: Str, base-url: Str): Map {
 
 cache-key
 meta {
-    doc: """The context key a token is cached under: a SHA-256 of the credential identity (client id, a hash of the secret, audience and base URL), never the raw credential. Exposed for testing."""
+    doc: """
+    The context key a token is cached under: a SHA-256 of the credential
+    identity (client id, a hash of the secret, audience and base URL), never
+    the raw credential. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    cache ::cipherowl::auth/cache-key(::cipherowl::api/resolve({}))
+    ::hot::ctx/get(`${cache}.expires-at`)
+    ```
+    """
 }
 fn (creds: Map): Str {
   identity join([
@@ -108,7 +162,17 @@ fn (creds: Map): Str {
 
 expires-at
 meta {
-    doc: """Epoch milliseconds at which a token minted at `now-ms` should be treated as expired: `expires_in` minus `EXPIRY_MARGIN_SECONDS`. Exposed for testing."""
+    doc: """
+    Epoch milliseconds at which a token minted at `now-ms` should be treated
+    as expired: `expires_in` minus `EXPIRY_MARGIN_SECONDS`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::auth/expires-at({expires_in: 3600}, 1000)  // 3541000
+    ```
+    """
 }
 fn (tokens: Map, now-ms: Int): Int {
   raw get(tokens, "expires_in")
@@ -118,19 +182,42 @@ fn (tokens: Map, now-ms: Int): Int {
 
 is-fresh
 meta {
-    doc: """True when a cached token exists and `now-ms` is before its margin-adjusted expiry. Exposed for testing."""
+    doc: """
+    True when a cached token exists and `now-ms` is before its
+    margin-adjusted expiry. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::auth/is-fresh("cached-token", 2000, 1000)  // true
+    ::cipherowl::auth/is-fresh("cached-token", 2000, 3000)  // false
+    ::cipherowl::auth/is-fresh(null, 2000, 1000)  // false
+    ```
+    """
 }
 fn (token: Any, expiry: Any, now-ms: Int): Bool {
   and(is-str(token), not(is-empty(or(token, ""))), is-int(expiry), lt(now-ms, or(expiry, 0)))
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
 evict
 meta {
-    doc: """Drop a cached token (after a 401). No-op for a null key (a caller-supplied access token)."""
+    doc: """
+    Drop a cached token (after a 401). No-op for a null key (a
+    caller-supplied access token).
+
+    **Example**
+
+    ```hot
+    cache ::cipherowl::auth/cache-key(::cipherowl::api/resolve({}))
+    ::cipherowl::auth/evict(cache)
+    ```
+    """
 }
 fn (key: Str?): Bool {
   cond {
@@ -152,6 +239,14 @@ meta {
     Returns `{token, cache-key, cached}` (`cached` is true when the token
     came from the cache; `cache-key` is null for a given access token),
     or an Err.
+
+    **Example**
+
+    ```hot
+    auth ::cipherowl::auth/bearer(::cipherowl::api/resolve({}))
+    auth.token
+    auth.cached
+    ```
     """
 }
 fn (creds: Map): Map {

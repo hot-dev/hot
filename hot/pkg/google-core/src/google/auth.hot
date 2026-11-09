@@ -88,7 +88,24 @@ type {
 
 token-error
 meta {
-    doc: """Build a `TokenError`. The 1-arity form wraps a plain message; the 2-arity form prefixes the payload of a failed `::oauth2` call (`{status, body}` or a transport error)."""
+    doc: """
+    Build a `TokenError`. The 1-arity form wraps a plain message; the
+    2-arity form prefixes the payload of a failed `::oauth2` call (`{status,
+    body}` or a transport error).
+
+    **Example**
+
+    ```hot
+    ::google::auth/token-error("google: no key").message  // "google: no key"
+
+    failure ::google::auth/token-error("google: token exchange failed", {
+      status: 400,
+      body: {error: "invalid_grant", error_description: "Token expired"}
+    })
+    failure.message  // "google: token exchange failed: invalid_grant (Token expired)"
+    failure.error-code  // "invalid_grant"
+    ```
+    """
 }
 fn
 (message: Str): TokenError {
@@ -122,19 +139,44 @@ fn
 
 is-blank-value
 meta {
-    doc: """True for null, `""`, and whitespace-only strings (context placeholders wire `""` for unset env vars)."""
+    doc: """
+    True for null, `""`, and whitespace-only strings (context placeholders
+    wire `""` for unset env vars).
+
+    **Example**
+
+    ```hot
+    ::google::auth/is-blank-value("  ")  // true
+    ::google::auth/is-blank-value(null)  // true
+    ::google::auth/is-blank-value("drive.file")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
 mark-fields
 meta {
-    doc: """Mask the non-blank values of `names` in `source` in this run's call records, and return `source` unchanged."""
+    doc: """
+    Mask the non-blank values of `names` in `source` in this run's call
+    records, and return `source` unchanged.
+
+    **Example**
+
+    ```hot
+    source {token: ::hot::ctx/get("tenant.google.token"), q: "reports"}
+
+    // Masks the token in this run's call records. The Map comes back as it was.
+    ::google::auth/mark-fields(source, ["token"])
+    ```
+    """
 }
 fn (source: Map, names: Vec): Map {
   ::ctx/mark-secret(filter-keys(filter-vals(source, (v) { not(is-blank-value(v)) }), (k) { in(k, names) }))
@@ -143,7 +185,19 @@ fn (source: Map, names: Vec): Map {
 
 mark-token-response
 meta {
-    doc: """Mask a token response's `access_token`, `refresh_token` and `id_token` in call records, and return it unchanged. Call it before a token leaves the function that obtained it."""
+    doc: """
+    Mask a token response's `access_token`, `refresh_token` and `id_token`
+    in call records, and return it unchanged. Call it before a token leaves
+    the function that obtained it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/post("https://oauth2.example.com/token", {grant_type: "client_credentials"})
+    tokens ::google::auth/mark-token-response(response.body)
+    tokens.expires_in
+    ```
+    """
 }
 fn (tokens: Map): Map {
   mark-fields(tokens, TOKEN_RESPONSE_SECRET_FIELDS)
@@ -159,6 +213,13 @@ meta {
     Expand a short scope name to its full URL: `"drive.file"` becomes
     `"https://www.googleapis.com/auth/drive.file"`. Full URLs and the
     OpenID scopes (`openid`, `email`, `profile`) pass through.
+
+    **Example**
+
+    ```hot
+    ::google::auth/expand-scope("drive.file")  // "https://www.googleapis.com/auth/drive.file"
+    ::google::auth/expand-scope("openid")  // "openid"
+    ```
     """
 }
 fn (scope: Str): Str {
@@ -205,6 +266,12 @@ meta {
     grant lists different scopes than the package defaults (for example
     only `drive.readonly`); it then applies to every call in the run, so
     include every scope those calls need.
+
+    **Example**
+
+    ```hot
+    ::google::auth/effective-scopes("drive.readonly", {scopes: "drive.file"})  // ["https://www.googleapis.com/auth/drive.file"]
+    ```
     """
 }
 fn (default-scopes: Any, opts: Map): Vec {
@@ -222,7 +289,17 @@ fn (default-scopes: Any, opts: Map): Vec {
 
 has-primary-credential
 meta {
-    doc: """True when `source` carries a primary credential: `token`, `refresh-token`, `service-account` or `api-key`."""
+    doc: """
+    True when `source` carries a primary credential: `token`,
+    `refresh-token`, `service-account` or `api-key`.
+
+    **Example**
+
+    ```hot
+    ::google::auth/has-primary-credential({subject: "ada@example.com"})  // false
+    ::google::auth/has-primary-credential({token: ""})  // false
+    ```
+    """
 }
 fn (source: Map): Bool {
   or(
@@ -244,7 +321,16 @@ meta {
         "google.impersonate": {required: false, secret: false},
         "google.api.key": {required: false}
     },
-    doc: """The credential source read from context, in the same shape as `opts`."""
+    doc: """
+    The credential source read from context, in the same shape as `opts`.
+
+    **Example**
+
+    ```hot
+    source ::google::auth/ctx-source()
+    ::google::auth/has-primary-credential(source)
+    ```
+    """
 }
 fn (): Map {
   {
@@ -260,7 +346,19 @@ fn (): Map {
 
 merge-sources
 meta {
-    doc: """Pick the credential source for a call: `opts` alone when it carries a primary credential, otherwise `ctx` with `opts.subject` layered on top. Pure; `resolve-credentials` passes the live context."""
+    doc: """
+    Pick the credential source for a call: `opts` alone when it carries a
+    primary credential, otherwise `ctx` with `opts.subject` layered on top.
+    Pure; `resolve-credentials` passes the live context.
+
+    **Example**
+
+    ```hot
+    context {service-account: "key-from-context"}
+    ::google::auth/merge-sources({subject: "ada@example.com"}, context)  // {service-account: "key-from-context", subject: "ada@example.com"}
+    ::google::auth/merge-sources({}, context)  // {service-account: "key-from-context"}
+    ```
+    """
 }
 fn (opts: Map, ctx: Map): Map {
   cond {
@@ -279,6 +377,13 @@ meta {
     `type: "authorized_user"`. Returns the Map or a `TokenError`. Its
     secret fields are masked in call records from here on, whichever
     source the key came from.
+
+    **Example**
+
+    ```hot
+    key ::google::auth/parse-service-account(::hot::ctx/get("google.service.account"))
+    key.client_email
+    ```
     """
 }
 fn (key: Any): Map {
@@ -299,7 +404,9 @@ fn (key: Any): Map {
   }
 }
 
-refresh-credentials fn (client-id: Any, client-secret: Any, refresh-token: Str): Map {
+refresh-credentials
+meta {no-doc: true}
+fn (client-id: Any, client-secret: Any, refresh-token: Str): Map {
   cond {
     is-blank-value(client-id) => {
       err(token-error("google: a refresh token is set but the OAuth client-id is missing. Set google.oauth.client-id (and google.oauth.client-secret) or pass client-id in opts."))
@@ -322,6 +429,15 @@ meta {
     credentials: `{kind: "token" | "refresh" | "service-account" |
     "api-key", ...}`. Returns a `TokenError` when nothing usable is set or
     a refresh token lacks its client-id. Pure; no network.
+
+    **Example**
+
+    ```hot
+    creds ::google::auth/credentials-from({token: ::hot::ctx/get("tenant.google.token")})
+
+    // One of token, refresh, service-account or api-key
+    creds.kind
+    ```
     """
 }
 fn (source: Map): Map {
@@ -359,7 +475,17 @@ fn (source: Map): Map {
 
 blank-credential
 meta {
-    doc: """The first credential key `opts` has with a blank or null value, else null (pure). Such a key is an error, never a fallback to context."""
+    doc: """
+    The first credential key `opts` has with a blank or null value, else
+    null (pure). Such a key is an error, never a fallback to context.
+
+    **Example**
+
+    ```hot
+    ::google::auth/blank-credential({token: ""})  // "token"
+    ::google::auth/blank-credential({scopes: "drive.file"})  // null
+    ```
+    """
 }
 fn (opts: Map): Str? {
   find-first(IDENTITY_KEYS, (key) { and(in(key, keys(opts)), is-blank-value(get(opts, key))) })
@@ -367,7 +493,20 @@ fn (opts: Map): Str? {
 
 mark-credentials
 meta {
-    doc: """Mask every credential in `opts` in this run's call records, and return `opts` unchanged. A service-account key that is a JSON Str is masked whole, and its secret fields separately once parsed."""
+    doc: """
+    Mask every credential in `opts` in this run's call records, and return
+    `opts` unchanged. A service-account key that is a JSON Str is masked
+    whole, and its secret fields separately once parsed.
+
+    **Example**
+
+    ```hot
+    opts {refresh-token: ::hot::ctx/get("tenant.google.refresh-token"), client-id: "123.apps.googleusercontent.com"}
+
+    // Masks the refresh token in this run's call records
+    ::google::auth/mark-credentials(opts)
+    ```
+    """
 }
 fn (opts: Map): Map {
   service-account get(opts, "service-account")
@@ -421,6 +560,13 @@ meta {
     credentials that are never cached (access tokens, API keys). Keyed by
     credential identity, sorted scope set and subject. Refresh tokens
     ignore scopes (the refresh grant always returns every granted scope).
+
+    **Example**
+
+    ```hot
+    // Explicit access tokens and API keys are never cached
+    ::google::auth/token-cache-key({kind: "api-key"}, [])  // null
+    ```
     """
 }
 fn (creds: Map, scopes: Vec): Str? {
@@ -442,7 +588,17 @@ fn (creds: Map, scopes: Vec): Str? {
 
 cache-entry
 meta {
-    doc: """The cached form of a token response: `{access-token, expires-at}` (epoch ms), expiring `EXPIRY_MARGIN_SECONDS` early."""
+    doc: """
+    The cached form of a token response: `{access-token, expires-at}` (epoch
+    ms), expiring `EXPIRY_MARGIN_SECONDS` early.
+
+    **Example**
+
+    ```hot
+    // expires_in 3600, less the 60 second margin, from now = 1000 ms
+    ::google::auth/cache-entry({expires_in: 3600}, 1000).expires-at  // 3541000
+    ```
+    """
 }
 fn (tokens: Map, now: Int): Map {
   expires-in Int(or(tokens.expires_in, 3600))
@@ -454,14 +610,40 @@ fn (tokens: Map, now: Int): Map {
 
 is-fresh
 meta {
-    doc: """True when a cache entry exists and has not reached its (margin-adjusted) expiry."""
+    doc: """
+    True when a cache entry exists and has not reached its (margin-adjusted)
+    expiry.
+
+    **Example**
+
+    ```hot
+    entry {access-token: "cached", expires-at: 2000}
+    ::google::auth/is-fresh(entry, 1000)  // true
+    ::google::auth/is-fresh(entry, 2000)  // false
+    ::google::auth/is-fresh(null, 1000)  // false
+    ```
+    """
 }
 fn (entry: Any, now: Int): Bool {
   and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
 }
 
 evict-token
-meta {doc: """Drop a cached token (e.g. after a 401). No-op for a null key."""}
+meta {
+    doc: """
+    Drop a cached token (e.g. after a 401). No-op for a null key.
+
+    **Example**
+
+    ```hot
+    creds ::google::auth/resolve-credentials({})
+    auth ::google::auth/bearer(creds, ::google::auth/normalize-scopes("drive.readonly"))
+
+    // Google answered 401: the next call mints a new token
+    ::google::auth/evict-token(auth.cache-key)
+    ```
+    """
+}
 fn (cache-key: Str?): Bool {
   cond {
     is-null(cache-key) => { false }
@@ -478,7 +660,20 @@ fn (cache-key: Str?): Bool {
 
 build-service-account-claims
 meta {
-    doc: """Build the RFC 7523 assertion claims for a service-account token request. `scope` is space-separated; `subject` (optional) enables domain-wide delegation, the user to impersonate."""
+    doc: """
+    Build the RFC 7523 assertion claims for a service-account token request.
+    `scope` is space-separated; `subject` (optional) enables domain-wide
+    delegation, the user to impersonate.
+
+    **Example**
+
+    ```hot
+    claims ::google::auth/build-service-account-claims("bot@project.iam.gserviceaccount.com", "https://www.googleapis.com/auth/drive.readonly", "ada@example.com")
+    claims.iss  // "bot@project.iam.gserviceaccount.com"
+    claims.sub  // "ada@example.com"
+    sub(claims.exp, claims.iat)  // 3600
+    ```
+    """
 }
 fn (client-email: Str, scope: Str, subject: Any): Map {
   now ::jwt/now-seconds()
@@ -497,7 +692,20 @@ fn (client-email: Str, scope: Str, subject: Any): Map {
 
 service-account-token
 meta {
-    doc: """Exchange a service-account key (parsed Map) for an access token with the given space-separated `scope`. Returns the token response (`access_token`, `expires_in`), masked in call records, or a `TokenError`."""
+    doc: """
+    Exchange a service-account key (parsed Map) for an access token with the
+    given space-separated `scope`. Returns the token response
+    (`access_token`, `expires_in`), masked in call records, or a
+    `TokenError`.
+
+    **Example**
+
+    ```hot
+    key ::google::auth/parse-service-account(::hot::ctx/get("google.service.account"))
+    tokens ::google::auth/service-account-token(key, "https://www.googleapis.com/auth/drive.readonly", "ada@example.com")
+    tokens.expires_in
+    ```
+    """
 }
 fn (service-account: Map, scope: Str, subject: Any): Map {
   claims build-service-account-claims(service-account.client_email, scope, subject)
@@ -513,7 +721,23 @@ fn (service-account: Map, scope: Str, subject: Any): Map {
 
 refresh-token-grant
 meta {
-    doc: """Exchange a refresh token for an access token. Returns the token response or a `TokenError` such as `"google: token exchange failed: invalid_grant (Token has been expired or revoked.)"`. The refresh token, client secret and response tokens are masked in call records."""
+    doc: """
+    Exchange a refresh token for an access token. Returns the token response
+    or a `TokenError` such as `"google: token exchange failed: invalid_grant
+    (Token has been expired or revoked.)"`. The refresh token, client secret
+    and response tokens are masked in call records.
+
+    **Example**
+
+    ```hot
+    tokens ::google::auth/refresh-token-grant(
+      "123.apps.googleusercontent.com",
+      ::hot::ctx/get("google.oauth.client-secret"),
+      ::hot::ctx/get("tenant.google.refresh-token")
+    )
+    tokens.expires_in
+    ```
+    """
 }
 fn (client-id: Str, client-secret: Str?, refresh-token: Str): Map {
   mark-fields({client-secret: client-secret, refresh-token: refresh-token}, SECRET_KEYS)
@@ -526,7 +750,19 @@ fn (client-id: Str, client-secret: Str?, refresh-token: Str): Map {
 }
 
 mint-token
-meta {doc: """Mint a fresh token response for resolved credentials (no cache)."""}
+meta {
+    doc: """
+    Mint a fresh token response for resolved credentials (no cache).
+
+    **Example**
+
+    ```hot
+    creds ::google::auth/resolve-credentials({})
+    tokens ::google::auth/mint-token(creds, ::google::auth/normalize-scopes("drive.readonly"))
+    tokens.expires_in
+    ```
+    """
+}
 fn (creds: Map, scopes: Vec): Map {
   cond {
     eq(creds.kind, "refresh") => {
@@ -550,6 +786,19 @@ meta {
     per-run cache. Returns `{token, cache-key, cached}` (`cached` is true
     when the token came from the cache, so a 401 should evict and retry),
     or a `TokenError`. API-key credentials have no bearer token.
+
+    **Example**
+
+    ```hot
+    creds ::google::auth/resolve-credentials({})
+    auth ::google::auth/bearer(creds, ::google::auth/normalize-scopes("drive.readonly"))
+    auth.cached
+    ::hot::http/request(::hot::http/HttpRequest({
+      method: "GET",
+      url: "https://www.googleapis.com/drive/v3/about?fields=user",
+      headers: {Authorization: `Bearer ${auth.token}`}
+    }))
+    ```
     """
 }
 fn (creds: Map, scopes: Vec): Map {

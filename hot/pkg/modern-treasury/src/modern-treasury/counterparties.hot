@@ -47,7 +47,16 @@ fn
 
 get-counterparty
 meta {
-    doc: """GET /api/counterparties/{id}: retrieve a counterparty with its accounts."""
+    doc: """
+    GET /api/counterparties/{id}: retrieve a counterparty with its accounts.
+
+    **Example**
+
+    ```hot
+    party ::modern-treasury::counterparties/get-counterparty("b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31")
+    party.name
+    ```
+    """
 }
 fn
 (counterparty-id: Str): Map {
@@ -59,7 +68,19 @@ fn
 
 list-counterparties
 meta {
-    doc: """GET /api/counterparties: one page (`{items, after_cursor, per_page}`). Filters: `name`, `email`, `external_id`, `legal_entity_id`, `metadata: {key: value}`, `created_at_lower_bound`, `created_at_upper_bound`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/counterparties: one page (`{items, after_cursor, per_page}`).
+    Filters: `name`, `email`, `external_id`, `legal_entity_id`, `metadata:
+    {key: value}`, `created_at_lower_bound`, `created_at_upper_bound`,
+    `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::counterparties/list-counterparties({metadata: {vendor_id: "17"}, per_page: 50})
+    map(page.items, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -74,7 +95,17 @@ fn
 
 update-counterparty
 meta {
-    doc: """PATCH /api/counterparties/{id}: change `name`, `email`, `external_id`, `metadata`, `send_remittance_advice`, `legal_entity_id` or `taxpayer_identifier`."""
+    doc: """
+    PATCH /api/counterparties/{id}: change `name`, `email`, `external_id`,
+    `metadata`, `send_remittance_advice`, `legal_entity_id` or
+    `taxpayer_identifier`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::counterparties/update-counterparty("b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31", {email: "billing::modern-treasury::example.com"})
+    ```
+    """
 }
 fn
 (counterparty-id: Str, params: Map): Map {
@@ -86,7 +117,16 @@ fn
 
 delete-counterparty
 meta {
-    doc: """DELETE /api/counterparties/{id}: delete a counterparty. Returns null (204). Irreversible."""
+    doc: """
+    DELETE /api/counterparties/{id}: delete a counterparty. Returns null
+    (204). Irreversible.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::counterparties/delete-counterparty("b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31")
+    ```
+    """
 }
 fn
 (counterparty-id: Str): Any {
@@ -105,6 +145,16 @@ meta {
     will pay them) or `"debit"` (you will pull from them). `params`:
     `send_email` (default true), `fields`, `custom_redirect`. Returns
     `{id, form_link, is_resend}`.
+
+    **Example**
+
+    ```hot
+    request ::modern-treasury::counterparties/collect-account-details("b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31", "credit")
+    request.form_link
+
+    // No email: hand out the link yourself
+    ::modern-treasury::counterparties/collect-account-details("b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31", "credit", {send_email: false}, {})
+    ```
     """
 }
 fn

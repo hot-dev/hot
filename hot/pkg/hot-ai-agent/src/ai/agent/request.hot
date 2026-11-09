@@ -60,6 +60,20 @@ meta {
     is intended for transport- or agent-specific fields (e.g. channel
     id, transport name, locale). Keep it small — anything routinely
     consumed by tools deserves its own typed ctx key.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+    ::session ::ai::session
+
+    ::request/bind(
+        ::session/Session({id: "slack:C123"}),
+        ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        {transport: "slack"}
+    )
+    ::request/session-id()
+    ```
     """
 }
 fn (session: Session, sender: Identity, extras: Map?): Null {
@@ -75,7 +89,20 @@ fn (session: Session, sender: Identity, extras: Map?): Null {
 
 session-id
 meta {
-    doc: "Returns the session id bound by `bind` for this request, or `null` if unbound."
+    doc: """
+    Returns the session id bound by `bind` for this request, or `null` if
+    unbound.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    // Inside a tool body. Null means nothing is bound.
+    sid ::request/session-id()
+    if(is-null(sid), "no active session", sid)
+    ```
+    """
 }
 fn (): Str? {
     raw ::ctx/get(CTX_SESSION_ID, null)
@@ -87,7 +114,19 @@ fn (): Str? {
 
 user-id
 meta {
-    doc: "Returns the user id bound by `bind` for this request, or `null` if unbound."
+    doc: """
+    Returns the user id bound by `bind` for this request, or `null` if
+    unbound.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    uid ::request/user-id()
+    if(is-null(uid), "anonymous", uid)
+    ```
+    """
 }
 fn (): Str? {
     raw ::ctx/get(CTX_USER_ID, null)
@@ -99,7 +138,19 @@ fn (): Str? {
 
 user-name
 meta {
-    doc: "Returns the user name bound by `bind` for this request, or `null` if unbound."
+    doc: """
+    Returns the user name bound by `bind` for this request, or `null` if
+    unbound.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    name ::request/user-name()
+    `Hello, ${or(name, "there")}`
+    ```
+    """
 }
 fn (): Str? {
     raw ::ctx/get(CTX_USER_NAME, null)
@@ -117,6 +168,15 @@ meta {
 
     Callers that need transport-decorated sessions should wrap the
     returned value with `::ai::agent::transport/session-with-transport`.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    session ::request/session()
+    if(is-null(session), null, session.id)
+    ```
     """
 }
 fn (): Session? {
@@ -135,6 +195,15 @@ meta {
     The returned identity has `meta = {}`; if your tools need richer
     identity metadata, pass it through `extras` and recover it with
     `extras`.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    caller ::request/sender()
+    if(is-null(caller), null, caller.name)
+    ```
     """
 }
 fn (): Identity? {
@@ -150,7 +219,18 @@ fn (): Identity? {
 
 extras
 meta {
-    doc: "Returns the extras map bound by `bind` for this request, or `{}` if none."
+    doc: """
+    Returns the extras map bound by `bind` for this request, or `{}` if
+    none.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    get(::request/extras(), "transport", "unknown")
+    ```
+    """
 }
 fn (): Map {
     or(::ctx/get(CTX_EXTRAS, {}), {})
@@ -162,6 +242,14 @@ meta {
     Clear the per-request bindings. Rarely needed — `::hot::ctx` is
     request-scoped — but handy in long-running test loops that reuse a
     single ctx and want to reset between iterations.
+
+    **Example**
+
+    ```hot
+    ::request ::ai::agent::request
+
+    ::request/clear()
+    ```
     """
 }
 fn (): Null {

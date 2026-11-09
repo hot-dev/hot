@@ -62,7 +62,7 @@ meta {
     **Example**
 
     ```hot
-    xml Xml({
+    xml ::hot::xml/Xml({
         "tag": "person",
         "attrs": {"id": "123"},
         "content": ["Alice"]

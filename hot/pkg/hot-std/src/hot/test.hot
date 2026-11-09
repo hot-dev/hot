@@ -23,7 +23,7 @@ meta {
     **Example**
 
     ```hot
-    [1, 2, 3] |> ptap |> map(mul(%, 2))
+    [1, 2, 3] |> ::hot::test/ptap() |> map(mul(%, 2))
     // Prints: 1, 2, 3
     // Returns: [2, 4, 6]
     ```
@@ -34,7 +34,9 @@ fn (x) { map(x, println) x }
 // DIAG: a local copy of mapcat used only by the test runner so that the
 // runner doesn't sit on top of `mapcat`'s own activation when a test
 // itself calls `mapcat`.
-test-runner-mapcat fn (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
+test-runner-mapcat
+meta {no-doc: true}
+fn (coll: Str | Vec | Map, f: Fn): Str | Vec | Map {
     coll
     |> map(f)
     |> reduce((acc, x) { concat(acc, x) }, [])
@@ -44,7 +46,10 @@ empty-test-counter {passed: 0, failed: 0, total: 0}
 
 // Initialize test counters in context
 init-test-counters
-meta {doc: """Initialize test counters in context. Returns the fresh counters."""}
+meta {
+    no-doc: true,
+    doc: """Initialize test counters in context. Returns the fresh counters."""
+}
 fn () {
     ::hot::ctx/set("test-counters", {
             assertions: empty-test-counter,
@@ -57,20 +62,28 @@ fn () {
 }
 
 get-test-counters
-meta {doc: """Get test counters from context, initializing if missing."""}
+meta {
+    no-doc: true,
+    doc: """Get test counters from context, initializing if missing."""
+}
 fn () {
     existing ::hot::ctx/get("test-counters")
     if(existing, existing, init-test-counters())
 }
 
 set-test-counters
-meta {doc: """Set test counters in context."""}
+meta {
+    no-doc: true,
+    doc: """Set test counters in context."""
+}
 fn (counters) {
     ::hot::ctx/set("test-counters", counters)
 }
 
 // Increment `outcome` (and total) in each of the given counter sections
-bump-counters fn (counters, sections: Vec<Str>, outcome: Str) {
+bump-counters
+meta {no-doc: true}
+fn (counters, sections: Vec<Str>, outcome: Str) {
     reduce(sections, (acc, section) {
         acc
         |> update-in([section, outcome], add(%, 1))
@@ -80,19 +93,28 @@ bump-counters fn (counters, sections: Vec<Str>, outcome: Str) {
 
 // Helper to increment a counter in context
 assertion-passed
-meta {doc: """Increment passed assertion counters."""}
+meta {
+    no-doc: true,
+    doc: """Increment passed assertion counters."""
+}
 fn () {
     set-test-counters(bump-counters(get-test-counters(), ["assertions", "current-test"], "passed"))
 }
 
 assertion-failed
-meta {doc: """Increment failed assertion counters."""}
+meta {
+    no-doc: true,
+    doc: """Increment failed assertion counters."""
+}
 fn () {
     set-test-counters(bump-counters(get-test-counters(), ["assertions", "current-test"], "failed"))
 }
 
 assertion-failed-with-details
-meta {doc: """Record a failed assertion with test name and description."""}
+meta {
+    no-doc: true,
+    doc: """Record a failed assertion with test name and description."""
+}
 fn (test-name, assertion-description) {
     assertion-failed()
 
@@ -117,13 +139,19 @@ fn (test-name, assertion-description) {
 }
 
 test-passed
-meta {doc: """Increment passed test counters."""}
+meta {
+    no-doc: true,
+    doc: """Increment passed test counters."""
+}
 fn () {
     set-test-counters(bump-counters(get-test-counters(), ["tests"], "passed"))
 }
 
 test-failed
-meta {doc: """Record a failed test and store enhanced name."""}
+meta {
+    no-doc: true,
+    doc: """Record a failed test and store enhanced name."""
+}
 fn (test-name) {
     // Store enhanced test name with IDE-friendly location format
     location-str format-source-location(::hot::meta/source(test-name))
@@ -137,7 +165,10 @@ fn (test-name) {
 }
 
 test-made-no-assertions
-meta {doc: """Record a passing test that made no assertions."""}
+meta {
+    no-doc: true,
+    doc: """Record a passing test that made no assertions."""
+}
 fn (test-name) {
     counters get-test-counters()
     set-test-counters({
@@ -147,14 +178,20 @@ fn (test-name) {
 }
 
 current-test-reset
-meta {doc: """Reset current test counters between tests."""}
+meta {
+    no-doc: true,
+    doc: """Reset current test counters between tests."""
+}
 fn () {
     counters get-test-counters()
     set-test-counters({...counters, current-test: empty-test-counter})
 }
 
 current-test-assertions-passed
-meta {doc: """Return true if current test has zero failed assertions."""}
+meta {
+    no-doc: true,
+    doc: """Return true if current test has zero failed assertions."""
+}
 fn () {
     counters get-test-counters()
     is-zero(counters.current-test.failed)
@@ -162,13 +199,18 @@ fn () {
 
 
 assert-expected-got
-meta {doc: """Format expected vs actual values."""}
+meta {
+    no-doc: true,
+    doc: """Format expected vs actual values."""
+}
 fn (expected, actual) {
     `expected ${expected}, got ${actual}`
 }
 
 // Helper function to format source location in IDE-friendly format
-format-source-location fn (source-info) {
+format-source-location
+meta {no-doc: true}
+fn (source-info) {
     cond {
         and(source-info.file, source-info.line, source-info.column) => {
             `${source-info.file}:${source-info.line}:${source-info.column}`
@@ -187,7 +229,9 @@ format-source-location fn (source-info) {
 
 // Record a failed assertion (with test details when a test is running),
 // print the failure line, and return false
-record-failure fn (description: Str): Bool {
+record-failure
+meta {no-doc: true}
+fn (description: Str): Bool {
     current-test-name ::hot::ctx/get("current-test-name")
     cond {
         current-test-name => { assertion-failed-with-details(current-test-name, description) }
@@ -208,7 +252,7 @@ meta {
     **Example**
 
     ```hot
-    test-math #["test"] fn () {
+    test-math meta ["test"] fn () {
         assert-eq(4, add(2, 2), "2 + 2 should equal 4")
         assert-eq([1, 2], [1, 2])  // description auto-generated
     }
@@ -264,9 +308,10 @@ meta {
     **Example**
 
     ```hot
-    test-truthy #["test"] fn () {
+    test-truthy meta ["test"] fn () {
         assert(gt(5, 3), "5 should be greater than 3")
         assert(contains("hello", "ell"))
+        response {id: "r-1"}
         assert(response.id, "response should have an id")
     }
     ```
@@ -366,19 +411,25 @@ max-test-deliveries 10000
 
 // Each `on-event` handler's name by event type, found once per run. The
 // harness lists them as the worker registers them, aliases included.
-event-handlers fn (): Map {
+event-handlers
+meta {no-doc: true}
+fn (): Map {
     found ::hot::ctx/get("test-event-handlers")
     if(found, found, ::hot::ctx/set("test-event-handlers", call-lib(::hot::test/event-handlers, [])))
 }
 
 // A contained `cancel()`: the worker records the run as cancelled, not failed
-is-cancellation fn (value: Any): Bool {
+is-cancellation
+meta {no-doc: true}
+fn (value: Any): Bool {
     or(is-type(value, ::hot::run/Cancellation), is-type(value, ::hot::task/Cancellation))
 }
 
 // Run `handler` on `event` as a worker would; a failure is a failed
 // assertion, and a cancellation is not
-run-handler fn (handler: Str, event: Map): Map {
+run-handler
+meta {no-doc: true}
+fn (handler: Str, event: Map): Map {
     result ::hot::internal::exec/contain(handler, [{type: event.type, data: event.data}])
     cond {
         and(is-err(result), not(is-cancellation(err-value(result)))) => {
@@ -393,7 +444,9 @@ run-handler fn (handler: Str, event: Map): Map {
 // Deliver one sent event. Schedule events arm and disarm the test's
 // schedules, as the scheduler would, a relative time counting from the
 // send; any other runs its handlers.
-deliver-one fn (event: Map): Vec<Map> {
+deliver-one
+meta {no-doc: true}
+fn (event: Map): Vec<Map> {
     cond {
         eq(event.type, "hot:schedule:new") => {
             sent-at get(event, "sent-at")
@@ -422,7 +475,9 @@ deliver-one fn (event: Map): Vec<Map> {
 // Deliver the sent events, oldest first, then what their handlers send,
 // until nothing is left, and return how many were delivered. Each run goes
 // to the harness's run log, which the caller takes once.
-deliver-sent fn (delivered: Int): Int {
+deliver-sent
+meta {no-doc: true}
+fn (delivered: Int): Int {
     pending call-lib(::hot::test/take-sent, [])
     cond {
         is-empty(pending) => { delivered }
@@ -484,7 +539,9 @@ fn
 
 // Call a due schedule's function as the scheduler would; a failure is a
 // failed assertion, and a cancellation is not
-run-scheduled fn (due: Map): Map {
+run-scheduled
+meta {no-doc: true}
+fn (due: Map): Map {
     result ::hot::internal::exec/contain(due.fn, due.args)
     cond {
         and(is-err(result), not(is-cancellation(err-value(result)))) => {
@@ -499,7 +556,9 @@ run-scheduled fn (due: Map): Map {
 // Fire schedules due by `until`, soonest first, each at its due time, and
 // return how many fired; `fixed` is the clock to return to afterwards (null
 // for the real time). Runs go to the harness's run log.
-fire-due fn (until: ::hot::time/Instant, fixed: ::hot::time/Instant?, fired: Int): Int {
+fire-due
+meta {no-doc: true}
+fn (until: ::hot::time/Instant, fixed: ::hot::time/Instant?, fired: Int): Int {
     due call-lib(::hot::test/take-due, [until])
     cond {
         is-null(due) => { fired }
@@ -568,7 +627,10 @@ fn (): Vec<Map> {
 }
 
 print-test-header
-meta {doc: """Print header for the test run and record start time."""}
+meta {
+    no-doc: true,
+    doc: """Print header for the test run and record start time."""
+}
 fn (tests) {
     println(`${red("hot test runner")}`)
     // Use the imported length function instead of direct hotlib call
@@ -581,6 +643,7 @@ fn (tests) {
 
 call-with-capture
 meta {
+    no-doc: true,
     doc: """Call function `f` with stdout capture, discarding captured output. Halts (fail()/runtime errors) are contained and returned as an Err so one test cannot abort the run."""
 }
 fn (f) {
@@ -603,7 +666,7 @@ meta {
 
     ```hot
     // Typically called by run-tests, not directly
-    run-test(my-test-fn, true)  // true = capture output
+    run-test("::myapp::checkout-test/test-total", true)  // true = capture output
     ```
     """
 }
@@ -681,7 +744,10 @@ fn (f, capture-output) {
 
 // Print summary of test results
 print-test-summary
-meta {doc: """Print a summary of test results including failures and duration."""}
+meta {
+    no-doc: true,
+    doc: """Print a summary of test results including failures and duration."""
+}
 fn () {
     counters get-test-counters()
     tests-total counters.tests.total
@@ -777,11 +843,11 @@ meta {
     **Example**
 
     ```hot
-    my-test #["test"] fn () { assert(true) }
+    my-test meta ["test"] fn () { assert(true) }
     other-fn fn () { "not a test" }
 
-    is-test(my-test)   // true
-    is-test(other-fn)  // false
+    ::hot::test/is-test(my-test)   // true
+    ::hot::test/is-test(other-fn)  // false
     ```
     """
 }
@@ -792,6 +858,7 @@ fn (f) {
 
 print-no-tests-warning
 meta {
+    no-doc: true,
     doc: """
     Notice that discovery found nothing.
 
@@ -818,7 +885,10 @@ fn (pattern) {
 }
 
 all-tests-passed
-meta {doc: """Return true if all tests passed - helper to avoid scoping issues."""}
+meta {
+    no-doc: true,
+    doc: """Return true if all tests passed - helper to avoid scoping issues."""
+}
 fn () {
     counters get-test-counters()
     tests-failed counters.tests.failed
@@ -834,10 +904,10 @@ meta {
 
     ```hot
     // Run all tests with output capture
-    run-tests(true)
+    ::hot::test/run-tests(true)
 
     // Run all tests showing full output
-    run-tests(false)
+    ::hot::test/run-tests(false)
     ```
     """
 }
@@ -886,10 +956,10 @@ meta {
 
     ```hot
     // Run only tests with "math" in the name
-    run-matching-tests("math", true)
+    ::hot::test/run-matching-tests("math", true)
 
     // Run tests matching "coll" with full output
-    run-matching-tests("coll", false)
+    ::hot::test/run-matching-tests("coll", false)
     ```
     """
 }

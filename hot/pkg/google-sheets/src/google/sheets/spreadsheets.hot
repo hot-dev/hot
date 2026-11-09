@@ -25,7 +25,19 @@ SHEET_FIELDS "sheets.properties"
 
 get-params
 meta {
-    doc: """The query parameters `get-spreadsheet` sends (pure): `ranges` (a Vec, sent repeated), `includeGridData`, `fields` (e.g. `"properties.title,sheets.properties"`), `excludeTablesInBandedRanges`; only the ones you set."""
+    doc: """
+    The query parameters `get-spreadsheet` sends (pure): `ranges` (a Vec,
+    sent repeated), `includeGridData`, `fields` (e.g.
+    `"properties.title,sheets.properties"`), `excludeTablesInBandedRanges`;
+    only the ones you set.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/get-params({fields: "properties.title", ranges: ["Sheet1!A1:C5"]})
+    // {fields: "properties.title", ranges: ["Sheet1!A1:C5"]}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::sheets/query-params({}, opts)
@@ -40,6 +52,17 @@ meta {
     `{ranges: ["Sheet1!A1:C5"], includeGridData: true}` for cell data
     and formatting, and `fields` to trim the response. Scope:
     `spreadsheets.readonly`.
+
+    **Example**
+
+    ```hot
+    book ::google::sheets::spreadsheets/get-spreadsheet("1AbCspreadsheetId", {fields: "properties.title,sheets.properties"})
+    book.properties.title
+    map(book.sheets, %.properties.title)
+
+    // Cell data and formatting for one range
+    ::google::sheets::spreadsheets/get-spreadsheet("1AbCspreadsheetId", {ranges: ["Sheet1!A1:C5"], includeGridData: true})
+    ```
     """
 }
 fn
@@ -50,7 +73,9 @@ fn
   ::sheets/json(::sheets/READ_SCOPE, "GET", ::sheets/url(`/${::sheets/encode-id(spreadsheet-id)}`, get-params(opts)), "", opts)
 }
 
-sheet-properties fn (sheet: Any): Map {
+sheet-properties
+meta {no-doc: true}
+fn (sheet: Any): Map {
   props if(is-map(sheet), get(sheet, "properties"), null)
   if(is-map(props), props, {title: Str(sheet)})
 }
@@ -63,6 +88,13 @@ meta {
     SheetProperties Maps; `opts.locale` (e.g. `"en_US"`) and
     `opts.timeZone` (e.g. `"America/Chicago"`) set the spreadsheet's
     defaults.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/build-spreadsheet("Q3 pipeline", {sheets: ["Leads"], timeZone: "America/Chicago"})
+    // {properties: {title: "Q3 pipeline", timeZone: "America/Chicago"}, sheets: [{properties: {title: "Leads"}}]}
+    ```
     """
 }
 fn (title: Str, opts: Map): Map {
@@ -99,7 +131,20 @@ fn
 
 batch-update-body
 meta {
-    doc: """The `batchUpdate` body (pure): `{requests}` plus `includeSpreadsheetInResponse`, `responseRanges` and `responseIncludeGridData` from `opts` when set."""
+    doc: """
+    The `batchUpdate` body (pure): `{requests}` plus
+    `includeSpreadsheetInResponse`, `responseRanges` and
+    `responseIncludeGridData` from `opts` when set.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/batch-update-body([{deleteSheet: {sheetId: 7}}], {includeSpreadsheetInResponse: true})
+    // {requests: [{deleteSheet: {sheetId: 7}}], includeSpreadsheetInResponse: true}
+
+    ::google::sheets::spreadsheets/batch-update-body([], {})  // {requests: []}
+    ```
+    """
 }
 fn (requests: Vec, opts: Map): Map {
   ::sheets/compact({
@@ -118,6 +163,18 @@ meta {
     Returns `{spreadsheetId, replies}`, one reply per request (empty for
     most; `addSheet` replies carry the new sheet's properties). If any
     request fails, none is applied. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::req ::google::sheets::requests
+
+    reply ::google::sheets::spreadsheets/batch-update("1AbCspreadsheetId", [
+      ::req/add-sheet("Archive"),
+      ::req/freeze(0, 1)
+    ])
+    reply.replies[0].addSheet.properties.sheetId
+    ```
     """
 }
 fn
@@ -134,7 +191,17 @@ fn
 
 list-sheets
 meta {
-    doc: """Every tab's properties (`sheetId`, `title`, `index`, `sheetType`, `gridProperties`), in order. Scope: `spreadsheets.readonly`."""
+    doc: """
+    Every tab's properties (`sheetId`, `title`, `index`, `sheetType`,
+    `gridProperties`), in order. Scope: `spreadsheets.readonly`.
+
+    **Example**
+
+    ```hot
+    tabs ::google::sheets::spreadsheets/list-sheets("1AbCspreadsheetId")
+    map(tabs, %.title)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str): Vec {
@@ -147,7 +214,17 @@ fn
 
 find-sheet
 meta {
-    doc: """The properties of the tab titled `title` (exact match), or null. Scope: `spreadsheets.readonly`."""
+    doc: """
+    The properties of the tab titled `title` (exact match), or null. Scope:
+    `spreadsheets.readonly`.
+
+    **Example**
+
+    ```hot
+    tab ::google::sheets::spreadsheets/find-sheet("1AbCspreadsheetId", "Leads")
+    if(is-some(tab), tab.sheetId, null)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, title: Str): Map? {
@@ -160,7 +237,18 @@ fn
 
 sheet-id
 meta {
-    doc: """The numeric `sheetId` of the tab titled `title` (what `::google::sheets::requests` builders take), or an Err when there is no such tab. Scope: `spreadsheets.readonly`."""
+    doc: """
+    The numeric `sheetId` of the tab titled `title` (what
+    `::google::sheets::requests` builders take), or an Err when there is no
+    such tab. Scope: `spreadsheets.readonly`.
+
+    **Example**
+
+    ```hot
+    leads-id ::google::sheets::spreadsheets/sheet-id("1AbCspreadsheetId", "Leads")
+    ::google::sheets::spreadsheets/freeze-rows("1AbCspreadsheetId", leads-id, 1)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, title: Str): Int {
@@ -177,7 +265,17 @@ fn
 
 add-sheet
 meta {
-    doc: """Add a tab and return its properties (with the new `sheetId`). Options as for `::google::sheets::requests/add-sheet`. Scope: `spreadsheets`."""
+    doc: """
+    Add a tab and return its properties (with the new `sheetId`). Options as
+    for `::google::sheets::requests/add-sheet`. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    tab ::google::sheets::spreadsheets/add-sheet("1AbCspreadsheetId", "Archive", {index: 0, rowCount: 500})
+    tab.sheetId
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, title: Str): Map {
@@ -189,7 +287,17 @@ fn
 }
 
 rename-sheet
-meta {doc: """Rename the tab `sheet-id`. Scope: `spreadsheets`."""}
+meta {
+    doc: """
+    Rename the tab `sheet-id`. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/rename-sheet("1AbCspreadsheetId", 0, "Archive")
+    ```
+    """
+}
 fn
 (spreadsheet-id: Str, sheet-id: Int, title: Str): Map {
   rename-sheet(spreadsheet-id, sheet-id, title, {})
@@ -200,7 +308,16 @@ fn
 
 delete-sheet
 meta {
-    doc: """Delete the tab `sheet-id` and its data (a spreadsheet must keep at least one tab). Scope: `spreadsheets`."""
+    doc: """
+    Delete the tab `sheet-id` and its data (a spreadsheet must keep at least
+    one tab). Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/delete-sheet("1AbCspreadsheetId", 123456)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, sheet-id: Int): Map {
@@ -212,7 +329,17 @@ fn
 
 duplicate-sheet
 meta {
-    doc: """Copy the tab `sheet-id` as `new-title` and return the copy's properties. Scope: `spreadsheets`."""
+    doc: """
+    Copy the tab `sheet-id` as `new-title` and return the copy's properties.
+    Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    copy ::google::sheets::spreadsheets/duplicate-sheet("1AbCspreadsheetId", 0, "Leads backup")
+    copy.sheetId
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, sheet-id: Int, new-title: Str): Map {
@@ -225,7 +352,19 @@ fn
 
 freeze-rows
 meta {
-    doc: """Freeze the first `rows` rows of a tab (0 unfreezes). Scope: `spreadsheets`."""
+    doc: """
+    Freeze the first `rows` rows of a tab (0 unfreezes). Scope:
+    `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/freeze-rows("1AbCspreadsheetId", 0, 1)
+
+    // Unfreeze
+    ::google::sheets::spreadsheets/freeze-rows("1AbCspreadsheetId", 0, 0)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, sheet-id: Int, rows: Int): Map {
@@ -237,7 +376,19 @@ fn
 
 auto-resize-columns
 meta {
-    doc: """Fit every column of a tab (or `start` to `end`, 0-based exclusive) to its content. Scope: `spreadsheets`."""
+    doc: """
+    Fit every column of a tab (or `start` to `end`, 0-based exclusive) to
+    its content. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/auto-resize-columns("1AbCspreadsheetId", 0)
+
+    // Columns A to C only
+    ::google::sheets::spreadsheets/auto-resize-columns("1AbCspreadsheetId", 0, 0, 3)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, sheet-id: Int): Map {
@@ -252,7 +403,16 @@ fn
 
 format-header
 meta {
-    doc: """Freeze and bold the first row of a tab, then fit its columns. Scope: `spreadsheets`."""
+    doc: """
+    Freeze and bold the first row of a tab, then fit its columns. Scope:
+    `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::spreadsheets/format-header("1AbCspreadsheetId", 0)
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, sheet-id: Int): Map {

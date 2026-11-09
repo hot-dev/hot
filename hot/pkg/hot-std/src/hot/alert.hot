@@ -34,7 +34,7 @@ meta {
     ```hot
     // Send a simple alert
     alert("user:high-value-signup", {
-        "user_id": user.id,
+        "user_id": "u-1",
         "plan": "enterprise",
         "value": 50000
     })
@@ -47,7 +47,7 @@ meta {
     })
 
     // Send using an Alert value
-    a Alert("deploy:rollback", {"reason": "health check failed"})
+    a ::hot::alert/Alert("deploy:rollback", {"reason": "health check failed"})
     alert(a)
     ```
 

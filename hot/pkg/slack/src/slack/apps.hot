@@ -17,7 +17,21 @@ AppsPermissionsInfoResponse type {
 
 apps-permissions-info
 meta {
-    doc: """GET /apps.permissions.info - Get the permissions this app has been granted. Returns the current set of scopes and resources available to the app."""
+    doc: """
+    GET /apps.permissions.info - Get the permissions this app has been
+    granted. Returns the current set of scopes and resources available to
+    the app.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-permissions-info()
+    response.info
+
+    // With a per-call token
+    ::slack::apps/apps-permissions-info({api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (): AppsPermissionsInfoResponse {
@@ -45,7 +59,21 @@ AppsPermissionsRequestResponse type {
 
 apps-permissions-request
 meta {
-    doc: """GET /apps.permissions.request - Request additional permissions from a user. Requires a `trigger_id` from an interactive event and a comma-separated list of scopes."""
+    doc: """
+    GET /apps.permissions.request - Request additional permissions from a
+    user. Requires a `trigger_id` from an interactive event and a
+    comma-separated list of scopes.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-permissions-request(::slack::apps/AppsPermissionsRequestRequest({
+      scopes: "channels:read,chat:write",
+      trigger_id: "13345224609.738474920.8088930838d88f008e0"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: AppsPermissionsRequestRequest): AppsPermissionsRequestResponse {
@@ -75,7 +103,19 @@ AppsPermissionsResourcesListResponse type {
 
 apps-permissions-resources-list
 meta {
-    doc: """GET /apps.permissions.resources.list - List resources granted to the app. Supports cursor-based pagination."""
+    doc: """
+    GET /apps.permissions.resources.list - List resources granted to the
+    app. Supports cursor-based pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-permissions-resources-list(::slack::apps/AppsPermissionsResourcesListRequest({
+      limit: 50
+    }))
+    response.resources
+    ```
+    """
 }
 fn
 (request: AppsPermissionsResourcesListRequest): AppsPermissionsResourcesListResponse {
@@ -99,7 +139,17 @@ AppsPermissionsScopesListResponse type {
 
 apps-permissions-scopes-list
 meta {
-    doc: """GET /apps.permissions.scopes.list - List the scopes this app has been granted. Returns app, user, and channel scopes."""
+    doc: """
+    GET /apps.permissions.scopes.list - List the scopes this app has been
+    granted. Returns app, user, and channel scopes.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-permissions-scopes-list()
+    response.scopes
+    ```
+    """
 }
 fn
 (): AppsPermissionsScopesListResponse {
@@ -131,7 +181,21 @@ AppsUninstallResponse type {
 
 apps-uninstall
 meta {
-    doc: """GET /apps.uninstall - Uninstall your app from a workspace. Requires `client_id` and `client_secret` for verification. This action is irreversible."""
+    doc: """
+    GET /apps.uninstall - Uninstall your app from a workspace. Requires
+    `client_id` and `client_secret` for verification. This action is
+    irreversible.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-uninstall(::slack::apps/AppsUninstallRequest({
+      client_id: ::hot::ctx/get("slack.client.id"),
+      client_secret: ::hot::ctx/get("slack.client.secret")
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: AppsUninstallRequest): AppsUninstallResponse {
@@ -162,7 +226,21 @@ AppsEventAuthorizationsListResponse type {
 
 apps-event-authorizations-list
 meta {
-    doc: """POST /apps.event.authorizations.list - List authorizations for the given event context. Used with org-wide apps to determine which workspaces authorized the event."""
+    doc: """
+    POST /apps.event.authorizations.list - List authorizations for the given
+    event context. Used with org-wide apps to determine which workspaces
+    authorized the event.
+
+    **Example**
+
+    ```hot
+    response ::slack::apps/apps-event-authorizations-list(::slack::apps/AppsEventAuthorizationsListRequest({
+      event_context: "4-eyJldCI6Im1lc3NhZ2UifQ",
+      limit: 50
+    }))
+    response.authorizations
+    ```
+    """
 }
 fn
 (request: AppsEventAuthorizationsListRequest): AppsEventAuthorizationsListResponse {

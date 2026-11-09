@@ -26,17 +26,19 @@ meta {
     per user per app, and one webhook per item per trigger set.
 
     ```hot
+    HttpResponse ::hot::http/HttpResponse
+
     box-webhook
     meta {webhook: {service: "box", path: "/box/webhook"}}
     fn (request) {
       cond {
         not(::box::webhooks/verify-request(request)) => {
-          ::hot::http/HttpResponse({status: 401, body: "invalid signature"})
+          HttpResponse({status: 401, body: "invalid signature"})
         }
         => {
           event ::box::webhooks/parse-delivery(request)
-          handle-box-event(event.trigger, event.source)
-          ::hot::http/HttpResponse({status: 200, body: "ok"})
+          println(`${event.trigger} ${event.source.id}`)
+          HttpResponse({status: 200, body: "ok"})
         }
       }
     }
@@ -62,7 +64,21 @@ TARGET_TYPES ["file", "folder"]
 
 webhook-body
 meta {
-    doc: """The webhook body (pure): `target: {type, id}`, `address` (HTTPS), `triggers` (e.g. `["FILE.UPLOADED", "FILE.TRASHED"]`). Null parts are dropped (for updates)."""
+    doc: """
+    The webhook body (pure): `target: {type, id}`, `address` (HTTPS),
+    `triggers` (e.g. `["FILE.UPLOADED", "FILE.TRASHED"]`). Null parts are
+    dropped (for updates).
+
+    **Example**
+
+    ```hot
+    body ::box::webhooks/webhook-body("folder", "123", "https://example.com/hook", ["FILE.UPLOADED"])
+    body.target  // {type: "folder", id: "123"}
+
+    // For an update, null parts are dropped
+    ::box::webhooks/webhook-body(null, null, "https://example.com/new", null)  // {address: "https://example.com/new"}
+    ```
+    """
 }
 fn (target-type: Str?, target-id: Str?, address: Str?, triggers: Vec?): Map {
   target if(or(is-null(target-type), is-null(target-id)), null, {type: target-type, id: target-id})
@@ -98,7 +114,18 @@ fn
 
 list-webhooks
 meta {
-    doc: """GET /webhooks - one page of the app's webhooks for the current user (marker paging: `{entries, next_marker, limit}`; `limit` up to 1000)."""
+    doc: """
+    GET /webhooks - one page of the app's webhooks for the current user
+    (marker paging: `{entries, next_marker, limit}`; `limit` up to 1000).
+
+    **Example**
+
+    ```hot
+    page ::box::webhooks/list-webhooks({limit: 100})
+    page.entries
+    page.next_marker
+    ```
+    """
 }
 fn
 (): Map {
@@ -109,7 +136,18 @@ fn
 }
 
 list-all-webhooks
-meta {doc: """Every webhook the app has for the current user (all marker pages)."""}
+meta {
+    doc: """
+    Every webhook the app has for the current user (all marker pages).
+
+    **Example**
+
+    ```hot
+    hooks ::box::webhooks/list-all-webhooks()
+    map(hooks, %.id)
+    ```
+    """
+}
 fn
 (): Vec {
   list-all-webhooks({})
@@ -119,7 +157,18 @@ fn
 }
 
 get-webhook
-meta {doc: """GET /webhooks/{id} - one webhook."""}
+meta {
+    doc: """
+    GET /webhooks/{id} - one webhook.
+
+    **Example**
+
+    ```hot
+    hook ::box::webhooks/get-webhook("789")
+    hook.triggers
+    ```
+    """
+}
 fn
 (webhook-id: Str): Map {
   get-webhook(webhook-id, {})
@@ -130,7 +179,17 @@ fn
 
 update-webhook
 meta {
-    doc: """PUT /webhooks/{id} - change `address`, `triggers` or `target` (`{type, id}`). Null values in `changes` are dropped."""
+    doc: """
+    PUT /webhooks/{id} - change `address`, `triggers` or `target` (`{type,
+    id}`). Null values in `changes` are dropped.
+
+    **Example**
+
+    ```hot
+    hook ::box::webhooks/update-webhook("789", {triggers: ["FILE.UPLOADED"]})
+    hook.triggers
+    ```
+    """
 }
 fn
 (webhook-id: Str, changes: Map): Map {
@@ -141,7 +200,17 @@ fn
 }
 
 delete-webhook
-meta {doc: """DELETE /webhooks/{id} - delete a webhook. Returns true."""}
+meta {
+    doc: """
+    DELETE /webhooks/{id} - delete a webhook. Returns true.
+
+    **Example**
+
+    ```hot
+    ::box::webhooks/delete-webhook("789")
+    ```
+    """
+}
 fn
 (webhook-id: Str): Bool {
   delete-webhook(webhook-id, {})
@@ -161,6 +230,14 @@ meta {
     Parse a `BOX-DELIVERY-TIMESTAMP` (RFC 3339 with an offset, e.g.
     `2026-11-01T12:00:00-07:00`, `Z`, optional fractional seconds) to Unix
     seconds, or null for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::box::webhooks/parse-timestamp("2026-11-01T12:00:00Z")  // 1793534400
+    ::box::webhooks/parse-timestamp("2026-11-01T05:00:00-07:00")  // 1793534400
+    ::box::webhooks/parse-timestamp("yesterday")  // null
+    ```
     """
 }
 fn (value: Str): Int? {
@@ -192,23 +269,38 @@ fn (value: Str): Int? {
   }
 }
 
-to-bytes fn (value: Any): Bytes {
+to-bytes
+meta {no-doc: true}
+fn (value: Any): Bytes {
   if(is-bytes(value), value, Bytes(Str(or(value, ""))))
 }
 
 signed-payload
 meta {
-    doc: """The bytes Box signs (pure): the raw body followed by the delivery timestamp. Exposed for testing."""
+    doc: """
+    The bytes Box signs (pure): the raw body followed by the delivery
+    timestamp. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    Str(::box::webhooks/signed-payload("{}", "2026-11-01T12:00:00Z"))  // "{}2026-11-01T12:00:00Z"
+    ```
+    """
 }
 fn (body: Any, timestamp: Str): Bytes {
   concat(to-bytes(body), Bytes(timestamp))
 }
 
-signature-matches fn (key: Str, payload: Bytes, signature: Str): Bool {
+signature-matches
+meta {no-doc: true}
+fn (key: Str, payload: Bytes, signature: Str): Bool {
   and(not(is-empty(key)), not(is-empty(signature)), ::hmac/hmac-verify-base64(key, payload, signature, "sha256"))
 }
 
-timestamp-ok fn (seconds: Int, max-age-seconds: Int): Bool {
+timestamp-ok
+meta {no-doc: true}
+fn (seconds: Int, max-age-seconds: Int): Bool {
   age sub(::time/epoch-seconds(), seconds)
   and(lte(age, max-age-seconds), gte(age, sub(0, MAX_FUTURE_SKEW_SECONDS)))
 }
@@ -223,6 +315,12 @@ meta {
     only trusted after a signature matched. A `max-age-seconds` of 0 or
     less skips the age check (for replaying stored test deliveries only).
     Explicit keys are marked as secrets.
+
+    **Example**
+
+    ```hot
+    ::box::webhooks/verification-failure({headers: {}}, null, null, 600)  // "no-key"
+    ```
     """
 }
 fn (request: Map, primary-key: Str?, secondary-key: Str?, max-age-seconds: Int): Str? {
@@ -265,6 +363,18 @@ meta {
     context variables and fails the run when neither is set; the other
     forms take the keys (either may be null or `""`, but not both) and an
     optional `max-age-seconds` (default 600). Returns a Bool.
+
+    **Example**
+
+    ```hot
+    request {headers: {box-delivery-timestamp: "2026-11-01T12:00:00Z"}, body-raw: "{}"}
+
+    // Keys from context
+    ok-from-context ::box::webhooks/verify-request(request)
+
+    // Explicit keys, and a 5 minute window
+    ::box::webhooks/verify-request(request, ::hot::ctx/get("box.webhook.primary-key"), ::hot::ctx/get("box.webhook.secondary-key"), 300)
+    ```
     """
 }
 fn
@@ -291,6 +401,14 @@ meta {
     source}`. `source` is the file or folder (mini form) the trigger fired
     on. Accepts a request (its parsed `body`, or `body-raw` as JSON) or
     an already decoded Map.
+
+    **Example**
+
+    ```hot
+    event ::box::webhooks/parse-delivery({body: {trigger: "FILE.UPLOADED", source: {id: "123", type: "file"}}})
+    event.trigger  // "FILE.UPLOADED"
+    event.source.id  // "123"
+    ```
     """
 }
 fn (request: Map): Map {

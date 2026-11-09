@@ -75,7 +75,9 @@ type {
     retry-after: Int?
 }
 
-decode-error-body fn (body: Any): Any {
+decode-error-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       parsed from-json(Str(body))
@@ -93,6 +95,18 @@ meta {
     errors: [{reason, ...}]}}` shape and the OAuth-style
     `{error: "invalid_grant", error_description}` shape. Fields are null
     (and `reasons` empty) when absent.
+
+    **Example**
+
+    ```hot
+    ::google::api/google-error-details({error: {
+      message: "File not found",
+      status: "NOT_FOUND",
+      errors: [{reason: "notFound"}]
+    }})  // {message: "File not found", status: "NOT_FOUND", reasons: ["notFound"]}
+
+    ::google::api/google-error-details({error: "invalid_grant", error_description: "Token expired"}).reasons  // ["invalid_grant"]
+    ```
     """
 }
 fn (body: Any): Map {
@@ -117,7 +131,18 @@ fn (body: Any): Map {
 
 body-excerpt
 meta {
-    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+    doc: """
+    A short (at most 300 characters) printable form of a response body, for
+    error messages.
+
+    **Example**
+
+    ```hot
+    ::google::api/body-excerpt("upstream error")  // "upstream error"
+    ::google::api/body-excerpt(null)  // ""
+    ::google::api/body-excerpt({ok: true})  // "{\"ok\":true}"
+    ```
+    """
 }
 fn (body: Any): Str {
   text cond {
@@ -153,7 +178,17 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 plain-payload
 meta {
-    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+    doc: """
+    The payload of a `Result.Err` (or the value itself), with type tags
+    removed so an `HttpError` / `TokenError` reads like a Map.
+
+    **Example**
+
+    ```hot
+    ::google::api/plain-payload(err({status: 404}))  // {status: 404}
+    ::google::api/plain-payload("connection refused")  // "connection refused"
+    ```
+    """
 }
 fn (value: Result): Any {
   payload if(is-err(value), err-value(value), value)
@@ -162,7 +197,18 @@ fn (value: Result): Any {
 
 has-reason
 meta {
-    doc: """True when `error` (an `HttpError`, a `Result.Err` holding one, or any error payload) carries the given Google `reason`."""
+    doc: """
+    True when `error` (an `HttpError`, a `Result.Err` holding one, or any
+    error payload) carries the given Google `reason`.
+
+    **Example**
+
+    ```hot
+    failure err({status: 403, reasons: ["insufficientFilePermissions"]})
+    ::google::api/has-reason(failure, "insufficientFilePermissions")  // true
+    ::google::api/has-reason(failure, "notFound")  // false
+    ```
+    """
 }
 fn (error: Result, reason: Str): Bool {
   payload plain-payload(error)
@@ -175,7 +221,18 @@ fn (error: Result, reason: Str): Bool {
 
 parse-int
 meta {
-    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else."""
+    doc: """
+    Parse an Int from an Int or a decimal-digit Str (surrounding whitespace
+    allowed); null for anything else.
+
+    **Example**
+
+    ```hot
+    ::google::api/parse-int(" 42 ")  // 42
+    ::google::api/parse-int(7)  // 7
+    ::google::api/parse-int("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -194,7 +251,18 @@ fn (value: Any): Int? {
 
 retry-after-seconds
 meta {
-    doc: """The `Retry-After` header of a response's `headers` as whole seconds (Int), or null when absent or given as an HTTP date."""
+    doc: """
+    The `Retry-After` header of a response's `headers` as whole seconds
+    (Int), or null when absent or given as an HTTP date.
+
+    **Example**
+
+    ```hot
+    ::google::api/retry-after-seconds({retry-after: "30"})  // 30
+    ::google::api/retry-after-seconds({retry-after: "Wed, 21 Oct 2026 07:28:00 GMT"})  // null
+    ::google::api/retry-after-seconds(null)  // null
+    ```
+    """
 }
 fn (headers: Map?): Int? {
   value get(or(headers, {}), "retry-after")
@@ -209,6 +277,14 @@ meta {
     `{max-retries: 0}` when `opts.retry` is `false` or `0`. An Int or
     `{max-retries}` Map is accepted and clamped to 0..1: google-core
     never waits between attempts, so it never retries more than once.
+
+    **Example**
+
+    ```hot
+    ::google::api/retry-policy({})  // {max-retries: 1}
+    ::google::api/retry-policy({retry: false})  // {max-retries: 0}
+    ::google::api/retry-policy({retry: 5})  // {max-retries: 1}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -224,7 +300,19 @@ fn (opts: Map): Map {
 
 is-retryable-status
 meta {
-    doc: """True for statuses Google asks clients to retry later: 408, 429, 5xx (500/502/503/504), and 403 with reason `rateLimitExceeded` / `userRateLimitExceeded`."""
+    doc: """
+    True for statuses Google asks clients to retry later: 408, 429, 5xx
+    (500/502/503/504), and 403 with reason `rateLimitExceeded` /
+    `userRateLimitExceeded`.
+
+    **Example**
+
+    ```hot
+    ::google::api/is-retryable-status(503, "")  // true
+    ::google::api/is-retryable-status(404, "")  // false
+    ::google::api/is-retryable-status(403, {error: {errors: [{reason: "rateLimitExceeded"}]}})  // true
+    ```
+    """
 }
 fn (status: Int, body: Any): Bool {
   cond {
@@ -239,7 +327,17 @@ fn (status: Int, body: Any): Bool {
 
 is-connection-failure
 meta {
-    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+    doc: """
+    True when a transport error message is a connection or read failure
+    (worth trying again), not a size-limit or URL error.
+
+    **Example**
+
+    ```hot
+    ::google::api/is-connection-failure("request failed: connection reset")  // true
+    ::google::api/is-connection-failure("response body exceeds the limit")  // false
+    ```
+    """
 }
 fn (message: Str): Bool {
   and(
@@ -250,7 +348,17 @@ fn (message: Str): Bool {
 
 is-retryable-transport
 meta {
-    doc: """True when a transport failure may be retried immediately: an idempotent method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure."""
+    doc: """
+    True when a transport failure may be retried immediately: an idempotent
+    method (GET, HEAD, PUT, DELETE, OPTIONS) and a connection failure.
+
+    **Example**
+
+    ```hot
+    ::google::api/is-retryable-transport("GET", "request failed: connection reset")  // true
+    ::google::api/is-retryable-transport("POST", "request failed: connection reset")  // false
+    ```
+    """
 }
 fn (method: Str, message: Str): Bool {
   and(in(uppercase(method), IDEMPOTENT_METHODS), is-connection-failure(message))
@@ -306,7 +414,22 @@ fn (error: Result): Bool {
 
 send-with-retry
 meta {
-    doc: """Send an `HttpRequest`; on a connection failure of an idempotent method, send it once more straight away (per `policy`). Never waits. Returns the final response or transport Err."""
+    doc: """
+    Send an `HttpRequest`; on a connection failure of an idempotent method,
+    send it once more straight away (per `policy`). Never waits. Returns the
+    final response or transport Err.
+
+    **Example**
+
+    ```hot
+    ::api ::google::api
+
+    token ::hot::ctx/get("google.access.token")
+    req ::api/build-http-request("GET", "https://www.googleapis.com/drive/v3/about?fields=user", {}, "", token)
+    response ::api/send-with-retry(req, ::api/retry-policy({}))
+    response.status
+    ```
+    """
 }
 fn
 (req: HttpRequest, policy: Map): HttpResponse {
@@ -328,7 +451,17 @@ fn
 
 api-params
 meta {
-    doc: """Strip google-core's own keys (`::google::auth/CREDENTIAL_KEYS`: credentials, `scopes`, `retry`) from an `opts` Map, leaving only API parameters."""
+    doc: """
+    Strip google-core's own keys (`::google::auth/CREDENTIAL_KEYS`:
+    credentials, `scopes`, `retry`) from an `opts` Map, leaving only API
+    parameters.
+
+    **Example**
+
+    ```hot
+    ::google::api/api-params({q: "reports", pageSize: 10, retry: false})  // {q: "reports", pageSize: 10}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
@@ -336,7 +469,16 @@ fn (opts: Map): Map {
 
 credential-opts
 meta {
-    doc: """Keep only google-core's own keys (credentials, `scopes`, `retry`) from an `opts` Map, e.g. to pass them on to a follow-up call."""
+    doc: """
+    Keep only google-core's own keys (credentials, `scopes`, `retry`) from
+    an `opts` Map, e.g. to pass them on to a follow-up call.
+
+    **Example**
+
+    ```hot
+    ::google::api/credential-opts({q: "reports", pageSize: 10, retry: false})  // {retry: false}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
@@ -350,6 +492,13 @@ meta {
     (`{labelIds: ["INBOX", "UNREAD"]}` gives
     `labelIds=INBOX&labelIds=UNREAD`), the way Google's repeated
     parameters expect. Works whether or not the URL already has a query.
+
+    **Example**
+
+    ```hot
+    ::google::api/with-query("https://example.com/v1", {labelIds: ["INBOX", "UNREAD"]})  // "https://example.com/v1?labelIds=INBOX&labelIds=UNREAD"
+    ::google::api/with-query("https://example.com/v1?a=1", {b: 2, c: null})  // "https://example.com/v1?a=1&b=2"
+    ```
     """
 }
 fn (url: Str, params: Map): Str {
@@ -375,6 +524,14 @@ meta {
     Bearer header. Map/Vec bodies are JSON-encoded with a JSON
     Content-Type; Str/Bytes bodies are sent verbatim (set Content-Type in
     `headers`); `""` or null sends no body. Caller headers win.
+
+    **Example**
+
+    ```hot
+    req ::google::api/build-http-request("POST", "https://example.com/v1/items", {}, {name: "a"}, null)
+    req.method  // "POST"
+    req.headers  // {Content-Type: "application/json; charset=UTF-8"}
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map, body: Any, token: Str?): HttpRequest {
@@ -472,7 +629,19 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response, the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+    doc: """
+    The decoded body of a 2xx response, the Err of a failed request, or
+    `err(HttpError)` for a non-2xx response.
+
+    **Example**
+
+    ```hot
+    ::google::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "a"}}))  // {id: "a"}
+
+    failed ::google::api/unwrap(::hot::http/HttpResponse({status: 404, headers: {}, body: ""}))
+    is-err(failed)  // true
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -484,7 +653,25 @@ fn (response: Result): Any {
 
 json
 meta {
-    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (credential failures carry `::google::auth/TokenError`). The shape used by all google-* endpoint functions. Takes the same arities as `request`."""
+    doc: """
+    Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err
+    carrying `HttpError` (credential failures carry
+    `::google::auth/TokenError`). The shape used by all google-* endpoint
+    functions. Takes the same arities as `request`.
+
+    **Example**
+
+    ```hot
+    about ::google::api/json("drive.readonly", "GET", "https://www.googleapis.com/drive/v3/about?fields=user")
+    about.user.emailAddress
+
+    // With per-call credentials, handling the failure
+    tenant ::google::api/json("drive.readonly", "GET", "https://www.googleapis.com/drive/v3/about?fields=user", {}, "", {
+      token: ::hot::ctx/get("tenant.google.token")
+    })
+    if(::google::api/has-reason(tenant, "authError"), "ask the user to reconnect", tenant.user)
+    ```
+    """
 }
 fn
 (scope: Str | Vec, method: Str, url: Str): Any {
@@ -543,7 +730,9 @@ fn (fetch: Fn, items-key: Str, page-token: Str?): Page {
   }
 }
 
-collect-loop fn (fetch: Fn, items-key: Str, limit: Int?, page-token: Str?, acc: Vec, pages: Int): Vec {
+collect-loop
+meta {no-doc: true}
+fn (fetch: Fn, items-key: Str, limit: Int?, page-token: Str?, acc: Vec, pages: Int): Vec {
   page fetch-page(fetch, items-key, page-token)
   cond {
     is-err(page) => { page }

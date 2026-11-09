@@ -28,7 +28,18 @@ Account type {
 
 mark-auth-token
 meta {
-    doc: """Mask the `auth_token` of an account response in call records. Returns `body` unchanged. Exposed for testing."""
+    doc: """
+    Mask the `auth_token` of an account response in call records. Returns
+    `body` unchanged. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::accounts ::twilio::accounts
+
+    ::accounts/mark-auth-token({sid: "AC123", status: "active"}).status  // "active"
+    ```
+    """
 }
 fn (body: Map): Map {
   if(is-str(get(body, "auth_token")), ::hot::ctx/mark-secret(body.auth_token))
@@ -78,7 +89,20 @@ UpdateAccountRequest type {
 update-account
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """POST /Accounts/{AccountSid}.json - Update account settings. Can change the `FriendlyName`, or set `Status` to "active", "suspended", or "closed" (subaccounts; closing is permanent)."""
+    doc: """
+    POST /Accounts/{AccountSid}.json - Update account settings. Can change
+    the `FriendlyName`, or set `Status` to "active", "suspended", or
+    "closed" (subaccounts; closing is permanent).
+
+    **Example**
+
+    ```hot
+    ::accounts ::twilio::accounts
+
+    account ::accounts/update-account(::accounts/UpdateAccountRequest({FriendlyName: "Acme Support"}))
+    account.friendly_name
+    ```
+    """
 }
 fn
 (request: UpdateAccountRequest): Account {
@@ -185,7 +209,20 @@ IncomingPhoneNumber type {
 get-incoming-phone-number
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Get details of a specific phone number by SID."""
+    doc: """
+    GET /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Get details
+    of a specific phone number by SID.
+
+    **Example**
+
+    ```hot
+    ::accounts ::twilio::accounts
+
+    number ::accounts/get-incoming-phone-number(::accounts/GetIncomingPhoneNumberRequest({sid: "PN123"}))
+    number.phone_number
+    number.capabilities
+    ```
+    """
 }
 fn
 (request: GetIncomingPhoneNumberRequest): IncomingPhoneNumber {
@@ -224,7 +261,19 @@ UpdateIncomingPhoneNumberRequest type {
 
 update-incoming-phone-number-body
 meta {
-    doc: """The form parameters `update-incoming-phone-number` sends (the request without its path `sid`). Exposed for testing."""
+    doc: """
+    The form parameters `update-incoming-phone-number` sends (the request
+    without its path `sid`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::accounts ::twilio::accounts
+
+    req ::accounts/UpdateIncomingPhoneNumberRequest({sid: "PN123", SmsUrl: "https://example.com/sms"})
+    ::accounts/update-incoming-phone-number-body(req)  // {SmsUrl: "https://example.com/sms"}
+    ```
+    """
 }
 fn (request: UpdateIncomingPhoneNumberRequest): Map {
   filter-vals(delete(untype(request), "sid"), is-some)
@@ -272,7 +321,20 @@ DeleteIncomingPhoneNumberRequest type {
 delete-incoming-phone-number
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """DELETE /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Release a phone number. The number is returned to Twilio's inventory and will no longer incur charges. This cannot be undone."""
+    doc: """
+    DELETE /Accounts/{AccountSid}/IncomingPhoneNumbers/{Sid}.json - Release
+    a phone number. The number is returned to Twilio's inventory and will no
+    longer incur charges. This cannot be undone.
+
+    **Example**
+
+    ```hot
+    ::accounts ::twilio::accounts
+
+    released ::accounts/delete-incoming-phone-number(::accounts/DeleteIncomingPhoneNumberRequest({sid: "PN123"}))
+    if(released, "Number released")
+    ```
+    """
 }
 fn
 (request: DeleteIncomingPhoneNumberRequest): Bool {

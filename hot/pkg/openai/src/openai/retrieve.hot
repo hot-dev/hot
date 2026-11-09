@@ -167,7 +167,21 @@ RetrieveBatchResponse type {
 
 
 retrieve-batch
-meta {doc: """GET /batches/{batch_id} - Retrieve the status and details of a batch."""}
+meta {
+    doc: """
+    GET /batches/{batch_id} - Retrieve the status and details of a batch.
+
+    **Example**
+
+    ```hot
+    batch ::openai::retrieve/retrieve-batch(::openai::retrieve/RetrieveBatchRequest({
+      batch-id: "batch_abc123"
+    }))
+    batch.status
+    batch.output_file_id
+    ```
+    """
+}
 fn
 (request: RetrieveBatchRequest): RetrieveBatchResponse {
   retrieve-batch(request, {})
@@ -199,7 +213,20 @@ RetrieveFileResponse type {
 
 
 retrieve-file
-meta {doc: """GET /files/{file_id} - Retrieve metadata about an uploaded file."""}
+meta {
+    doc: """
+    GET /files/{file_id} - Retrieve metadata about an uploaded file.
+
+    **Example**
+
+    ```hot
+    info ::openai::retrieve/retrieve-file(::openai::retrieve/RetrieveFileRequest({
+      file-id: "file-abc123"
+    }))
+    info.filename
+    ```
+    """
+}
 fn
 (request: RetrieveFileRequest): RetrieveFileResponse {
   retrieve-file(request, {})
@@ -242,7 +269,20 @@ RetrieveFineTuningJobResponse type {
 
 retrieve-finetuning-job
 meta {
-    doc: """GET /fine_tuning/jobs/{fine_tuning_job_id} - Retrieve the status and details of a fine-tuning job."""
+    doc: """
+    GET /fine_tuning/jobs/{fine_tuning_job_id} - Retrieve the status and
+    details of a fine-tuning job.
+
+    **Example**
+
+    ```hot
+    job ::openai::retrieve/retrieve-finetuning-job(::openai::retrieve/RetrieveFineTuningJobRequest({
+      fine-tuning-job-id: "ftjob_abc123"
+    }))
+    job.status
+    job.fine_tuned_model
+    ```
+    """
 }
 fn
 (request: RetrieveFineTuningJobRequest): RetrieveFineTuningJobResponse {
@@ -279,7 +319,7 @@ meta {
     **Example**
 
     ```hot
-    model ::openai::retrieve/retrieve-model(RetrieveModelRequest({model: "gpt-4o"}))
+    model ::openai::retrieve/retrieve-model(::openai::retrieve/RetrieveModelRequest({model: "gpt-4o"}))
     model.id       // => "gpt-4o"
     model.owned_by // => "system"
     ```
@@ -313,7 +353,20 @@ RetrieveVectorStoreFileContentResponse type {
 
 retrieve-vector-store-file-content
 meta {
-    doc: """GET /vector_stores/{vector_store_id}/files/{file_id}/content - Retrieve vector store file content"""
+    doc: """
+    GET /vector_stores/{vector_store_id}/files/{file_id}/content - Retrieve
+    vector store file content
+
+    **Example**
+
+    ```hot
+    page ::openai::retrieve/retrieve-vector-store-file-content(::openai::retrieve/RetrieveVectorStoreFileContentRequest({
+      vector-store-id: "vs_abc123",
+      file-id: "file-abc123"
+    }))
+    page.data
+    ```
+    """
 }
 fn
 (request: RetrieveVectorStoreFileContentRequest): RetrieveVectorStoreFileContentResponse {

@@ -4,7 +4,17 @@
 
 get-page
 meta {
-    doc: """GET /pages/{id} - A page's properties (not its content — use `::notion::blocks/get-children` for that)."""
+    doc: """
+    GET /pages/{id} - A page's properties (not its content — use
+    `::notion::blocks/get-children` for that).
+
+    **Example**
+
+    ```hot
+    page ::notion::pages/get-page("59833787-2cf9-4fdf-8782-e53db20768a5")
+    page.properties
+    ```
+    """
 }
 fn
 (page-id: Str): Map {
@@ -24,7 +34,7 @@ meta {
     **Example**
 
     ```hot
-    page ::notion::pages/create-page(parent-id, "Retro notes", [
+    page ::notion::pages/create-page("59833787-2cf9-4fdf-8782-e53db20768a5", "Retro notes", [
       ::notion/heading(2, "What went well"),
       ::notion/bullet("The webhook primitives held up")
     ])
@@ -58,7 +68,7 @@ meta {
     **Example**
 
     ```hot
-    ::notion::pages/create-database-page(db-id, {
+    ::notion::pages/create-database-page("d9824bdc-8445-4327-be8b-5b47500af6ce", {
       Name: {title: ::notion/rich-text("Ship web-search")},
       Status: {status: {name: "In progress"}},
       Priority: {number: 2}
@@ -79,7 +89,19 @@ fn
 
 update-page
 meta {
-    doc: """PATCH /pages/{id} - Update page properties (same shapes as `create-database-page`); `{archived: true}` moves a page to the trash via `archive-page`."""
+    doc: """
+    PATCH /pages/{id} - Update page properties (same shapes as
+    `create-database-page`); `{archived: true}` moves a page to the trash
+    via `archive-page`.
+
+    **Example**
+
+    ```hot
+    ::notion::pages/update-page("59833787-2cf9-4fdf-8782-e53db20768a5", {
+      Status: {status: {name: "Done"}}
+    })
+    ```
+    """
 }
 fn
 (page-id: Str, properties: Map): Map {
@@ -91,7 +113,15 @@ fn
 
 archive-page
 meta {
-    doc: """PATCH /pages/{id} with `archived: true` - Move a page to the trash."""
+    doc: """
+    PATCH /pages/{id} with `archived: true` - Move a page to the trash.
+
+    **Example**
+
+    ```hot
+    ::notion::pages/archive-page("59833787-2cf9-4fdf-8782-e53db20768a5")
+    ```
+    """
 }
 fn
 (page-id: Str): Map {

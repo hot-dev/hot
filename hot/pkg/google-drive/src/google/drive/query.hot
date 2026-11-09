@@ -27,7 +27,18 @@ QUOTE "'"
 
 quote
 meta {
-    doc: """Quote a string value for a Drive query: wraps in single quotes, escaping `\\` as `\\\\` and `'` as `\\'`. `quote("Valentine's Day")` is `'Valentine\\'s Day'`."""
+    doc: """
+    Quote a string value for a Drive query: wraps in single quotes, escaping
+    `\\` as `\\\\` and `'` as `\\'`. `quote("Valentine's Day")` is
+    `'Valentine\\'s Day'`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/quote("a.txt")  // "'a.txt'"
+    ::google::drive::query/quote("Valentine's Day")  // "'Valentine\\'s Day'"
+    ```
+    """
 }
 fn (value: Str): Str {
   escaped replace(replace(value, BACKSLASH, concat(BACKSLASH, BACKSLASH)), QUOTE, concat(BACKSLASH, QUOTE))
@@ -36,93 +47,288 @@ fn (value: Str): Str {
 
 term
 meta {
-    doc: """A raw `field operator 'value'` term with the value quoted, e.g. `term("name", "=", "a.txt")`. Escape hatch for terms without a helper."""
+    doc: """
+    A raw `field operator 'value'` term with the value quoted, e.g.
+    `term("name", "=", "a.txt")`. Escape hatch for terms without a helper.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/term("name", "=", "a.txt")  // "name = 'a.txt'"
+    ```
+    """
 }
 fn (field: Str, operator: Str, value: Str): Str {
   `${field} ${operator} ${quote(value)}`
 }
 
 name-is
-meta {doc: """`name = '...'` (exact name)."""}
+meta {
+    doc: """
+    `name = '...'` (exact name).
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/name-is("a.txt")  // "name = 'a.txt'"
+    ```
+    """
+}
 fn (name: Str): Str { term("name", "=", name) }
 
 name-contains
-meta {doc: """`name contains '...'` (Drive matches name prefixes / word starts)."""}
+meta {
+    doc: """
+    `name contains '...'` (Drive matches name prefixes / word starts).
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/name-contains("roadmap")  // "name contains 'roadmap'"
+    ```
+    """
+}
 fn (text: Str): Str { term("name", "contains", text) }
 
 full-text-contains
 meta {
-    doc: """`fullText contains '...'` (name, description, indexable text and content; whole tokens). Wrap the text in double quotes for a phrase."""
+    doc: """
+    `fullText contains '...'` (name, description, indexable text and
+    content; whole tokens). Wrap the text in double quotes for a phrase.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/full-text-contains("budget")  // "fullText contains 'budget'"
+    ```
+    """
 }
 fn (text: Str): Str { term("fullText", "contains", text) }
 
 mime-type-is
-meta {doc: """`mimeType = '...'`."""}
+meta {
+    doc: """
+    `mimeType = '...'`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/mime-type-is("application/pdf")  // "mimeType = 'application/pdf'"
+    ```
+    """
+}
 fn (mime-type: Str): Str { term("mimeType", "=", mime-type) }
 
 mime-type-is-not
-meta {doc: """`mimeType != '...'`."""}
+meta {
+    doc: """
+    `mimeType != '...'`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/mime-type-is-not("application/pdf")  // "mimeType != 'application/pdf'"
+    ```
+    """
+}
 fn (mime-type: Str): Str { term("mimeType", "!=", mime-type) }
 
 is-folder
-meta {doc: """Folders only."""}
+meta {
+    doc: """
+    Folders only.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/is-folder()  // "mimeType = 'application/vnd.google-apps.folder'"
+    ```
+    """
+}
 fn (): Str { mime-type-is(::google::drive/FOLDER_MIME) }
 
 not-folder
-meta {doc: """Everything except folders."""}
+meta {
+    doc: """
+    Everything except folders.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/not-folder()  // "mimeType != 'application/vnd.google-apps.folder'"
+    ```
+    """
+}
 fn (): Str { mime-type-is-not(::google::drive/FOLDER_MIME) }
 
 in-folder
-meta {doc: """`'<id>' in parents`: direct children of a folder (not descendants)."""}
+meta {
+    doc: """
+    `'<id>' in parents`: direct children of a folder (not descendants).
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/in-folder("1AbCfolder")  // "'1AbCfolder' in parents"
+    ```
+    """
+}
 fn (folder-id: Str): Str { `${quote(folder-id)} in parents` }
 
 in-parents
-meta {doc: """Alias of `in-folder`."""}
+meta {
+    doc: """
+    Alias of `in-folder`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/in-parents("1AbCfolder")  // "'1AbCfolder' in parents"
+    ```
+    """
+}
 fn (folder-id: Str): Str { in-folder(folder-id) }
 
 owned-by
-meta {doc: """`'<email>' in owners`."""}
+meta {
+    doc: """
+    `'<email>' in owners`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/owned-by("ada@example.com")  // "'ada@example.com' in owners"
+    ```
+    """
+}
 fn (email: Str): Str { `${quote(email)} in owners` }
 
 modified-after
 meta {
-    doc: """`modifiedTime > '<RFC 3339>'`, e.g. `"2026-10-01T00:00:00Z"` (UTC unless an offset is given)."""
+    doc: """
+    `modifiedTime > '<RFC 3339>'`, e.g. `"2026-10-01T00:00:00Z"` (UTC unless
+    an offset is given).
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/modified-after("2026-10-01T00:00:00Z")  // "modifiedTime > '2026-10-01T00:00:00Z'"
+    ```
+    """
 }
 fn (timestamp: Str): Str { term("modifiedTime", ">", timestamp) }
 
 modified-before
-meta {doc: """`modifiedTime < '<RFC 3339>'`."""}
+meta {
+    doc: """
+    `modifiedTime < '<RFC 3339>'`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/modified-before("2026-10-01T00:00:00Z")  // "modifiedTime < '2026-10-01T00:00:00Z'"
+    ```
+    """
+}
 fn (timestamp: Str): Str { term("modifiedTime", "<", timestamp) }
 
 created-after
-meta {doc: """`createdTime > '<RFC 3339>'`."""}
+meta {
+    doc: """
+    `createdTime > '<RFC 3339>'`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/created-after("2026-10-01T00:00:00Z")  // "createdTime > '2026-10-01T00:00:00Z'"
+    ```
+    """
+}
 fn (timestamp: Str): Str { term("createdTime", ">", timestamp) }
 
 not-trashed
 meta {
-    doc: """`trashed = false`. Drive includes trashed files unless you ask otherwise."""
+    doc: """
+    `trashed = false`. Drive includes trashed files unless you ask
+    otherwise.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/not-trashed()  // "trashed = false"
+    ```
+    """
 }
 fn (): Str { "trashed = false" }
 
 trashed
-meta {doc: """`trashed = true`."""}
+meta {
+    doc: """
+    `trashed = true`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/trashed()  // "trashed = true"
+    ```
+    """
+}
 fn (): Str { "trashed = true" }
 
 starred
-meta {doc: """`starred = true`."""}
+meta {
+    doc: """
+    `starred = true`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/starred()  // "starred = true"
+    ```
+    """
+}
 fn (): Str { "starred = true" }
 
 shared-with-me
-meta {doc: """`sharedWithMe = true`."""}
+meta {
+    doc: """
+    `sharedWithMe = true`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/shared-with-me()  // "sharedWithMe = true"
+    ```
+    """
+}
 fn (): Str { "sharedWithMe = true" }
 
 shortcut-to
-meta {doc: """`shortcutDetails.targetId = '<id>'`: shortcuts pointing at a file."""}
+meta {
+    doc: """
+    `shortcutDetails.targetId = '<id>'`: shortcuts pointing at a file.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/shortcut-to("1AbCfile")  // "shortcutDetails.targetId = '1AbCfile'"
+    ```
+    """
+}
 fn (target-id: Str): Str { term("shortcutDetails.targetId", "=", target-id) }
 
 has-property
 meta {
-    doc: """`properties has { key='k' and value='v' }` (public custom properties). Use `app-property` for `appProperties`."""
+    doc: """
+    `properties has { key='k' and value='v' }` (public custom properties).
+    Use `app-property` for `appProperties`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/has-property("team", "eng")  // "properties has { key='team' and value='eng' }"
+    ```
+    """
 }
 fn (key: Str, value: Str): Str {
   `properties has { key=${quote(key)} and value=${quote(value)} }`
@@ -130,13 +336,24 @@ fn (key: Str, value: Str): Str {
 
 app-property
 meta {
-    doc: """`appProperties has { key='k' and value='v' }` (private to your OAuth client)."""
+    doc: """
+    `appProperties has { key='k' and value='v' }` (private to your OAuth
+    client).
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/app-property("job", "42")  // "appProperties has { key='job' and value='42' }"
+    ```
+    """
 }
 fn (key: Str, value: Str): Str {
   `appProperties has { key=${quote(key)} and value=${quote(value)} }`
 }
 
-group fn (terms: Vec, joiner: Str): Str {
+group
+meta {no-doc: true}
+fn (terms: Vec, joiner: Str): Str {
   parts filter(terms, (t) { and(is-str(t), not(is-empty(trim(t)))) })
   cond {
     is-empty(parts) => { "" }
@@ -147,7 +364,20 @@ group fn (terms: Vec, joiner: Str): Str {
 
 all-of
 meta {
-    doc: """Join terms with `and`. Empty or null terms are skipped; compound terms (containing `and`/`or`) are parenthesised."""
+    doc: """
+    Join terms with `and`. Empty or null terms are skipped; compound terms
+    (containing `and`/`or`) are parenthesised.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/all-of(::google::drive::query/name-contains("Q3"), ::google::drive::query/not-trashed())
+    // "name contains 'Q3' and trashed = false"
+
+    // Empty and null terms are skipped
+    ::google::drive::query/all-of(::google::drive::query/starred(), null)  // "starred = true"
+    ```
+    """
 }
 fn (...terms: Any): Str {
   group(terms, " and ")
@@ -155,14 +385,35 @@ fn (...terms: Any): Str {
 
 any-of
 meta {
-    doc: """Join terms with `or`. Empty or null terms are skipped; compound terms are parenthesised, and `all-of` parenthesises the result when you combine it further."""
+    doc: """
+    Join terms with `or`. Empty or null terms are skipped; compound terms
+    are parenthesised, and `all-of` parenthesises the result when you
+    combine it further.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/any-of(::google::drive::query/starred(), ::google::drive::query/shared-with-me())
+    // "starred = true or sharedWithMe = true"
+    ```
+    """
 }
 fn (...terms: Any): Str {
   group(terms, " or ")
 }
 
 negate
-meta {doc: """`not (<term>)`."""}
+meta {
+    doc: """
+    `not (<term>)`.
+
+    **Example**
+
+    ```hot
+    ::google::drive::query/negate(::google::drive::query/starred())  // "not (starred = true)"
+    ```
+    """
+}
 fn (term: Str): Str {
   `not (${term})`
 }

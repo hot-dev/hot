@@ -11,7 +11,21 @@ TITLE_TYPES ["TITLE", "CENTERED_TITLE"]
 
 text-content
 meta {
-    doc: """A `TextContent`'s text: its text runs and auto text joined."""
+    doc: """
+    A `TextContent`'s text: its text runs and auto text joined.
+
+    **Example**
+
+    ```hot
+    ::google::slides::content/text-content({textElements: [
+      {paragraphMarker: {}},
+      {textRun: {content: "Slide "}},
+      {autoText: {content: "3"}}
+    ]})  // "Slide 3"
+
+    ::google::slides::content/text-content(null)  // ""
+    ```
+    """
 }
 fn (text: Any): Str {
   elements if(is-map(text), or(get(text, "textElements"), []), [])
@@ -20,7 +34,9 @@ fn (text: Any): Str {
   }), "")
 }
 
-table-text fn (table: Map): Str {
+table-text
+meta {no-doc: true}
+fn (table: Map): Str {
   join(map(or(get(table, "tableRows"), []), (row) {
     join(map(or(get(row, "tableCells"), []), (cell) { text-content(get(cell, "text")) }), "")
   }), "")
@@ -28,7 +44,17 @@ table-text fn (table: Map): Str {
 
 element-text
 meta {
-    doc: """A page element's text, from a shape, a table (cell after cell) or a group (child after child); empty for images, lines and the like."""
+    doc: """
+    A page element's text, from a shape, a table (cell after cell) or a
+    group (child after child); empty for images, lines and the like.
+
+    **Example**
+
+    ```hot
+    ::google::slides::content/element-text({shape: {text: {textElements: [{textRun: {content: "Hi\n"}}]}}})  // "Hi\n"
+    ::google::slides::content/element-text({image: {contentUrl: "https://example.com/a.png"}})  // ""
+    ```
+    """
 }
 fn cond (element: Map): Str {
   is-some(get(element, "shape")) => { text-content(get(element.shape, "text")) }
@@ -37,46 +63,122 @@ fn cond (element: Map): Str {
   => { "" }
 }
 
-page-elements fn (page: Map): Vec {
+page-elements
+meta {no-doc: true}
+fn (page: Map): Vec {
   or(get(page, "pageElements"), [])
 }
 
-trim-text fn (text: Str): Str {
+flatten-elements
+meta {no-doc: true}
+fn (elements: Vec): Vec {
+  mapcat(elements, (e) { concat([e], flatten-elements(or(get-in(e, ["elementGroup", "children"]), []))) })
+}
+
+all-elements
+meta {no-doc: true}
+fn (page: Map): Vec {
+  flatten-elements(page-elements(page))
+}
+
+trim-text
+meta {no-doc: true}
+fn (text: Str): Str {
   trim(text)
 }
 
-placeholder-type fn (element: Map): Str? {
+placeholder-type
+meta {no-doc: true}
+fn (element: Map): Str? {
   get-in(element, ["shape", "placeholder", "type"])
 }
 
 find-placeholder
 meta {
-    doc: """The first element on a page whose placeholder type is `kind` (`TITLE`, `CENTERED_TITLE`, `SUBTITLE`, `BODY`, ...), or null."""
+    doc: """
+    The first element on a page whose placeholder type is `kind` (`TITLE`,
+    `CENTERED_TITLE`, `SUBTITLE`, `BODY`, ...), or null. Looks inside
+    groups.
+
+    **Example**
+
+    ```hot
+    slide {pageElements: [
+      {objectId: "t", shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3 review\n"}}]}}},
+      {objectId: "b", shape: {placeholder: {type: "BODY", index: 0}, text: {textElements: [{textRun: {content: "Revenue up\n"}}]}}}
+    ]}
+
+    ::google::slides::content/find-placeholder(slide, "BODY").objectId  // "b"
+    ::google::slides::content/find-placeholder(slide, "SUBTITLE")  // null
+    ```
+    """
 }
 fn (page: Map, kind: Str): Map? {
-  find-first(page-elements(page), (e) { eq(placeholder-type(e), kind) })
+  find-first(all-elements(page), (e) { eq(placeholder-type(e), kind) })
 }
 
 find-element
 meta {
-    doc: """The element on a page with this `objectId`, or null."""
+    doc: """
+    The element on a page with this `objectId`, or null. Looks inside
+    groups.
+
+    **Example**
+
+    ```hot
+    slide {pageElements: [
+      {objectId: "t", shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3 review\n"}}]}}},
+      {objectId: "b", shape: {placeholder: {type: "BODY", index: 0}, text: {textElements: [{textRun: {content: "Revenue up\n"}}]}}}
+    ]}
+
+    ::google::slides::content/find-element(slide, "t").shape.placeholder.type  // "TITLE"
+    ::google::slides::content/find-element(slide, "missing")  // null
+    ```
+    """
 }
 fn (page: Map, object-id: Str): Map? {
-  find-first(page-elements(page), (e) { eq(get(e, "objectId"), object-id) })
+  find-first(all-elements(page), (e) { eq(get(e, "objectId"), object-id) })
 }
 
 slide-title
 meta {
-    doc: """A slide's title placeholder text, trimmed; null when it has no title placeholder."""
+    doc: """
+    A slide's title placeholder text, trimmed; null when it has no title
+    placeholder. Looks inside groups.
+
+    **Example**
+
+    ```hot
+    slide {pageElements: [
+      {objectId: "t", shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3 review\n"}}]}}},
+      {objectId: "b", shape: {placeholder: {type: "BODY", index: 0}, text: {textElements: [{textRun: {content: "Revenue up\n"}}]}}}
+    ]}
+
+    ::google::slides::content/slide-title(slide)  // "Q3 review"
+    ::google::slides::content/slide-title({})  // null
+    ```
+    """
 }
 fn (slide: Map): Str? {
-  el find-first(page-elements(slide), (e) { in(placeholder-type(e), TITLE_TYPES) })
+  el find-first(all-elements(slide), (e) { in(placeholder-type(e), TITLE_TYPES) })
   if(is-null(el), null, trim-text(element-text(el)))
 }
 
 slide-text
 meta {
-    doc: """All text on a slide, element after element, including the title."""
+    doc: """
+    All text on a slide, element after element, including the title.
+
+    **Example**
+
+    ```hot
+    slide {pageElements: [
+      {objectId: "t", shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3 review\n"}}]}}},
+      {objectId: "b", shape: {placeholder: {type: "BODY", index: 0}, text: {textElements: [{textRun: {content: "Revenue up\n"}}]}}}
+    ]}
+    ::google::slides::content/slide-text(slide)  // "Q3 review\nRevenue up\n"
+    ```
+    """
 }
 fn (slide: Map): Str {
   join(map(page-elements(slide), element-text), "")
@@ -84,7 +186,21 @@ fn (slide: Map): Str {
 
 speaker-notes
 meta {
-    doc: """A slide's speaker notes, trimmed; empty when it has none."""
+    doc: """
+    A slide's speaker notes, trimmed; empty when it has none.
+
+    **Example**
+
+    ```hot
+    slide {slideProperties: {notesPage: {
+      notesProperties: {speakerNotesObjectId: "n"},
+      pageElements: [{objectId: "n", shape: {text: {textElements: [{textRun: {content: " Say hi \n"}}]}}}]
+    }}}
+
+    ::google::slides::content/speaker-notes(slide)  // "Say hi"
+    ::google::slides::content/speaker-notes({})  // ""
+    ```
+    """
 }
 fn (slide: Map): Str {
   notes get-in(slide, ["slideProperties", "notesPage"])
@@ -93,13 +209,42 @@ fn (slide: Map): Str {
   if(is-null(el), "", trim-text(element-text(el)))
 }
 
-slide-outline fn (slide: Map): Map {
+slide-outline
+meta {
+    doc: """
+    One slide as `{id, title, text, notes}`, the record `outline` returns
+    for each slide. Use it on a single page from `get-page`. `text` includes
+    the title.
+
+    **Example**
+
+    ```hot
+    slide {objectId: "s1", pageElements: [
+      {shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3\n"}}]}}}
+    ]}
+    ::google::slides::content/slide-outline(slide)  // {id: "s1", title: "Q3", text: "Q3\n", notes: ""}
+    ```
+    """
+}
+fn (slide: Map): Map {
   {id: get(slide, "objectId"), title: slide-title(slide), text: slide-text(slide), notes: speaker-notes(slide)}
 }
 
 outline
 meta {
-    doc: """Every slide of a presentation as `{id, title, text, notes}`, in order. `text` includes the title."""
+    doc: """
+    Every slide of a presentation as `{id, title, text, notes}`, in order.
+    `text` includes the title.
+
+    **Example**
+
+    ```hot
+    deck {slides: [{objectId: "s1", pageElements: [
+      {shape: {placeholder: {type: "TITLE", index: 0}, text: {textElements: [{textRun: {content: "Q3\n"}}]}}}
+    ]}]}
+    ::google::slides::content/outline(deck)  // [{id: "s1", title: "Q3", text: "Q3\n", notes: ""}]
+    ```
+    """
 }
 fn (presentation: Map): Vec {
   map(or(get(presentation, "slides"), []), slide-outline)

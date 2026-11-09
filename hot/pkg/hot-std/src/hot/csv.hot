@@ -129,7 +129,7 @@ meta {
 
     ```hot
     rows iter-csv(read-file-stream("customers.csv"), {types: {id: "Int"}})
-    for-each(rows, (row) { import-customer(row) })
+    for-each(rows, (row) { println(row.id) })
 
     response ::hot::http/get-stream("https://example.com/export.csv")
     total reduce(iter-csv(response.body), (sum, row) { add(sum, Dec(row.amount)) }, 0)

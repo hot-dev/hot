@@ -103,6 +103,18 @@ meta {
     up to `limit` (1-200). Page with `before`/`after` guild ids, or use
     `get-all-current-user-guilds`. Apps on large bot sharding must pass
     `shard`.
+
+    **Example**
+
+    ```hot
+    ::users ::discord::users
+
+    guilds ::users/get-current-user-guilds(::users/GetCurrentUserGuildsRequest({
+      limit: 200,
+      with_counts: true
+    }))
+    map(guilds, %.name)
+    ```
     """
 }
 fn
@@ -123,7 +135,17 @@ fn
 
 get-all-current-user-guilds
 meta {
-    doc: """Every guild the bot is in (up to `max-items`, default 1000), paging with `after` 200 at a time."""
+    doc: """
+    Every guild the bot is in (up to `max-items`, default 1000), paging with
+    `after` 200 at a time.
+
+    **Example**
+
+    ```hot
+    guilds ::discord::users/get-all-current-user-guilds(500)
+    map(guilds, %.id)
+    ```
+    """
 }
 fn
 (): Vec<Map> {
@@ -147,7 +169,20 @@ GetCurrentUserGuildMemberRequest type {
 
 get-current-user-guild-member
 meta {
-    doc: """GET /users/@me/guilds/{guild_id}/member - The current user's member object in a guild. Needs the `guilds.members.read` OAuth2 scope (user tokens); bots should use `::discord::guilds/get-guild-member`."""
+    doc: """
+    GET /users/@me/guilds/{guild_id}/member - The current user's member
+    object in a guild. Needs the `guilds.members.read` OAuth2 scope (user
+    tokens); bots should use `::discord::guilds/get-guild-member`.
+
+    **Example**
+
+    ```hot
+    ::users ::discord::users
+
+    member ::users/get-current-user-guild-member(::users/GetCurrentUserGuildMemberRequest({guild_id: "1000000000000000000"}))
+    member.roles
+    ```
+    """
 }
 fn
 (request: GetCurrentUserGuildMemberRequest): Map {
@@ -163,7 +198,17 @@ LeaveGuildRequest type {
 
 leave-guild
 meta {
-    doc: """DELETE /users/@me/guilds/{guild_id} - Make the bot leave a guild."""
+    doc: """
+    DELETE /users/@me/guilds/{guild_id} - Make the bot leave a guild.
+
+    **Example**
+
+    ```hot
+    ::users ::discord::users
+
+    ::users/leave-guild(::users/LeaveGuildRequest({guild_id: "1000000000000000000"}))
+    ```
+    """
 }
 fn
 (request: LeaveGuildRequest): Bool {
@@ -204,7 +249,18 @@ fn
 
 get-current-user-connections
 meta {
-    doc: """GET /users/@me/connections - The current user's connected accounts. Needs a user OAuth2 token with the `connections` scope; bot tokens are rejected."""
+    doc: """
+    GET /users/@me/connections - The current user's connected accounts.
+    Needs a user OAuth2 token with the `connections` scope; bot tokens are
+    rejected.
+
+    **Example**
+
+    ```hot
+    connections ::discord::users/get-current-user-connections()
+    map(connections, %.type)
+    ```
+    """
 }
 fn
 (): Vec<Map> {

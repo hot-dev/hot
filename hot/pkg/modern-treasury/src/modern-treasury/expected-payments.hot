@@ -51,7 +51,18 @@ fn
 
 get-expected-payment
 meta {
-    doc: """GET /api/expected_payments/{id}: retrieve an expected payment, with its `status` (`unreconciled`, `partially_reconciled`, `reconciled`, `archived`) and `transaction_id` once matched."""
+    doc: """
+    GET /api/expected_payments/{id}: retrieve an expected payment, with its
+    `status` (`unreconciled`, `partially_reconciled`, `reconciled`,
+    `archived`) and `transaction_id` once matched.
+
+    **Example**
+
+    ```hot
+    expected ::modern-treasury::expected-payments/get-expected-payment("a41f6d27-90c3-4b7e-b2d8-5e3c17f8a096")
+    expected.status
+    ```
+    """
 }
 fn
 (expected-payment-id: Str): Map {
@@ -63,7 +74,20 @@ fn
 
 list-expected-payments
 meta {
-    doc: """GET /api/expected_payments: one page. Filters: `status`, `type`, `direction`, `internal_account_id`, `counterparty_id`, `external_id`, `created_at_lower_bound`, `created_at_upper_bound`, `updated_at_lower_bound`, `updated_at_upper_bound`, `metadata`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/expected_payments: one page. Filters: `status`, `type`,
+    `direction`, `internal_account_id`, `counterparty_id`, `external_id`,
+    `created_at_lower_bound`, `created_at_upper_bound`,
+    `updated_at_lower_bound`, `updated_at_upper_bound`, `metadata`,
+    `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::expected-payments/list-expected-payments({status: "unreconciled", per_page: 50})
+    map(page.items, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -78,7 +102,16 @@ fn
 
 update-expected-payment
 meta {
-    doc: """PATCH /api/expected_payments/{id}: change the bounds, description, metadata or rule variables of an unreconciled expected payment."""
+    doc: """
+    PATCH /api/expected_payments/{id}: change the bounds, description,
+    metadata or rule variables of an unreconciled expected payment.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::expected-payments/update-expected-payment("a41f6d27-90c3-4b7e-b2d8-5e3c17f8a096", {date_upper_bound: "2026-11-12"})
+    ```
+    """
 }
 fn
 (expected-payment-id: Str, params: Map): Map {
@@ -90,7 +123,16 @@ fn
 
 reconcile-expected-payment
 meta {
-    doc: """Mark an expected payment reconciled by hand (`PATCH {status: "reconciled"}`), when you have matched it yourself."""
+    doc: """
+    Mark an expected payment reconciled by hand (`PATCH {status:
+    "reconciled"}`), when you have matched it yourself.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::expected-payments/reconcile-expected-payment("a41f6d27-90c3-4b7e-b2d8-5e3c17f8a096")
+    ```
+    """
 }
 fn
 (expected-payment-id: Str): Map {
@@ -102,7 +144,16 @@ fn
 
 delete-expected-payment
 meta {
-    doc: """DELETE /api/expected_payments/{id}: archive an expected payment so it no longer reconciles."""
+    doc: """
+    DELETE /api/expected_payments/{id}: archive an expected payment so it no
+    longer reconciles.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::expected-payments/delete-expected-payment("a41f6d27-90c3-4b7e-b2d8-5e3c17f8a096")
+    ```
+    """
 }
 fn
 (expected-payment-id: Str): Any {

@@ -27,7 +27,7 @@ meta {
     ```hot
     card ::increase::cards/create-card({account_id: "account_in71c4amph0vgo2qllky", description: "Travel card"},
       {idempotency-key: "card-travel-ada"})
-    card.last4   // => "4242"
+    card.last4
     ```
     """
 }
@@ -41,7 +41,17 @@ fn
 
 get-card
 meta {
-    doc: """GET /cards/{card_id}: retrieve a Card (its `last4` and expiration, not the full number)."""
+    doc: """
+    GET /cards/{card_id}: retrieve a Card (its `last4` and expiration, not
+    the full number).
+
+    **Example**
+
+    ```hot
+    card ::increase::cards/get-card("card_oubs0hwk5rn6knuecxg2")
+    card.last4
+    ```
+    """
 }
 fn
 (card-id: Str): Map {
@@ -53,7 +63,18 @@ fn
 
 list-cards
 meta {
-    doc: """GET /cards: one page of Cards. Filters: `account_id`, `"status.in"` (`active`, `disabled`, `canceled`), `created_at`, `idempotency_key`, `limit`, `cursor`."""
+    doc: """
+    GET /cards: one page of Cards. Filters: `account_id`, `"status.in"`
+    (`active`, `disabled`, `canceled`), `created_at`, `idempotency_key`,
+    `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::cards/list-cards({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["active"]})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -68,7 +89,17 @@ fn
 
 update-card
 meta {
-    doc: """PATCH /cards/{card_id}: change `description`, `status` (`"active"`, `"disabled"`, or `"canceled"`, which is permanent), `billing_address`, `digital_wallet`, `entity_id` or `authorization_controls`."""
+    doc: """
+    PATCH /cards/{card_id}: change `description`, `status` (`"active"`,
+    `"disabled"`, or `"canceled"`, which is permanent), `billing_address`,
+    `digital_wallet`, `entity_id` or `authorization_controls`.
+
+    **Example**
+
+    ```hot
+    ::increase::cards/update-card("card_oubs0hwk5rn6knuecxg2", {status: "disabled"})
+    ```
+    """
 }
 fn
 (card-id: Str, params: Map): Map {
@@ -86,6 +117,14 @@ meta {
     This is cardholder data in the clear: calling it brings your system
     into PCI scope. Never log, store or show the result to an agent.
     Prefer `create-details-iframe`.
+
+    **Example**
+
+    ```hot
+    // Cardholder data: use the fields, never log the response.
+    details ::increase::cards/get-card-details("card_oubs0hwk5rn6knuecxg2")
+    details.expiration_year
+    ```
     """
 }
 fn
@@ -98,7 +137,19 @@ fn
 
 create-details-iframe
 meta {
-    doc: """POST /cards/{card_id}/create_details_iframe: a short-lived `iframe_url` that shows the card's details to the cardholder, so the number never touches your servers. `physical-card-id` (or null) picks a physical card's details."""
+    doc: """
+    POST /cards/{card_id}/create_details_iframe: a short-lived `iframe_url`
+    that shows the card's details to the cardholder, so the number never
+    touches your servers. `physical-card-id` (or null) picks a physical
+    card's details.
+
+    **Example**
+
+    ```hot
+    iframe ::increase::cards/create-details-iframe("card_oubs0hwk5rn6knuecxg2")
+    iframe.iframe_url
+    ```
+    """
 }
 fn
 (card-id: Str): Map {
@@ -117,7 +168,25 @@ fn
 
 create-physical-card
 meta {
-    doc: """POST /physical_cards: print and ship a plastic card for an existing Card. `params` needs `card_id`, `cardholder: {first_name, last_name}` and `shipment: {method, address: {name, line1, city, state, postal_code, country}}`; optional `physical_card_profile_id`."""
+    doc: """
+    POST /physical_cards: print and ship a plastic card for an existing
+    Card. `params` needs `card_id`, `cardholder: {first_name, last_name}`
+    and `shipment: {method, address: {name, line1, city, state, postal_code,
+    country}}`; optional `physical_card_profile_id`.
+
+    **Example**
+
+    ```hot
+    ::increase::cards/create-physical-card({
+      card_id: "card_oubs0hwk5rn6knuecxg2",
+      cardholder: {first_name: "Ian", last_name: "Crease"},
+      shipment: {
+        method: "usps",
+        address: {name: "Ian Crease", line1: "33 Liberty Street", city: "New York", state: "NY", postal_code: "10045", country: "US"}
+      }
+    }, {idempotency-key: "physical-card-ian"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -129,7 +198,17 @@ fn
 
 get-physical-card
 meta {
-    doc: """GET /physical_cards/{physical_card_id}: retrieve a Physical Card, including its `shipment.status` and tracking."""
+    doc: """
+    GET /physical_cards/{physical_card_id}: retrieve a Physical Card,
+    including its `shipment.status` and tracking.
+
+    **Example**
+
+    ```hot
+    card ::increase::cards/get-physical-card("physical_card_ode8duyq5v2ynhjoharl")
+    card.shipment.status
+    ```
+    """
 }
 fn
 (physical-card-id: Str): Map {
@@ -141,7 +220,17 @@ fn
 
 list-physical-cards
 meta {
-    doc: """GET /physical_cards: one page of Physical Cards. Filters: `card_id`, `created_at`, `idempotency_key`, `limit`, `cursor`."""
+    doc: """
+    GET /physical_cards: one page of Physical Cards. Filters: `card_id`,
+    `created_at`, `idempotency_key`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::cards/list-physical-cards({card_id: "card_oubs0hwk5rn6knuecxg2", limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -156,7 +245,16 @@ fn
 
 update-physical-card
 meta {
-    doc: """PATCH /physical_cards/{physical_card_id}: set `status` to `"active"`, `"disabled"` or `"canceled"`."""
+    doc: """
+    PATCH /physical_cards/{physical_card_id}: set `status` to `"active"`,
+    `"disabled"` or `"canceled"`.
+
+    **Example**
+
+    ```hot
+    ::increase::cards/update-physical-card("physical_card_ode8duyq5v2ynhjoharl", "disabled")
+    ```
+    """
 }
 fn
 (physical-card-id: Str, status: Str): Map {

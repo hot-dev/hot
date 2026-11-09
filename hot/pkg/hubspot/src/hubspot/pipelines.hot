@@ -21,6 +21,13 @@ meta {
     [{id, label, displayOrder, stages: [{id, label, displayOrder,
     metadata}]}]}`. Deal stage `metadata.probability` is the win
     probability; `metadata.isClosed` marks closed stages.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::pipelines/list-pipelines("deals")
+    map(out.results, %.label)
+    ```
     """
 }
 fn
@@ -33,7 +40,17 @@ fn
 
 get-pipeline
 meta {
-    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId} - One pipeline with its stages. The default deal pipeline's id is `"default"`."""
+    doc: """
+    GET /crm/pipelines/{version}/{objectType}/{pipelineId} - One pipeline
+    with its stages. The default deal pipeline's id is `"default"`.
+
+    **Example**
+
+    ```hot
+    pipeline ::hubspot::pipelines/get-pipeline("deals", "default")
+    map(pipeline.stages, %.label)
+    ```
+    """
 }
 fn
 (object-type: Str, pipeline-id: Str): Map {
@@ -45,7 +62,18 @@ fn
 
 list-stages
 meta {
-    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages - The stages of one pipeline: `{results: [{id, label, displayOrder, metadata}]}`."""
+    doc: """
+    GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages - The
+    stages of one pipeline: `{results: [{id, label, displayOrder,
+    metadata}]}`.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::pipelines/list-stages("deals", "default")
+    map(out.results, %.id)
+    ```
+    """
 }
 fn
 (object-type: Str, pipeline-id: Str): Map {
@@ -57,7 +85,17 @@ fn
 
 get-stage
 meta {
-    doc: """GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages/{stageId} - One stage."""
+    doc: """
+    GET /crm/pipelines/{version}/{objectType}/{pipelineId}/stages/{stageId}
+    - One stage.
+
+    **Example**
+
+    ```hot
+    stage ::hubspot::pipelines/get-stage("deals", "default", "appointmentscheduled")
+    stage.metadata.probability
+    ```
+    """
 }
 fn
 (object-type: Str, pipeline-id: Str, stage-id: Str): Map {
@@ -67,7 +105,9 @@ fn
   ::api/json("GET", crm-path("pipelines", `/${segment(object-type)}/${segment(pipeline-id)}/stages/${segment(stage-id)}`, opts), opts)
 }
 
-matches fn (item: Map, wanted: Str): Bool {
+matches
+meta {no-doc: true}
+fn (item: Map, wanted: Str): Bool {
   w lowercase(trim(wanted))
   or(eq(lowercase(Str(get(item, "id"))), w), eq(lowercase(Str(or(get(item, "label"), ""))), w))
 }
@@ -79,6 +119,14 @@ meta {
     `stage` each match an id or a label (case-insensitive). Returns
     `{pipeline_id, stage_id, stage}` or null. Exposed for testing;
     `find-stage` calls the API.
+
+    **Example**
+
+    ```hot
+    pipelines {results: [{id: "default", label: "Sales", stages: [{id: "won", label: "Closed Won"}]}]}
+    ::hubspot::pipelines/find-stage-in(pipelines, "sales", "closed won").stage_id  // "won"
+    ::hubspot::pipelines/find-stage-in(pipelines, "sales", "lost")  // null
+    ```
     """
 }
 fn (pipelines: Map, pipeline: Str, stage: Str): Map? {

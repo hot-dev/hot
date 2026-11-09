@@ -36,6 +36,18 @@ meta {
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    page ::users/list(::users/ListRequest({team_id: "T0123ABCDEF", is_active: true, limit: 200}))
+    map(page.users, %.email)
+
+    // As another organization
+    ::users/list(::users/ListRequest({team_id: "T0123ABCDEF"}), {token: ::hot::ctx/get("tenant-b.slack.admin.token")})
+    ```
     """
 }
 fn
@@ -52,7 +64,18 @@ fn
 list-all
 meta {
     doc: """
-    Every `users` entry from `admin.users.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `users` entry from `admin.users.list`, following `next_cursor`
+    until the last page or `max-items` (default 1000). `request` sets the
+    filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    users ::users/list-all(::users/ListRequest({team_id: "T0123ABCDEF"}), 5000)
+    length(users)
+    ```
     """
 }
 fn
@@ -88,6 +111,28 @@ meta {
     admin.users.invite - Invite someone to a workspace, joining `channel_ids`. `is_restricted` / `is_ultra_restricted` invite a multi- or single-channel guest; `guest_expiration_ts` sets a guest's expiry.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/invite(::users/InviteRequest({
+      team_id: "T0123ABCDEF",
+      email: "ada::users/example.com",
+      channel_ids: ["C0123ABCDEF"],
+      real_name: "Ada Lovelace"
+    }))
+
+    // A single-channel guest who expires
+    ::users/invite(::users/InviteRequest({
+      team_id: "T0123ABCDEF",
+      email: "contractor::users/example.com",
+      channel_ids: ["C0123ABCDEF"],
+      is_ultra_restricted: true,
+      guest_expiration_ts: "1767225600"
+    }))
+    ```
     """
 }
 fn
@@ -112,6 +157,14 @@ meta {
     admin.users.assign - Add an existing org user to a workspace.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/assign(::users/AssignRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF", channel_ids: ["C0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -133,6 +186,14 @@ meta {
     admin.users.remove - Remove a user from a workspace.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/remove-user(::users/RemoveUserRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -154,6 +215,14 @@ meta {
     admin.users.setAdmin - Make a user a workspace admin.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/set-admin(::users/SetAdminRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -175,6 +244,14 @@ meta {
     admin.users.setOwner - Make a user a workspace owner.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/set-owner(::users/SetOwnerRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -196,6 +273,14 @@ meta {
     admin.users.setRegular - Make a user a regular member (drops admin/owner, or converts a guest).
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/set-regular(::users/SetRegularRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -218,6 +303,14 @@ meta {
     admin.users.setExpiration - Set when a guest account expires (Unix seconds).
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/set-expiration(::users/SetExpirationRequest({user_id: "U0123ABCDEF", expiration_ts: 1767225600, team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -239,6 +332,14 @@ meta {
     admin.users.getExpiration - Get a guest's expiration timestamp.
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/get-expiration(::users/GetExpirationRequest({user_id: "U0123ABCDEF", target_team: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -266,6 +367,15 @@ meta {
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `session-list-all`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    page ::users/session-list(::users/SessionListRequest({team_id: "T0123ABCDEF", user_id: "U0123ABCDEF", limit: 100}))
+    page.active_sessions
+    ```
     """
 }
 fn
@@ -282,7 +392,18 @@ fn
 session-list-all
 meta {
     doc: """
-    Every `active_sessions` entry from `admin.users.session.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `active_sessions` entry from `admin.users.session.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    sessions ::users/session-list-all(::users/SessionListRequest({}), 5000)
+    length(sessions)
+    ```
     """
 }
 fn
@@ -311,6 +432,17 @@ meta {
     admin.users.session.reset - Sign a user out of every session (or only mobile/web ones).
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/session-reset(::users/SessionResetRequest({user_id: "U0123ABCDEF"}))
+
+    // Mobile sessions only
+    ::users/session-reset(::users/SessionResetRequest({user_id: "U0123ABCDEF", mobile_only: true}))
+    ```
     """
 }
 fn
@@ -333,6 +465,14 @@ meta {
     admin.users.session.resetBulk - Sign up to 1000 users out of their sessions (background job).
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/session-reset-bulk(::users/SessionResetBulkRequest({user_ids: ["U0123ABCDEF", "U0456GHIJKL"], web_only: true}))
+    ```
     """
 }
 fn
@@ -354,6 +494,14 @@ meta {
     admin.users.session.invalidate - Invalidate one session by id.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/session-invalidate(::users/SessionInvalidateRequest({session_id: "12345", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -374,6 +522,14 @@ meta {
     admin.users.session.getSettings - Get per-user session settings (duration, quit-on-close).
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/session-get-settings(::users/SessionGetSettingsRequest({user_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -396,6 +552,15 @@ meta {
     admin.users.session.setSettings - Set session duration (seconds, 28800 to 315569520) or quit-on-close for users.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    // Sign out after 12 hours
+    ::users/session-set-settings(::users/SessionSetSettingsRequest({user_ids: ["U0123ABCDEF"], duration: 43200}))
+    ```
     """
 }
 fn
@@ -416,6 +581,14 @@ meta {
     admin.users.session.clearSettings - Clear per-user session settings so the org defaults apply.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/session-clear-settings(::users/SessionClearSettingsRequest({user_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -437,6 +610,17 @@ meta {
     admin.users.unsupportedVersions.export - Ask Slackbot to send a CSV of users on unsupported Slack client versions.
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::users ::slack::admin::users
+
+    ::users/unsupported-versions-export()
+
+    // Users whose sessions started after a date, on versions leaving support
+    ::users/unsupported-versions-export(::users/UnsupportedVersionsExportRequest({date_end_of_support: 1767225600, date_sessions_started: 1735689600}))
+    ```
     """
 }
 fn

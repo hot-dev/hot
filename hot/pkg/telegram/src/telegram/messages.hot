@@ -71,7 +71,23 @@ ForwardMessageRequest type {
 
 forward-message
 meta {
-    doc: """forwardMessage - Forward a message from one chat to another. The forwarded message shows the original sender."""
+    doc: """
+    forwardMessage - Forward a message from one chat to another. The
+    forwarded message shows the original sender.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/forward-message(::messages/ForwardMessageRequest({
+      chat_id: 123456789,
+      from_chat_id: -1001234567890,
+      message_id: 42
+    }))
+    sent.message_id
+    ```
+    """
 }
 fn
 (request: ForwardMessageRequest): Map {
@@ -102,7 +118,24 @@ CopyMessageRequest type {
 
 copy-message
 meta {
-    doc: """copyMessage - Copy a message without the "Forwarded from" attribution. Returns the new message ID rather than the full message object."""
+    doc: """
+    copyMessage - Copy a message without the "Forwarded from" attribution.
+    Returns the new message ID rather than the full message object.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    copied ::messages/copy-message(::messages/CopyMessageRequest({
+      chat_id: 123456789,
+      from_chat_id: -1001234567890,
+      message_id: 42,
+      caption: "Copied without attribution"
+    }))
+    copied.message_id
+    ```
+    """
 }
 fn
 (request: CopyMessageRequest): Map {
@@ -164,7 +197,22 @@ EditMessageCaptionRequest type {
 
 edit-message-caption
 meta {
-    doc: """editMessageCaption - Edit the caption of a photo, video, document, or animation message."""
+    doc: """
+    editMessageCaption - Edit the caption of a photo, video, document, or
+    animation message.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    ::messages/edit-message-caption(::messages/EditMessageCaptionRequest({
+      chat_id: 123456789,
+      message_id: 42,
+      caption: "Updated caption"
+    }))
+    ```
+    """
 }
 fn
 (request: EditMessageCaptionRequest): Any {
@@ -184,7 +232,22 @@ EditMessageReplyMarkupRequest type {
 
 edit-message-reply-markup
 meta {
-    doc: """editMessageReplyMarkup - Edit the reply markup (inline keyboard) of a message."""
+    doc: """
+    editMessageReplyMarkup - Edit the reply markup (inline keyboard) of a
+    message.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    ::messages/edit-message-reply-markup(::messages/EditMessageReplyMarkupRequest({
+      chat_id: 123456789,
+      message_id: 42,
+      reply_markup: {inline_keyboard: [[{text: "Open", url: "https://hot.dev"}]]}
+    }))
+    ```
+    """
 }
 fn
 (request: EditMessageReplyMarkupRequest): Any {
@@ -201,7 +264,22 @@ DeleteMessageRequest type {
 
 delete-message
 meta {
-    doc: """deleteMessage - Delete a message. Bots can delete messages they sent, messages in private chats, and messages in groups/channels where they have delete permissions."""
+    doc: """
+    deleteMessage - Delete a message. Bots can delete messages they sent,
+    messages in private chats, and messages in groups/channels where they
+    have delete permissions.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    ::messages/delete-message(::messages/DeleteMessageRequest({
+      chat_id: 123456789,
+      message_id: 42
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteMessageRequest): Bool {
@@ -218,7 +296,21 @@ DeleteMessagesRequest type {
 
 delete-messages
 meta {
-    doc: """deleteMessages - Delete multiple messages at once (up to 100). Messages must be from the same chat and no older than 48 hours."""
+    doc: """
+    deleteMessages - Delete multiple messages at once (up to 100). Messages
+    must be from the same chat and no older than 48 hours.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    ::messages/delete-messages(::messages/DeleteMessagesRequest({
+      chat_id: 123456789,
+      message_ids: [42, 43, 44]
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteMessagesRequest): Bool {
@@ -309,7 +401,23 @@ SendDocumentRequest type {
 
 send-document
 meta {
-    doc: """sendDocument - Send a general file. `document` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
+    doc: """
+    sendDocument - Send a general file. `document` can be a file_id, an HTTP
+    URL, or an `InputFile` to upload bytes (up to 50 MB).
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-document(::messages/SendDocumentRequest({
+      chat_id: 123456789,
+      document: "https://example.com/report.pdf",
+      caption: "Monthly report"
+    }))
+    sent.document.file_id
+    ```
+    """
 }
 fn
 (request: SendDocumentRequest): Map {
@@ -347,7 +455,23 @@ SendVideoRequest type {
 
 send-video
 meta {
-    doc: """sendVideo - Send an MPEG4 video. `video` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
+    doc: """
+    sendVideo - Send an MPEG4 video. `video` can be a file_id, an HTTP URL,
+    or an `InputFile` to upload bytes (up to 50 MB).
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-video(::messages/SendVideoRequest({
+      chat_id: 123456789,
+      video: "https://example.com/demo.mp4",
+      supports_streaming: true
+    }))
+    sent.video.file_id
+    ```
+    """
 }
 fn
 (request: SendVideoRequest): Map {
@@ -380,7 +504,24 @@ SendAudioRequest type {
 
 send-audio
 meta {
-    doc: """sendAudio - Send an MP3 or M4A file to show in the music player. `audio` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to 50 MB)."""
+    doc: """
+    sendAudio - Send an MP3 or M4A file to show in the music player. `audio`
+    can be a file_id, an HTTP URL, or an `InputFile` to upload bytes (up to
+    50 MB).
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-audio(::messages/SendAudioRequest({
+      chat_id: 123456789,
+      audio: "https://example.com/track.mp3",
+      title: "Episode 1"
+    }))
+    sent.audio.file_id
+    ```
+    """
 }
 fn
 (request: SendAudioRequest): Map {
@@ -410,7 +551,22 @@ SendVoiceRequest type {
 
 send-voice
 meta {
-    doc: """sendVoice - Send a voice message (OGG/OPUS, MP3, or M4A). `voice` can be a file_id, an HTTP URL, or an `InputFile` to upload bytes."""
+    doc: """
+    sendVoice - Send a voice message (OGG/OPUS, MP3, or M4A). `voice` can be
+    a file_id, an HTTP URL, or an `InputFile` to upload bytes.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-voice(::messages/SendVoiceRequest({
+      chat_id: 123456789,
+      voice: ::telegram::api/input-file(::hot::file/read-file-bytes("note.ogg"), "note.ogg", "audio/ogg")
+    }))
+    sent.voice.file_id
+    ```
+    """
 }
 fn
 (request: SendVoiceRequest): Map {
@@ -441,7 +597,23 @@ SendLocationRequest type {
 
 send-location
 meta {
-    doc: """sendLocation - Send a point on the map. Set `live_period` (60-86400 seconds) for a live location that updates."""
+    doc: """
+    sendLocation - Send a point on the map. Set `live_period` (60-86400
+    seconds) for a live location that updates.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-location(::messages/SendLocationRequest({
+      chat_id: 123456789,
+      latitude: 37.7749,
+      longitude: -122.4194
+    }))
+    sent.location
+    ```
+    """
 }
 fn
 (request: SendLocationRequest): Map {
@@ -470,7 +642,22 @@ SendContactRequest type {
 
 send-contact
 meta {
-    doc: """sendContact - Send a phone contact."""
+    doc: """
+    sendContact - Send a phone contact.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-contact(::messages/SendContactRequest({
+      chat_id: 123456789,
+      phone_number: "+15555550100",
+      first_name: "Ada"
+    }))
+    sent.contact.first_name
+    ```
+    """
 }
 fn
 (request: SendContactRequest): Map {
@@ -509,7 +696,25 @@ SendPollRequest type {
 
 send-poll
 meta {
-    doc: """sendPoll - Send a poll with 1-12 options, each `{text: "Option text"}`. Set `type: "quiz"` for quiz mode with `correct_option_ids` (0-based, increasing)."""
+    doc: """
+    sendPoll - Send a poll with 1-12 options, each `{text: "Option text"}`.
+    Set `type: "quiz"` for quiz mode with `correct_option_ids` (0-based,
+    increasing).
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-poll(::messages/SendPollRequest({
+      chat_id: 123456789,
+      question: "Ship on Friday?",
+      options: [{text: "Yes"}, {text: "No"}],
+      is_anonymous: false
+    }))
+    sent.poll.id
+    ```
+    """
 }
 fn
 (request: SendPollRequest): Map {
@@ -535,7 +740,22 @@ SendDiceRequest type {
 
 send-dice
 meta {
-    doc: """sendDice - Send an animated dice/emoji. `emoji` can be a die, dart, basketball, football, bowling, or slot machine emoji. Default is die."""
+    doc: """
+    sendDice - Send an animated dice/emoji. `emoji` can be a die, dart,
+    basketball, football, bowling, or slot machine emoji. Default is die.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    sent ::messages/send-dice(::messages/SendDiceRequest({
+      chat_id: 123456789,
+      emoji: "🎯"
+    }))
+    sent.dice.value
+    ```
+    """
 }
 fn
 (request: SendDiceRequest): Map {
@@ -554,7 +774,23 @@ SendChatActionRequest type {
 
 send-chat-action
 meta {
-    doc: """sendChatAction - Show a typing indicator or upload status. `action`: "typing", "upload_photo", "record_video", "upload_video", "record_voice", "upload_voice", "upload_document", "find_location", "record_video_note", "upload_video_note"."""
+    doc: """
+    sendChatAction - Show a typing indicator or upload status. `action`:
+    "typing", "upload_photo", "record_video", "upload_video",
+    "record_voice", "upload_voice", "upload_document", "find_location",
+    "record_video_note", "upload_video_note".
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    ::messages/send-chat-action(::messages/SendChatActionRequest({
+      chat_id: 123456789,
+      action: "typing"
+    }))
+    ```
+    """
 }
 fn
 (request: SendChatActionRequest): Bool {
@@ -741,7 +977,22 @@ StopPollRequest type {
 
 stop-poll
 meta {
-    doc: """stopPoll - Close a poll the bot sent. Returns the final Poll with vote counts."""
+    doc: """
+    stopPoll - Close a poll the bot sent. Returns the final Poll with vote
+    counts.
+
+    **Example**
+
+    ```hot
+    ::messages ::telegram::messages
+
+    poll ::messages/stop-poll(::messages/StopPollRequest({
+      chat_id: 123456789,
+      message_id: 42
+    }))
+    poll.total_voter_count
+    ```
+    """
 }
 fn
 (request: StopPollRequest): Map {

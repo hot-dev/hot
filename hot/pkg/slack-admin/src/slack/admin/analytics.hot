@@ -16,7 +16,18 @@ GetFileRequest type {
 
 file-result
 meta {
-    doc: """Turn a getFile response into its result: the gzip bytes on success, otherwise the `Err(SlackError)` from the JSON error body. Exposed for testing."""
+    doc: """
+    Turn a getFile response into its result: the gzip bytes on success,
+    otherwise the `Err(SlackError)` from the JSON error body. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    res ::hot::http/HttpResponse({status: 200, headers: {content-type: "application/json"}, body: {ok: false, error: "file_not_yet_available"}})
+    if-err(::slack::admin::analytics/file-result(res), (e) { e.error })  // "file_not_yet_available"
+    ```
+    """
 }
 fn (response: Result): Any {
   content-type lowercase(or(get(or(response.headers, {}), "content-type"), ""))
@@ -59,7 +70,17 @@ fn (request: GetFileRequest): Bytes {
 
 parse-records
 meta {
-    doc: """Decompress a getFile file and parse its JSON lines into records. Exposed for testing."""
+    doc: """
+    Decompress a getFile file and parse its JSON lines into records. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    gz ::hot::gzip/encode("{\"id\":\"U1\"}\n{\"id\":\"U2\"}\n")
+    ::slack::admin::analytics/parse-records(gz)  // [{id: "U1"}, {id: "U2"}]
+    ```
+    """
 }
 fn (gz: Bytes): Vec<Map> {
   ::hot::gzip/decode(gz)

@@ -16,7 +16,21 @@ meta {
 
 get-range
 meta {
-    doc: """GET /worksheets/{sheet}/range(address='...'). Returns the range: `address`, `values`, `formulas`, `text`, `numberFormat`, `rowCount`, `columnCount`, ... Pass `{select: "values,address"}` to trim it."""
+    doc: """
+    GET /worksheets/{sheet}/range(address='...'). Returns the range:
+    `address`, `values`, `formulas`, `text`, `numberFormat`, `rowCount`,
+    `columnCount`, ... Pass `{select: "values,address"}` to trim it.
+
+    **Example**
+
+    ```hot
+    cells ::microsoft::excel::ranges/get-range("/Reports/Q3.xlsx", "Data", "A1:C10")
+    cells.rowCount
+
+    // Only the fields you need
+    ::microsoft::excel::ranges/get-range("/Reports/Q3.xlsx", "Data", "A1:C10", {select: "values,address"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Map {
@@ -26,14 +40,28 @@ fn
   ::excel/fetch(::excel/range-path(item, sheet, address, opts), {}, opts)
 }
 
-read-field fn (item: Any, sheet: Str, address: Str, field: Str, opts: Map): Vec {
-  result ::excel/fetch(::excel/range-path(item, sheet, address, opts), {select: field}, opts)
+read-field
+meta {no-doc: true}
+fn (item: Any, sheet: Str, address: Str, field: Str, opts: Map): Vec {
+  result ::excel/fetch(::excel/range-path(item, sheet, address, opts), {select: field}, ::excel/without-query(opts))
   if(is-err(result), result, or(get(result, field), []))
 }
 
 read-values
 meta {
-    doc: """A range's values as a grid (a Vec of rows)."""
+    doc: """
+    A range's values as a grid (a Vec of rows).
+
+    **Example**
+
+    ```hot
+    grid ::microsoft::excel::ranges/read-values("/Reports/Q3.xlsx", "Data", "A1:C10")
+    first(grid)
+
+    // A workbook in another drive
+    ::microsoft::excel::ranges/read-values("01ABC", "Data", "A1:C10", {drive: "b1"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Vec {
@@ -45,7 +73,16 @@ fn
 
 read-formulas
 meta {
-    doc: """A range's formulas as a grid; cells without a formula hold their value."""
+    doc: """
+    A range's formulas as a grid; cells without a formula hold their value.
+
+    **Example**
+
+    ```hot
+    formulas ::microsoft::excel::ranges/read-formulas("/Reports/Q3.xlsx", "Summary", "B2:B5")
+    first(formulas)
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Vec {
@@ -57,7 +94,17 @@ fn
 
 read-formatted
 meta {
-    doc: """A range's cells as the text they display, as a grid of Strs."""
+    doc: """
+    A range's cells as the text they display, as a grid of Strs.
+
+    **Example**
+
+    ```hot
+    // Dates as the cell shows them, not as serial numbers
+    shown ::microsoft::excel::ranges/read-formatted("/Reports/Q3.xlsx", "Data", "A2:A5")
+    first(shown)
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Vec {
@@ -69,7 +116,20 @@ fn
 
 used-range-path
 meta {
-    doc: """The Graph path of a worksheet's used range (pure). With `opts.values-only`, cells that only have formatting are left out."""
+    doc: """
+    The Graph path of a worksheet's used range (pure). With
+    `opts.values-only`, cells that only have formatting are left out.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::ranges/used-range-path("01ABC", "Data", {drive: "b1"})
+    // "/drives/b1/items/01ABC/workbook/worksheets/Data/usedRange"
+
+    ::microsoft::excel::ranges/used-range-path("01ABC", "Data", {drive: "b1", values-only: true})
+    // "/drives/b1/items/01ABC/workbook/worksheets/Data/usedRange(valuesOnly=true)"
+    ```
+    """
 }
 fn (item: Any, sheet: Str, opts: Map): Str {
   base `${::excel/worksheet-path(item, sheet, opts)}/usedRange`
@@ -78,7 +138,20 @@ fn (item: Any, sheet: Str, opts: Map): Str {
 
 used-range
 meta {
-    doc: """GET /worksheets/{sheet}/usedRange: the smallest range holding every used cell."""
+    doc: """
+    GET /worksheets/{sheet}/usedRange: the smallest range holding every used
+    cell.
+
+    **Example**
+
+    ```hot
+    used ::microsoft::excel::ranges/used-range("/Reports/Q3.xlsx", "Data")
+    used.address
+
+    // Skip cells that only have formatting, and trim the response
+    ::microsoft::excel::ranges/used-range("/Reports/Q3.xlsx", "Data", {values-only: true, select: "address,values"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str): Map {
@@ -90,7 +163,20 @@ fn
 
 update-range
 meta {
-    doc: """PATCH /worksheets/{sheet}/range(address='...'). `changes` holds `values`, `formulas` or `numberFormat`, each a grid matching the address's size."""
+    doc: """
+    PATCH /worksheets/{sheet}/range(address='...'). `changes` holds
+    `values`, `formulas` or `numberFormat`, each a grid matching the
+    address's size.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::ranges/update-range("/Reports/Q3.xlsx", "Data", "A1:B1", {values: [["Name", "Score"]]})
+
+    // Each field is a grid the size of the address
+    ::microsoft::excel::ranges/update-range("/Reports/Q3.xlsx", "Data", "B2:B3", {numberFormat: [["0.00"], ["0.00"]]}, {session: "s1"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str, changes: Map): Map {
@@ -100,9 +186,11 @@ fn
   ::excel/call("PATCH", ::excel/range-path(item, sheet, address, opts), changes, opts)
 }
 
-write-grid fn (item: Any, sheet: Str, address: Str, field: Str, grid: Vec, opts: Map): Map {
+write-grid
+meta {no-doc: true}
+fn (item: Any, sheet: Str, address: Str, field: Str, grid: Vec, opts: Map): Map {
   cond {
-    is-empty(grid) => { {} }
+    all(grid, is-empty) => { {} }
     => {
       square ::records/rectangular(grid)
       target ::records/expand-address(address, length(square), length(first(square)))
@@ -120,7 +208,7 @@ meta {
     makes no call and returns `{}`.
 
     ```hot
-    ::microsoft::excel::ranges/write-values(book, "Data", "B2", [["a", 1], ["b", 2]])
+    ::microsoft::excel::ranges/write-values("/Reports/Q3.xlsx", "Data", "B2", [["a", 1], ["b", 2]])
     ```
     """
 }
@@ -134,7 +222,15 @@ fn
 
 write-formulas
 meta {
-    doc: """Write a grid of formulas, addressed as in `write-values`."""
+    doc: """
+    Write a grid of formulas, addressed as in `write-values`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::ranges/write-formulas("/Reports/Q3.xlsx", "Summary", "B2", [["=SUM(Data!C:C)"], ["=AVERAGE(Data!C:C)"]])
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str, grid: Vec): Map {
@@ -146,7 +242,17 @@ fn
 
 clear-body
 meta {
-    doc: """The `clear` body (pure): `opts.apply-to` is `All` (the default), `Formats` or `Contents`."""
+    doc: """
+    The `clear` body (pure): `opts.apply-to` is `All` (the default),
+    `Formats` or `Contents`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::ranges/clear-body({})  // {applyTo: "All"}
+    ::microsoft::excel::ranges/clear-body({apply-to: "Contents"})  // {applyTo: "Contents"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   {applyTo: get(opts, "apply-to", "All")}
@@ -154,7 +260,19 @@ fn (opts: Map): Map {
 
 clear-range
 meta {
-    doc: """POST /range(...)/clear. Clears values and formatting unless `opts.apply-to` is `Formats` or `Contents`."""
+    doc: """
+    POST /range(...)/clear. Clears values and formatting unless
+    `opts.apply-to` is `Formats` or `Contents`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::ranges/clear-range("/Reports/Q3.xlsx", "Data", "A2:C100")
+
+    // Keep the formatting
+    ::microsoft::excel::ranges/clear-range("/Reports/Q3.xlsx", "Data", "A2:C100", {apply-to: "Contents"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Map {
@@ -166,7 +284,17 @@ fn
 
 insert-cells
 meta {
-    doc: """POST /range(...)/insert. Insert blank cells over `address`, moving existing cells `Down` or `Right`."""
+    doc: """
+    POST /range(...)/insert. Insert blank cells over `address`, moving
+    existing cells `Down` or `Right`.
+
+    **Example**
+
+    ```hot
+    // A blank row of three cells above the data
+    ::microsoft::excel::ranges/insert-cells("/Reports/Q3.xlsx", "Data", "A2:C2", "Down")
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str, shift: Str): Map {
@@ -178,7 +306,17 @@ fn
 
 delete-cells
 meta {
-    doc: """POST /range(...)/delete. Delete the cells at `address`, moving the rest `Up` or `Left`."""
+    doc: """
+    POST /range(...)/delete. Delete the cells at `address`, moving the rest
+    `Up` or `Left`.
+
+    **Example**
+
+    ```hot
+    // Remove three cells and close the gap
+    ::microsoft::excel::ranges/delete-cells("/Reports/Q3.xlsx", "Data", "A2:C2", "Up")
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str, shift: Str): Map {
@@ -212,22 +350,43 @@ fn
   if(is-err(grid), grid, ::records/rows-to-records(grid))
 }
 
-read-used-values fn (item: Any, sheet: Str, opts: Map): Vec {
-  result ::excel/fetch(used-range-path(item, sheet, {...opts, values-only: true}), {select: "values"}, opts)
+read-used-values
+meta {no-doc: true}
+fn (item: Any, sheet: Str, opts: Map): Vec {
+  result ::excel/fetch(used-range-path(item, sheet, {...opts, values-only: true}), {select: "values"}, ::excel/without-query(opts))
   if(is-err(result), result, or(get(result, "values"), []))
 }
 
 write-records
 meta {
-    doc: """Write records as a header row and data rows from a top-left cell. `columns` sets the order (default: every key in order of first appearance). Missing values empty their cells."""
+    doc: """
+    Write records as a header row and data rows from a top-left cell.
+    `columns` sets the order (default, or null: every key in order of
+    first appearance). Missing values empty their cells. No records and
+    no `columns` make no call.
+
+    **Example**
+
+    ```hot
+    leads [{name: "Ada", stage: "demo"}, {name: "Grace", stage: "trial"}]
+    ::microsoft::excel::ranges/write-records("/Reports/Q3.xlsx", "Pipeline", "A1", leads)
+
+    // Choose the columns and their order
+    ::microsoft::excel::ranges/write-records("/Reports/Q3.xlsx", "Pipeline", "A1", leads, ["stage", "name"])
+
+    // With a session, keeping the default columns
+    ::microsoft::excel::ranges/write-records("/Reports/Q3.xlsx", "Pipeline", "A1", leads, null, {session: "s1"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str, records: Vec): Map {
   write-values(item, sheet, address, ::records/records-to-grid(records), {})
 },
-(item: Any, sheet: Str, address: Str, records: Vec, columns: Vec): Map {
-  write-values(item, sheet, address, ::records/records-to-grid(records, columns), {})
+(item: Any, sheet: Str, address: Str, records: Vec, columns: Vec?): Map {
+  write-records(item, sheet, address, records, columns, {})
 },
-(item: Any, sheet: Str, address: Str, records: Vec, columns: Vec, opts: Map): Map {
-  write-values(item, sheet, address, ::records/records-to-grid(records, columns), opts)
+(item: Any, sheet: Str, address: Str, records: Vec, columns: Vec?, opts: Map): Map {
+  grid if(is-null(columns), ::records/records-to-grid(records), ::records/records-to-grid(records, columns))
+  write-values(item, sheet, address, grid, opts)
 }

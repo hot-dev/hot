@@ -19,7 +19,22 @@ meta {
 
 get-current-account
 meta {
-    doc: """POST users/get_current_account - the connected account: `account_id`, `name`, `email`, `account_type`, `root_info` (`root_namespace_id`, `home_namespace_id`), `team` for team members."""
+    doc: """
+    POST users/get_current_account - the connected account: `account_id`,
+    `name`, `email`, `account_type`, `root_info` (`root_namespace_id`,
+    `home_namespace_id`), `team` for team members.
+
+    **Example**
+
+    ```hot
+    account ::dropbox::users/get-current-account()
+    account.email
+
+    // A team token acting as one member
+    member ::dropbox::users/get-current-account({select-user: "dbmid:AAH4f99"})
+    member.name.display_name
+    ```
+    """
 }
 fn
 (): Map {
@@ -31,7 +46,17 @@ fn
 
 get-space-usage
 meta {
-    doc: """POST users/get_space_usage - `{used, allocation}` in bytes (`allocation` is individual or team)."""
+    doc: """
+    POST users/get_space_usage - `{used, allocation}` in bytes (`allocation`
+    is individual or team).
+
+    **Example**
+
+    ```hot
+    usage ::dropbox::users/get-space-usage()
+    usage.used
+    ```
+    """
 }
 fn
 (): Map {

@@ -8,7 +8,18 @@ meta {
 
 me
 meta {
-    doc: """GET /users/me - The authenticated user: `{user}`. The cheapest credentials check (an anonymous user with id null means auth failed silently)."""
+    doc: """
+    GET /users/me - The authenticated user: `{user}`. The cheapest
+    credentials check (an anonymous user with id null means auth failed
+    silently).
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/me()
+    out.user.email
+    ```
+    """
 }
 fn
 (): Any {
@@ -20,7 +31,16 @@ fn
 
 get-user
 meta {
-    doc: """GET /users/{id} - One user: `{user}`."""
+    doc: """
+    GET /users/{id} - One user: `{user}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/get-user(1900000001)
+    out.user.name
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -32,7 +52,18 @@ fn
 
 list-users
 meta {
-    doc: """GET /users - One cursor page of users: `{users, meta, links}`. `options`: `role` ("end-user"/"agent"/"admin"), `external_id`, `page_size`, `after`, `sort`."""
+    doc: """
+    GET /users - One cursor page of users: `{users, meta, links}`.
+    `options`: `role` ("end-user"/"agent"/"admin"), `external_id`,
+    `page_size`, `after`, `sort`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::users/list-users({role: "agent", page_size: 50})
+    map(page.users, %.email)
+    ```
+    """
 }
 fn
 (): Any {
@@ -52,6 +83,13 @@ meta {
     email, phone, notes, or Zendesk search syntax such as `role:agent`).
     Offset paging only: `options` takes `page` and `per_page` (max 100),
     capped at 10,000 results per query. Returns `{users, next_page, count}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/search-users("role:agent", {per_page: 50})
+    out.count
+    ```
     """
 }
 fn
@@ -67,7 +105,17 @@ fn
 
 find-user-by-email
 meta {
-    doc: """GET /users/search?query= - Find a user by email. Returns the user or null."""
+    doc: """
+    GET /users/search?query= - Find a user by email. Returns the user or
+    null.
+
+    **Example**
+
+    ```hot
+    user ::zendesk::users/find-user-by-email("ada@example.com")
+    if(is-null(user), "not found", user.id)
+    ```
+    """
 }
 fn
 (email: Str): Any {
@@ -84,7 +132,19 @@ fn
 
 create-user
 meta {
-    doc: """POST /users - Create a user. `fields`: `name` (required), `email`, `role` (end-user by default), `phone`, `external_id`, `organization_id`, `tags`, `user_fields`, `verified`, `skip_verify_email`. Unset fields are omitted. Returns `{user}`."""
+    doc: """
+    POST /users - Create a user. `fields`: `name` (required), `email`,
+    `role` (end-user by default), `phone`, `external_id`, `organization_id`,
+    `tags`, `user_fields`, `verified`, `skip_verify_email`. Unset fields are
+    omitted. Returns `{user}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/create-user({name: "Ada Lovelace", email: "ada@example.com", role: "end-user", tags: ["beta"]})
+    out.user.id
+    ```
+    """
 }
 fn
 (fields: Map): Any {
@@ -96,7 +156,16 @@ fn
 
 update-user
 meta {
-    doc: """PUT /users/{id} - Update a user's fields. Unset fields are omitted."""
+    doc: """
+    PUT /users/{id} - Update a user's fields. Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::users/update-user(1900000001, {phone: "+15550100", user_fields: {plan: "enterprise"}})
+    out.user.phone
+    ```
+    """
 }
 fn
 (id: Any, fields: Map): Any {

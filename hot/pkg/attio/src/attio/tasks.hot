@@ -4,7 +4,20 @@
 
 build-task-payload
 meta {
-    doc: """Build the create-task payload. Attio requires `deadline_at`, `linked_records`, and `assignees` to be present (nullable/empty is fine); `options` overrides any of them. Exposed for testing; `create-task` uses it."""
+    doc: """
+    Build the create-task payload. Attio requires `deadline_at`,
+    `linked_records`, and `assignees` to be present (nullable/empty is
+    fine); `options` overrides any of them. Exposed for testing;
+    `create-task` uses it.
+
+    **Example**
+
+    ```hot
+    payload ::attio::tasks/build-task-payload("Send the proposal", {deadline_at: "2026-08-01T12:00:00Z"})
+    payload.data.deadline_at  // "2026-08-01T12:00:00Z"
+    payload.data.assignees  // []
+    ```
+    """
 }
 fn (content: Str, options: Map): Map {
   {
@@ -22,7 +35,17 @@ fn (content: Str, options: Map): Map {
 
 list-tasks
 meta {
-    doc: """GET /tasks - The workspace's tasks (`limit`/`offset` via the 1-arity options map)."""
+    doc: """
+    GET /tasks - The workspace's tasks (`limit`/`offset` via the 1-arity
+    options map).
+
+    **Example**
+
+    ```hot
+    tasks ::attio::tasks/list-tasks({limit: 20})
+    map(tasks.data, %.content_plaintext)
+    ```
+    """
 }
 fn
 (): Map {
@@ -48,7 +71,7 @@ meta {
     ```hot
     ::attio::tasks/create-task("Send the proposal", {
       deadline_at: "2026-08-01T12:00:00Z",
-      linked_records: [{target_object: "companies", target_record_id: company.id.record_id}]
+      linked_records: [{target_object: "companies", target_record_id: "7f4e2a10-3b9c-4d2a-8f1e-6a5c9d0b1e23"}]
     })
     ```
     """
@@ -71,7 +94,16 @@ fn
 
 update-task
 meta {
-    doc: """PATCH /tasks/{id} - Update a task (`is_completed`, `deadline_at`, `assignees`, `linked_records`)."""
+    doc: """
+    PATCH /tasks/{id} - Update a task (`is_completed`, `deadline_at`,
+    `assignees`, `linked_records`).
+
+    **Example**
+
+    ```hot
+    ::attio::tasks/update-task("c2d8e4f1-5a6b-47c9-b0d3-1e2f3a4b5c6d", {is_completed: true})
+    ```
+    """
 }
 fn
 (task-id: Str, changes: Map): Map {
@@ -88,7 +120,15 @@ fn
 
 delete-task
 meta {
-    doc: """DELETE /tasks/{id} - Delete a task."""
+    doc: """
+    DELETE /tasks/{id} - Delete a task.
+
+    **Example**
+
+    ```hot
+    ::attio::tasks/delete-task("c2d8e4f1-5a6b-47c9-b0d3-1e2f3a4b5c6d")
+    ```
+    """
 }
 fn
 (task-id: Str): Any {

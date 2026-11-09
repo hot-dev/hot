@@ -30,6 +30,14 @@ meta {
     `after`, `query` (e.g. `"title:*sticker* status:active"`), `sortKey`
     (`TITLE`, `CREATED_AT`, `UPDATED_AT`, `INVENTORY_TOTAL`, ...),
     `reverse`. Returns `{nodes, pageInfo}`.
+
+    **Example**
+
+    ```hot
+    page ::shopify::products/list-products({first: 20, query: "status:active", sortKey: "UPDATED_AT", reverse: true})
+    map(page.nodes, %.title)
+    page.pageInfo.hasNextPage
+    ```
     """
 }
 fn
@@ -54,7 +62,17 @@ fn
 
 search-products
 meta {
-    doc: """One page of products matching Shopify's search syntax (e.g. `"title:*sticker* status:active"`). Options as in `list-products`."""
+    doc: """
+    One page of products matching Shopify's search syntax (e.g.
+    `"title:*sticker* status:active"`). Options as in `list-products`.
+
+    **Example**
+
+    ```hot
+    page ::shopify::products/search-products("title:*sticker* status:active", {first: 10})
+    map(page.nodes, %.handle)
+    ```
+    """
 }
 fn
 (search-query: Str): Map {
@@ -69,7 +87,17 @@ fn
 
 collect-products
 meta {
-    doc: """Follow cursors and return up to `max-items` products (a Vec of nodes). Options as in `list-products`."""
+    doc: """
+    Follow cursors and return up to `max-items` products (a Vec of nodes).
+    Options as in `list-products`.
+
+    **Example**
+
+    ```hot
+    products ::shopify::products/collect-products({query: "status:active"}, 1000)
+    length(products)
+    ```
+    """
 }
 fn
 (options: Map, max-items: Int): Vec {
@@ -81,7 +109,17 @@ fn
 
 get-product
 meta {
-    doc: """One product by GraphQL id with its options and first 100 variants (price, SKU, inventory item id). Returns null when not found."""
+    doc: """
+    One product by GraphQL id with its options and first 100 variants
+    (price, SKU, inventory item id). Returns null when not found.
+
+    **Example**
+
+    ```hot
+    product ::shopify::products/get-product("gid://shopify/Product/1")
+    product.title
+    ```
+    """
 }
 fn
 (id: Str): Map? {
@@ -143,7 +181,16 @@ fn
 
 update-product
 meta {
-    doc: """Update a product (`productUpdate`) from a `ProductUpdateInput` that includes the product `id` and the fields to change."""
+    doc: """
+    Update a product (`productUpdate`) from a `ProductUpdateInput` that
+    includes the product `id` and the fields to change.
+
+    **Example**
+
+    ```hot
+    ::shopify::products/update-product({id: "gid://shopify/Product/1", status: "ARCHIVED"})
+    ```
+    """
 }
 fn
 (product: Map): Map {
@@ -179,8 +226,8 @@ meta {
     **Example**
 
     ```hot
-    ::shopify::products/update-variants(product.id, [
-      {id: variant.id, price: "19.00", inventoryItem: {sku: "SOCK-RED-M"}}
+    ::shopify::products/update-variants("gid://shopify/Product/1", [
+      {id: "gid://shopify/ProductVariant/11", price: "19.00", inventoryItem: {sku: "SOCK-RED-M"}}
     ])
     ```
     """
@@ -212,7 +259,17 @@ fn
 
 delete-product
 meta {
-    doc: """Permanently delete a product and its variants (`productDelete`). Returns the deleted product id. Prefer `update-product` with `status: "ARCHIVED"` when the product may be needed again."""
+    doc: """
+    Permanently delete a product and its variants (`productDelete`). Returns
+    the deleted product id. Prefer `update-product` with `status:
+    "ARCHIVED"` when the product may be needed again.
+
+    **Example**
+
+    ```hot
+    ::shopify::products/delete-product("gid://shopify/Product/1")
+    ```
+    """
 }
 fn
 (id: Str): Str {

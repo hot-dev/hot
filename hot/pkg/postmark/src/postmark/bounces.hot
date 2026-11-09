@@ -19,7 +19,17 @@ GETBouncesBounceidDumpResponse type {
 
 get-bounce-dump
 meta {
-    doc: """Retrieve the raw SMTP dump for a specific bounce, useful for diagnosing delivery issues."""
+    doc: """
+    Retrieve the raw SMTP dump for a specific bounce, useful for diagnosing
+    delivery issues.
+
+    **Example**
+
+    ```hot
+    dump ::postmark::bounces/get-bounce-dump(::postmark::bounces/GETBouncesBounceidDumpRequest({bounceid: "692560173"}))
+    dump.Body
+    ```
+    """
 }
 fn
 (request: GETBouncesBounceidDumpRequest): GETBouncesBounceidDumpResponse {

@@ -18,7 +18,22 @@ meta {
 ::api ::quickbooks::api
 
 company-info
-meta {doc: """GET /companyinfo/{realmId} - the connected company's CompanyInfo."""}
+meta {
+    doc: """
+    GET /companyinfo/{realmId} - the connected company's CompanyInfo.
+
+    **Example**
+
+    ```hot
+    info ::quickbooks::company/company-info()
+    info.CompanyName
+
+    // Another company, for this call only
+    other ::quickbooks::company/company-info({realm-id: "9341453", access-token: ::hot::ctx/get("quickbooks.access.token")})
+    other.Country
+    ```
+    """
+}
 fn
 (): Map {
   company-info({})
@@ -35,7 +50,19 @@ fn
 }
 
 preferences
-meta {doc: """GET /preferences - the company's Preferences."""}
+meta {
+    doc: """
+    GET /preferences - the company's Preferences.
+
+    **Example**
+
+    ```hot
+    prefs ::quickbooks::company/preferences()
+    prefs.CurrencyPrefs.MultiCurrencyEnabled
+    prefs.AccountingInfoPrefs.ClassTrackingPerTxn
+    ```
+    """
+}
 fn
 (): Map {
   preferences({})

@@ -55,7 +55,20 @@ SearchVectorStoreResponse type {
 
 search-vector-store
 meta {
-    doc: """POST /vector_stores/{vector_store_id}/search - Search a vector store for relevant file content using semantic search."""
+    doc: """
+    POST /vector_stores/{vector_store_id}/search - Search a vector store for
+    relevant file content using semantic search.
+
+    **Example**
+
+    ```hot
+    results ::openai::search/search-vector-store("vs_abc123", ::openai::search/SearchVectorStoreRequest({
+      query: "How do I reset my password?",
+      max_num_results: 5
+    }))
+    map(results.data, %.filename)
+    ```
+    """
 }
 fn
 (vector-store-id: Str, request: SearchVectorStoreRequest): SearchVectorStoreResponse {

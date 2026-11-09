@@ -27,8 +27,10 @@ meta {
        a signing secret is configured. Returns
        `{ok, status, error?, attempt-ms}`.
     - `from-body(body)` — extract a `CallbackOptions` from the
-       webhook body's `callback_url` / `callback_secret_env` fields,
-       returning `null` when no callback was requested.
+       webhook body's `callback_url` field, returning `null` when no
+       callback was requested. `from-body(body, signing-secret-env)`
+       also signs with the named env var. That name comes from your
+       code, never from the body.
 
     Transports that want callback parity should:
 
@@ -43,6 +45,29 @@ meta {
 ::env  ::hot::env
 ::json ::hot::json
 ::time ::hot::time
+::regex ::hot::regex
+
+// A canonical dotted-quad IPv4 address.
+IPV4_ADDRESS "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
+
+// IPv4 ranges that are not publicly routable: this network, RFC1918, CGNAT,
+// loopback, link-local, IETF and documentation blocks, benchmarking,
+// multicast and reserved.
+NON_PUBLIC_IPV4 [
+    "^(0|10|127)[.]",
+    "^100[.](6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])[.]",
+    "^169[.]254[.]",
+    "^172[.](1[6-9]|2[0-9]|3[01])[.]",
+    "^192[.]0[.][02][.]",
+    "^192[.]88[.]99[.]",
+    "^192[.]168[.]",
+    "^198[.](1[89]|51[.]100)[.]",
+    "^203[.]0[.]113[.]",
+    "^(22[4-9]|2[3-5][0-9])[.]",
+]
+
+// Top-level labels used for names that only resolve inside a network.
+INTERNAL_TLDS ["localhost", "local", "internal", "intranet", "lan", "home", "corp", "svc", "arpa"]
 
 CallbackOptions
 meta {
@@ -89,6 +114,7 @@ type {
 
 resolve-secret
 meta {
+    no-doc: true,
     doc: "Internal: resolve a literal-or-env signing secret. Returns `null` when neither is set."
 }
 fn (literal: Str?, env-name: Str?): Str? {
@@ -104,6 +130,7 @@ fn (literal: Str?, env-name: Str?): Str? {
 
 build-headers
 meta {
+    no-doc: true,
     doc: "Internal: assemble the headers dictionary for a callback POST. Adds the signature header when a secret is configured."
 }
 fn (body-text: Str, opts: CallbackOptions): Map {
@@ -124,47 +151,67 @@ is-url-allowed
 meta {
     doc: """
     Return true when a callback URL is safe for the shared helper to
-    call. The default policy is intentionally narrow: callbacks must be
-    HTTPS and must not target obvious local/private hosts, so untrusted
+    call. The default policy is intentionally narrow, so untrusted
     webhook bodies cannot direct the worker at internal services.
+    Callbacks must be HTTPS, carry no `user@` part or backslash, and name a public
+    host: a dotted DNS name outside internal suffixes like `.internal`,
+    or a publicly routable IPv4 address. IPv6 literals and numeric
+    spellings of IPv4 (`2130706433`, `0x7f.0.0.1`, `127.1`) are refused.
+
+    This checks the URL only. A public name that resolves to a private
+    address still passes, so network egress rules remain the real
+    boundary for workers that can reach internal services.
+
+    **Example**
+
+    ```hot
+    ::callbacks ::ai::agent::callbacks
+
+    ::callbacks/is-url-allowed("https://example.com/hook")  // true
+    ::callbacks/is-url-allowed("http://example.com/hook")  // false
+    ::callbacks/is-url-allowed("https://10.0.0.5/hook")  // false
+    ::callbacks/is-url-allowed("https://x@127.0.0.1/hook")  // false
+    ```
     """
 }
 fn (url: Str?): Bool {
     u lowercase(or(url, ""))
     cond {
         not(starts-with(u, "https://")) => { false }
-        => {
-            host callback-host(u)
-            not(is-private-callback-host(host))
-        }
+        contains(u, "\\") => { false }
+        => { not(is-private-callback-host(callback-host(u))) }
     }
 }
 
 callback-host
 meta {
-    doc: "Internal: best-effort host extraction for already-lowercased HTTPS callback URLs."
+    no-doc: true,
+    doc: "Internal: host of an already-lowercased HTTPS URL, or an empty string when the URL has a `user@` part."
 }
 fn (url: Str): Str {
-    without-scheme slice(url, length("https://"))
-    authority first(split(without-scheme, "/"))
-    first(split(authority, ":"))
+    authority slice(url, length("https://"))
+        |> replace("?", "/")
+        |> replace("#", "/")
+        |> split("/")
+        |> first()
+    if(contains(authority, "@"), "", first(split(authority, ":")))
 }
 
 is-private-callback-host
 meta {
-    doc: "Internal: reject obvious localhost, link-local, and RFC1918 callback hosts."
+    no-doc: true,
+    doc: "Internal: true unless `host` is a dotted DNS name with a public suffix or a publicly routable IPv4 address. Anything else is refused, including percent-encoded and non-ASCII spellings that a URL parser would normalize."
 }
 fn (host: Str): Bool {
-    or(
-        is-empty(host),
-        eq(host, "localhost"),
-        starts-with(host, "127."),
-        starts-with(host, "10."),
-        starts-with(host, "192.168."),
-        starts-with(host, "172."),
-        starts-with(host, "169.254."),
-        starts-with(host, "[")
-    )
+    name if(ends-with(host, "."), slice(host, 0, sub(length(host), 1)), host)
+    tld last(split(name, "."))
+    cond {
+        not(::regex/is-match(name, "^[a-z0-9_-]+([.][a-z0-9_-]+)+$")) => { true }
+        ::regex/is-match(tld, "^([0-9]+|0x[0-9a-f]*)$") => {
+            or(not(::regex/is-match(name, IPV4_ADDRESS)), some(NON_PUBLIC_IPV4, ::regex/is-match(name, %)))
+        }
+        => { in(tld, INTERNAL_TLDS) }
+    }
 }
 
 post-callback
@@ -176,6 +223,19 @@ meta {
 
     `payload` may be any value — it's wrapped through
     `::hot::json/to-json` before transmission.
+
+    **Example**
+
+    ```hot
+    ::callbacks ::ai::agent::callbacks
+
+    opts ::callbacks/CallbackOptions({
+        url: "https://example.com/agent/callback",
+        signing-secret-env: "AGENT_CALLBACK_SECRET",
+    })
+    result ::callbacks/post-callback({text: "Done."}, opts)
+    if(result.ok, `delivered in ${result.attempt-ms}ms`, result.error)
+    ```
     """
 }
 fn (payload: Any, opts: CallbackOptions?): CallbackResult {
@@ -230,16 +290,35 @@ meta {
     kebab-case and snake_case):
 
     - `callback_url` / `callback-url`
-    - `callback_secret_env` / `callback-secret-env`
     - `callback_signing_header` / `callback-signing-header`
+
+    To sign the callback, pass the env var name as `signing-secret-env`.
+    The body cannot choose it: a caller who could name any env var would
+    get that value used as an HMAC key on a POST to their own URL. A
+    `callback_secret_env` key in the body is ignored.
 
     Convenience for transports that accept `callback_url` in the
     inbound payload directly. Non-HTTPS URLs are ignored; callers that
     need local development callbacks should use streams or construct
     their own stricter transport-local policy.
+
+    **Example**
+
+    ```hot
+    ::callbacks ::ai::agent::callbacks
+
+    opts ::callbacks/from-body({callback_url: "https://example.com/done"}, "CALLBACK_SECRET")
+    opts.url  // "https://example.com/done"
+    opts.signing-secret-env  // "CALLBACK_SECRET"
+    ::callbacks/from-body({callback_url: "http://example.com/done"})  // null
+    ```
     """
 }
-fn (body: Map?): Any {
+fn
+(body: Map?): Any {
+    from-body(body, null)
+},
+(body: Map?, signing-secret-env: Str?): Any {
     raw or(body, {})
     url or(get(raw, "callback_url"), get(raw, "callback-url"))
     cond {
@@ -248,7 +327,7 @@ fn (body: Map?): Any {
         => {
             CallbackOptions({
                 url: url,
-                signing-secret-env: or(get(raw, "callback_secret_env"), get(raw, "callback-secret-env")),
+                signing-secret-env: signing-secret-env,
                 signing-secret: null,
                 signing-header: or(get(raw, "callback_signing_header"), get(raw, "callback-signing-header")),
                 headers: get(raw, "callback_headers"),

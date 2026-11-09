@@ -43,6 +43,16 @@ meta {
     `taxId`, `leiCode`, `website`, `email`, `phone`, `noUBOs`,
     `noShareholders`. `options` adds applicant fields (`email`, `lang`,
     `sourceKey`, `metadata`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::kyb/create-company-request("kyb-level", "acme-ltd", {companyName: "Acme Ltd", country: "GBR"}, {})
+    spec.path  // "/resources/applicants?levelName=kyb-level"
+    spec.body.fixedInfo.companyInfo.companyName  // "Acme Ltd"
+
+    is-err(::sumsub::kyb/create-company-request("kyb-level", "acme-ltd", {}, {}))  // true
+    ```
     """
 }
 fn (level-name: Str, external-user-id: Str, company-info: Map, options: Map): Map {
@@ -92,7 +102,16 @@ fn
 
 update-company-info
 meta {
-    doc: """Overwrite the company data fields you supply (`PATCH .../fixedInfo/companyInfo`)."""
+    doc: """
+    Overwrite the company data fields you supply (`PATCH
+    .../fixedInfo/companyInfo`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyb/update-company-info("65f0c1e2a3b4c5d6e7f80912", {website: "https://acme.example"})
+    ```
+    """
 }
 fn
 (applicant-id: Str, fields: Map): Map {
@@ -112,6 +131,16 @@ meta {
     registrationNumber, ...}` for a company), plus `shareSize` (percent),
     `subtypes` (`UBO_SUBTYPES`, with `ubo` only) and `natureOfControl`
     (required for `controlUbo`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::kyb/beneficiary-request("abc", {types: ["ubo"], applicantId: "def"})
+    spec.path  // "/resources/applicants/abc/fixedInfo/companyInfo/beneficiaries"
+    spec.body  // {types: ["ubo"], applicantId: "def"}
+
+    is-err(::sumsub::kyb/beneficiary-request("abc", {types: []}))  // true
+    ```
     """
 }
 fn (company-applicant-id: Str, beneficiary: Map): Map {
@@ -165,7 +194,17 @@ fn
 
 link-applicant
 meta {
-    doc: """Link an existing applicant to a company in the given roles; shorthand for `add-beneficiary` with `applicantId`."""
+    doc: """
+    Link an existing applicant to a company in the given roles; shorthand
+    for `add-beneficiary` with `applicantId`.
+
+    **Example**
+
+    ```hot
+    link ::sumsub::kyb/link-applicant("65f0c1e2a3b4c5d6e7f80912", "65f0c1e2a3b4c5d6e7f80913", ["director"])
+    link.id
+    ```
+    """
 }
 fn
 (company-applicant-id: Str, applicant-id: Str, types: Vec<Str>): Map {
@@ -177,7 +216,16 @@ fn
 
 remove-beneficiary
 meta {
-    doc: """Unlink a beneficiary by its beneficiary `id` (from `add-beneficiary` or `beneficiaries`)."""
+    doc: """
+    Unlink a beneficiary by its beneficiary `id` (from `add-beneficiary` or
+    `beneficiaries`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyb/remove-beneficiary("65f0c1e2a3b4c5d6e7f80912", "65f0c1e2a3b4c5d6e7f80a00")
+    ```
+    """
 }
 fn
 (company-applicant-id: Str, beneficiary-id: Str): Map {
@@ -189,7 +237,19 @@ fn
 
 beneficiaries
 meta {
-    doc: """The beneficiaries on a company applicant (as returned by `::sumsub::applicants/get-applicant`): `fixedInfo.companyInfo.beneficiaries`, falling back to `info.companyInfo.beneficiaries`; `[]` when none. Pure."""
+    doc: """
+    The beneficiaries on a company applicant (as returned by
+    `::sumsub::applicants/get-applicant`):
+    `fixedInfo.companyInfo.beneficiaries`, falling back to
+    `info.companyInfo.beneficiaries`; `[]` when none. Pure.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyb/beneficiaries({fixedInfo: {companyInfo: {beneficiaries: [{id: "b1"}]}}})  // [{id: "b1"}]
+    ::sumsub::kyb/beneficiaries({})  // []
+    ```
+    """
 }
 fn (applicant: Any): Vec {
   fixed get-in(applicant, ["fixedInfo", "companyInfo", "beneficiaries"])

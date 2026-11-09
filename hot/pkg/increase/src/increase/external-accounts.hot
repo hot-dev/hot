@@ -43,7 +43,18 @@ fn
 
 get-external-account
 meta {
-    doc: """GET /external_accounts/{external_account_id}: retrieve an External Account."""
+    doc: """
+    GET /external_accounts/{external_account_id}: retrieve an External
+    Account.
+
+    **Example**
+
+    ```hot
+    account ::increase::external-accounts/get-external-account("external_account_ukk55lr923a3ac0pp7iv")
+    account.description
+    account.status
+    ```
+    """
 }
 fn
 (external-account-id: Str): Map {
@@ -55,7 +66,18 @@ fn
 
 list-external-accounts
 meta {
-    doc: """GET /external_accounts: one page of External Accounts. Filters: `"status.in"` (`active`, `archived`), `routing_number`, `idempotency_key`, `limit`, `cursor`."""
+    doc: """
+    GET /external_accounts: one page of External Accounts. Filters:
+    `"status.in"` (`active`, `archived`), `routing_number`,
+    `idempotency_key`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::external-accounts/list-external-accounts({"status.in": ["active"], limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -70,7 +92,17 @@ fn
 
 update-external-account
 meta {
-    doc: """PATCH /external_accounts/{external_account_id}: change `description`, `account_holder`, `funding`, or `status` (`"archived"` retires it; Increase has no delete)."""
+    doc: """
+    PATCH /external_accounts/{external_account_id}: change `description`,
+    `account_holder`, `funding`, or `status` (`"archived"` retires it;
+    Increase has no delete).
+
+    **Example**
+
+    ```hot
+    ::increase::external-accounts/update-external-account("external_account_ukk55lr923a3ac0pp7iv", {description: "Landlord (new)"})
+    ```
+    """
 }
 fn
 (external-account-id: Str, params: Map): Map {
@@ -82,7 +114,17 @@ fn
 
 archive-external-account
 meta {
-    doc: """Archive an External Account (`PATCH {status: "archived"}`), the closest thing Increase has to a delete."""
+    doc: """
+    Archive an External Account (`PATCH {status: "archived"}`), the closest
+    thing Increase has to a delete.
+
+    **Example**
+
+    ```hot
+    account ::increase::external-accounts/archive-external-account("external_account_ukk55lr923a3ac0pp7iv")
+    account.status
+    ```
+    """
 }
 fn
 (external-account-id: Str): Map {

@@ -9,7 +9,7 @@ Targets REST API **v68.0** (Winter '27) by default. Set `salesforce.api.version`
 ```hot
 // hot.hot
 hot.project.my-app.deps {
-    "hot.dev/salesforce": "0.1.1"
+    "hot.dev/salesforce": "0.1.2"
 }
 ```
 

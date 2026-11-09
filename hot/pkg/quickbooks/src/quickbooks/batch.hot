@@ -34,7 +34,19 @@ OPERATIONS ["create", "update", "delete"]
 
 create-item
 meta {
-    doc: """A batch create for `entity` with `body`. `bid` (optional) names the item in the results; items without one are numbered in order."""
+    doc: """
+    A batch create for `entity` with `body`. `bid` (optional) names the item
+    in the results; items without one are numbered in order.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/create-item("Customer", {DisplayName: "Acme Corp"})
+    // {operation: "create", entity: "Customer", body: {DisplayName: "Acme Corp"}}
+
+    ::quickbooks::batch/create-item("Customer", {DisplayName: "Acme Corp"}, "acme").bId  // "acme"
+    ```
+    """
 }
 fn
 (entity: Str, body: Map): Map {
@@ -46,7 +58,18 @@ fn
 
 update-item
 meta {
-    doc: """A batch update. `body` carries `Id` and `SyncToken`; add `sparse: true` to change only the fields given."""
+    doc: """
+    A batch update. `body` carries `Id` and `SyncToken`; add `sparse: true`
+    to change only the fields given.
+
+    **Example**
+
+    ```hot
+    item ::quickbooks::batch/update-item("Invoice", {Id: "130", SyncToken: "2", sparse: true, DueDate: "2026-12-31"})
+    item.operation  // "update"
+    item.body.DueDate  // "2026-12-31"
+    ```
+    """
 }
 fn
 (entity: Str, body: Map): Map {
@@ -57,7 +80,18 @@ fn
 }
 
 delete-item
-meta {doc: """A batch delete of a transaction by `Id` and current `SyncToken`."""}
+meta {
+    doc: """
+    A batch delete of a transaction by `Id` and current `SyncToken`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/delete-item("Bill", "88", "0")
+    // {operation: "delete", entity: "Bill", body: {Id: "88", SyncToken: "0"}}
+    ```
+    """
+}
 fn
 (entity: Str, id: Str | Int, sync-token: Str | Int): Map {
   delete-item(entity, id, sync-token, null)
@@ -67,7 +101,18 @@ fn
 }
 
 query-item
-meta {doc: """A batch query (`select ...`; STARTPOSITION/MAXRESULTS allowed)."""}
+meta {
+    doc: """
+    A batch query (`select ...`; STARTPOSITION/MAXRESULTS allowed).
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/query-item("select * from Vendor")  // {Query: "select * from Vendor"}
+    ::quickbooks::batch/query-item("select * from Vendor", "vendors").bId  // "vendors"
+    ```
+    """
+}
 fn
 (q: Str): Map {
   query-item(q, null)
@@ -78,13 +123,27 @@ fn
 
 // Item builders never Err (an Err inside a Vec literal halts the run);
 // `build-batch` validates the entity and operation of every item.
-operation-item fn (operation: Str, entity: Str, body: Map, bid: Str?): Map {
+operation-item
+meta {no-doc: true}
+fn (operation: Str, entity: Str, body: Map, bid: Str?): Map {
   filter-vals({bId: bid, operation: operation, entity: entity, body: body}, is-some)
 }
 
 wire-item
 meta {
-    doc: """Check one item and turn it into its wire form (`{bId, operation, Invoice: {...}}` or `{bId, Query}`), or an Err."""
+    doc: """
+    Check one item and turn it into its wire form (`{bId, operation,
+    Invoice: {...}}` or `{bId, Query}`), or an Err.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/wire-item(::quickbooks::batch/delete-item("Bill", "88", "0"))
+    // {operation: "delete", Bill: {Id: "88", SyncToken: "0"}}
+
+    is-err(::quickbooks::batch/wire-item(::quickbooks::batch/delete-item("Customer", "58", "1")))  // true
+    ```
+    """
 }
 fn (item: Map): Map {
   cond {
@@ -107,6 +166,15 @@ meta {
     without a `bId` get their 1-based position. Errs when there are no
     items, more than 30, a repeated `bId`, or an item whose entity does
     not support its operation.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/build-batch([::quickbooks::batch/query-item("select * from Vendor")])
+    // {BatchItemRequest: [{Query: "select * from Vendor", bId: "1"}]}
+
+    is-err(::quickbooks::batch/build-batch([]))  // true
+    ```
     """
 }
 fn (items: Vec): Map {
@@ -140,6 +208,17 @@ meta {
     `entity` is the entity name (or `"QueryResponse"`), `value` the entity
     or query response, and for a failed item `message` is readable and
     `errors` lists each `{message, detail, code, element}`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::batch/item-result({bId: "1", Invoice: {Id: "130"}})
+    // {bid: "1", ok: true, entity: "Invoice", value: {Id: "130"}}
+
+    failed ::quickbooks::batch/item-result({bId: "2", Fault: {type: "ValidationFault", Error: [{Message: "Stale Object Error", code: "5010"}]}})
+    failed.ok  // false
+    failed.message  // "quickbooks: batch item 2 failed: ValidationFault: Stale Object Error"
+    ```
     """
 }
 fn (item: Map): Map {
@@ -166,7 +245,20 @@ fn (item: Map): Map {
 
 parse-results
 meta {
-    doc: """Every item of a batch response body as an `item-result`, in response order."""
+    doc: """
+    Every item of a batch response body as an `item-result`, in response
+    order.
+
+    **Example**
+
+    ```hot
+    body {BatchItemResponse: [
+      {bId: "1", Customer: {Id: "58"}},
+      {bId: "2", Fault: {type: "ValidationFault", Error: [{Message: "Stale Object Error"}]}}
+    ]}
+    map(::quickbooks::batch/parse-results(body), %.ok)  // [true, false]
+    ```
+    """
 }
 fn (body: Map): Vec {
   map(filter(or(get(body, "BatchItemResponse"), []), is-map), item-result)
@@ -178,7 +270,24 @@ fn (body: Map): Vec {
 
 batch
 meta {
-    doc: """POST /batch: run up to 30 items and return their `item-result`s. The call itself Errs only for request-level failures (auth, throttling, a malformed batch)."""
+    doc: """
+    POST /batch: run up to 30 items and return their `item-result`s. The
+    call itself Errs only for request-level failures (auth, throttling, a
+    malformed batch).
+
+    **Example**
+
+    ```hot
+    results ::quickbooks::batch/batch([
+      ::quickbooks::batch/create-item("Customer", {DisplayName: "Acme Corp"}),
+      ::quickbooks::batch/query-item("select * from Vendor where Active = true")
+    ], {realm-id: "9341453"})
+
+    // A failed item does not fail the call
+    failed filter(results, (r) { not(r.ok) })
+    map(failed, %.message)
+    ```
+    """
 }
 fn
 (items: Vec): Vec {

@@ -34,7 +34,17 @@ fn
 
 get-event
 meta {
-    doc: """GET /api/events/{id}: retrieve an event (`resource`, `event_name`, `event_time`, `data`)."""
+    doc: """
+    GET /api/events/{id}: retrieve an event (`resource`, `event_name`,
+    `event_time`, `data`).
+
+    **Example**
+
+    ```hot
+    event ::modern-treasury::events/get-event("d4a6c1f8-2e93-4b05-97c6-3f8d1e0a7b52")
+    event.event_name
+    ```
+    """
 }
 fn
 (event-id: Str): Map {

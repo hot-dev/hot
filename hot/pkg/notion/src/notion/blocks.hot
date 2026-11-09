@@ -4,7 +4,17 @@
 
 get-children
 meta {
-    doc: """GET /blocks/{id}/children - A page's (or block's) content blocks. Returns `{results, has_more, next_cursor}`."""
+    doc: """
+    GET /blocks/{id}/children - A page's (or block's) content blocks.
+    Returns `{results, has_more, next_cursor}`.
+
+    **Example**
+
+    ```hot
+    content ::notion::blocks/get-children("59833787-2cf9-4fdf-8782-e53db20768a5")
+    map(content.results, %.type)
+    ```
+    """
 }
 fn
 (block-id: Str): Map {
@@ -23,7 +33,7 @@ meta {
     **Example**
 
     ```hot
-    ::notion::blocks/append-children(page-id, [
+    ::notion::blocks/append-children("59833787-2cf9-4fdf-8782-e53db20768a5", [
       ::notion/to-do("Review the pinecone package"),
       ::notion/paragraph("Added by the standup agent.")
     ])
@@ -40,7 +50,15 @@ fn
 
 delete-block
 meta {
-    doc: """DELETE /blocks/{id} - Move a block to the trash."""
+    doc: """
+    DELETE /blocks/{id} - Move a block to the trash.
+
+    **Example**
+
+    ```hot
+    ::notion::blocks/delete-block("c02fc1d3-db8b-45c5-a222-27595b15aea7")
+    ```
+    """
 }
 fn
 (block-id: Str): Map {

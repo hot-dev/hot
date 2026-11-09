@@ -98,6 +98,16 @@ meta {
     Pair jobs with their raw results (pure): `[{job, figis, warning,
     error}]`, where `figis` is `[]` unless the job matched. A missing
     result (a short response) counts as an error.
+
+    **Example**
+
+    ```hot
+    jobs [::openfigi/job("TICKER", "IBM", {exchCode: "US"}), ::openfigi/job("TICKER", "NOPE")]
+    out ::openfigi/mapping-results(jobs, [{data: [{figi: "BBG000BLNNH6"}]}, {warning: "No identifier found."}])
+    first(out[0].figis).figi  // "BBG000BLNNH6"
+    out[1].figis  // []
+    out[1].warning  // "No identifier found."
+    ```
     """
 }
 fn (jobs: Vec, results: Vec): Vec<Map> {
@@ -112,7 +122,9 @@ fn (jobs: Vec, results: Vec): Vec<Map> {
   })
 }
 
-map-all-chunks fn (chunks: Vec, opts: Map, acc: Vec): Vec<Map> {
+map-all-chunks
+meta {no-doc: true}
+fn (chunks: Vec, opts: Map, acc: Vec): Vec<Map> {
   cond {
     is-empty(chunks) => { acc }
     => {
@@ -190,7 +202,17 @@ fn
 
 by-isin
 meta {
-    doc: """FIGIs for an ISIN (`ID_ISIN`). One ISIN usually maps to a FIGI per listing; add `{filters: {exchCode: "US"}}` to narrow it."""
+    doc: """
+    FIGIs for an ISIN (`ID_ISIN`). One ISIN usually maps to a FIGI per
+    listing; add `{filters: {exchCode: "US"}}` to narrow it.
+
+    **Example**
+
+    ```hot
+    figis ::openfigi/by-isin("US0378331005", {filters: {exchCode: "US"}})
+    map(figis, %.ticker)
+    ```
+    """
 }
 fn
 (isin: Str): Vec<Map> {
@@ -202,7 +224,16 @@ fn
 
 by-cusip
 meta {
-    doc: """FIGIs for a nine-character CUSIP (`ID_CUSIP`)."""
+    doc: """
+    FIGIs for a nine-character CUSIP (`ID_CUSIP`).
+
+    **Example**
+
+    ```hot
+    figis ::openfigi/by-cusip("037833100", {filters: {exchCode: "US"}})
+    map(figis, %.figi)
+    ```
+    """
 }
 fn
 (cusip: Str): Vec<Map> {
@@ -214,7 +245,16 @@ fn
 
 by-sedol
 meta {
-    doc: """FIGIs for a SEDOL (`ID_SEDOL`)."""
+    doc: """
+    FIGIs for a SEDOL (`ID_SEDOL`).
+
+    **Example**
+
+    ```hot
+    figis ::openfigi/by-sedol("2046251")
+    map(figis, %.name)
+    ```
+    """
 }
 fn
 (sedol: Str): Vec<Map> {
@@ -248,7 +288,18 @@ fn
 
 by-figi
 meta {
-    doc: """The record for a FIGI (`ID_BB_GLOBAL`), or null when OpenFIGI has none."""
+    doc: """
+    The record for a FIGI (`ID_BB_GLOBAL`), or null when OpenFIGI has none.
+
+    **Example**
+
+    ```hot
+    record ::openfigi/by-figi("BBG000B9XRY4")
+
+    // Null when OpenFIGI has no record for the FIGI
+    if(is-some(record), record.name, "not found")
+    ```
+    """
 }
 fn
 (figi: Str): Map? {
@@ -269,13 +320,25 @@ fn
 
 search-body
 meta {
-    doc: """The request body for `/search` or `/filter` (pure): `query`, `opts.filters` and `opts.start`, with null and blank values dropped."""
+    doc: """
+    The request body for `/search` or `/filter` (pure): `query`,
+    `opts.filters` and `opts.start`, with null and blank values dropped.
+
+    **Example**
+
+    ```hot
+    ::openfigi/search-body("apple", {filters: {exchCode: "US", currency: null}})  // {query: "apple", exchCode: "US"}
+    ::openfigi/search-body(null, {filters: {exchCode: "US"}, start: "tok"})  // {exchCode: "US", start: "tok"}
+    ```
+    """
 }
 fn (query: Str?, opts: Map): Map {
   filter-vals({query: query, ...or(get(opts, "filters"), {}), start: get(opts, "start")}, ::api/given)
 }
 
-page-request fn (path: Str, query: Str?, opts: Map): Map {
+page-request
+meta {no-doc: true}
+fn (path: Str, query: Str?, opts: Map): Map {
   cfg ::api/resolve(opts)
   body search-body(query, opts)
   cond {
@@ -338,7 +401,9 @@ fn
   page-request("/filter", query, opts)
 }
 
-collect-pages fn (fetch: Fn, start: Str?, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, start: Str?, limit: Int, acc: Vec): Vec {
   page fetch(start)
   cond {
     is-err(page) => { page }
@@ -422,11 +487,15 @@ CHAR_VALUES {
 // Prefixes the FIGI standard reserves because they clash with ISIN country codes.
 RESERVED_PREFIXES ["BS", "BM", "GG", "GB", "GH", "KY", "VG"]
 
-digits fn (s: Str): Vec<Str> {
+digits
+meta {no-doc: true}
+fn (s: Str): Vec<Str> {
   filter(::re/split(s, ""), (c) { not(is-empty(c)) })
 }
 
-digit-sum fn (n: Int): Int {
+digit-sum
+meta {no-doc: true}
+fn (n: Int): Int {
   reduce(map(digits(Str(n)), Int), add, 0)
 }
 
@@ -437,6 +506,12 @@ meta {
     count A=10 … Z=35, every second character's value is doubled, the
     digits of all values are summed, and the check digit is
     `(10 - sum mod 10) mod 10`.
+
+    **Example**
+
+    ```hot
+    ::openfigi/check-digit("BBG000B9XRY")  // 4
+    ```
     """
 }
 fn (s: Str): Int {
@@ -458,7 +533,8 @@ meta {
 
     ```hot
     ::openfigi/is-figi("BBG000B9XRY4")   // true
-    ::openfigi/is-figi("BBG000B9XRY5")   // false: bad check digit
+    // A bad check digit
+    ::openfigi/is-figi("BBG000B9XRY5")   // false
     ```
     """
 }

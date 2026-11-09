@@ -31,7 +31,18 @@ fn
 
 update-me
 meta {
-    doc: """PATCH /me - Update the profile (`name`, `email`, `timeZone`, `weekStart`, `timeFormat` (12/24), `defaultScheduleId`, `locale`, `avatarUrl`, `bio`, `metadata`). Unset fields are omitted. An email change waits for verification before it takes effect."""
+    doc: """
+    PATCH /me - Update the profile (`name`, `email`, `timeZone`,
+    `weekStart`, `timeFormat` (12/24), `defaultScheduleId`, `locale`,
+    `avatarUrl`, `bio`, `metadata`). Unset fields are omitted. An email
+    change waits for verification before it takes effect.
+
+    **Example**
+
+    ```hot
+    ::cal-com::users/update-me({timeZone: "America/Chicago", weekStart: "Monday"})
+    ```
+    """
 }
 fn
 (changes: Map): Any {

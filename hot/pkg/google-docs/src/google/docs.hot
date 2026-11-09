@@ -55,7 +55,16 @@ FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
 api-root
 meta {
     ctx: {"google.docs.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://docs.googleapis.com` unless the `google.docs.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://docs.googleapis.com` unless the
+    `google.docs.api-root` context variable points at a proxy or emulator.
+
+    **Example**
+
+    ```hot
+    ::google::docs/api-root()  // "https://docs.googleapis.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.docs.api-root")
@@ -64,7 +73,17 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Docs v1 URL: `/v1/documents` + `path` with non-null `params`. `url("/abc:batchUpdate")`."""
+    doc: """
+    A Docs v1 URL: `/v1/documents` + `path`, with `params` as a query string
+    when given.
+
+    **Example**
+
+    ```hot
+    ::google::docs/url("/abc:batchUpdate")
+    // "https://docs.googleapis.com/v1/documents/abc:batchUpdate"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -75,7 +94,17 @@ fn
 }
 
 encode-id
-meta {doc: """URL-encode a document id for a path segment."""}
+meta {
+    doc: """
+    URL-encode a document id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::google::docs/encode-id("a b")  // "a%20b"
+    ```
+    """
+}
 fn (id: Str): Str {
   ::uri/encode(id)
 }
@@ -87,6 +116,16 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::docs/query-params({fields: "title"}, {suggestionsViewMode: "PREVIEW_SUGGESTIONS_ACCEPTED"})
+    // {fields: "title", suggestionsViewMode: "PREVIEW_SUGGESTIONS_ACCEPTED"}
+
+    // Null in opts drops a default
+    ::google::docs/query-params({fields: "title"}, {fields: null})  // {}
+    ```
     """
 }
 fn
@@ -100,7 +139,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::docs/creds({token: "ya29.abc", fields: "title"})  // {token: "ya29.abc"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -108,7 +156,17 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    // Package internals: prefer the functions in ::google::docs::documents
+    ::google::docs/json(::google::docs/READ_SCOPE, "GET", ::google::docs/url("/abc"), "", {})
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -116,7 +174,16 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Docs bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Docs bodies never carry JSON null
+    for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::docs/compact({title: "Report", fields: null})  // {title: "Report"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)

@@ -34,7 +34,16 @@ ACCEPT "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/x
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::feed::api/given("  ")  // false
+    ::feed::api/given("x")   // true
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -44,7 +53,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -102,14 +113,18 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     => { null }
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -120,7 +135,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 404, headers: {}, body: "Not Found"}
+    e ::feed::api/http-error(response, "https://example.com/feed.xml")
+    e.status   // 404
+    e.message  // "feed: HTTP 404: Not Found"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -146,6 +173,14 @@ meta {
     The headers for one fetch (pure): `User-Agent`, `Accept`, and
     `If-None-Match` / `If-Modified-Since` from `opts.etag` and
     `opts.last-modified` when they are set.
+
+    **Example**
+
+    ```hot
+    headers ::feed::api/request-headers({user-agent: "Acme Corp ops@acme.example"}, {etag: "abc"})
+    get(headers, "User-Agent")     // "Acme Corp ops@acme.example"
+    get(headers, "If-None-Match")  // "abc"
+    ```
     """
 }
 fn (cfg: Map, opts: Map): Map {
@@ -163,6 +198,16 @@ meta {
     GET a feed URL with `headers`, returning the `HttpResponse` on 2xx
     or 304, or an Err carrying `HttpError`. A transport failure passes
     through as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::feed::api/request(
+      "https://www.sec.gov/news/pressreleases.rss",
+      {User-Agent: "Acme Corp ops@acme.example"}
+    )
+    response.status
+    ```
     """
 }
 fn (url: Str, headers: Map): HttpResponse {
@@ -186,7 +231,17 @@ fn (url: Str, headers: Map): HttpResponse {
 
 declared-encoding
 meta {
-    doc: """The lower-cased `encoding` of an XML declaration at the start of `bytes`, or `"utf-8"` when there is none (pure)."""
+    doc: """
+    The lower-cased `encoding` of an XML declaration at the start of
+    `bytes`, or `"utf-8"` when there is none (pure).
+
+    **Example**
+
+    ```hot
+    ::feed::api/declared-encoding(Bytes("<?xml version='1.0' encoding='ISO-8859-1'?><rss/>"))  // "iso-8859-1"
+    ::feed::api/declared-encoding(Bytes("<rss/>"))                                             // "utf-8"
+    ```
+    """
 }
 fn (bytes: Bytes): Str {
   head slice(::hot::bytes/to-vec(bytes), 0, min(length(bytes), 100))
@@ -198,7 +253,16 @@ fn (bytes: Bytes): Str {
 
 latin1-to-str
 meta {
-    doc: """ISO-8859-1 bytes as text (pure): every byte is the code point of the same value, so each one above 127 becomes two UTF-8 bytes."""
+    doc: """
+    ISO-8859-1 bytes as text (pure): every byte is the code point of the
+    same value, so each one above 127 becomes two UTF-8 bytes.
+
+    **Example**
+
+    ```hot
+    ::feed::api/latin1-to-str(Bytes([99, 97, 102, 233]))  // "café"
+    ```
+    """
 }
 fn (bytes: Bytes): Str {
   ::hot::bytes/to-str(Bytes(flatten(map(::hot::bytes/to-vec(bytes), (b) {
@@ -217,6 +281,13 @@ meta {
     read in the encoding their XML declaration names: UTF-8 (the default),
     US-ASCII or ISO-8859-1, which EDGAR's feeds declare. Any other
     encoding, or bytes invalid in the declared one, is an Err.
+
+    **Example**
+
+    ```hot
+    ::feed::api/decode("<rss/>")                               // "<rss/>"
+    ::feed::api/decode(Bytes([60, 114, 115, 115, 47, 62]))     // "<rss/>"
+    ```
     """
 }
 fn (body: Str | Bytes): Str {

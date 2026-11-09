@@ -50,7 +50,7 @@ meta {
     fn (request) {
       if(not(::cal-com::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-booking-event(request.body))
+        ::hot::http/HttpResponse({status: 200, body: "ok"}))
     }
     ```
     """
@@ -79,7 +79,17 @@ fn
 
 mark-webhook-secret
 meta {
-    doc: """Mask a `secret` set in webhook fields in call records. Returns `fields` unchanged. Exposed for testing."""
+    doc: """
+    Mask a `secret` set in webhook fields in call records. Returns `fields`
+    unchanged. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    fields ::cal-com::webhooks/mark-webhook-secret({active: true, secret: ::hot::ctx/get("cal-com.webhook.secret")})
+    fields.active
+    ```
+    """
 }
 fn (fields: Map): Map {
   if(is-some(get(fields, "secret")), ::ctx/mark-secret(fields.secret))
@@ -88,19 +98,43 @@ fn (fields: Map): Map {
 
 build-webhook-body
 meta {
-    doc: """Build a create body: `subscriberUrl`, `triggers`, `active` (default true), plus `options` (`secret`, `payloadTemplate`, `version`). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Build a create body: `subscriberUrl`, `triggers`, `active` (default
+    true), plus `options` (`secret`, `payloadTemplate`, `version`). Unset
+    options are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::cal-com::webhooks/build-webhook-body("https://example.com/cal/webhook", ["BOOKING_CREATED"], {payloadTemplate: null})
+    body.active  // true
+    body.triggers  // ["BOOKING_CREATED"]
+    ```
+    """
 }
 fn (subscriber-url: Str, triggers: Vec, options: Map): Map {
   ::api/compact({active: true, ...options, subscriberUrl: subscriber-url, triggers: triggers})
 }
 
-webhook-path fn (event-type-id: Any): Str {
+webhook-path
+meta {no-doc: true}
+fn (event-type-id: Any): Str {
   `/event-types/${::api/path-segment(event-type-id)}/webhooks`
 }
 
 list-webhooks
 meta {
-    doc: """GET /webhooks - The user's webhooks (Vec). `options`: `take` (default 250) and `skip`."""
+    doc: """
+    GET /webhooks - The user's webhooks (Vec). `options`: `take` (default
+    250) and `skip`.
+
+    **Example**
+
+    ```hot
+    hooks ::cal-com::webhooks/list-webhooks({take: 50})
+    map(hooks, %.subscriberUrl)
+    ```
+    """
 }
 fn
 (): Any {
@@ -115,7 +149,16 @@ fn
 
 get-webhook
 meta {
-    doc: """GET /webhooks/{id} - One user-level webhook."""
+    doc: """
+    GET /webhooks/{id} - One user-level webhook.
+
+    **Example**
+
+    ```hot
+    hook ::cal-com::webhooks/get-webhook("wh_abc123")
+    hook.triggers
+    ```
+    """
 }
 fn
 (webhook-id: Str): Any {
@@ -155,7 +198,16 @@ fn
 
 update-webhook
 meta {
-    doc: """PATCH /webhooks/{id} - Update `subscriberUrl`, `triggers`, `active`, `secret` or `payloadTemplate`. Unset fields are omitted."""
+    doc: """
+    PATCH /webhooks/{id} - Update `subscriberUrl`, `triggers`, `active`,
+    `secret` or `payloadTemplate`. Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::cal-com::webhooks/update-webhook("wh_abc123", {active: false})
+    ```
+    """
 }
 fn
 (webhook-id: Str, changes: Map): Any {
@@ -167,7 +219,15 @@ fn
 
 delete-webhook
 meta {
-    doc: """DELETE /webhooks/{id} - Delete a user-level webhook."""
+    doc: """
+    DELETE /webhooks/{id} - Delete a user-level webhook.
+
+    **Example**
+
+    ```hot
+    ::cal-com::webhooks/delete-webhook("wh_abc123")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Any {
@@ -179,7 +239,17 @@ fn
 
 list-event-type-webhooks
 meta {
-    doc: """GET /event-types/{id}/webhooks - Webhooks scoped to one event type (Vec). `options`: `take`, `skip`."""
+    doc: """
+    GET /event-types/{id}/webhooks - Webhooks scoped to one event type
+    (Vec). `options`: `take`, `skip`.
+
+    **Example**
+
+    ```hot
+    hooks ::cal-com::webhooks/list-event-type-webhooks(123, {take: 50})
+    map(hooks, %.subscriberUrl)
+    ```
+    """
 }
 fn
 (event-type-id: Any): Any {
@@ -194,7 +264,16 @@ fn
 
 get-event-type-webhook
 meta {
-    doc: """GET /event-types/{id}/webhooks/{webhookId} - One event-type webhook."""
+    doc: """
+    GET /event-types/{id}/webhooks/{webhookId} - One event-type webhook.
+
+    **Example**
+
+    ```hot
+    hook ::cal-com::webhooks/get-event-type-webhook(123, "wh_abc123")
+    hook.active
+    ```
+    """
 }
 fn
 (event-type-id: Any, webhook-id: Str): Any {
@@ -206,7 +285,17 @@ fn
 
 create-event-type-webhook
 meta {
-    doc: """POST /event-types/{id}/webhooks - Subscribe a URL to one event type's events. Same `options` as `create-webhook`."""
+    doc: """
+    POST /event-types/{id}/webhooks - Subscribe a URL to one event type's
+    events. Same `options` as `create-webhook`.
+
+    **Example**
+
+    ```hot
+    hook ::cal-com::webhooks/create-event-type-webhook(123, "https://example.com/cal/webhook", ["BOOKING_CREATED"], {secret: ::hot::ctx/get("cal-com.webhook.secret")})
+    hook.id
+    ```
+    """
 }
 fn
 (event-type-id: Any, subscriber-url: Str, triggers: Vec): Any {
@@ -221,7 +310,16 @@ fn
 
 update-event-type-webhook
 meta {
-    doc: """PATCH /event-types/{id}/webhooks/{webhookId} - Update an event-type webhook. Unset fields are omitted."""
+    doc: """
+    PATCH /event-types/{id}/webhooks/{webhookId} - Update an event-type
+    webhook. Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::cal-com::webhooks/update-event-type-webhook(123, "wh_abc123", {triggers: ["BOOKING_CREATED", "MEETING_ENDED"]})
+    ```
+    """
 }
 fn
 (event-type-id: Any, webhook-id: Str, changes: Map): Any {
@@ -233,7 +331,16 @@ fn
 
 delete-event-type-webhook
 meta {
-    doc: """DELETE /event-types/{id}/webhooks/{webhookId} - Delete one event-type webhook."""
+    doc: """
+    DELETE /event-types/{id}/webhooks/{webhookId} - Delete one event-type
+    webhook.
+
+    **Example**
+
+    ```hot
+    ::cal-com::webhooks/delete-event-type-webhook(123, "wh_abc123")
+    ```
+    """
 }
 fn
 (event-type-id: Any, webhook-id: Str): Any {

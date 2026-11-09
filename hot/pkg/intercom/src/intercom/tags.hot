@@ -11,7 +11,16 @@ meta {
 
 list-tags
 meta {
-    doc: """GET /tags - Every tag in the workspace: `{type: "list", data: [...]}`."""
+    doc: """
+    GET /tags - Every tag in the workspace: `{type: "list", data: [...]}`.
+
+    **Example**
+
+    ```hot
+    tags ::intercom::tags/list-tags()
+    map(tags.data, %.name)
+    ```
+    """
 }
 fn
 (): Any {
@@ -23,7 +32,17 @@ fn
 
 create-tag
 meta {
-    doc: """POST /tags - Create a tag by name, or return the existing tag with that name."""
+    doc: """
+    POST /tags - Create a tag by name, or return the existing tag with that
+    name.
+
+    **Example**
+
+    ```hot
+    tag ::intercom::tags/create-tag("vip")
+    tag.id
+    ```
+    """
 }
 fn
 (name: Str): Any {
@@ -35,7 +54,15 @@ fn
 
 rename-tag
 meta {
-    doc: """POST /tags with an `id` - Rename an existing tag."""
+    doc: """
+    POST /tags with an `id` - Rename an existing tag.
+
+    **Example**
+
+    ```hot
+    ::intercom::tags/rename-tag("7522907", "enterprise")
+    ```
+    """
 }
 fn
 (id: Str, name: Str): Any {
@@ -47,7 +74,16 @@ fn
 
 get-tag
 meta {
-    doc: """GET /tags/{id} - One tag."""
+    doc: """
+    GET /tags/{id} - One tag.
+
+    **Example**
+
+    ```hot
+    tag ::intercom::tags/get-tag("7522907")
+    tag.name
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -59,7 +95,16 @@ fn
 
 delete-tag
 meta {
-    doc: """DELETE /tags/{id} - Delete a tag. Intercom refuses while the tag is used by rules or messages."""
+    doc: """
+    DELETE /tags/{id} - Delete a tag. Intercom refuses while the tag is used
+    by rules or messages.
+
+    **Example**
+
+    ```hot
+    ::intercom::tags/delete-tag("7522907")
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -71,7 +116,16 @@ fn
 
 tag-contact
 meta {
-    doc: """POST /contacts/{id}/tags - Apply a tag (by tag id) to a contact. Returns the tag."""
+    doc: """
+    POST /contacts/{id}/tags - Apply a tag (by tag id) to a contact. Returns
+    the tag.
+
+    **Example**
+
+    ```hot
+    ::intercom::tags/tag-contact("6643703ffae7834d1792fd30", "7522907")
+    ```
+    """
 }
 fn
 (contact-id: Str, tag-id: Str): Any {
@@ -83,7 +137,16 @@ fn
 
 untag-contact
 meta {
-    doc: """DELETE /contacts/{id}/tags/{tag_id} - Remove a tag from a contact. Returns the tag."""
+    doc: """
+    DELETE /contacts/{id}/tags/{tag_id} - Remove a tag from a contact.
+    Returns the tag.
+
+    **Example**
+
+    ```hot
+    ::intercom::tags/untag-contact("6643703ffae7834d1792fd30", "7522907")
+    ```
+    """
 }
 fn
 (contact-id: Str, tag-id: Str): Any {
@@ -104,7 +167,7 @@ meta {
 
     ```hot
     bug ::intercom::tags/create-tag("bug")
-    ::intercom::tags/tag-conversation(conversation-id, bug.id)
+    ::intercom::tags/tag-conversation("215473041", bug.id)
     ```
     """
 }
@@ -121,7 +184,16 @@ fn
 untag-conversation
 meta {
     ctx: {"intercom.admin.id": {required: false, secret: false}},
-    doc: """DELETE /conversations/{id}/tags/{tag_id} - Remove a tag from a conversation, as the configured admin."""
+    doc: """
+    DELETE /conversations/{id}/tags/{tag_id} - Remove a tag from a
+    conversation, as the configured admin.
+
+    **Example**
+
+    ```hot
+    ::intercom::tags/untag-conversation("215473041", "7522907")
+    ```
+    """
 }
 fn
 (conversation-id: Str, tag-id: Str): Any {

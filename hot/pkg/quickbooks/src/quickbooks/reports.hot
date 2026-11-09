@@ -55,7 +55,17 @@ REPORTS [
 
 check-name
 meta {
-    doc: """A report name (letters only, e.g. `ProfitAndLoss`), or an Err. Names outside `REPORTS` are allowed for reports this package does not list."""
+    doc: """
+    A report name (letters only, e.g. `ProfitAndLoss`), or an Err. Names
+    outside `REPORTS` are allowed for reports this package does not list.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::reports/check-name("ProfitAndLoss")  // "ProfitAndLoss"
+    is-err(::quickbooks::reports/check-name("../company"))  // true
+    ```
+    """
 }
 fn (name: Str): Str {
   cond {
@@ -66,7 +76,17 @@ fn (name: Str): Str {
 
 run-report
 meta {
-    doc: """GET /reports/{name} with `params`. Returns the report (`Header`, `Columns`, `Rows`). Use `flatten-report` for records."""
+    doc: """
+    GET /reports/{name} with `params`. Returns the report (`Header`,
+    `Columns`, `Rows`). Use `flatten-report` for records.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/run-report("VendorBalance", {report_date: "2026-09-30"})
+    report.Header.ReportName
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -84,7 +104,21 @@ fn
 }
 
 profit-and-loss
-meta {doc: """The ProfitAndLoss report (income statement)."""}
+meta {
+    doc: """
+    The ProfitAndLoss report (income statement).
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/profit-and-loss({date_macro: "Last Month", accounting_method: "Accrual"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/profit-and-loss({date_macro: "Last Month", accounting_method: "Accrual"}, {realm-id: "9341453"})
+    ```
+    """
+}
 fn
 (params: Map): Map {
   run-report("ProfitAndLoss", params, {})
@@ -94,7 +128,21 @@ fn
 }
 
 balance-sheet
-meta {doc: """The BalanceSheet report."""}
+meta {
+    doc: """
+    The BalanceSheet report.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/balance-sheet({start_date: "2026-01-01", end_date: "2026-09-30"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/balance-sheet({start_date: "2026-01-01", end_date: "2026-09-30"}, {realm-id: "9341453"})
+    ```
+    """
+}
 fn
 (params: Map): Map {
   run-report("BalanceSheet", params, {})
@@ -104,7 +152,21 @@ fn
 }
 
 cash-flow
-meta {doc: """The CashFlow (statement of cash flows) report."""}
+meta {
+    doc: """
+    The CashFlow (statement of cash flows) report.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/cash-flow({date_macro: "This Fiscal Year-to-date"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/cash-flow({date_macro: "This Fiscal Year-to-date"}, {realm-id: "9341453"})
+    ```
+    """
+}
 fn
 (params: Map): Map {
   run-report("CashFlow", params, {})
@@ -115,7 +177,20 @@ fn
 
 aged-receivables
 meta {
-    doc: """The AgedReceivables (A/R aging summary) report. `report_date`, `aging_period`, `num_periods` and `customer` narrow it."""
+    doc: """
+    The AgedReceivables (A/R aging summary) report. `report_date`,
+    `aging_period`, `num_periods` and `customer` narrow it.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/aged-receivables({report_date: "2026-09-30", aging_period: 30, num_periods: 4})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/aged-receivables({report_date: "2026-09-30", aging_period: 30, num_periods: 4}, {realm-id: "9341453"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -127,7 +202,20 @@ fn
 
 aged-payables
 meta {
-    doc: """The AgedPayables (A/P aging summary) report. `report_date`, `aging_period`, `num_periods` and `vendor` narrow it."""
+    doc: """
+    The AgedPayables (A/P aging summary) report. `report_date`,
+    `aging_period`, `num_periods` and `vendor` narrow it.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/aged-payables({report_date: "2026-09-30", vendor: "56"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/aged-payables({report_date: "2026-09-30", vendor: "56"}, {realm-id: "9341453"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -139,7 +227,20 @@ fn
 
 general-ledger
 meta {
-    doc: """The GeneralLedger report. `account` (comma-separated ids), `columns` and `source_account_type` narrow it."""
+    doc: """
+    The GeneralLedger report. `account` (comma-separated ids), `columns` and
+    `source_account_type` narrow it.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/general-ledger({start_date: "2026-09-01", end_date: "2026-09-30", account: "35,36"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/general-ledger({start_date: "2026-09-01", end_date: "2026-09-30", account: "35,36"}, {realm-id: "9341453"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -151,7 +252,21 @@ fn
 
 transaction-list
 meta {
-    doc: """The TransactionList report: every transaction in a period, the usual input to reconciliation. `transaction_type`, `columns`, `payment_method` and `cleared` narrow it."""
+    doc: """
+    The TransactionList report: every transaction in a period, the usual
+    input to reconciliation. `transaction_type`, `columns`, `payment_method`
+    and `cleared` narrow it.
+
+    **Example**
+
+    ```hot
+    report ::quickbooks::reports/transaction-list({start_date: "2026-09-01", end_date: "2026-09-30", transaction_type: "Invoice"})
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)
+
+    ::quickbooks::reports/transaction-list({start_date: "2026-09-01", end_date: "2026-09-30", transaction_type: "Invoice"}, {realm-id: "9341453"})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -165,7 +280,9 @@ fn
 // Flattening (pure)
 // ---------------------------------------------------------------------------
 
-column-meta fn (column: Map, name: Str): Str? {
+column-meta
+meta {no-doc: true}
+fn (column: Map, name: Str): Str? {
   hit find-first(or(get(column, "MetaData"), []), (m) { eq(get(m, "Name"), name) })
   if(is-map(hit), get(hit, "Value"), null)
 }
@@ -176,6 +293,13 @@ meta {
     The key for each report column: its `ColTitle`, else its `ColKey`
     metadata, else its `ColType`, else `col{i}`. Repeated keys get
     `_{i}` appended, so every key is unique.
+
+    **Example**
+
+    ```hot
+    report {Columns: {Column: [{ColTitle: "Account"}, {ColTitle: ""}, {ColTitle: "Account"}, {ColType: "Money"}]}}
+    ::quickbooks::reports/column-keys(report)  // ["Account", "col1", "Account_2", "Money"]
+    ```
     """
 }
 fn (report: Map): Vec {
@@ -197,11 +321,15 @@ fn (report: Map): Vec {
   })
 }
 
-cell-values fn (col-data: Any): Vec {
+cell-values
+meta {no-doc: true}
+fn (col-data: Any): Vec {
   map(or(col-data, []), (c) { or(get(c, "value"), "") })
 }
 
-record fn (kind: Str, path: Vec, group: Str?, col-data: Any, col-keys: Vec, depth: Int): Map {
+record
+meta {no-doc: true}
+fn (kind: Str, path: Vec, group: Str?, col-data: Any, col-keys: Vec, depth: Int): Map {
   cells cell-values(col-data)
   first-cell if(is-empty(or(col-data, [])), {}, first(col-data))
   values reduce(range(0, min(length(col-keys), length(cells))), (acc, i) { assoc(acc, col-keys[i], cells[i]) }, {})
@@ -217,7 +345,9 @@ record fn (kind: Str, path: Vec, group: Str?, col-data: Any, col-keys: Vec, dept
   }, is-some)
 }
 
-flatten-rows fn (rows: Vec, col-keys: Vec, path: Vec, group: Str?, depth: Int): Vec {
+flatten-rows
+meta {no-doc: true}
+fn (rows: Vec, col-keys: Vec, path: Vec, group: Str?, depth: Int): Vec {
   mapcat(rows, (row) {
     row-group or(get(row, "group"), group)
     header-cells get(or(get(row, "Header"), {}), "ColData")
@@ -248,6 +378,25 @@ meta {
     - `depth` - nesting level, 0 at the top
 
     Amounts stay as the Strs QuickBooks sends; `parse-amount` converts one.
+
+    **Example**
+
+    ```hot
+    report {
+      Columns: {Column: [{ColTitle: "Account"}, {ColTitle: "Total"}]},
+      Rows: {Row: [{
+        group: "Income",
+        Header: {ColData: [{value: "Income"}, {value: ""}]},
+        Rows: {Row: [{ColData: [{value: "Services", id: "1"}, {value: "1200.00"}]}]},
+        Summary: {ColData: [{value: "Total Income"}, {value: "1200.00"}]}
+      }]}
+    }
+    rows ::quickbooks::reports/flatten-report(report)
+    map(rows, %.label)  // ["Services", "Total Income"]
+    rows[0].id  // "1"
+    rows[0].path  // ["Income"]
+    rows[1].values  // {Account: "Total Income", Total: "1200.00"}
+    ```
     """
 }
 fn (report: Map): Vec {
@@ -256,7 +405,18 @@ fn (report: Map): Vec {
 
 parse-amount
 meta {
-    doc: """A report amount Str (`"1200.00"`, `"-35.5"`) as a Dec; null for blanks and non-numbers."""
+    doc: """
+    A report amount Str (`"1200.00"`, `"-35.5"`) as a Dec; null for blanks
+    and non-numbers.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::reports/parse-amount("1200.00")  // 1200.0
+    ::quickbooks::reports/parse-amount("-35.5")  // -35.5
+    ::quickbooks::reports/parse-amount("n/a")  // null
+    ```
+    """
 }
 fn (value: Any): Dec? {
   cond {

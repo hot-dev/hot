@@ -14,13 +14,25 @@ meta {
 
 ListPage ::cloudflare::api/ListPage
 
-bucket-suffix fn (name: Str): Str {
+bucket-suffix
+meta {no-doc: true}
+fn (name: Str): Str {
   `/r2/buckets/${::api/seg(name)}`
 }
 
 jurisdiction-headers
 meta {
-    doc: """The `cf-r2-jurisdiction` header for a jurisdiction (`"eu"`, `"fedramp"`, …), or no header for null/`"default"`. Exposed for testing."""
+    doc: """
+    The `cf-r2-jurisdiction` header for a jurisdiction (`"eu"`, `"fedramp"`,
+    …), or no header for null/`"default"`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::r2/jurisdiction-headers("eu")  // {cf-r2-jurisdiction: "eu"}
+    ::cloudflare::r2/jurisdiction-headers("default")  // {}
+    ```
+    """
 }
 fn (jurisdiction: Str?): Map {
   cond {
@@ -30,7 +42,9 @@ fn (jurisdiction: Str?): Map {
   }
 }
 
-send-json fn (method: Str, suffix: Str, body: Any, jurisdiction: Str?, opts: Map): Any {
+send-json
+meta {no-doc: true}
+fn (method: Str, suffix: Str, body: Any, jurisdiction: Str?, opts: Map): Any {
   path ::api/account-path(suffix, opts)
   headers jurisdiction-headers(jurisdiction)
   cond {
@@ -57,6 +71,16 @@ meta {
     `cursor`, `order` (`name`), `direction`, and `jurisdiction` (sent as
     the `cf-r2-jurisdiction` header). Returns a `ListPage` whose `result`
     is the bucket list.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::r2/list-buckets({name_contains: "export", per_page: 100})
+    map(page.result, %.name)
+
+    // EU buckets
+    ::cloudflare::r2/list-buckets({jurisdiction: "eu"})
+    ```
     """
 }
 fn
@@ -78,7 +102,16 @@ fn
 
 list-all-buckets
 meta {
-    doc: """Every bucket matching `params`, following cursors up to `max` buckets (default 10000)."""
+    doc: """
+    Every bucket matching `params`, following cursors up to `max` buckets
+    (default 10000).
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::r2/list-all-buckets({name_contains: "export"}, 500), %.name)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -99,7 +132,17 @@ fn
 
 create-bucket-body
 meta {
-    doc: """The create body: `{name, locationHint?, storageClass?}` from `options` (`location_hint`/`locationHint`, `storage_class`/`storageClass`). Exposed for testing."""
+    doc: """
+    The create body: `{name, locationHint?, storageClass?}` from `options`
+    (`location_hint`/`locationHint`, `storage_class`/`storageClass`).
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::r2/create-bucket-body("exports", {location_hint: "enam"})  // {name: "exports", locationHint: "enam"}
+    ```
+    """
 }
 fn
 (name: Str, options: Map): Map {
@@ -139,7 +182,19 @@ fn
 
 get-bucket
 meta {
-    doc: """GET /accounts/{account_id}/r2/buckets/{name} - One bucket: `{name, creation_date, location, storage_class, jurisdiction}`."""
+    doc: """
+    GET /accounts/{account_id}/r2/buckets/{name} - One bucket: `{name,
+    creation_date, location, storage_class, jurisdiction}`.
+
+    **Example**
+
+    ```hot
+    bucket ::cloudflare::r2/get-bucket("exports")
+    bucket.location
+
+    ::cloudflare::r2/get-bucket("eu-exports", "eu")
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -161,7 +216,16 @@ fn
 
 delete-bucket
 meta {
-    doc: """DELETE /accounts/{account_id}/r2/buckets/{name} - Delete an empty bucket (R2 refuses a bucket that still holds objects)."""
+    doc: """
+    DELETE /accounts/{account_id}/r2/buckets/{name} - Delete an empty bucket
+    (R2 refuses a bucket that still holds objects).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::r2/delete-bucket("exports")
+    ```
+    """
 }
 fn
 (name: Str): Any {
@@ -183,7 +247,18 @@ fn
 
 s3-endpoint
 meta {
-    doc: """The S3-compatible endpoint for object I/O with `aws-s3`: `https://{account_id}.r2.cloudflarestorage.com` (`.eu.` / `.fedramp.` inserted for those jurisdictions)."""
+    doc: """
+    The S3-compatible endpoint for object I/O with `aws-s3`:
+    `https://{account_id}.r2.cloudflarestorage.com` (`.eu.` / `.fedramp.`
+    inserted for those jurisdictions).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::r2/s3-endpoint("acc123")  // "https://acc123.r2.cloudflarestorage.com"
+    ::cloudflare::r2/s3-endpoint("acc123", "eu")  // "https://acc123.eu.r2.cloudflarestorage.com"
+    ```
+    """
 }
 fn
 (account-id: Str): Str {

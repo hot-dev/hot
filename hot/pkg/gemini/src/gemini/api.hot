@@ -47,7 +47,18 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 }
 
 non-blank
-meta { doc: """`value`, or null when it is null or a blank Str.""" }
+meta {
+    doc: """
+    `value`, or null when it is null or a blank Str.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/non-blank("key")  // "key"
+    ::gemini::api/non-blank("  ")  // null
+    ```
+    """
+}
 fn (value: Any): Any {
   cond {
     is-str(value) => { if(is-empty(trim(value)), null, value) }
@@ -132,7 +143,7 @@ meta {
     **Example**
 
     ```hot
-    ::gemini::api/resolve({api-key: "tenant-key"}).base-url  // => "https://generativelanguage.googleapis.com"
+    ::gemini::api/resolve({api-key: ::hot::ctx/get("tenant.gemini.key")}).base-url  // => "https://generativelanguage.googleapis.com"
     ```
     """,
     ctx: {
@@ -184,6 +195,13 @@ meta {
     Request headers from resolved settings (see `resolve`), pure:
     `x-goog-api-key`, and `Content-Type` when there is a body. Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::gemini::api/build-headers({api-key: "k"}, false)  // {x-goog-api-key: "k"}
+    ::gemini::api/build-headers({api-key: "k"}, true)  // {x-goog-api-key: "k", Content-Type: "application/json"}
+    ```
     """
 }
 fn (resolved: Map, has-body: Bool): Map {
@@ -237,7 +255,7 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::api/call("GET", "/v1/models", {}, "", {api-key: "tenant-key"})
+    response ::gemini::api/call("GET", "/v1/models", {}, "", {api-key: ::hot::ctx/get("tenant.gemini.key")})
     ```
     """,
     ctx: {
@@ -255,6 +273,18 @@ meta {
     doc: """
     Streaming counterpart to `call`. Returns a `StreamingHttpResponse` whose
     body is an iterator of parsed SSE or NDJSON events.
+
+    **Example**
+
+    ```hot
+    response ::gemini::api/call-stream("POST", "/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {}, {
+        contents: [{role: "user", parts: [{text: "Count to 3."}]}]
+    }, "sse", {})
+
+    for-each(response.body, (event) {
+        println(::gemini::chat/extract-chunk-text(event))
+    })
+    ```
     """,
     ctx: {
         "gemini.api.key": {required: false},
@@ -284,7 +314,10 @@ meta {
     **With body**
 
     ```hot
-    response ::gemini::api/request("POST", url, {}, {contents: [...]})
+    response ::gemini::api/request("POST", `${::gemini/BASE_URL}/v1/models/gemini-2.0-flash:generateContent`, {}, {
+        contents: [{role: "user", parts: [{text: "Say hello"}]}]
+    })
+    response.body.candidates
     ```
     """,
     ctx: {"gemini.api.key": {required: false}}
@@ -319,9 +352,12 @@ meta {
     **Example**
 
     ```hot
+    url `${::gemini/BASE_URL}/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse`
+    body {contents: [{role: "user", parts: [{text: "Count to 3."}]}]}
+
     response ::gemini::api/request-stream("POST", url, {}, body, "sse")
     for-each(response.body, (event) {
-        // process each streaming event
+        println(::gemini::chat/extract-chunk-text(event))
     })
     ```
     """,

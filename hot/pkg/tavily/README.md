@@ -7,7 +7,7 @@
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/tavily": "0.1.1"
+"hot.dev/tavily": "0.1.2"
 ```
 
 ## Setup

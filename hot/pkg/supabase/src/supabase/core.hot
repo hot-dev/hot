@@ -3,19 +3,25 @@
 ::ctx ::hot::ctx
 ::env ::hot::env
 
-secret-value fn (value: Any): Str? {
+secret-value
+meta {no-doc: true}
+fn (value: Any): Str? {
   s Str(or(value, ""))
   if(is-empty(s), null, s)
 }
 
-first-secret fn (values: Vec<Any>): Str? {
+first-secret
+meta {no-doc: true}
+fn (values: Vec<Any>): Str? {
   values
     |> map(secret-value(%))
     |> filter(is-some(%))
     |> first()
 }
 
-required-secret fn (values: Vec<Any>, label: Str, sources: Str): Str {
+required-secret
+meta {no-doc: true}
+fn (values: Vec<Any>, label: Str, sources: Str): Str {
   value first-secret(values)
   if(is-empty(value),
     fail(`${label} is not set. Add one of: ${sources}.`)
@@ -37,6 +43,13 @@ meta {
       `SUPABASE_SERVICE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
 
     Returns `{url, anon-key, service-key}`, each null when unset.
+
+    **Example**
+
+    ```hot
+    ::supabase::core/sources-from({"SUPABASE_URL": "https://x.supabase.co", "supabase.anon.key": "anon"})
+    // {url: "https://x.supabase.co", anon-key: "anon", service-key: null}
+    ```
     """
 }
 fn (values: Map): Map {
@@ -66,7 +79,16 @@ meta {
         "supabase.service.key": {required: false},
         "supabase.service.role.key": {required: false}
     },
-    doc: """The live context and environment values, by `sources-from`."""
+    doc: """
+    The live context and environment values, by `sources-from`.
+
+    **Example**
+
+    ```hot
+    creds ::supabase::core/sources()
+    is-some(creds.service-key)
+    ```
+    """
 }
 fn (): Map {
   sources-from({
@@ -86,7 +108,17 @@ fn (): Map {
 project-url
 meta {
     ctx: {"supabase.url": {required: false, secret: false}},
-    doc: """Return the Supabase project URL from context. Example: `https://xxxx.supabase.co`."""
+    doc: """
+    Return the Supabase project URL from context. Example:
+    `https://xxxx.supabase.co`.
+
+    **Example**
+
+    ```hot
+    url ::supabase::core/project-url()
+    `${url}/rest/v1/`
+    ```
+    """
 }
 fn (): Str {
   required-secret([
@@ -98,7 +130,16 @@ fn (): Str {
 anon-key
 meta {
     ctx: {"supabase.anon.key": {required: false}},
-    doc: """Return the Supabase anon/public key from context."""
+    doc: """
+    Return the Supabase anon/public key from context.
+
+    **Example**
+
+    ```hot
+    anon ::supabase::core/anon-key()
+    ::supabase::api/request-with-keys("GET", "/rest/v1/users?select=id", {}, {}, anon, anon)
+    ```
+    """
 }
 fn (): Str {
   required-secret([
@@ -112,7 +153,17 @@ fn (): Str {
 service-key
 meta {
     ctx: {"supabase.service.key": {required: false}},
-    doc: """Return the Supabase service role key from context. Required for admin operations."""
+    doc: """
+    Return the Supabase service role key from context. Required for admin
+    operations.
+
+    **Example**
+
+    ```hot
+    service ::supabase::core/service-key()
+    ::supabase::api/request-with-keys("GET", "/rest/v1/users?select=id", {}, {}, service, service)
+    ```
+    """
 }
 fn (): Str {
   key first-secret([

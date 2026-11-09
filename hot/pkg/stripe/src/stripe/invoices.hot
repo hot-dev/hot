@@ -69,7 +69,22 @@ fn
 
 get-invoice
 meta {
-    doc: """GET /v1/invoices/{invoice} - Retrieve an invoice by ID. Optional `params` such as `{expand: ["payments"]}`. The subscription an invoice belongs to is at `parent.subscription_details.subscription`; the client secret for paying it client-side is `confirmation_secret.client_secret`."""
+    doc: """
+    GET /v1/invoices/{invoice} - Retrieve an invoice by ID. Optional
+    `params` such as `{expand: ["payments"]}`. The subscription an invoice
+    belongs to is at `parent.subscription_details.subscription`; the client
+    secret for paying it client-side is `confirmation_secret.client_secret`.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    invoice ::invoices/get-invoice("in_123", {expand: ["payments"]})
+    invoice.amount_due
+    invoice.parent.subscription_details.subscription
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -99,7 +114,22 @@ UpdateInvoiceRequest type {
 
 update-invoice
 meta {
-    doc: """POST /v1/invoices/{invoice} - Update an invoice. Most fields can only change while it is a draft; `metadata`, `auto_advance` and a few others stay editable after finalization."""
+    doc: """
+    POST /v1/invoices/{invoice} - Update an invoice. Most fields can only
+    change while it is a draft; `metadata`, `auto_advance` and a few others
+    stay editable after finalization.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    ::invoices/update-invoice("in_123", ::invoices/UpdateInvoiceRequest({
+      description: "November services",
+      days_until_due: 14
+    }))
+    ```
+    """
 }
 fn
 (invoice: Str, request: UpdateInvoiceRequest): Map {
@@ -111,7 +141,19 @@ fn
 
 delete-invoice
 meta {
-    doc: """DELETE /v1/invoices/{invoice} - Delete a draft invoice. Finalized invoices must be voided instead."""
+    doc: """
+    DELETE /v1/invoices/{invoice} - Delete a draft invoice. Finalized
+    invoices must be voided instead.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    result ::invoices/delete-invoice("in_123")
+    result.deleted
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -128,7 +170,20 @@ FinalizeInvoiceRequest type {
 
 finalize-invoice
 meta {
-    doc: """POST /v1/invoices/{invoice}/finalize - Finalize a draft invoice so it can be paid. `auto_advance: false` finalizes without letting Stripe attempt collection automatically."""
+    doc: """
+    POST /v1/invoices/{invoice}/finalize - Finalize a draft invoice so it
+    can be paid. `auto_advance: false` finalizes without letting Stripe
+    attempt collection automatically.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    invoice ::invoices/finalize-invoice("in_123", ::invoices/FinalizeInvoiceRequest({auto_advance: false}))
+    invoice.status
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -181,7 +236,20 @@ fn
 
 send-invoice
 meta {
-    doc: """POST /v1/invoices/{invoice}/send - Email an invoice to the customer for manual payment. The invoice must use `collection_method: "send_invoice"`. In test mode no email is actually sent."""
+    doc: """
+    POST /v1/invoices/{invoice}/send - Email an invoice to the customer for
+    manual payment. The invoice must use `collection_method:
+    "send_invoice"`. In test mode no email is actually sent.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    invoice ::invoices/send-invoice("in_123")
+    invoice.hosted_invoice_url
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -193,7 +261,19 @@ fn
 
 void-invoice
 meta {
-    doc: """POST /v1/invoices/{invoice}/void - Void a finalized invoice. Voiding is irreversible and similar to deletion for accounting purposes."""
+    doc: """
+    POST /v1/invoices/{invoice}/void - Void a finalized invoice. Voiding is
+    irreversible and similar to deletion for accounting purposes.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    voided ::invoices/void-invoice("in_123")
+    voided.status
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -205,7 +285,19 @@ fn
 
 mark-invoice-uncollectible
 meta {
-    doc: """POST /v1/invoices/{invoice}/mark_uncollectible - Mark an open invoice as uncollectible (bad debt). It can still be paid later."""
+    doc: """
+    POST /v1/invoices/{invoice}/mark_uncollectible - Mark an open invoice as
+    uncollectible (bad debt). It can still be paid later.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    invoice ::invoices/mark-invoice-uncollectible("in_123")
+    invoice.status
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -217,7 +309,19 @@ fn
 
 list-invoice-lines
 meta {
-    doc: """GET /v1/invoices/{invoice}/lines - List an invoice's line items. Optional `params`: `limit`, `starting_after`, `ending_before`."""
+    doc: """
+    GET /v1/invoices/{invoice}/lines - List an invoice's line items.
+    Optional `params`: `limit`, `starting_after`, `ending_before`.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    lines ::invoices/list-invoice-lines("in_123", {limit: 100})
+    amounts map(lines.data, %.amount)
+    ```
+    """
 }
 fn
 (invoice: Str): Map {
@@ -272,7 +376,20 @@ ListInvoicesRequest type {
 
 list-invoices
 meta {
-    doc: """GET /v1/invoices - List invoices, most recent first. Filter by `customer`, `subscription`, or `status` ("draft", "open", "paid", "uncollectible", "void")."""
+    doc: """
+    GET /v1/invoices - List invoices, most recent first. Filter by
+    `customer`, `subscription`, or `status` ("draft", "open", "paid",
+    "uncollectible", "void").
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    page ::invoices/list-invoices(::invoices/ListInvoicesRequest({customer: "cus_123", status: "open"}))
+    ids map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -287,7 +404,20 @@ fn
 
 search-invoices
 meta {
-    doc: """GET /v1/invoices/search - Search invoices with Stripe's search query language, e.g. `status:"open" AND customer:"cus_..."`. Pass `next_page` back as `page` in `params` to continue."""
+    doc: """
+    GET /v1/invoices/search - Search invoices with Stripe's search query
+    language, e.g. `status:"open" AND customer:"cus_..."`. Pass `next_page`
+    back as `page` in `params` to continue.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    results ::invoices/search-invoices(`status:"open" AND customer:"cus_123"`, {limit: 20})
+    due map(results.data, %.amount_due)
+    ```
+    """
 }
 fn
 (query: Str): Map {
@@ -368,7 +498,19 @@ fn
 
 delete-invoice-item
 meta {
-    doc: """DELETE /v1/invoiceitems/{invoiceitem} - Delete an invoice item that isn't yet on a finalized invoice."""
+    doc: """
+    DELETE /v1/invoiceitems/{invoiceitem} - Delete an invoice item that
+    isn't yet on a finalized invoice.
+
+    **Example**
+
+    ```hot
+    ::invoices ::stripe::invoices
+
+    result ::invoices/delete-invoice-item("ii_123")
+    result.deleted
+    ```
+    """
 }
 fn
 (invoice-item: Str): Map {

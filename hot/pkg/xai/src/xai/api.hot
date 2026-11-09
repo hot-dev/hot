@@ -49,7 +49,20 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 }
 
 non-blank
-meta { doc: """`value`, or null when it is null or a blank Str.""" }
+meta {
+    doc: """
+    `value`, or null when it is null or a blank Str.
+
+    **Example**
+
+    ```hot
+    ::api ::xai::api
+
+    ::api/non-blank("  ")  // null
+    ::api/non-blank("grok-3")  // "grok-3"
+    ```
+    """
+}
 fn (value: Any): Any {
   cond {
     is-str(value) => { if(is-empty(trim(value)), null, value) }
@@ -211,6 +224,15 @@ meta {
     With a `management-api-key` in `opts`, the ctx key is not read, and a blank
     one is an Err rather than a fallback to ctx. Nothing is written to ctx, and
     the key from `opts` is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    ::api ::xai::api
+
+    settings ::api/resolve-management({management-api-key: ::hot::ctx/get("tenant.xai.management.key")})
+    settings.base-url
+    ```
     """,
     ctx: {
         "xai.management.api.key": {required: false},
@@ -257,6 +279,15 @@ meta {
     Request headers from resolved settings (see `resolve`), pure:
     `Authorization: Bearer`, and `Content-Type` when there is a body. Exposed
     for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::xai::api
+
+    ::api/build-headers({api-key: "test-key"}, false)  // {Authorization: "Bearer test-key"}
+    ::api/build-headers({api-key: "test-key"}, true).Content-Type  // "application/json"
+    ```
     """
 }
 fn (resolved: Map, has-body: Bool): Map {
@@ -328,6 +359,15 @@ meta {
     doc: """
     Streaming counterpart to `call`. Returns a `StreamingHttpResponse` whose
     body is an iterator of parsed SSE or NDJSON events.
+
+    **Example**
+
+    ```hot
+    ::api ::xai::api
+
+    response ::api/call-stream("POST", "/responses", {}, {model: "grok-3", input: "Hello", stream: true}, "sse", {})
+    for-each(response.body, (event) { println(event) })
+    ```
     """,
     ctx: {
         "xai.api.key": {required: false},
@@ -378,10 +418,10 @@ meta {
 
     ```hot
     // Simple GET request
-    response request("GET", "https://api.x.ai/v1/models")
+    response ::xai::api/request("GET", "https://api.x.ai/v1/models")
 
     // POST with body
-    response request("POST", "https://api.x.ai/v1/responses", {}, {
+    response ::xai::api/request("POST", "https://api.x.ai/v1/responses", {}, {
         model: "grok-3-mini",
         input: "Hello"
     })
@@ -424,7 +464,7 @@ meta {
     **Example**
 
     ```hot
-    response request-stream("POST", "https://api.x.ai/v1/responses", {}, {
+    response ::xai::api/request-stream("POST", "https://api.x.ai/v1/responses", {}, {
         model: "grok-3-mini",
         input: "Hello",
         stream: true

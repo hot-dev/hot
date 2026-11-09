@@ -15,7 +15,7 @@ meta {
 
     **Header-safe JSON.** HTTP headers must be ASCII, so
     `Dropbox-API-Arg` (and `Dropbox-API-Path-Root`) JSON escapes every
-    character from U+007F up as `\\uXXXX` (UTF-16 surrogate pairs above
+    character from U+007F up as `\uXXXX` (UTF-16 surrogate pairs above
     U+FFFF), the way the official SDKs do. Without it, non-ASCII paths
     such as `/Café/日本.txt` are corrupted. See `ascii-escape`.
 
@@ -92,7 +92,16 @@ MAX_PAGES 10000
 
 hex4
 meta {
-    doc: """A code unit (0..65535) as four lowercase hex digits: `hex4(233)` is `"00e9"`."""
+    doc: """
+    A code unit (0..65535) as four lowercase hex digits: `hex4(233)` is
+    `"00e9"`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/hex4(233)  // "00e9"
+    ```
+    """
 }
 fn (n: Int): Str {
   ::hex/encode(Bytes([::bit/shift-right(n, 8), ::bit/and(n, 255)]))
@@ -100,7 +109,18 @@ fn (n: Int): Str {
 
 unicode-escape
 meta {
-    doc: """The JSON `\\uXXXX` escape for a Unicode code point, as a surrogate pair above U+FFFF: `unicode-escape(233)` is `\\u00e9`, `unicode-escape(128512)` is `\\ud83d\\ude00`."""
+    doc: """
+    The JSON `\uXXXX` escape for a Unicode code point, as a surrogate pair
+    above U+FFFF: `unicode-escape(233)` is `\u00e9`,
+    `unicode-escape(128512)` is `\ud83d\ude00`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/unicode-escape(233)  // "\\u00e9"
+    ::dropbox::api/unicode-escape(128512)  // "\\ud83d\\ude00"
+    ```
+    """
 }
 fn (cp: Int): Str {
   cond {
@@ -112,7 +132,9 @@ fn (cp: Int): Str {
   }
 }
 
-escape-step fn (state: Map, b: Int): Map {
+escape-step
+meta {no-doc: true}
+fn (state: Map, b: Int): Map {
   cond {
     gt(state.need, 0) => {
       cp add(mul(state.cp, 64), ::bit/and(b, 63))
@@ -136,13 +158,13 @@ ascii-escape
 meta {
     doc: """
     Make a JSON text safe for an HTTP header (pure): every character from
-    U+007F up becomes `\\uXXXX` (lowercase hex; a UTF-16 surrogate pair
+    U+007F up becomes `\uXXXX` (lowercase hex; a UTF-16 surrogate pair
     above U+FFFF), which any JSON parser reads back as the same string.
     Pure-ASCII text is returned unchanged.
 
     ```hot
-    ::dropbox::api/ascii-escape("{\\"path\\":\\"/Café\\"}")
-    // {"path":"/Caf\\u00e9"}
+    ::dropbox::api/ascii-escape("{\"path\":\"/Café\"}")
+    // "{\"path\":\"/Caf\\u00e9\"}"
     ```
     """
 }
@@ -158,7 +180,17 @@ fn (text: Str): Str {
 
 header-json
 meta {
-    doc: """Encode an argument as header-safe JSON (pure): nulls are dropped from Maps, then `ascii-escape` is applied. This is the `Dropbox-API-Arg` value."""
+    doc: """
+    Encode an argument as header-safe JSON (pure): nulls are dropped from
+    Maps, then `ascii-escape` is applied. This is the `Dropbox-API-Arg`
+    value.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/header-json({path: "/Café", rev: null})  // "{\"path\":\"/Caf\\u00e9\"}"
+    ```
+    """
 }
 fn (arg: Any): Str {
   value if(is-map(arg), ::dropbox/compact(arg), untype(arg))
@@ -171,7 +203,16 @@ fn (arg: Any): Str {
 
 path-root-home
 meta {
-    doc: """`Dropbox-API-Path-Root` value for paths relative to the user's home namespace (the default)."""
+    doc: """
+    `Dropbox-API-Path-Root` value for paths relative to the user's home
+    namespace (the default).
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/path-root-home()  // {".tag": "home"}
+    ```
+    """
 }
 fn (): Map {
   {".tag": "home"}
@@ -179,7 +220,17 @@ fn (): Map {
 
 path-root-team
 meta {
-    doc: """`Dropbox-API-Path-Root` value for the team space: paths are relative to the user's root namespace (`root_info.root_namespace_id` from `::dropbox::users/get-current-account`)."""
+    doc: """
+    `Dropbox-API-Path-Root` value for the team space: paths are relative to
+    the user's root namespace (`root_info.root_namespace_id` from
+    `::dropbox::users/get-current-account`).
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/path-root-team("3235641")  // {".tag": "root", root: "3235641"}
+    ```
+    """
 }
 fn (root-namespace-id: Str): Map {
   {".tag": "root", root: root-namespace-id}
@@ -187,7 +238,16 @@ fn (root-namespace-id: Str): Map {
 
 path-root-namespace
 meta {
-    doc: """`Dropbox-API-Path-Root` value for paths relative to one namespace id (a shared or team folder you can access)."""
+    doc: """
+    `Dropbox-API-Path-Root` value for paths relative to one namespace id (a
+    shared or team folder you can access).
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/path-root-namespace("1234")  // {".tag": "namespace_id", namespace_id: "1234"}
+    ```
+    """
 }
 fn (namespace-id: Str): Map {
   {".tag": "namespace_id", namespace_id: namespace-id}
@@ -203,8 +263,8 @@ meta {
     root, the common case for team members).
 
     ```hot
-    ::dropbox::api/path-root-value("3235641")    // {".tag":"root","root":"3235641"}
-    ::dropbox::api/path-root-value("ns:1234")    // {".tag":"namespace_id","namespace_id":"1234"}
+    ::dropbox::api/path-root-value("3235641")  // "{\".tag\":\"root\",\"root\":\"3235641\"}"
+    ::dropbox::api/path-root-value("ns:1234")  // "{\".tag\":\"namespace_id\",\"namespace_id\":\"1234\"}"
     ```
     """
 }
@@ -224,13 +284,27 @@ fn (value: Any): Str? {
   }
 }
 
-opt-or-ctx fn (opts: Map, ctx: Map, k: Str): Any {
+opt-or-ctx
+meta {no-doc: true}
+fn (opts: Map, ctx: Map, k: Str): Any {
   if(in(k, keys(opts)), get(opts, k), get(ctx, k))
 }
 
 team-headers
 meta {
-    doc: """The `Dropbox-API-Select-User`, `Dropbox-API-Select-Admin` and `Dropbox-API-Path-Root` headers for a call (pure): from `opts` (`select-user`, `select-admin`, `path-root`), else from `ctx` (the same keys). Unset values send no header."""
+    doc: """
+    The `Dropbox-API-Select-User`, `Dropbox-API-Select-Admin` and
+    `Dropbox-API-Path-Root` headers for a call (pure): from `opts`
+    (`select-user`, `select-admin`, `path-root`), else from `ctx` (the same
+    keys). Unset values send no header.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/team-headers({select-user: "dbmid:AAH4f99"}, {})  // {Dropbox-API-Select-User: "dbmid:AAH4f99"}
+    ::dropbox::api/team-headers({}, {})  // {}
+    ```
+    """
 }
 fn (opts: Map, ctx: Map): Map {
   user opt-or-ctx(opts, ctx, "select-user")
@@ -245,7 +319,17 @@ fn (opts: Map, ctx: Map): Map {
 
 ctx-team
 meta {
-    doc: """The team options read from context (`dropbox.select.user`, `dropbox.select.admin`, `dropbox.path.root`)."""
+    doc: """
+    The team options read from context (`dropbox.select.user`,
+    `dropbox.select.admin`, `dropbox.path.root`).
+
+    **Example**
+
+    ```hot
+    team ::dropbox::api/ctx-team()
+    team.select-user
+    ```
+    """
 }
 fn (): Map {
   {
@@ -264,7 +348,16 @@ resolve ::dropbox::auth/resolve-credentials
 
 api-params
 meta {
-    doc: """Strip the package's own keys (`::dropbox::auth/CREDENTIAL_KEYS`) from `opts`, leaving Dropbox arguments."""
+    doc: """
+    Strip the package's own keys (`::dropbox::auth/CREDENTIAL_KEYS`) from
+    `opts`, leaving Dropbox arguments.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/api-params({recursive: true, retry: false})  // {recursive: true}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { not(in(k, ::auth/CREDENTIAL_KEYS)) })
@@ -272,7 +365,16 @@ fn (opts: Map): Map {
 
 credential-opts
 meta {
-    doc: """Keep only the package's own keys (credentials, team headers, `retry`) from `opts`, to pass them on to a follow-up call."""
+    doc: """
+    Keep only the package's own keys (credentials, team headers, `retry`)
+    from `opts`, to pass them on to a follow-up call.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/credential-opts({recursive: true, select-user: "dbmid:AAH4f99"})  // {select-user: "dbmid:AAH4f99"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { in(k, ::auth/CREDENTIAL_KEYS) })
@@ -284,6 +386,13 @@ meta {
     Build a route argument (pure): `base` (the function's required
     fields), overridden by the Dropbox arguments in `opts` (package keys
     and the function's own `local-keys` removed), with nulls dropped.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/build-arg({path: "/a"}, {limit: 100, retry: false, recursive: null})  // {path: "/a", limit: 100}
+    ::dropbox::api/build-arg({path: "/a"}, {limit: 100, range: 5}, ["range"])  // {path: "/a", limit: 100}
+    ```
     """
 }
 fn
@@ -333,7 +442,9 @@ type {
     retry-after: Int?
 }
 
-decode-error-body fn (body: Any): Any {
+decode-error-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       text Str(body)
@@ -351,7 +462,17 @@ decode-error-body fn (body: Any): Any {
 
 union-tags
 meta {
-    doc: """The tag path of a Dropbox error union (pure): `{".tag": "path", path: {".tag": "not_found"}}` gives `["path", "not_found"]`. A 429 body's `{reason: {".tag": "too_many_requests"}}` gives `["too_many_requests"]`."""
+    doc: """
+    The tag path of a Dropbox error union (pure): `{".tag": "path", path:
+    {".tag": "not_found"}}` gives `["path", "not_found"]`. A 429 body's
+    `{reason: {".tag": "too_many_requests"}}` gives `["too_many_requests"]`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/union-tags({".tag": "path", path: {".tag": "not_found"}})  // ["path", "not_found"]
+    ```
+    """
 }
 fn (e: Any): Vec {
   cond {
@@ -368,7 +489,17 @@ fn (e: Any): Vec {
 
 summary-tags
 meta {
-    doc: """The tag path from an `error_summary` (pure): `"path/not_found/.."` gives `["path", "not_found"]`; the trailing punctuation Dropbox appends is dropped."""
+    doc: """
+    The tag path from an `error_summary` (pure): `"path/not_found/.."` gives
+    `["path", "not_found"]`; the trailing punctuation Dropbox appends is
+    dropped.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/summary-tags("path/not_found/..")  // ["path", "not_found"]
+    ```
+    """
 }
 fn (summary: Str?): Vec {
   filter(split(or(summary, ""), "/"), (s) { ::re/is-match(s, "^[A-Za-z0-9_]+$") })
@@ -376,7 +507,21 @@ fn (summary: Str?): Vec {
 
 error-node
 meta {
-    doc: """The member of a Dropbox error union whose `.tag` is `tag` (pure), searching nested unions: for `{".tag": "lookup_failed", lookup_failed: {".tag": "incorrect_offset", correct_offset: 8}}`, `error-node(e, "incorrect_offset")` is `{".tag": "incorrect_offset", correct_offset: 8}`. Null when absent."""
+    doc: """
+    The member of a Dropbox error union whose `.tag` is `tag` (pure),
+    searching nested unions: for `{".tag": "lookup_failed", lookup_failed:
+    {".tag": "incorrect_offset", correct_offset: 8}}`, `error-node(e,
+    "incorrect_offset")` is `{".tag": "incorrect_offset", correct_offset:
+    8}`. Null when absent.
+
+    **Example**
+
+    ```hot
+    e {".tag": "lookup_failed", lookup_failed: {".tag": "incorrect_offset", correct_offset: 8}}
+    ::dropbox::api/error-node(e, "incorrect_offset").correct_offset  // 8
+    ::dropbox::api/error-node(e, "too_large")  // null
+    ```
+    """
 }
 fn (e: Any, tag: Str): Map? {
   cond {
@@ -389,7 +534,17 @@ fn (e: Any, tag: Str): Map? {
 
 body-excerpt
 meta {
-    doc: """A short (at most 300 characters) printable form of a response body, for error messages."""
+    doc: """
+    A short (at most 300 characters) printable form of a response body, for
+    error messages.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/body-excerpt({error_summary: "path/not_found/.."})  // "{\"error_summary\":\"path/not_found/..\"}"
+    ::dropbox::api/body-excerpt(null)  // ""
+    ```
+    """
 }
 fn (body: Any): Str {
   text cond {
@@ -404,7 +559,17 @@ fn (body: Any): Str {
 
 parse-int
 meta {
-    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Never halts on bad input."""
+    doc: """
+    Parse an Int from an Int or a decimal-digit Str (surrounding whitespace
+    allowed); null for anything else. Never halts on bad input.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/parse-int(" 30 ")  // 30
+    ::dropbox::api/parse-int("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -420,7 +585,17 @@ fn (value: Any): Int? {
 
 retry-after-seconds
 meta {
-    doc: """Seconds to wait from a response's `Retry-After` header, else the 429 body's `error.retry_after`, else null."""
+    doc: """
+    Seconds to wait from a response's `Retry-After` header, else the 429
+    body's `error.retry_after`, else null.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/retry-after-seconds({retry-after: "30"}, null)  // 30
+    ::dropbox::api/retry-after-seconds({}, {error: {retry_after: 5}})  // 5
+    ```
+    """
 }
 fn (headers: Map?, body: Any): Int? {
   from-header parse-int(get(or(headers, {}), "retry-after"))
@@ -437,7 +612,20 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 http-error
 meta {
-    doc: """Build an `HttpError` (with a readable `message`) from a non-2xx response and the route that was called, which `HttpError(response)` cannot know. Pure; exposed for testing and for code that reads responses itself."""
+    doc: """
+    Build an `HttpError` (with a readable `message`) from a non-2xx response
+    and the route that was called, which `HttpError(response)` cannot know.
+    Pure; exposed for testing and for code that reads responses itself.
+
+    **Example**
+
+    ```hot
+    body {error_summary: "path/not_found/..", error: {".tag": "path", path: {".tag": "not_found"}}}
+    e ::dropbox::api/http-error({status: 409, headers: {}, body: body}, "files/get_metadata")
+    e.message  // "dropbox: HTTP 409 path/not_found (files/get_metadata)"
+    e.error-tags  // ["path", "not_found"]
+    ```
+    """
 }
 fn (response: Map, route: Str?): HttpError {
   headers or(response.headers, {})
@@ -481,7 +669,17 @@ fn (response: Map, route: Str?): HttpError {
 
 plain-payload
 meta {
-    doc: """The payload of a `Result.Err` (or the value itself), with type tags removed so an `HttpError` / `TokenError` reads like a Map."""
+    doc: """
+    The payload of a `Result.Err` (or the value itself), with type tags
+    removed so an `HttpError` / `TokenError` reads like a Map.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/plain-payload(err("boom"))  // "boom"
+    ::dropbox::api/plain-payload(err({status: 409}))  // {status: 409}
+    ```
+    """
 }
 fn (value: Result): Any {
   payload if(is-err(value), err-value(value), value)
@@ -490,7 +688,17 @@ fn (value: Result): Any {
 
 error-tags-of
 meta {
-    doc: """The Dropbox error tag path of a failed call (an `HttpError`, a `Result.Err` holding one, or a raw error body), or `[]`."""
+    doc: """
+    The Dropbox error tag path of a failed call (an `HttpError`, a
+    `Result.Err` holding one, or a raw error body), or `[]`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/error-tags-of(err({error: {".tag": "path", path: {".tag": "not_found"}}}))  // ["path", "not_found"]
+    ::dropbox::api/error-tags-of("not an error")  // []
+    ```
+    """
 }
 fn (error: Result): Vec {
   payload plain-payload(error)
@@ -520,7 +728,16 @@ fn (error: Result, tag: Str): Bool {
 
 is-not-found
 meta {
-    doc: """True when a call failed because nothing exists at the path (`.../not_found`)."""
+    doc: """
+    True when a call failed because nothing exists at the path
+    (`.../not_found`).
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/is-not-found(err({error: {".tag": "path", path: {".tag": "not_found"}}}))  // true
+    ```
+    """
 }
 fn (error: Result): Bool {
   has-error-tag(error, "not_found")
@@ -528,7 +745,16 @@ fn (error: Result): Bool {
 
 is-reset
 meta {
-    doc: """True when a cursor was invalidated (`reset`) and the listing must restart from `list_folder`."""
+    doc: """
+    True when a cursor was invalidated (`reset`) and the listing must
+    restart from `list_folder`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/is-reset(err({error: {".tag": "reset"}}))  // true
+    ```
+    """
 }
 fn (error: Result): Bool {
   has-error-tag(error, "reset")
@@ -536,7 +762,19 @@ fn (error: Result): Bool {
 
 is-transport-limit
 meta {
-    doc: """True for the Business-plan data transport limit: a 403 `invalid_account_type/feature` on an upload once a team has used its monthly data transport calls. Retrying will not help until the next month or a plan change."""
+    doc: """
+    True for the Business-plan data transport limit: a 403
+    `invalid_account_type/feature` on an upload once a team has used its
+    monthly data transport calls. Retrying will not help until the next
+    month or a plan change.
+
+    **Example**
+
+    ```hot
+    e err({status: 403, error: {".tag": "invalid_account_type", invalid_account_type: {".tag": "feature"}}})
+    ::dropbox::api/is-transport-limit(e)  // true
+    ```
+    """
 }
 fn (error: Result): Bool {
   payload plain-payload(error)
@@ -546,7 +784,17 @@ fn (error: Result): Bool {
 
 is-connection-failure
 meta {
-    doc: """True when a transport error message is a connection or read failure (worth trying again), not a size-limit or URL error."""
+    doc: """
+    True when a transport error message is a connection or read failure
+    (worth trying again), not a size-limit or URL error.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/is-connection-failure("request failed: connection reset")  // true
+    ::dropbox::api/is-connection-failure("response exceeds http.max-response-bytes")  // false
+    ```
+    """
 }
 fn (message: Str): Bool {
   and(
@@ -608,7 +856,18 @@ fn (error: Result): Bool {
 
 retry-policy
 meta {
-    doc: """The immediate-retry policy (pure): `{max-retries: 1}`, or `0` when `opts.retry` is `false` or `0`. Never more than one: nothing here waits between attempts."""
+    doc: """
+    The immediate-retry policy (pure): `{max-retries: 1}`, or `0` when
+    `opts.retry` is `false` or `0`. Never more than one: nothing here waits
+    between attempts.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/retry-policy({})  // {max-retries: 1}
+    ::dropbox::api/retry-policy({retry: false})  // {max-retries: 0}
+    ```
+    """
 }
 fn (opts: Map): Map {
   r opts.retry
@@ -629,6 +888,13 @@ meta {
     `notify.dropboxapi.com`. When the `dropbox.api.root` context variable
     (or the 3-arity `root`) is set, every route goes to `{root}/2/{route}`
     instead, for a proxy or a local mock server.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/route-url("rpc", "files/list_folder", null)  // "https://api.dropboxapi.com/2/files/list_folder"
+    ::dropbox::api/route-url("download", "files/download", "http://localhost:9000/")  // "http://localhost:9000/2/files/download"
+    ```
     """
 }
 fn
@@ -658,6 +924,18 @@ meta {
 
     `token` (nullable) becomes the Bearer header; `headers` (team
     headers, `Range`, ...) are added last.
+
+    **Example**
+
+    ```hot
+    token ::dropbox::auth/access-token()
+    req ::dropbox::api/build-request("rpc", "files/get_metadata", {path: "/a.txt"}, "", token, {})
+    req.url
+
+    // Content route: the argument travels in Dropbox-API-Arg
+    up ::dropbox::api/build-request("upload", "files/upload", {path: "/a.txt"}, Bytes("hello"), token, {})
+    up.headers
+    ```
     """
 }
 fn (style: Str, route: Str, arg: Any, body: Any, token: Str?, headers: Map): HttpRequest {
@@ -709,7 +987,19 @@ fn (style: Str, route: Str, arg: Any, body: Any, token: Str?, headers: Map): Htt
 
 send-with-retry
 meta {
-    doc: """Send a request; on a connection failure of an idempotent route, send it once more straight away (per `policy`). Never waits."""
+    doc: """
+    Send a request; on a connection failure of an idempotent route, send it
+    once more straight away (per `policy`). Never waits.
+
+    **Example**
+
+    ```hot
+    route "users/get_current_account"
+    req ::dropbox::api/build-request("rpc", route, null, "", ::dropbox::auth/access-token(), {})
+    response ::dropbox::api/send-with-retry(req, route, {max-retries: 1})
+    response.status
+    ```
+    """
 }
 fn
 (req: HttpRequest, route: Str, policy: Map): HttpResponse {
@@ -768,7 +1058,18 @@ fn (style: Str, route: Str, arg: Any, body: Any, headers: Map, opts: Map): HttpR
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response (null for Void routes), the Err of a failed request, or `err(HttpError)` for a non-2xx response."""
+    doc: """
+    The decoded body of a 2xx response (null for Void routes), the Err of a
+    failed request, or `err(HttpError)` for a non-2xx response.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/unwrap({status: 200, headers: {}, body: {cursor: "AAF"}}, "files/list_folder")  // {cursor: "AAF"}
+    ::dropbox::api/unwrap({status: 200, headers: {}, body: ""}, "auth/token/revoke")  // null
+    is-err(::dropbox::api/unwrap({status: 409, headers: {}, body: {}}, "files/get_metadata"))  // true
+    ```
+    """
 }
 fn (response: Result, route: Str): Any {
   cond {
@@ -814,7 +1115,18 @@ fn
 
 api-result
 meta {
-    doc: """The decoded `Dropbox-API-Result` header of a content response (the route's result: file metadata for download, `{export_metadata, file_metadata}` for export), or null."""
+    doc: """
+    The decoded `Dropbox-API-Result` header of a content response (the
+    route's result: file metadata for download, `{export_metadata,
+    file_metadata}` for export), or null.
+
+    **Example**
+
+    ```hot
+    ::dropbox::api/api-result({headers: {dropbox-api-result: "{\"name\":\"a.txt\"}"}})  // {name: "a.txt"}
+    ::dropbox::api/api-result({headers: {}})  // null
+    ```
+    """
 }
 fn (response: Map): Any {
   raw get(or(response.headers, {}), "dropbox-api-result")
@@ -829,7 +1141,18 @@ fn (response: Map): Any {
 
 upload-call
 meta {
-    doc: """Call an upload-style content route: `arg` in `Dropbox-API-Arg`, `content` (Bytes, or a Str as UTF-8) as the body. Returns the decoded JSON result or an Err carrying `HttpError`."""
+    doc: """
+    Call an upload-style content route: `arg` in `Dropbox-API-Arg`,
+    `content` (Bytes, or a Str as UTF-8) as the body. Returns the decoded
+    JSON result or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    result ::dropbox::api/upload-call("files/upload", {path: "/notes.txt", mode: "add"}, "hello\n", {})
+    result.content_hash
+    ```
+    """
 }
 fn (route: Str, arg: Any, content: Any, opts: Map): Any {
   unwrap(request("upload", route, arg, content, {}, opts), route)
@@ -837,7 +1160,19 @@ fn (route: Str, arg: Any, content: Any, opts: Map): Any {
 
 notify
 meta {
-    doc: """Call a `notify.dropboxapi.com` route (`files/list_folder/longpoll`). These routes take no authentication, so no Authorization or team header is sent. Returns the decoded JSON result or an Err carrying `HttpError`."""
+    doc: """
+    Call a `notify.dropboxapi.com` route (`files/list_folder/longpoll`).
+    These routes take no authentication, so no Authorization or team header
+    is sent. Returns the decoded JSON result or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    cursor ::dropbox::sync/get-latest-cursor("/Docs")
+    poll ::dropbox::api/notify("files/list_folder/longpoll", {cursor: cursor, timeout: 30}, {})
+    poll.changes
+    ```
+    """
 }
 fn (route: Str, arg: Any, opts: Map): Any {
   req build-request("notify", route, arg, "", null, {})
@@ -848,7 +1183,9 @@ fn (route: Str, arg: Any, opts: Map): Any {
 // Cursor pagination
 // ---------------------------------------------------------------------------
 
-collect-loop fn (page: Result, fetch-next: Fn, items-key: Str, limit: Int?, acc: Vec, pages: Int): Vec {
+collect-loop
+meta {no-doc: true}
+fn (page: Result, fetch-next: Fn, items-key: Str, limit: Int?, acc: Vec, pages: Int): Vec {
   cond {
     is-err(page) => { page }
     => {

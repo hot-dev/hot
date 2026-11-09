@@ -32,7 +32,9 @@ meta {
 
 DECISIONS ["clear", "review", "block"]
 
-rank fn (decision: Str): Int {
+rank
+meta {no-doc: true}
+fn (decision: Str): Int {
   cond {
     eq(decision, "block") => { 2 }
     eq(decision, "review") => { 1 }
@@ -40,21 +42,39 @@ rank fn (decision: Str): Int {
   }
 }
 
-is-number fn (v: Any): Bool {
+is-number
+meta {no-doc: true}
+fn (v: Any): Bool {
   or(is-int(v), is-dec(v))
 }
 
-score-ok fn (v: Any): Bool {
+score-ok
+meta {no-doc: true}
+fn (v: Any): Bool {
   or(is-null(v), and(is-number(v), gte(v, 0), lte(v, 100)))
 }
 
-list-ok fn (v: Any): Bool {
+list-ok
+meta {no-doc: true}
+fn (v: Any): Bool {
   or(is-null(v), and(is-vec(v), all(v, is-str)))
 }
 
 validate-policy
 meta {
-    doc: """The policy when it is well formed, otherwise an Err naming the problem: `found-risk` must be one of `DECISIONS`; scores numbers from 0 to 100 with `review-score` not above `block-score`; bands and categories Vecs of Str; `max-hops` an Int from 0 to 8. Exposed for testing."""
+    doc: """
+    The policy when it is well formed, otherwise an Err naming the problem:
+    `found-risk` must be one of `DECISIONS`; scores numbers from 0 to 100
+    with `review-score` not above `block-score`; bands and categories Vecs
+    of Str; `max-hops` an Int from 0 to 8. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::decisions/validate-policy({found-risk: "review", block-score: 75})  // {found-risk: "review", block-score: 75}
+    is-err(::cipherowl::decisions/validate-policy({review-score: 40}))  // true
+    ```
+    """
 }
 fn (policy: Map): Map {
   p untype(policy)
@@ -81,7 +101,18 @@ fn (policy: Map): Map {
 
 reason-of
 meta {
-    doc: """One normalized reason `{category, direction, hops, direct, source}` from a detail reason, a score breakdown item or a breakdown risk. Paths, counterparty addresses and USD values are left out. Exposed for testing."""
+    doc: """
+    One normalized reason `{category, direction, hops, direct, source}` from
+    a detail reason, a score breakdown item or a breakdown risk. Paths,
+    counterparty addresses and USD values are left out. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::decisions/reason-of({category: "OFAC", direction: "RECEIVE", hops: 1}, "risk-score")
+    // {category: "ofac", direction: "receive", hops: 1, direct: false, source: "risk-score"}
+    ```
+    """
 }
 fn (item: Map, source: Str): Map {
   hops-raw ::api/number-or-null(get(item, "hops"))
@@ -99,7 +130,21 @@ fn (item: Map, source: Str): Map {
 
 evidence
 meta {
-    doc: """Collect the decision inputs from one or more results: `{found-risk, score, band, config, reasons}`. `found-risk` is true when any result says so; `score` is the highest `riskScore`; `band` the `riskBand` of that score. Exposed for testing."""
+    doc: """
+    Collect the decision inputs from one or more results: `{found-risk,
+    score, band, config, reasons}`. `found-risk` is true when any result
+    says so; `score` is the highest `riskScore`; `band` the `riskBand` of
+    that score. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    found ::cipherowl::decisions/evidence([{foundRisk: true}, {riskScore: 82, riskBand: "High Risk"}])
+    found.found-risk  // true
+    found.score  // 82
+    found.band  // "high"
+    ```
+    """
 }
 fn (results: Any): Map {
   rs cond {
@@ -130,11 +175,15 @@ fn (results: Any): Map {
 // Decision
 // ---------------------------------------------------------------------------
 
-bands fn (policy: Map, key: Str): Vec {
+bands
+meta {no-doc: true}
+fn (policy: Map, key: Str): Vec {
   filter(map(or(get(policy, key), []), (b) { ::api/normalize-band(b) }), is-some)
 }
 
-category-hits fn (reasons: Vec, categories: Any, max-hops: Any, direct-only: Bool): Vec {
+category-hits
+meta {no-doc: true}
+fn (reasons: Vec, categories: Any, max-hops: Any, direct-only: Bool): Vec {
   wanted map(or(categories, []), (c) { lowercase(c) })
   matched filter(reasons, (r) {
     and(
@@ -178,7 +227,9 @@ fn (results: Any, policy: Map): Map {
   }
 }
 
-decide-valid fn (results: Any, p: Map): Map {
+decide-valid
+meta {no-doc: true}
+fn (results: Any, p: Map): Map {
   e evidence(results)
   score e.score
   band e.band
@@ -210,7 +261,22 @@ decide-valid fn (results: Any, p: Map): Map {
 
 decide-batch
 meta {
-    doc: """Decide on every address in a batch screening result with the same policy (screening alone carries only `foundRisk`, so `found-risk` decides). Returns `[{address, decision, triggers}]`."""
+    doc: """
+    Decide on every address in a batch screening result with the same policy
+    (screening alone carries only `foundRisk`, so `found-risk` decides).
+    Returns `[{address, decision, triggers}]`.
+
+    **Example**
+
+    ```hot
+    batch {results: [
+      {address: "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", foundRisk: true},
+      {address: "0x0000000000000000000000000000000000000001", foundRisk: false}
+    ]}
+    ::cipherowl::decisions/decide-batch(batch, {found-risk: "review"})
+    // [{address: "0x93df2c9c8786242b8fdca3f96b3914b8b4a9f704", decision: "review", triggers: ["found-risk"]}, {address: "0x0000000000000000000000000000000000000001", decision: "clear", triggers: []}]
+    ```
+    """
 }
 fn (batch-result: Any, policy: Map): Vec<Map> {
   p validate-policy(policy)

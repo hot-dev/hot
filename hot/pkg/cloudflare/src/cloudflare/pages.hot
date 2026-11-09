@@ -12,17 +12,31 @@ meta {
 
 ListPage ::cloudflare::api/ListPage
 
-project-suffix fn (project: Str): Str {
+project-suffix
+meta {no-doc: true}
+fn (project: Str): Str {
   `/pages/projects/${::api/seg(project)}`
 }
 
-deployment-suffix fn (project: Str, deployment-id: Str): Str {
+deployment-suffix
+meta {no-doc: true}
+fn (project: Str, deployment-id: Str): Str {
   `${project-suffix(project)}/deployments/${::api/seg(deployment-id)}`
 }
 
 list-projects
 meta {
-    doc: """GET /accounts/{account_id}/pages/projects - One page of projects (`page`, `per_page`). Returns a `ListPage`."""
+    doc: """
+    GET /accounts/{account_id}/pages/projects - One page of projects
+    (`page`, `per_page`). Returns a `ListPage`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::pages/list-projects({per_page: 25})
+    map(page.result, %.name)
+    ```
+    """
 }
 fn
 (): ListPage {
@@ -37,7 +51,15 @@ fn
 
 list-all-projects
 meta {
-    doc: """Every Pages project, following pages up to `max` (default 10000)."""
+    doc: """
+    Every Pages project, following pages up to `max` (default 10000).
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::pages/list-all-projects(), %.name)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -55,7 +77,17 @@ fn
 
 get-project
 meta {
-    doc: """GET .../pages/projects/{name} - A project: subdomain, domains, source, build config, latest deployment."""
+    doc: """
+    GET .../pages/projects/{name} - A project: subdomain, domains, source,
+    build config, latest deployment.
+
+    **Example**
+
+    ```hot
+    project ::cloudflare::pages/get-project("marketing-site")
+    project.subdomain
+    ```
+    """
 }
 fn
 (project: Str): Map {
@@ -71,6 +103,13 @@ meta {
     GET .../pages/projects/{name}/deployments - One page of a project's
     deployments, newest first. `params`: `env` (`production` or
     `preview`), `page`, `per_page`. Returns a `ListPage`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::pages/list-deployments("marketing-site", {env: "production", per_page: 5})
+    map(page.result, %.url)
+    ```
     """
 }
 fn
@@ -86,7 +125,17 @@ fn
 
 get-deployment
 meta {
-    doc: """GET .../deployments/{id} - One deployment: `url`, `environment`, `latest_stage` (`{name, status}`), `deployment_trigger`."""
+    doc: """
+    GET .../deployments/{id} - One deployment: `url`, `environment`,
+    `latest_stage` (`{name, status}`), `deployment_trigger`.
+
+    **Example**
+
+    ```hot
+    deployment ::cloudflare::pages/get-deployment("marketing-site", "f64788e9-fccd-4d4a-a28a-cb84f88f6fa2")
+    deployment.latest_stage.status
+    ```
+    """
 }
 fn
 (project: Str, deployment-id: Str): Map {
@@ -98,7 +147,17 @@ fn
 
 deployment-parts
 meta {
-    doc: """The multipart fields for a Git build trigger: `branch` and the optional commit fields, omitted when unset. Exposed for testing."""
+    doc: """
+    The multipart fields for a Git build trigger: `branch` and the optional
+    commit fields, omitted when unset. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::pages/deployment-parts({branch: "main"})  // [{name: "branch", value: "main"}]
+    ::cloudflare::pages/deployment-parts({})  // []
+    ```
+    """
 }
 fn
 (options: Map): Vec {
@@ -139,7 +198,15 @@ fn
 
 retry-deployment
 meta {
-    doc: """POST .../deployments/{id}/retry - Re-run a deployment's build."""
+    doc: """
+    POST .../deployments/{id}/retry - Re-run a deployment's build.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::pages/retry-deployment("marketing-site", "f64788e9-fccd-4d4a-a28a-cb84f88f6fa2")
+    ```
+    """
 }
 fn
 (project: Str, deployment-id: Str): Map {
@@ -151,7 +218,16 @@ fn
 
 rollback-deployment
 meta {
-    doc: """POST .../deployments/{id}/rollback - Make an earlier successful production deployment live again."""
+    doc: """
+    POST .../deployments/{id}/rollback - Make an earlier successful
+    production deployment live again.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::pages/rollback-deployment("marketing-site", "f64788e9-fccd-4d4a-a28a-cb84f88f6fa2")
+    ```
+    """
 }
 fn
 (project: Str, deployment-id: Str): Map {

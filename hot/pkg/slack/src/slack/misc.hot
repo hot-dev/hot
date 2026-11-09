@@ -67,7 +67,18 @@ AuthRevokeResponse type {
 
 auth-revoke
 meta {
-    doc: """GET /auth.revoke - Revoke a token. Pass `test: true` to check revocation without actually revoking."""
+    doc: """
+    GET /auth.revoke - Revoke a token. Pass `test: true` to check revocation
+    without actually revoking.
+
+    **Example**
+
+    ```hot
+    // Checks the call without revoking anything
+    response ::slack::misc/auth-revoke(::slack::misc/AuthRevokeRequest({test: true}))
+    response.revoked
+    ```
+    """
 }
 fn
 (request: AuthRevokeRequest): AuthRevokeResponse {
@@ -186,7 +197,27 @@ TeamAccessLogsResponse type {
 
 team-access-logs
 meta {
-    doc: """GET /team.accessLogs - Get the access logs for the current team. Requires an admin or owner token. Returns login records with user, IP, and user agent info."""
+    doc: """
+    GET /team.accessLogs - Get the access logs for the current team.
+    Requires an admin or owner token. Returns login records with user, IP,
+    and user agent info.
+
+    **Example**
+
+    ```hot
+    response ::slack::misc/team-access-logs(::slack::misc/TeamAccessLogsRequest({
+      count: 100,
+      page: 1
+    }))
+    map(response.logins, %.ip)
+
+    // With a per-call token
+    ::slack::misc/team-access-logs(::slack::misc/TeamAccessLogsRequest({
+      count: 100,
+      page: 1
+    }), {api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (request: TeamAccessLogsRequest): TeamAccessLogsResponse {
@@ -214,7 +245,19 @@ TeamBillableInfoResponse type {
 
 team-billable-info
 meta {
-    doc: """GET /team.billableInfo - Get billable user information for the current team. Optionally filter by a specific user ID."""
+    doc: """
+    GET /team.billableInfo - Get billable user information for the current
+    team. Optionally filter by a specific user ID.
+
+    **Example**
+
+    ```hot
+    response ::slack::misc/team-billable-info(::slack::misc/TeamBillableInfoRequest({
+      user: "U1234567"
+    }))
+    response.billable_info
+    ```
+    """
 }
 fn
 (request: TeamBillableInfoRequest): TeamBillableInfoResponse {
@@ -248,7 +291,20 @@ TeamIntegrationLogsResponse type {
 
 team-integration-logs
 meta {
-    doc: """GET /team.integrationLogs - Get the integration activity logs for the current team. Filter by app_id, change_type, service_id, or user."""
+    doc: """
+    GET /team.integrationLogs - Get the integration activity logs for the
+    current team. Filter by app_id, change_type, service_id, or user.
+
+    **Example**
+
+    ```hot
+    response ::slack::misc/team-integration-logs(::slack::misc/TeamIntegrationLogsRequest({
+      change_type: "added",
+      count: 50
+    }))
+    response.logs
+    ```
+    """
 }
 fn
 (request: TeamIntegrationLogsRequest): TeamIntegrationLogsResponse {
@@ -276,7 +332,19 @@ TeamProfileGetResponse type {
 
 team-profile-get
 meta {
-    doc: """GET /team.profile.get - Get the team profile field definitions. Optionally filter by visibility level."""
+    doc: """
+    GET /team.profile.get - Get the team profile field definitions.
+    Optionally filter by visibility level.
+
+    **Example**
+
+    ```hot
+    response ::slack::misc/team-profile-get(::slack::misc/TeamProfileGetRequest({
+      visibility: "all"
+    }))
+    response.profile
+    ```
+    """
 }
 fn
 (request: TeamProfileGetRequest): TeamProfileGetResponse {
@@ -345,7 +413,27 @@ DialogOpenResponse type {
 
 dialog-open
 meta {
-    doc: """GET /dialog.open - Open a dialog with a user. Requires a valid `trigger_id` from an interactive event. The `dialog` parameter is a JSON-encoded dialog definition."""
+    doc: """
+    GET /dialog.open - Open a dialog with a user. Requires a valid
+    `trigger_id` from an interactive event. The `dialog` parameter is a
+    JSON-encoded dialog definition.
+
+    **Example**
+
+    ```hot
+    dialog to-json({
+      callback_id: "feedback",
+      title: "Feedback",
+      elements: [{type: "text", label: "Comment", name: "comment"}]
+    })
+
+    response ::slack::misc/dialog-open(::slack::misc/DialogOpenRequest({
+      dialog: dialog,
+      trigger_id: "13345224609.738474920.8088930838d88f008e0"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: DialogOpenRequest): DialogOpenResponse {
@@ -382,7 +470,20 @@ MigrationExchangeResponse type {
 
 migration-exchange
 meta {
-    doc: """GET /migration.exchange - Exchange legacy user IDs to new Enterprise Grid format. Pass a comma-separated list of user IDs. Set `to_old: true` to convert in the reverse direction."""
+    doc: """
+    GET /migration.exchange - Exchange legacy user IDs to new Enterprise
+    Grid format. Pass a comma-separated list of user IDs. Set `to_old: true`
+    to convert in the reverse direction.
+
+    **Example**
+
+    ```hot
+    response ::slack::misc/migration-exchange(::slack::misc/MigrationExchangeRequest({
+      users: "U1234567,U2345678"
+    }))
+    response.user_id_map
+    ```
+    """
 }
 fn
 (request: MigrationExchangeRequest): MigrationExchangeResponse {
@@ -415,7 +516,26 @@ ViewsOpenResponse type {
 
 views-open
 meta {
-    doc: """POST /views.open - Open a modal view for a user. Requires a valid `trigger_id` from an interactive event and a JSON-encoded view payload."""
+    doc: """
+    POST /views.open - Open a modal view for a user. Requires a valid
+    `trigger_id` from an interactive event and a JSON-encoded view payload.
+
+    **Example**
+
+    ```hot
+    view to-json({
+      type: "modal",
+      title: {type: "plain_text", text: "Feedback"},
+      blocks: [{type: "section", text: {type: "mrkdwn", text: "How did it go?"}}]
+    })
+
+    response ::slack::misc/views-open(::slack::misc/ViewsOpenRequest({
+      trigger_id: "13345224609.738474920.8088930838d88f008e0",
+      view: view
+    }))
+    response.view.id
+    ```
+    """
 }
 fn
 (request: ViewsOpenRequest): ViewsOpenResponse {
@@ -445,7 +565,25 @@ ViewsPublishResponse type {
 
 views-publish
 meta {
-    doc: """POST /views.publish - Publish a static view to the App Home tab for a user. Use `hash` to avoid overwriting concurrent updates."""
+    doc: """
+    POST /views.publish - Publish a static view to the App Home tab for a
+    user. Use `hash` to avoid overwriting concurrent updates.
+
+    **Example**
+
+    ```hot
+    view to-json({
+      type: "home",
+      blocks: [{type: "section", text: {type: "mrkdwn", text: "Welcome back"}}]
+    })
+
+    response ::slack::misc/views-publish(::slack::misc/ViewsPublishRequest({
+      user_id: "U1234567",
+      view: view
+    }))
+    response.view.hash
+    ```
+    """
 }
 fn
 (request: ViewsPublishRequest): ViewsPublishResponse {
@@ -474,7 +612,26 @@ ViewsPushResponse type {
 
 views-push
 meta {
-    doc: """POST /views.push - Push a new view onto the stack of an existing root view. Requires a valid `trigger_id` from a view interaction."""
+    doc: """
+    POST /views.push - Push a new view onto the stack of an existing root
+    view. Requires a valid `trigger_id` from a view interaction.
+
+    **Example**
+
+    ```hot
+    view to-json({
+      type: "modal",
+      title: {type: "plain_text", text: "Feedback"},
+      blocks: [{type: "section", text: {type: "mrkdwn", text: "How did it go?"}}]
+    })
+
+    response ::slack::misc/views-push(::slack::misc/ViewsPushRequest({
+      trigger_id: "13345224609.738474920.8088930838d88f008e0",
+      view: view
+    }))
+    response.view.id
+    ```
+    """
 }
 fn
 (request: ViewsPushRequest): ViewsPushResponse {
@@ -505,7 +662,26 @@ ViewsUpdateResponse type {
 
 views-update
 meta {
-    doc: """POST /views.update - Update an existing view by `view_id` or `external_id`. Use `hash` to avoid overwriting concurrent updates."""
+    doc: """
+    POST /views.update - Update an existing view by `view_id` or
+    `external_id`. Use `hash` to avoid overwriting concurrent updates.
+
+    **Example**
+
+    ```hot
+    view to-json({
+      type: "modal",
+      title: {type: "plain_text", text: "Feedback"},
+      blocks: [{type: "section", text: {type: "mrkdwn", text: "How did it go?"}}]
+    })
+
+    response ::slack::misc/views-update(::slack::misc/ViewsUpdateRequest({
+      view_id: "V1234567",
+      view: view
+    }))
+    response.view.hash
+    ```
+    """
 }
 fn
 (request: ViewsUpdateRequest): ViewsUpdateResponse {
@@ -548,7 +724,26 @@ OauthV2AccessResponse type {
 
 oauth-v2-access
 meta {
-    doc: """POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an access token. Used during the OAuth 2.0 flow to complete app installation. The client secret and the tokens returned are masked in the run's call records."""
+    doc: """
+    POST /oauth.v2.access - Exchange a temporary OAuth verifier code for an
+    access token. Used during the OAuth 2.0 flow to complete app
+    installation. The client secret and the tokens returned are masked in
+    the run's call records.
+
+    **Example**
+
+    ```hot
+    // `code` comes from the OAuth redirect
+    response ::slack::misc/oauth-v2-access(::slack::misc/OauthV2AccessRequest({
+      client_id: ::hot::ctx/get("slack.client.id"),
+      client_secret: ::hot::ctx/get("slack.client.secret"),
+      code: "1234.5678.abcdef",
+      redirect_uri: "https://example.com/slack/callback"
+    }))
+    response.access_token
+    response.team
+    ```
+    """
 }
 fn
 (request: OauthV2AccessRequest): OauthV2AccessResponse {

@@ -41,7 +41,21 @@ fn
 
 get-function
 meta {
-    doc: """Get details for a specific edge function by slug."""
+    doc: """
+    Get details for a specific edge function by slug.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    edge ::functions/get-function("my-project-ref", "hello-world")
+    edge.status
+
+    // Per-call credentials
+    other ::functions/get-function("my-project-ref", "hello-world", {access-token: ::hot::ctx/get("tenant_b.supabase.token")})
+    ```
+    """
 }
 fn
 (project-ref: Str, function-slug: Str): EdgeFunction {
@@ -113,7 +127,21 @@ UpdateFunctionRequest type {
 
 update-function
 meta {
-    doc: """Update an existing edge function. Only provided fields are updated."""
+    doc: """
+    Update an existing edge function. Only provided fields are updated.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    ::functions/update-function(::functions/UpdateFunctionRequest({
+      project_ref: "my-project-ref",
+      function_slug: "hello-world",
+      verify_jwt: false
+    }))
+    ```
+    """
 }
 fn
 (request: UpdateFunctionRequest): Map {
@@ -133,7 +161,20 @@ fn
 
 deploy-function
 meta {
-    doc: """Deploy a function bundle through the Management API deploy endpoint."""
+    doc: """
+    Deploy a function bundle through the Management API deploy endpoint.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    // The body is sent as JSON.
+    bundle {slug: "hello-world", name: "hello-world", entrypoint_path: "index.ts"}
+    deployed ::functions/deploy-function("my-project-ref", bundle)
+    deployed.version
+    ```
+    """
 }
 fn
 (project-ref: Str, body: Any): Map {
@@ -145,7 +186,19 @@ fn
 
 bulk-update-functions
 meta {
-    doc: """Bulk update edge functions for a project."""
+    doc: """
+    Bulk update edge functions for a project.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    ::functions/bulk-update-functions("my-project-ref", [
+      {id: "fn-id-1", slug: "hello-world", name: "hello-world", status: "ACTIVE", version: 2}
+    ])
+    ```
+    """
 }
 fn
 (project-ref: Str, body: Any): Map {
@@ -157,7 +210,17 @@ fn
 
 delete-function
 meta {
-    doc: """Delete an edge function by slug."""
+    doc: """
+    Delete an edge function by slug.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    ::functions/delete-function("my-project-ref", "hello-world")
+    ```
+    """
 }
 fn
 (project-ref: Str, function-slug: Str): Map {
@@ -169,7 +232,17 @@ fn
 
 get-function-body
 meta {
-    doc: """Get the source code of an edge function."""
+    doc: """
+    Get the source code of an edge function.
+
+    **Example**
+
+    ```hot
+    ::functions ::supabase::admin::functions
+
+    source ::functions/get-function-body("my-project-ref", "hello-world")
+    ```
+    """
 }
 fn
 (project-ref: Str, function-slug: Str): Any {

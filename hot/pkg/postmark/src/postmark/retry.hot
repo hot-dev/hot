@@ -21,7 +21,17 @@ RetryInboundMessageProcessingResponse type {
 
 retry-failed-inbound-message-processing
 meta {
-    doc: """Retry processing of a failed inbound message, re-triggering the inbound webhook."""
+    doc: """
+    Retry processing of a failed inbound message, re-triggering the inbound
+    webhook.
+
+    **Example**
+
+    ```hot
+    result ::postmark::retry/retry-failed-inbound-message-processing(::postmark::retry/RetryInboundMessageProcessingRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277"}))
+    result.Message
+    ```
+    """
 }
 fn
 (request: RetryInboundMessageProcessingRequest): RetryInboundMessageProcessingResponse {

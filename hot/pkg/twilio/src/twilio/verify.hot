@@ -20,7 +20,19 @@ is-ok-response ::hot::http/is-ok-response
 service-sid
 meta {
     ctx: {"twilio.verify.service.sid": {required: false, secret: false}},
-    doc: """The Verify Service SID (`VA...`) to use: `explicit` when set, else the `twilio.verify.service.sid` context variable. Halts when neither is set. Exposed for testing."""
+    doc: """
+    The Verify Service SID (`VA...`) to use: `explicit` when set, else the
+    `twilio.verify.service.sid` context variable. Halts when neither is set.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    ::verify/service-sid("VA123")  // "VA123"
+    ```
+    """
 }
 fn (explicit: Str?): Str {
   sid or(explicit, or(::ctx/get("twilio.verify.service.sid"), ""))
@@ -29,13 +41,29 @@ fn (explicit: Str?): Str {
     sid)
 }
 
-service-url fn (sid: Str): Str {
+service-url
+meta {no-doc: true}
+fn (sid: Str): Str {
   `${::twilio::core/VERIFY_URL}/Services/${::uri/encode(sid)}`
 }
 
 form-value
 meta {
-    doc: """Twilio takes object-valued Verify parameters (`RateLimits`, `ChannelConfiguration`, template substitutions, `Tags`) as JSON strings; Maps are serialized, everything else passes through. Exposed for testing."""
+    doc: """
+    Twilio takes object-valued Verify parameters (`RateLimits`,
+    `ChannelConfiguration`, template substitutions, `Tags`) as JSON strings;
+    Maps are serialized, everything else passes through. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    ::verify/form-value({a: 1})  // "{\"a\":1}"
+    ::verify/form-value("sms")  // "sms"
+    ```
+    """
 }
 fn (value: Any): Any {
   if(is-map(value), to-json(value), value)
@@ -95,7 +123,19 @@ Verification type {
 
 start-verification-body
 meta {
-    doc: """The form parameters `start-verification` sends (without `service_sid`, which is in the path). Exposed for testing."""
+    doc: """
+    The form parameters `start-verification` sends (without `service_sid`,
+    which is in the path). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    req ::verify/StartVerificationRequest({service_sid: "VA123", To: "+15558675310", Channel: "sms"})
+    ::verify/start-verification-body(req)  // {To: "+15558675310", Channel: "sms"}
+    ```
+    """
 }
 fn (request: StartVerificationRequest): Map {
   untype(request)
@@ -171,7 +211,18 @@ VerificationCheck type {
 
 check-verification-body
 meta {
-    doc: """The form parameters `check-verification` sends. Exposed for testing."""
+    doc: """
+    The form parameters `check-verification` sends. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    req ::verify/CheckVerificationRequest({service_sid: "VA123", To: "+15558675310", Code: "123456"})
+    ::verify/check-verification-body(req)  // {To: "+15558675310", Code: "123456"}
+    ```
+    """
 }
 fn (request: CheckVerificationRequest): Map {
   filter-vals(delete(untype(request), "service_sid"), is-some)
@@ -221,7 +272,19 @@ GetVerificationRequest type {
 get-verification
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}, "twilio.verify.service.sid": {required: false, secret: false}},
-    doc: """GET /v2/Services/{ServiceSid}/Verifications/{Sid} - Fetch a verification (`VE...`) to see its status."""
+    doc: """
+    GET /v2/Services/{ServiceSid}/Verifications/{Sid} - Fetch a verification
+    (`VE...`) to see its status.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    v ::verify/get-verification(::verify/GetVerificationRequest({sid: "VE123"}))
+    v.status
+    ```
+    """
 }
 fn
 (request: GetVerificationRequest): Verification {
@@ -357,7 +420,19 @@ fn
 get-service
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /v2/Services/{Sid} - Fetch a Verify Service."""
+    doc: """
+    GET /v2/Services/{Sid} - Fetch a Verify Service.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    service ::verify/get-service("VA123")
+    service.friendly_name
+    service.code_length
+    ```
+    """
 }
 fn
 (sid: Str): Service {
@@ -383,7 +458,19 @@ ListServicesResponse type {
 list-services
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /v2/Services - List Verify Services (one page; `meta.next_page_url` feeds `::twilio::api/next-page`)."""
+    doc: """
+    GET /v2/Services - List Verify Services (one page; `meta.next_page_url`
+    feeds `::twilio::api/next-page`).
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    page ::verify/list-services()
+    map(page.services, %.sid)
+    ```
+    """
 }
 fn
 (): ListServicesResponse {
@@ -404,7 +491,18 @@ fn
 delete-service
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """DELETE /v2/Services/{Sid} - Delete a Verify Service."""
+    doc: """
+    DELETE /v2/Services/{Sid} - Delete a Verify Service.
+
+    **Example**
+
+    ```hot
+    ::verify ::twilio::verify
+
+    deleted ::verify/delete-service("VA123")
+    if(deleted, "Service removed")
+    ```
+    """
 }
 fn
 (sid: Str): Bool {

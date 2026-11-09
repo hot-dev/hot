@@ -33,7 +33,17 @@ BODY_KEYS ["majorDimension"]
 
 value-range
 meta {
-    doc: """A ValueRange body (pure): `{range, majorDimension, values}` with `majorDimension` from `opts` (default `ROWS`)."""
+    doc: """
+    A ValueRange body (pure): `{range, majorDimension, values}` with
+    `majorDimension` from `opts` (default `ROWS`).
+
+    **Example**
+
+    ```hot
+    ::google::sheets::values/value-range("Log!A1:B1", [["a", "b"]], {})
+    // {range: "Log!A1:B1", majorDimension: "ROWS", values: [["a", "b"]]}
+    ```
+    """
 }
 fn (range: Str, values: Vec, opts: Map): Map {
   {range: range, majorDimension: or(get(opts, "majorDimension"), "ROWS"), values: values}
@@ -41,7 +51,17 @@ fn (range: Str, values: Vec, opts: Map): Map {
 
 read-params
 meta {
-    doc: """The query parameters a read sends (pure): only the options you set (`valueRenderOption`, `dateTimeRenderOption`, `majorDimension`, `fields`, ...)."""
+    doc: """
+    The query parameters a read sends (pure): only the options you set
+    (`valueRenderOption`, `dateTimeRenderOption`, `majorDimension`,
+    `fields`, ...).
+
+    **Example**
+
+    ```hot
+    ::google::sheets::values/read-params({valueRenderOption: "FORMULA"})  // {valueRenderOption: "FORMULA"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::sheets/query-params({}, opts)
@@ -49,7 +69,18 @@ fn (opts: Map): Map {
 
 write-params
 meta {
-    doc: """The query parameters a write sends (pure): `valueInputOption: "USER_ENTERED"` unless set, plus your options; `majorDimension` stays in the body."""
+    doc: """
+    The query parameters a write sends (pure): `valueInputOption:
+    "USER_ENTERED"` unless set, plus your options; `majorDimension` stays in
+    the body.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::values/write-params({})  // {valueInputOption: "USER_ENTERED"}
+    ::google::sheets::values/write-params({valueInputOption: "RAW", majorDimension: "COLUMNS"})  // {valueInputOption: "RAW"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::sheets/query-params({valueInputOption: "USER_ENTERED"}, opts, BODY_KEYS)
@@ -68,7 +99,7 @@ meta {
     the range is empty. Scope: `spreadsheets.readonly`.
 
     ```hot
-    raw ::google::sheets::values/get-values(id, "Data!A2:D", {valueRenderOption: "UNFORMATTED_VALUE"})
+    raw ::google::sheets::values/get-values("1AbCspreadsheetId", "Data!A2:D", {valueRenderOption: "UNFORMATTED_VALUE"})
     ```
     """
 }
@@ -82,7 +113,21 @@ fn
 
 batch-get-values
 meta {
-    doc: """GET /{id}/values:batchGet - read several ranges in one call. Returns `{spreadsheetId, valueRanges: [...]}` in request order. Same options as `get-values`. Scope: `spreadsheets.readonly`."""
+    doc: """
+    GET /{id}/values:batchGet - read several ranges in one call. Returns
+    `{spreadsheetId, valueRanges: [...]}` in request order. Same options as
+    `get-values`. Scope: `spreadsheets.readonly`.
+
+    **Example**
+
+    ```hot
+    out ::google::sheets::values/batch-get-values("1AbCspreadsheetId", ["Leads!A1:B2", "Summary!B2"])
+    map(out.valueRanges, %.range)
+
+    // Numbers as numbers
+    ::google::sheets::values/batch-get-values("1AbCspreadsheetId", ["Leads!A:D"], {valueRenderOption: "UNFORMATTED_VALUE"})
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, ranges: Vec): Map {
@@ -102,7 +147,7 @@ meta {
     back as numbers. Scope: `spreadsheets.readonly`.
 
     ```hot
-    leads ::google::sheets::values/read-records(id, "Leads!A:F")
+    leads ::google::sheets::values/read-records("1AbCspreadsheetId", "Leads!A:F")
     filter(leads, (l) { eq(l.status, "new") })
     ```
     """
@@ -128,6 +173,16 @@ meta {
     Vecs). Returns `{updatedRange, updatedRows, updatedColumns,
     updatedCells, updatedData?}`. See the namespace doc for options.
     Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    out ::google::sheets::values/update-values("1AbCspreadsheetId", "Summary!A1:B2", [["Total", "=SUM(Data!C:C)"], ["Owner", "Ada"]])
+    out.updatedCells
+
+    // Store strings as is
+    ::google::sheets::values/update-values("1AbCspreadsheetId", "Notes!A1", [["=not a formula"]], {valueInputOption: "RAW"})
+    ```
     """
 }
 fn
@@ -148,7 +203,7 @@ meta {
     Returns `{tableRange, updates}`. Scope: `spreadsheets`.
 
     ```hot
-    ::google::sheets::values/append-values(id, "Log!A:C", [["2026-11-01", "deploy", "ok"]], {insertDataOption: "INSERT_ROWS"})
+    ::google::sheets::values/append-values("1AbCspreadsheetId", "Log!A:C", [["2026-11-01", "deploy", "ok"]], {insertDataOption: "INSERT_ROWS"})
     ```
     """
 }
@@ -168,6 +223,13 @@ meta {
     `{range, values, majorDimension?}` or a Map of range to rows.
     `valueInputOption` defaults to `USER_ENTERED`; the response options
     are copied from `opts` when set.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::values/batch-update-body({"Summary!B2": [[42]]}, {})
+    // {valueInputOption: "USER_ENTERED", data: [{range: "Summary!B2", majorDimension: "ROWS", values: [[42]]}]}
+    ```
     """
 }
 fn (data: Any, opts: Map): Map {
@@ -189,7 +251,7 @@ meta {
     POST /{id}/values:batchUpdate - write several ranges in one call.
 
     ```hot
-    ::google::sheets::values/batch-update-values(id, {"Summary!B2": [[42]], "Summary!B3": [["=SUM(Data!C:C)"]]})
+    ::google::sheets::values/batch-update-values("1AbCspreadsheetId", {"Summary!B2": [[42]], "Summary!B3": [["=SUM(Data!C:C)"]]})
     ```
 
     Returns `{totalUpdatedCells, responses, ...}`. Scope: `spreadsheets`.
@@ -206,7 +268,17 @@ fn
 
 clear-values
 meta {
-    doc: """POST /{id}/values/{range}:clear - clear a range's values (formatting and validation are kept). Returns `{clearedRange}`. Scope: `spreadsheets`."""
+    doc: """
+    POST /{id}/values/{range}:clear - clear a range's values (formatting and
+    validation are kept). Returns `{clearedRange}`. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    out ::google::sheets::values/clear-values("1AbCspreadsheetId", "Leads!A2:D")
+    out.clearedRange
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, range: Str): Map {
@@ -218,7 +290,17 @@ fn
 
 batch-clear-values
 meta {
-    doc: """POST /{id}/values:batchClear - clear several ranges. Returns `{clearedRanges}`. Scope: `spreadsheets`."""
+    doc: """
+    POST /{id}/values:batchClear - clear several ranges. Returns
+    `{clearedRanges}`. Scope: `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    out ::google::sheets::values/batch-clear-values("1AbCspreadsheetId", ["Leads!A2:D", "Summary!B2:B3"])
+    out.clearedRanges
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, ranges: Vec): Map {
@@ -239,6 +321,15 @@ meta {
     order of first appearance) and one row per record. Clear the old
     data first with `clear-values` if the new table is shorter. Scope:
     `spreadsheets`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::values/write-records("1AbCspreadsheetId", "Leads!A1", [{name: "Ada", email: "ada@example.com"}, {name: "Bob"}])
+
+    // Choose and order the columns
+    ::google::sheets::values/write-records("1AbCspreadsheetId", "Leads!A1", [{name: "Ada", email: "ada@example.com"}], ["email", "name"])
+    ```
     """
 }
 fn
@@ -260,7 +351,7 @@ meta {
     written as empty cells. Scope: `spreadsheets`.
 
     ```hot
-    ::google::sheets::values/append-records(id, "Leads!A:C", [{name: "Ada", email: "ada@example.com", source: "web"}], ["name", "email", "source"])
+    ::google::sheets::values/append-records("1AbCspreadsheetId", "Leads!A:C", [{name: "Ada", email: "ada@example.com", source: "web"}], ["name", "email", "source"])
     ```
     """
 }

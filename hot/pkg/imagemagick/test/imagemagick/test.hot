@@ -203,3 +203,51 @@ meta ["test"] fn () {
     assert-eq("cover", opts.fit)
     assert-eq("webp", opts.format)
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::imagemagick/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::imagemagick/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::imagemagick/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::imagemagick/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::imagemagick/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::imagemagick/shell-quote("a\nb"))
+    assert-eq("''", ::imagemagick/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::imagemagick/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::imagemagick/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::imagemagick/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::imagemagick/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::imagemagick/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::imagemagick/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::imagemagick/file-ext("hot://uploads/a.x y"))
+}

@@ -169,7 +169,7 @@ meta {
     **Example**
 
     ```hot
-    response create(CreateResponseRequest({
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: "What is the capital of France?",
         max_output_tokens: 1024
@@ -182,7 +182,7 @@ meta {
     **With conversation history**
 
     ```hot
-    response create(CreateResponseRequest({
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: [
             {role: "user", content: "My name is Alice."},
@@ -196,7 +196,7 @@ meta {
     **Continue a previous conversation**
 
     ```hot
-    response create(CreateResponseRequest({
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3",
         input: "Tell me more",
         previous_response_id: "resp_abc123"
@@ -237,7 +237,7 @@ meta {
     **Example**
 
     ```hot
-    response create-stream(CreateResponseRequest({
+    response ::xai::responses/create-stream(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: "Count from 1 to 3.",
         max_output_tokens: 50
@@ -279,14 +279,14 @@ meta {
 
     ```hot
     // Create with store: true (default)
-    created create(CreateResponseRequest({
+    created ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: "Say hello",
         store: true
     }))
 
     // Later, retrieve it
-    retrieved get(created.id)
+    retrieved ::xai::responses/get(created.id)
     eq(created.id, retrieved.id) // => true
     ```
     """
@@ -315,7 +315,7 @@ meta {
     **Example**
 
     ```hot
-    delete("resp_abc123")
+    ::xai::responses/delete("resp_abc123")
     ```
     """
 }
@@ -346,11 +346,11 @@ meta {
     **Example**
 
     ```hot
-    answer chat("grok-3", "What is the capital of France?")
+    answer ::xai::responses/chat("grok-3", "What is the capital of France?")
     // => "The capital of France is Paris."
 
     // With system instructions
-    answer chat("grok-3-mini", "What is 2+2?", "Respond with just the number.")
+    answer ::xai::responses/chat("grok-3-mini", "What is 2+2?", "Respond with just the number.")
     // => "4"
     ```
     """
@@ -395,7 +395,7 @@ meta {
     **Example**
 
     ```hot
-    msg user-message("Hello")
+    msg ::xai::responses/user-message("Hello")
     msg.role // => "user"
     msg.content // => "Hello"
     ```
@@ -414,7 +414,7 @@ meta {
     **Example**
 
     ```hot
-    msg system-message("You are a helpful math tutor.")
+    msg ::xai::responses/system-message("You are a helpful math tutor.")
     msg.role // => "system"
     msg.content // => "You are a helpful math tutor."
     ```
@@ -433,16 +433,16 @@ meta {
     **Example**
 
     ```hot
-    msg assistant-message("Nice to meet you!")
+    msg ::xai::responses/assistant-message("Nice to meet you!")
     msg.role // => "assistant"
 
     // Use in multi-turn input
-    response create(CreateResponseRequest({
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: [
-            user-message("My name is Alice."),
-            assistant-message("Nice to meet you, Alice!"),
-            user-message("What is my name?")
+            ::xai::responses/user-message("My name is Alice."),
+            ::xai::responses/assistant-message("Nice to meet you, Alice!"),
+            ::xai::responses/user-message("What is my name?")
         ]
     }))
     ```
@@ -464,13 +464,13 @@ meta {
     **Example**
 
     ```hot
-    response create(CreateResponseRequest({
+    response ::xai::responses/create(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: "Say 'test'",
         max_output_tokens: 50
     }))
 
-    text extract-response-text(response)
+    text ::xai::responses/extract-response-text(response)
     is-str(text) // => true
     ```
     """
@@ -515,13 +515,13 @@ meta {
     **Example**
 
     ```hot
-    response create-stream(CreateResponseRequest({
+    response ::xai::responses/create-stream(::xai::responses/CreateResponseRequest({
         model: "grok-3-mini",
         input: "Say hello"
     }))
 
     for-each(response.body, (event) {
-        text extract-delta-text(event)
+        text ::xai::responses/extract-delta-text(event)
         // text contains the delta chunk, or "" for non-text events
     })
     ```
@@ -552,11 +552,16 @@ meta {
     **Example**
 
     ```hot
+    response ::xai::responses/create-stream(::xai::responses/CreateResponseRequest({
+        model: "grok-3-mini",
+        input: "Say hello"
+    }))
+
     for-each(response.body, (event) {
         cond {
-            is-stream-done(event) => { "Stream finished" }
+            ::xai::responses/is-stream-done(event) => { "Stream finished" }
             => {
-                text extract-delta-text(event)
+                text ::xai::responses/extract-delta-text(event)
                 // process text chunk
             }
         }

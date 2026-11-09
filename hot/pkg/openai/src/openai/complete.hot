@@ -43,7 +43,20 @@ CompleteUploadResponse type {
 
 complete-upload
 meta {
-    doc: """POST /uploads/{upload_id}/complete - Complete a multi-part upload by providing the ordered list of part IDs."""
+    doc: """
+    POST /uploads/{upload_id}/complete - Complete a multi-part upload by
+    providing the ordered list of part IDs.
+
+    **Example**
+
+    ```hot
+    upload ::openai::complete/complete-upload("upload_abc123", ::openai::complete/CompleteUploadRequest({
+      part_ids: ["part_1", "part_2"]
+    }))
+    upload.status
+    upload.file
+    ```
+    """
 }
 fn
 (upload-id: Str, request: CompleteUploadRequest): CompleteUploadResponse {

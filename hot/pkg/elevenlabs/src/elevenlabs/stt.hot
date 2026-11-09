@@ -48,7 +48,20 @@ QUERY_FIELDS ["enable_logging"]
 
 form-fields
 meta {
-    doc: """The form fields for a request as `[[name, value-string]]`, with `model_id` defaulted, nulls dropped, Vec `keyterms` repeated, and JSON fields encoded. Exposed for testing."""
+    doc: """
+    The form fields for a request as `[[name, value-string]]`, with
+    `model_id` defaulted, nulls dropped, Vec `keyterms` repeated, and JSON
+    fields encoded. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::stt ::elevenlabs::stt
+
+    ::stt/form-fields(::stt/SpeechToTextRequest({keyterms: ["Hot", "Dev"]}))
+    // [["model_id", "scribe_v2"], ["keyterms", "Hot"], ["keyterms", "Dev"]]
+    ```
+    """
 }
 fn (request: SpeechToTextRequest): Vec {
   fields {model_id: DEFAULT_MODEL, ...untype(request)}
@@ -67,7 +80,21 @@ fn (request: SpeechToTextRequest): Vec {
 
 multipart-body
 meta {
-    doc: """The `multipart/form-data` body for an upload: form fields, then the `file` part (when `audio` is non-null) with its bytes concatenated verbatim. Exposed for testing."""
+    doc: """
+    The `multipart/form-data` body for an upload: form fields, then the
+    `file` part (when `audio` is non-null) with its bytes concatenated
+    verbatim. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::stt ::elevenlabs::stt
+
+    body ::stt/multipart-body(::stt/SpeechToTextRequest({}), Bytes("hi"), "clip.wav", "B")
+    contains(Str(body), "filename=\"clip.wav\"")  // true
+    ends-with(Str(body), "--B--\r\n")  // true
+    ```
+    """
 }
 fn (request: SpeechToTextRequest, audio: Any, filename: Str, boundary: Str): Bytes {
   fields reduce(form-fields(request), (acc, pair) {
@@ -79,15 +106,21 @@ fn (request: SpeechToTextRequest, audio: Any, filename: Str, boundary: Str): Byt
   concat(fields, file-part, ::api/multipart-close(boundary))
 }
 
-mime-for fn (filename: Str): Str {
+mime-for
+meta {no-doc: true}
+fn (filename: Str): Str {
   or(::hot::mime/from-path(filename), "application/octet-stream")
 }
 
-stt-path fn (request: SpeechToTextRequest): Str {
+stt-path
+meta {no-doc: true}
+fn (request: SpeechToTextRequest): Str {
   `/v1/speech-to-text${::api/query-string({enable_logging: request.enable_logging})}`
 }
 
-post-multipart fn (request: SpeechToTextRequest, audio: Any, filename: Str, opts: Map): Map {
+post-multipart
+meta {no-doc: true}
+fn (request: SpeechToTextRequest, audio: Any, filename: Str, opts: Map): Map {
   boundary `hot-elevenlabs-${Uuid()}`
   ::api/json("POST", stt-path(request), {Content-Type: `multipart/form-data; boundary=${boundary}`},
     multipart-body(request, audio, filename, boundary), opts)
@@ -170,7 +203,19 @@ fn
 get-transcript
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """GET /v1/speech-to-text/transcripts/{transcription_id}: fetch a stored transcript (for example one produced through a webhook request)."""
+    doc: """
+    GET /v1/speech-to-text/transcripts/{transcription_id}: fetch a stored
+    transcript (for example one produced through a webhook request).
+
+    **Example**
+
+    ```hot
+    ::stt ::elevenlabs::stt
+
+    out ::stt/get-transcript("tr_8f2a1c")
+    ::stt/transcript-text(out)
+    ```
+    """
 }
 fn
 (transcription-id: Str): Map {
@@ -183,7 +228,16 @@ fn
 delete-transcript
 meta {
     ctx: {"elevenlabs.api.key": {required: false}},
-    doc: """DELETE /v1/speech-to-text/transcripts/{transcription_id}: delete a stored transcript."""
+    doc: """
+    DELETE /v1/speech-to-text/transcripts/{transcription_id}: delete a
+    stored transcript.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::stt/delete-transcript("tr_8f2a1c")
+    ```
+    """
 }
 fn
 (transcription-id: Str): Any {
@@ -195,7 +249,19 @@ fn
 
 transcript-text
 meta {
-    doc: """The transcript text of a result; multichannel results join each channel's text with newlines. `""` when absent."""
+    doc: """
+    The transcript text of a result; multichannel results join each
+    channel's text with newlines. `""` when absent.
+
+    **Example**
+
+    ```hot
+    ::stt ::elevenlabs::stt
+
+    ::stt/transcript-text({text: "Hello there"})  // "Hello there"
+    ::stt/transcript-text({transcripts: [{text: "Left"}, {text: "Right"}]})  // "Left\nRight"
+    ```
+    """
 }
 fn (response: Map): Str {
   channels get(response, "transcripts")
@@ -207,7 +273,21 @@ fn (response: Map): Str {
 
 words
 meta {
-    doc: """The spoken words of a result (entries of `type` "word"; spacing and audio events dropped) as `{text, start, end, speaker_id, ...}`."""
+    doc: """
+    The spoken words of a result (entries of `type` "word"; spacing and
+    audio events dropped) as `{text, start, end, speaker_id, ...}`.
+
+    **Example**
+
+    ```hot
+    out {words: [
+      {text: "Hi", type: "word", start: 0.0, end: 0.2},
+      {text: " ", type: "spacing", start: 0.2, end: 0.3},
+      {text: "you", type: "word", start: 0.3, end: 0.5}
+    ]}
+    map(::elevenlabs::stt/words(out), %.text)  // ["Hi", "you"]
+    ```
+    """
 }
 fn (response: Map): Vec {
   filter(or(get(response, "words"), []), (w) { eq(get(w, "type"), "word") })

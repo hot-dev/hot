@@ -20,7 +20,9 @@ LINK_SCOPES ["anonymous", "organization", "users"]
 INVITE_ROLES ["read", "write", "owner"]
 APP_ROLES ["read", "write", "owner", "fullcontrol"]
 
-json fn (method: Str, path: Str, body: Any, opts: Map): Any {
+json
+meta {no-doc: true}
+fn (method: Str, path: Str, body: Any, opts: Map): Any {
   ::api/json(method, path, {}, body, ::od/creds(opts))
 }
 
@@ -32,6 +34,13 @@ meta {
     `expiration` (RFC 3339), `password` (personal OneDrive only),
     `retain-inherited` (`retainInheritedPermissions`), `recipients`
     (emails, for `users` links). An Err for an unknown type or scope.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::sharing/build-link("view", {scope: "organization"})  // {type: "view", scope: "organization"}
+    ::microsoft::onedrive::sharing/build-link("edit", {scope: "users", recipients: ["alex@contoso.com"]}).recipients  // [{email: "alex@contoso.com"}]
+    ```
     """
 }
 fn (link-type: Str, opts: Map): Map {
@@ -82,6 +91,14 @@ meta {
     `{objectId}` Maps), `roles` (`read`, `write`; default `["read"]`),
     and from `opts` `message`, `require-sign-in` (default true),
     `send-invitation` (default false: grant silently), `expiration`.
+
+    **Example**
+
+    ```hot
+    body ::microsoft::onedrive::sharing/build-invite(["alex@contoso.com"], [], {message: "Q3 numbers"})
+    body.roles  // ["read"]
+    body.sendInvitation  // false
+    ```
     """
 }
 fn (recipients: Vec, roles: Vec, opts: Map): Map {
@@ -126,7 +143,17 @@ fn
 
 list-permissions
 meta {
-    doc: """GET {item}/permissions - the item's permissions (links, people, inherited). Returns a Vec."""
+    doc: """
+    GET {item}/permissions - the item's permissions (links, people,
+    inherited). Returns a Vec.
+
+    **Example**
+
+    ```hot
+    perms ::microsoft::onedrive::sharing/list-permissions("/Reports/Q3.pdf")
+    map(perms, %.roles)
+    ```
+    """
 }
 fn
 (item: Any): Vec {
@@ -137,7 +164,18 @@ fn
 }
 
 get-permission
-meta {doc: """GET {item}/permissions/{id}."""}
+meta {
+    doc: """
+    GET {item}/permissions/{id}.
+
+    **Example**
+
+    ```hot
+    perm ::microsoft::onedrive::sharing/get-permission("/Reports/Q3.pdf", "aTowIy5mfG1lbWJlcnNoaXA")
+    perm.roles
+    ```
+    """
+}
 fn
 (item: Any, permission-id: Str): Map {
   get-permission(item, permission-id, {})
@@ -148,7 +186,17 @@ fn
 
 update-permission
 meta {
-    doc: """PATCH {item}/permissions/{id} - change `roles` (e.g. `["write"]`). Returns the permission."""
+    doc: """
+    PATCH {item}/permissions/{id} - change `roles` (e.g. `["write"]`).
+    Returns the permission.
+
+    **Example**
+
+    ```hot
+    perm ::microsoft::onedrive::sharing/update-permission("/Reports/Q3.pdf", "aTowIy5mfG1lbWJlcnNoaXA", ["write"])
+    perm.roles
+    ```
+    """
 }
 fn
 (item: Any, permission-id: Str, roles: Vec): Map {
@@ -160,7 +208,16 @@ fn
 
 delete-permission
 meta {
-    doc: """DELETE {item}/permissions/{id} - remove a link or a person's access (inherited permissions cannot be removed here). Returns true."""
+    doc: """
+    DELETE {item}/permissions/{id} - remove a link or a person's access
+    (inherited permissions cannot be removed here). Returns true.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::sharing/delete-permission("/Reports/Q3.pdf", "aTowIy5mfG1lbWJlcnNoaXA")
+    ```
+    """
 }
 fn
 (item: Any, permission-id: Str): Bool {
@@ -173,7 +230,19 @@ fn
 
 build-app-grant
 meta {
-    doc: """The body granting an app a role on a resource (pure): `{roles, grantedToV2: {application: {id, displayName}}}`. Roles are `read`, `write`, `owner`, `fullcontrol`."""
+    doc: """
+    The body granting an app a role on a resource (pure): `{roles,
+    grantedToV2: {application: {id, displayName}}}`. Roles are `read`,
+    `write`, `owner`, `fullcontrol`.
+
+    **Example**
+
+    ```hot
+    grant ::microsoft::onedrive::sharing/build-app-grant("11111111-2222-3333-4444-555555555555", "Hot Worker", ["read"])
+    grant.roles  // ["read"]
+    grant.grantedToV2.application.displayName  // "Hot Worker"
+    ```
+    """
 }
 fn (app-id: Str, display-name: Str?, roles: Vec): Map {
   bad filter(roles, (r) { not(in(r, APP_ROLES)) })
@@ -193,6 +262,15 @@ meta {
     caller needs `Sites.FullControl.All` or an owner/fullcontrol grant.
     Breaks permission inheritance on the item. Returns the permission;
     delete it with `delete-permission` to revoke.
+
+    **Example**
+
+    ```hot
+    perm ::microsoft::onedrive::sharing/grant-app("/Reports", "11111111-2222-3333-4444-555555555555", "Hot Worker", ["read"])
+
+    // Revoke it later
+    ::microsoft::onedrive::sharing/delete-permission("/Reports", perm.id)
+    ```
     """
 }
 fn

@@ -82,6 +82,24 @@ test-no-op-writes-make-no-call
 meta ["test"] fn () {
     assert-eq({}, ::ranges/write-values("I1", "Data", "A1", []), "no credentials are needed, because no call is made")
     assert-eq({}, ::tables/append-records("I1", "T", []))
+    assert-eq({}, ::ranges/write-values("I1", "Data", "A1", [[]]), "a grid with no cells is a no-op")
+    assert-eq({}, ::ranges/write-values("I1", "Data", "A1", [[], []]))
+    assert-eq({}, ::ranges/write-records("I1", "Data", "A1", []), "no records and no columns write nothing")
+    assert-eq({}, ::ranges/write-records("I1", "Data", "A1", [], null, {session: "s1"}))
+}
+
+test-write-records-null-columns-use-the-default
+meta ["test"] fn () {
+    written ::ranges/write-records("/a.xlsx", "Data", "A1", [{a: 1}], null, {session: "s1"})
+    assert(is-err(written), "reaches the call, which has no credentials")
+    assert(contains(err-message(written), "credentials"))
+}
+
+test-without-query-keeps-only-routing-and-credentials
+meta ["test"] fn () {
+    assert-eq({drive: "d1", session: "s1", token: "t"}, ::excel/without-query({drive: "d1", session: "s1", token: "t", select: "address", top: 1, skip: 2}))
+    assert-eq({}, ::excel/without-query({}))
+    assert-eq({select: "values"}, ::excel/query-opts({select: "values"}, ::excel/without-query({select: "address", top: 1})), "the package's own select survives")
 }
 
 test-calls-surface-no-credentials-err

@@ -12,7 +12,9 @@ Branch type {
   reset_on_push: Bool?
 }
 
-branch-path fn (branch-id: Str): Str {
+branch-path
+meta {no-doc: true}
+fn (branch-id: Str): Str {
   `/branches/${branch-id}`
 }
 
@@ -82,7 +84,21 @@ fn
 
 get-branch
 meta {
-    doc: """Get details for a specific branch by its ID."""
+    doc: """
+    Get details for a specific branch by its ID.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    branch ::branches/get-branch("branch-id-123")
+    branch.status
+
+    // Per-call credentials
+    other ::branches/get-branch("branch-id-123", {access-token: ::hot::ctx/get("tenant_b.supabase.token")})
+    ```
+    """
 }
 fn
 (branch-id: Str): Branch {
@@ -94,7 +110,17 @@ fn
 
 delete-branch
 meta {
-    doc: """Delete a preview branch."""
+    doc: """
+    Delete a preview branch.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/delete-branch("branch-id-123")
+    ```
+    """
 }
 fn
 (branch-id: Str): Map {
@@ -106,7 +132,18 @@ fn
 
 get-branch-config
 meta {
-    doc: """Get the database configuration for a branch."""
+    doc: """
+    Get the database configuration for a branch.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    config ::branches/get-branch-config("branch-id-123")
+    config.db_host
+    ```
+    """
 }
 fn
 (branch-id: Str): Map {
@@ -126,7 +163,22 @@ UpdateBranchConfigRequest type {
 
 update-branch-config
 meta {
-    doc: """Update branch configuration (git branch association, reset behavior, persistence)."""
+    doc: """
+    Update branch configuration (git branch association, reset behavior,
+    persistence).
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/update-branch-config(::branches/UpdateBranchConfigRequest({
+      branch_id: "branch-id-123",
+      git_branch: "feat/auth",
+      persistent: true
+    }))
+    ```
+    """
 }
 fn
 (request: UpdateBranchConfigRequest): Map {
@@ -144,7 +196,17 @@ fn
 
 push-branch
 meta {
-    doc: """Push migrations to a preview branch database."""
+    doc: """
+    Push migrations to a preview branch database.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/push-branch("branch-id-123")
+    ```
+    """
 }
 fn
 (branch-id: Str): Map {
@@ -156,7 +218,17 @@ fn
 
 reset-branch
 meta {
-    doc: """Reset a preview branch database to match the parent project."""
+    doc: """
+    Reset a preview branch database to match the parent project.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/reset-branch("branch-id-123")
+    ```
+    """
 }
 fn
 (branch-id: Str): Map {
@@ -168,7 +240,17 @@ fn
 
 merge-branch
 meta {
-    doc: """Merge a preview branch into the parent project."""
+    doc: """
+    Merge a preview branch into the parent project.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/merge-branch("branch-id-123")
+    ```
+    """
 }
 fn
 (branch-id: Str): Map {
@@ -180,7 +262,18 @@ fn
 
 disable-preview-branching
 meta {
-    doc: """Disable preview branching for a project. This deletes all existing preview branches."""
+    doc: """
+    Disable preview branching for a project. This deletes all existing
+    preview branches.
+
+    **Example**
+
+    ```hot
+    ::branches ::supabase::admin::branches
+
+    ::branches/disable-preview-branching("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {

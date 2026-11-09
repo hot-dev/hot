@@ -14,7 +14,20 @@ seg ::stripe::api/encode-id
 
 get-event
 meta {
-    doc: """GET /v1/events/{id} - Retrieve an event by ID. Useful for re-fetching an event referenced by a webhook to confirm its authenticity."""
+    doc: """
+    GET /v1/events/{id} - Retrieve an event by ID. Useful for re-fetching an
+    event referenced by a webhook to confirm its authenticity.
+
+    **Example**
+
+    ```hot
+    ::events ::stripe::events
+
+    event ::events/get-event("evt_123")
+    event.type
+    event.data.object
+    ```
+    """
 }
 fn
 (event: Str): Map {

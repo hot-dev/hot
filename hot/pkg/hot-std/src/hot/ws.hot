@@ -65,6 +65,7 @@ meta {
     **Examples**
 
     ```hot
+    ::ws ::hot::ws
     // Simple connection
     conn ::ws/connect("wss://echo.websocket.org")
 
@@ -97,6 +98,8 @@ meta {
     **Example**
 
     ```hot
+    ::ws ::hot::ws
+    conn ::ws/connect("wss://api.example.com/realtime")
     ::ws/send(conn, {type: "session.update", session: {instructions: "Be nice"}})
     ::ws/send(conn, "plain text message")
     ```
@@ -118,7 +121,8 @@ meta {
     For processing a stream of messages, iterate over `conn.messages` instead:
 
     ```hot
-    for-each(conn.messages, fn (msg) {
+    conn ::hot::ws/connect("wss://api.example.com/realtime")
+    for-each(conn.messages, (msg) {
         print(msg)
     })
     ```
@@ -140,6 +144,8 @@ meta {
     **Example**
 
     ```hot
+    ::ws ::hot::ws
+    conn ::ws/connect("wss://api.example.com/realtime")
     ::ws/close(conn)
     ```
     """
@@ -157,6 +163,8 @@ meta {
     **Example**
 
     ```hot
+    ::ws ::hot::ws
+    conn ::ws/connect("wss://api.example.com/realtime")
     if(::ws/is-open(conn), ::ws/send(conn, "ping"), print("closed"))
     ```
     """

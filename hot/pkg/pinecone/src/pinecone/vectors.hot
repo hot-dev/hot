@@ -19,6 +19,16 @@ meta {
     POST {host}/vectors/upsert - Write up to 1000 vectors:
     `[{id, values, metadata?, sparseValues?}]`. The 3-arity form targets
     a namespace. Returns `{upsertedCount}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    out ::pinecone::vectors/upsert(host, [
+      {id: "doc-1", values: [0.1, 0.2, 0.3], metadata: {source: "guide.md"}}
+    ], "guides")
+    out.upsertedCount
+    ```
     """
 }
 fn
@@ -45,6 +55,20 @@ meta {
     `$eq`/`$in`/`$gte`/...), `includeMetadata`, `includeValues`.
     Returns `{matches: [{id, score, metadata?, values?}], namespace,
     usage}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    out ::pinecone::vectors/query(host, {
+      vector: [0.1, 0.2, 0.3],
+      topK: 3,
+      namespace: "guides",
+      includeMetadata: true,
+      filter: {source: {"$eq": "guide.md"}}
+    })
+    map(out.matches, %.id)
+    ```
     """
 }
 fn
@@ -57,7 +81,16 @@ fn
 
 fetch-url
 meta {
-    doc: """The `GET /vectors/fetch` URL: one `ids=` parameter per id (URL-encoded), plus `namespace` when given. Exposed for testing."""
+    doc: """
+    The `GET /vectors/fetch` URL: one `ids=` parameter per id (URL-encoded),
+    plus `namespace` when given. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::vectors/fetch-url("docs-abc.svc.pinecone.io", ["a", "b"], "guides")  // "https://docs-abc.svc.pinecone.io/vectors/fetch?ids=a&ids=b&namespace=guides"
+    ```
+    """
 }
 fn (host: Str, ids: Vec, namespace: Any): Str {
   params map(ids, (id) { `ids=${::hot::uri/encode(id)}` })
@@ -68,7 +101,19 @@ fn (host: Str, ids: Vec, namespace: Any): Str {
 fetch
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """GET {host}/vectors/fetch - Fetch up to 1000 vectors by id, from the default namespace or `namespace`. Returns `{vectors: {id: {id, values, metadata?}}, namespace, usage}`."""
+    doc: """
+    GET {host}/vectors/fetch - Fetch up to 1000 vectors by id, from the
+    default namespace or `namespace`. Returns `{vectors: {id: {id, values,
+    metadata?}}, namespace, usage}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    out ::pinecone::vectors/fetch(host, ["doc-1", "doc-2"], "guides")
+    get(out.vectors, "doc-1")
+    ```
+    """
 }
 fn
 (host: Str, ids: Vec): Map {
@@ -87,7 +132,19 @@ fn
 fetch-by-metadata
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """POST {host}/vectors/fetch_by_metadata - Fetch vectors matching a metadata `filter`. `options`: `namespace`, `limit` (default 100), `paginationToken`. Returns `{vectors, pagination?: {next}}`."""
+    doc: """
+    POST {host}/vectors/fetch_by_metadata - Fetch vectors matching a
+    metadata `filter`. `options`: `namespace`, `limit` (default 100),
+    `paginationToken`. Returns `{vectors, pagination?: {next}}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    out ::pinecone::vectors/fetch-by-metadata(host, {source: {"$eq": "guide.md"}}, {namespace: "guides", limit: 50})
+    keys(out.vectors)
+    ```
+    """
 }
 fn
 (host: Str, filter: Map, options: Map): Map {
@@ -99,7 +156,17 @@ fn
 
 build-update-body
 meta {
-    doc: """The `POST /vectors/update` body for one vector: `id`, the set fields of `changes` (`values`, `sparseValues`, `setMetadata`), and `namespace` when given. Exposed for testing."""
+    doc: """
+    The `POST /vectors/update` body for one vector: `id`, the set fields of
+    `changes` (`values`, `sparseValues`, `setMetadata`), and `namespace`
+    when given. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::vectors/build-update-body("doc-1", {setMetadata: {reviewed: true}}, null)  // {id: "doc-1", setMetadata: {reviewed: true}}
+    ```
+    """
 }
 fn (id: Str, changes: Map, namespace: Any): Map {
   ::api/compact({
@@ -123,6 +190,7 @@ meta {
     **Example**
 
     ```hot
+    host ::pinecone::indexes/describe-index("docs").host
     ::pinecone::vectors/update(host, "doc-1", {setMetadata: {reviewed: true}}, "guides")
     ```
     """
@@ -144,7 +212,20 @@ fn
 update-by-filter
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """POST {host}/vectors/update - Merge `set-metadata` into every vector matching `filter`. `options`: `namespace`, `dryRun` (count matches without writing). Returns `{matchedRecords}`."""
+    doc: """
+    POST {host}/vectors/update - Merge `set-metadata` into every vector
+    matching `filter`. `options`: `namespace`, `dryRun` (count matches
+    without writing). Returns `{matchedRecords}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    // Count the matches first with dryRun
+    out ::pinecone::vectors/update-by-filter(host, {source: {"$eq": "guide.md"}}, {archived: true}, {namespace: "guides", dryRun: true})
+    out.matchedRecords
+    ```
+    """
 }
 fn
 (host: Str, filter: Map, set-metadata: Map, options: Map): Map {
@@ -161,7 +242,16 @@ fn
 
 list-ids-url
 meta {
-    doc: """The `GET /vectors/list` URL from the set options among `prefix`, `limit` (1-100), `paginationToken`, `namespace`. Exposed for testing."""
+    doc: """
+    The `GET /vectors/list` URL from the set options among `prefix`, `limit`
+    (1-100), `paginationToken`, `namespace`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::vectors/list-ids-url("docs-abc.svc.pinecone.io", {limit: 10})  // "https://docs-abc.svc.pinecone.io/vectors/list?limit=10"
+    ```
+    """
 }
 fn (host: Str, options: Map): Str {
   ::api/data-url(host, ["vectors", "list"], {
@@ -182,6 +272,14 @@ meta {
     Returns `{vectors: [{id}], pagination?: {next}}`; pass
     `pagination.next` back as `paginationToken` for the next page, or
     use `list-all-ids`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    page ::pinecone::vectors/list-ids(host, {prefix: "doc-", limit: 50, namespace: "guides"})
+    map(page.vectors, %.id)
+    ```
     """
 }
 fn
@@ -208,6 +306,7 @@ meta {
     **Example**
 
     ```hot
+    host ::pinecone::indexes/describe-index("docs").host
     ids ::pinecone::vectors/list-all-ids(host, {prefix: "doc-1#", namespace: "guides"})
     ::pinecone::vectors/delete-vectors(host, {ids: ids, namespace: "guides"})
     ```
@@ -226,13 +325,26 @@ fn
 
 collect-ids
 meta {
-    doc: """Gather IDs across pages: calls `fetch-page(token)` (token null for the first page) until a page has no `pagination.next`. An Err from `fetch-page` is returned. Exposed for testing."""
+    doc: """
+    Gather IDs across pages: calls `fetch-page(token)` (token null for the
+    first page) until a page has no `pagination.next`. An Err from
+    `fetch-page` is returned. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    fetch-page (token) { if(is-null(token), {vectors: [{id: "a"}], pagination: {next: "p2"}}, {vectors: [{id: "b"}]}) }
+    ::pinecone::vectors/collect-ids(fetch-page, null)  // ["a", "b"]
+    ```
+    """
 }
 fn (fetch-page: Fn, token: Any): Vec {
   collect-loop(fetch-page, token, [], 0)
 }
 
-collect-loop fn (fetch-page: Fn, token: Any, ids: Vec, count: Int): Vec {
+collect-loop
+meta {no-doc: true}
+fn (fetch-page: Fn, token: Any, ids: Vec, count: Int): Vec {
   page fetch-page(token)
   cond {
     is-err(page) => { page }
@@ -252,7 +364,18 @@ collect-loop fn (fetch-page: Fn, token: Any, ids: Vec, count: Int): Vec {
 delete-vectors
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """POST {host}/vectors/delete - Delete by ids (`{ids: [...]}`, up to 1000), by metadata filter (`{filter: {...}}`), or everything in a namespace (`{deleteAll: true}`). Add `namespace` to target one. Returns `{}`."""
+    doc: """
+    POST {host}/vectors/delete - Delete by ids (`{ids: [...]}`, up to 1000),
+    by metadata filter (`{filter: {...}}`), or everything in a namespace
+    (`{deleteAll: true}`). Add `namespace` to target one. Returns `{}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    ::pinecone::vectors/delete-vectors(host, {ids: ["doc-1", "doc-2"], namespace: "guides"})
+    ```
+    """
 }
 fn
 (host: Str, options: Map): Map {
@@ -265,7 +388,20 @@ fn
 describe-stats
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """POST {host}/describe_index_stats - Vector counts per namespace, `dimension`, `metric`, `totalVectorCount`, and fullness. The 2-arity form counts only vectors matching a metadata `filter` (pod-based indexes)."""
+    doc: """
+    POST {host}/describe_index_stats - Vector counts per namespace,
+    `dimension`, `metric`, `totalVectorCount`, and fullness. The 2-arity
+    form counts only vectors matching a metadata `filter` (pod-based
+    indexes).
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    stats ::pinecone::vectors/describe-stats(host)
+    stats.totalVectorCount
+    ```
+    """
 }
 fn
 (host: Str): Map {

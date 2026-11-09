@@ -76,7 +76,17 @@ FREEBUSY_SCOPE "https://www.googleapis.com/auth/calendar.freebusy"
 api-root
 meta {
     ctx: {"google.calendar.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://www.googleapis.com` unless the `google.calendar.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://www.googleapis.com` unless the
+    `google.calendar.api-root` context variable points at a proxy or
+    emulator.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/api-root()  // "https://www.googleapis.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.calendar.api-root")
@@ -85,7 +95,17 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Calendar v3 URL: `/calendar/v3` + `path` with non-null `params` as a query string (Vec values repeat the key)."""
+    doc: """
+    A Calendar v3 URL: `/calendar/v3` + `path` with non-null `params` as a
+    query string (Vec values repeat the key).
+
+    **Example**
+
+    ```hot
+    ::google::calendar/url("/colors")  // "https://www.googleapis.com/calendar/v3/colors"
+    ::google::calendar/url("/users/me/calendarList", {maxResults: 10})  // "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=10"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -97,14 +117,35 @@ fn
 
 encode-id
 meta {
-    doc: """URL-encode an id for a path segment: `"team@group.calendar.google.com"` becomes `team%40group.calendar.google.com`; `#` in holiday calendar ids is encoded too."""
+    doc: """
+    URL-encode an id for a path segment: `"team@group.calendar.google.com"`
+    becomes `team%40group.calendar.google.com`; `#` in holiday calendar ids
+    is encoded too.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/encode-id("team@group.calendar.google.com")  // "team%40group.calendar.google.com"
+    ```
+    """
 }
 fn (id: Str): Str {
   ::uri/encode(id)
 }
 
 calendar-path
-meta {doc: """`/calendars/{calendarId}` plus `suffix`, with the id encoded."""}
+meta {
+    doc: """
+    `/calendars/{calendarId}` plus `suffix`, with the id encoded.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/calendar-path("team@group.calendar.google.com")  // "/calendars/team%40group.calendar.google.com"
+    ::google::calendar/calendar-path("primary", "/events")  // "/calendars/primary/events"
+    ```
+    """
+}
 fn
 (calendar-id: Str): Str {
   `/calendars/${encode-id(calendar-id)}`
@@ -115,7 +156,17 @@ fn
 
 event-path
 meta {
-    doc: """`/calendars/{calendarId}/events/{eventId}` plus `suffix`, both ids encoded."""
+    doc: """
+    `/calendars/{calendarId}/events/{eventId}` plus `suffix`, both ids
+    encoded.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/event-path("primary", "abc123")  // "/calendars/primary/events/abc123"
+    ::google::calendar/event-path("primary", "abc123", "/instances")  // "/calendars/primary/events/abc123/instances"
+    ```
+    """
 }
 fn
 (calendar-id: Str, event-id: Str): Str {
@@ -132,6 +183,14 @@ meta {
     Calendar parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/query-params({maxResults: 250}, {q: "standup", retry: false})  // {maxResults: 250, q: "standup"}
+    ::google::calendar/query-params({maxResults: 250}, {maxResults: null})  // {}
+    ::google::calendar/query-params({}, {q: "standup", resync: true}, ["resync"])  // {q: "standup"}
+    ```
     """
 }
 fn
@@ -145,7 +204,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/creds({scopes: "calendar", maxResults: 10})  // {scopes: "calendar"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -153,7 +221,17 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    colors ::google::calendar/json(::google::calendar/READ_SCOPE, "GET", ::google::calendar/url("/colors"), "", {})
+    colors.event
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -161,7 +239,16 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Calendar bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Calendar bodies never carry JSON
+    null for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::calendar/compact({summary: "Standup", location: null})  // {summary: "Standup"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)
@@ -169,7 +256,16 @@ fn (body: Map): Map {
 
 done
 meta {
-    doc: """`true` for a successful call whose response has no useful body (delete, stop), or the call's Err."""
+    doc: """
+    `true` for a successful call whose response has no useful body (delete,
+    stop), or the call's Err.
+
+    **Example**
+
+    ```hot
+    ::google::calendar/done({})  // true
+    ```
+    """
 }
 fn (result: Result): Bool {
   if(is-err(result), result, true)

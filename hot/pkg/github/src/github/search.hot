@@ -3,13 +3,26 @@
 ::api ::github::api
 query-string ::hot::uri/query-string
 
-search-path fn (resource: Str, query: Str, params: Map): Str {
+search-path
+meta {no-doc: true}
+fn (resource: Str, query: Str, params: Map): Str {
   `/search/${resource}${query-string({q: query, ...params})}`
 }
 
 search-repos
 meta {
-    doc: """GET /search/repositories - Search repositories with GitHub's query syntax, e.g. `"language:rust stars:>1000 topic:runtime"`. `params` supports `sort`, `order`, `per_page`, and `page`."""
+    doc: """
+    GET /search/repositories - Search repositories with GitHub's query
+    syntax, e.g. `"language:rust stars:>1000 topic:runtime"`. `params`
+    supports `sort`, `order`, `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    hits ::github::search/search-repos("language:rust stars:>1000", {sort: "stars", per_page: 10})
+    map(hits.items, %.full_name)
+    ```
+    """
 }
 fn
 (query: Str): Map {
@@ -50,7 +63,18 @@ fn
 
 search-code
 meta {
-    doc: """GET /search/code - Search code, e.g. `"repo:hot-dev/hot ed25519 in:file language:rust"`. `params` supports `sort`, `order`, `per_page`, and `page`."""
+    doc: """
+    GET /search/code - Search code, e.g. `"repo:hot-dev/hot ed25519 in:file
+    language:rust"`. `params` supports `sort`, `order`, `per_page`, and
+    `page`.
+
+    **Example**
+
+    ```hot
+    hits ::github::search/search-code("repo:acme/api TODO in:file")
+    map(hits.items, %.path)
+    ```
+    """
 }
 fn
 (query: Str): Map {

@@ -45,19 +45,42 @@ REPLY_HEADERS ["Subject", "From", "Reply-To", "To", "Cc", "Message-ID", "Referen
 
 send-body
 meta {
-    doc: """The JSON body for `messages.send` / `drafts.create` (pure): `{raw, threadId?}` with `raw` base64url encoded."""
+    doc: """
+    The JSON body for `messages.send` / `drafts.create` (pure): `{raw,
+    threadId?}` with `raw` base64url encoded.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/send-body(Bytes("Hi"), "t1")  // {raw: "SGk", threadId: "t1"}
+    ::google::gmail::messages/send-body(Bytes("Hi"), null)  // {raw: "SGk"}
+    ```
+    """
 }
 fn (raw: Bytes, thread-id: Str?): Map {
   ::gmail/compact({raw: ::mime/to-raw(raw), threadId: thread-id})
 }
 
-thread-id-of fn (opts: Map): Str? {
+thread-id-of
+meta {no-doc: true}
+fn (opts: Map): Str? {
   or(get(opts, "thread-id"), get(opts, "threadId"))
 }
 
 use-upload
 meta {
-    doc: """True when a raw message of `size` bytes should use the media-upload endpoint: over 5 MiB, or `opts.upload` is true."""
+    doc: """
+    True when a raw message of `size` bytes should use the media-upload
+    endpoint: over 5 MiB, or `opts.upload` is true.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/use-upload(1024, {})  // false
+    ::google::gmail::messages/use-upload(1024, {upload: true})  // true
+    ::google::gmail::messages/use-upload(6000000, {})  // true
+    ```
+    """
 }
 fn (size: Int, opts: Map): Bool {
   or(eq(get(opts, "upload"), true), gt(size, UPLOAD_THRESHOLD))
@@ -71,6 +94,17 @@ meta {
     Options: `thread-id` (add it to a thread), `upload: true` (force the
     upload endpoint). Returns the sent message `{id, threadId,
     labelIds}`. Scope: `gmail.send`.
+
+    **Example**
+
+    ```hot
+    raw ::google::gmail::mime/build-message({to: "ada@example.com", subject: "Hi", text: "Hello!"})
+    sent ::google::gmail::messages/send-raw(raw)
+    sent.id
+
+    // Into an existing thread, through the upload endpoint
+    ::google::gmail::messages/send-raw(raw, {thread-id: "18f2a", upload: true})
+    ```
     """
 }
 fn
@@ -127,7 +161,21 @@ fn
 
 send-message
 meta {
-    doc: """Send a plain-text email: `send-message("ada@example.com", "Hi", "Hello from Hot!")`. `to` may be a list (`"a@x.io, b@x.io"` or a Vec). Scope: `gmail.send`."""
+    doc: """
+    Send a plain-text email: `send-message("ada@example.com", "Hi", "Hello
+    from Hot!")`. `to` may be a list (`"a@x.io, b@x.io"` or a Vec). Scope:
+    `gmail.send`.
+
+    **Example**
+
+    ```hot
+    sent ::google::gmail::messages/send-message("ada@example.com", "Hi", "Hello from Hot!")
+    sent.id
+
+    // Two recipients, sending as a delegated Workspace user
+    ::google::gmail::messages/send-message(["ada@example.com", "bob@example.com"], "Hi", "Hello!", {subject: "ops@example.com"})
+    ```
+    """
 }
 fn
 (to: Any, subject: Str, text: Str): Map {
@@ -143,7 +191,17 @@ fn
 
 reply-subject
 meta {
-    doc: """`"Re: <subject>"`, unless the subject already starts with `Re:` (any case)."""
+    doc: """
+    `"Re: <subject>"`, unless the subject already starts with `Re:` (any
+    case).
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/reply-subject("Q3 plan")  // "Re: Q3 plan"
+    ::google::gmail::messages/reply-subject("RE: Q3 plan")  // "RE: Q3 plan"
+    ```
+    """
 }
 fn (subject: Str?): Str {
   s trim(or(subject, ""))
@@ -151,7 +209,18 @@ fn (subject: Str?): Str {
 }
 
 forward-subject
-meta {doc: """`"Fwd: <subject>"`, unless it already starts with `Fwd:` or `Fw:`."""}
+meta {
+    doc: """
+    `"Fwd: <subject>"`, unless it already starts with `Fwd:` or `Fw:`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/forward-subject("Q3 plan")  // "Fwd: Q3 plan"
+    ::google::gmail::messages/forward-subject("FW: Q3 plan")  // "FW: Q3 plan"
+    ```
+    """
+}
 fn (subject: Str?): Str {
   s trim(or(subject, ""))
   if(::hot::regex/is-match(s, "(?i)^fwd?:"), s, trim(`Fwd: ${s}`))
@@ -171,6 +240,22 @@ meta {
     - `In-Reply-To` is the original `Message-ID`; `References` is the
       original `References` plus its `Message-ID`, so Gmail and other
       clients thread the reply.
+
+    **Example**
+
+    ```hot
+    original {threadId: "t1", payload: {headers: [
+      {name: "From", value: "Ada <ada@example.com>"},
+      {name: "To", value: "me@example.com, bob@example.com"},
+      {name: "Subject", value: "Q3 plan"},
+      {name: "Message-ID", value: "<m1@mail.example>"}
+    ]}}
+    fields ::google::gmail::messages/reply-fields(original, "me@example.com", true)
+    fields.to  // ["ada@example.com"]
+    fields.cc  // ["bob@example.com"]
+    fields.subject  // "Re: Q3 plan"
+    fields.in-reply-to  // "<m1@mail.example>"
+    ```
     """
 }
 fn (original: Map, self-email: Str?, all: Bool): Map {
@@ -200,7 +285,9 @@ fn (original: Map, self-email: Str?, all: Bool): Map {
   })
 }
 
-self-email fn (opts: Map): Str? {
+self-email
+meta {no-doc: true}
+fn (opts: Map): Str? {
   given get(opts, "self-email")
   cond {
     is-some(given) => { given }
@@ -213,7 +300,20 @@ self-email fn (opts: Map): Str? {
 
 prepare-reply
 meta {
-    doc: """Fetch `message-id`'s headers and return the reply message Map (`reply-fields` merged under your `reply` fields) with its `thread-id`. Used by `reply`, `reply-all` and `::google::gmail::drafts/create-reply-draft`. Scope: `gmail.readonly`."""
+    doc: """
+    Fetch `message-id`'s headers and return the reply message Map
+    (`reply-fields` merged under your `reply` fields) with its `thread-id`.
+    Used by `reply`, `reply-all` and
+    `::google::gmail::drafts/create-reply-draft`. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    message ::google::gmail::messages/prepare-reply("18f2a", {text: "Thanks."}, false, {})
+    message.to
+    message.thread-id
+    ```
+    """
 }
 fn (message-id: Str, reply: Map, all: Bool, opts: Map): Map {
   original get-message(message-id, {...::gmail/creds(opts), format: "metadata", metadataHeaders: REPLY_HEADERS})
@@ -234,7 +334,7 @@ meta {
     `gmail.readonly` and `gmail.send`.
 
     ```hot
-    ::google::gmail::messages/reply(email.id, {text: "Thanks, merged."})
+    ::google::gmail::messages/reply("18f2a", {text: "Thanks, merged."})
     ```
     """
 }
@@ -249,7 +349,19 @@ fn
 
 reply-all
 meta {
-    doc: """Like `reply`, but also copies the original `To` and `Cc` (minus you) onto `cc`. Scopes: `gmail.readonly` and `gmail.send`."""
+    doc: """
+    Like `reply`, but also copies the original `To` and `Cc` (minus you)
+    onto `cc`. Scopes: `gmail.readonly` and `gmail.send`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/reply-all("18f2a", {text: "Thanks, everyone."})
+
+    // Skip the profile lookup when you know your own address
+    ::google::gmail::messages/reply-all("18f2a", {text: "Thanks, everyone."}, {self-email: "me@example.com"})
+    ```
+    """
 }
 fn
 (message-id: Str, reply: Map): Map {
@@ -270,7 +382,7 @@ meta {
     `gmail.send`.
 
     ```hot
-    ::google::gmail::messages/forward(email.id, {to: "legal@example.com", text: "FYI, see below."})
+    ::google::gmail::messages/forward("18f2a", {to: "legal@example.com", text: "FYI, see below."})
     ```
     """
 }
@@ -308,6 +420,12 @@ meta {
     parameters (`q`, `maxResults` up to 500, `pageToken`, `labelIds` -
     a Vec, sent repeated - and `includeSpamTrash`) with nulls and
     credential keys dropped.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/list-params({q: "is:unread", maxResults: 10, pageToken: null, retry: 3})  // {q: "is:unread", maxResults: 10}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -322,6 +440,16 @@ meta {
     a Gmail search (`"from:boss is:unread newer_than:2d"`). Follow
     `nextPageToken` with `{pageToken}` or use `list-all-messages`. Scope:
     `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::gmail::messages/list-messages("from:boss is:unread newer_than:2d")
+    map(or(page.messages, []), %.id)
+
+    // The next page of one label
+    ::google::gmail::messages/list-messages({labelIds: ["INBOX"], maxResults: 50, pageToken: page.nextPageToken})
+    ```
     """
 }
 fn
@@ -335,7 +463,9 @@ fn
   ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/messages", list-params(opts)), "", opts)
 }
 
-page-size fn (limit: Int?): Int {
+page-size
+meta {no-doc: true}
+fn (limit: Int?): Int {
   if(is-some(limit), min(MAX_PAGE_SIZE, max(or(limit, 1), 1)), MAX_PAGE_SIZE)
 }
 
@@ -346,6 +476,16 @@ meta {
     or at most `limit`. Takes the same `opts` as `list-messages` (a Str
     is a search). Uses `maxResults: 500` (or `limit` when smaller).
     Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    ids ::google::gmail::messages/list-all-messages("has:attachment newer_than:30d", 200)
+    length(ids)
+
+    // No cap, with Gmail's own parameters
+    ::google::gmail::messages/list-all-messages({labelIds: ["INBOX", "UNREAD"]})
+    ```
     """
 }
 fn
@@ -367,6 +507,16 @@ meta {
     message base64url encoded). Read it with `::google::gmail::parse`.
     Scope: `gmail.readonly` (`gmail.metadata` allows `metadata` and
     `minimal` only).
+
+    **Example**
+
+    ```hot
+    message ::google::gmail::messages/get-message("18f2a")
+    ::google::gmail::parse/header(message, "Subject")
+
+    // Only the headers you need
+    ::google::gmail::messages/get-message("18f2a", {format: "metadata", metadataHeaders: ["From", "Subject"]})
+    ```
     """
 }
 fn
@@ -380,7 +530,17 @@ fn
 
 get-email
 meta {
-    doc: """`get-message` (full format) flattened with `::google::gmail::parse/to-email`. Scope: `gmail.readonly`."""
+    doc: """
+    `get-message` (full format) flattened with
+    `::google::gmail::parse/to-email`. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    email ::google::gmail::messages/get-email("18f2a")
+    `${email.from-email}: ${email.subject}`
+    ```
+    """
 }
 fn
 (id: Str): Email {
@@ -422,7 +582,17 @@ fn
 
 label-changes
 meta {
-    doc: """The `{addLabelIds, removeLabelIds}` body (pure), omitting an empty or null side."""
+    doc: """
+    The `{addLabelIds, removeLabelIds}` body (pure), omitting an empty or
+    null side.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/label-changes(["STARRED"], ["UNREAD"])  // {addLabelIds: ["STARRED"], removeLabelIds: ["UNREAD"]}
+    ::google::gmail::messages/label-changes([], ["INBOX"])  // {removeLabelIds: ["INBOX"]}
+    ```
+    """
 }
 fn (add-label-ids: Vec?, remove-label-ids: Vec?): Map {
   add or(add-label-ids, [])
@@ -435,7 +605,18 @@ fn (add-label-ids: Vec?, remove-label-ids: Vec?): Map {
 
 modify-message
 meta {
-    doc: """POST /users/me/messages/{id}/modify - add and remove label ids: `modify-message(id, ["STARRED"], ["UNREAD"])` stars and marks read. Returns the message. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/messages/{id}/modify - add and remove label ids:
+    `modify-message(id, ["STARRED"], ["UNREAD"])` stars and marks read.
+    Returns the message. Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    message ::google::gmail::messages/modify-message("18f2a", ["STARRED"], ["UNREAD"])
+    message.labelIds
+    ```
+    """
 }
 fn
 (id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
@@ -447,7 +628,18 @@ fn
 
 batch-modify
 meta {
-    doc: """POST /users/me/messages/batchModify - change labels on many messages, 1000 ids per call (larger Vecs are split). Returns true. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/messages/batchModify - change labels on many messages,
+    1000 ids per call (larger Vecs are split). Returns true. Scope:
+    `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    found ::google::gmail::messages/list-all-messages("from:newsletter@example.com", 1000)
+    ::google::gmail::messages/batch-modify(map(found, %.id), [], ["INBOX", "UNREAD"])
+    ```
+    """
 }
 fn
 (ids: Vec, add-label-ids: Vec, remove-label-ids: Vec): Bool {
@@ -463,7 +655,17 @@ fn
 }
 
 mark-read
-meta {doc: """Remove the `UNREAD` label. Scope: `gmail.modify`."""}
+meta {
+    doc: """
+    Remove the `UNREAD` label. Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/mark-read("18f2a")
+    ```
+    """
+}
 fn
 (id: Str): Map {
   mark-read(id, {})
@@ -473,7 +675,17 @@ fn
 }
 
 mark-unread
-meta {doc: """Add the `UNREAD` label. Scope: `gmail.modify`."""}
+meta {
+    doc: """
+    Add the `UNREAD` label. Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/mark-unread("18f2a")
+    ```
+    """
+}
 fn
 (id: Str): Map {
   mark-unread(id, {})
@@ -483,7 +695,17 @@ fn
 }
 
 archive-message
-meta {doc: """Remove the `INBOX` label (Gmail's Archive). Scope: `gmail.modify`."""}
+meta {
+    doc: """
+    Remove the `INBOX` label (Gmail's Archive). Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/archive-message("18f2a")
+    ```
+    """
+}
 fn
 (id: Str): Map {
   archive-message(id, {})
@@ -494,7 +716,18 @@ fn
 
 trash-message
 meta {
-    doc: """POST /users/me/messages/{id}/trash - move a message to the trash (Gmail deletes it after 30 days; `untrash-message` restores it). Permanent deletion needs the full `https://mail.google.com/` scope and is not wrapped. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/messages/{id}/trash - move a message to the trash (Gmail
+    deletes it after 30 days; `untrash-message` restores it). Permanent
+    deletion needs the full `https://mail.google.com/` scope and is not
+    wrapped. Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/trash-message("18f2a")
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -506,7 +739,16 @@ fn
 
 untrash-message
 meta {
-    doc: """POST /users/me/messages/{id}/untrash - restore a message from the trash. Scope: `gmail.modify`."""
+    doc: """
+    POST /users/me/messages/{id}/untrash - restore a message from the trash.
+    Scope: `gmail.modify`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::messages/untrash-message("18f2a")
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -522,7 +764,20 @@ fn
 
 get-attachment
 meta {
-    doc: """GET /users/me/messages/{messageId}/attachments/{id} - an attachment's bytes (decoded from Gmail's base64url). Get ids from `::google::gmail::parse/attachments`. Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/messages/{messageId}/attachments/{id} - an attachment's
+    bytes (decoded from Gmail's base64url). Get ids from
+    `::google::gmail::parse/attachments`. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    email ::google::gmail::messages/get-email("18f2a")
+    file first(email.attachments)
+    bytes ::google::gmail::messages/get-attachment(email.id, file.attachment-id)
+    length(bytes)
+    ```
+    """
 }
 fn
 (message-id: Str, attachment-id: Str): Bytes {
@@ -542,7 +797,7 @@ meta {
     call. Scope: `gmail.readonly`.
 
     ```hot
-    email ::google::gmail::messages/get-email(id)
+    email ::google::gmail::messages/get-email("18f2a")
     pdf first(filter(email.attachments, (a) { eq(a.mime-type, "application/pdf") }))
     bytes ::google::gmail::messages/attachment-bytes(pdf)
     ```

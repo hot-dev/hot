@@ -96,7 +96,21 @@ GetMessageRequest type {
 
 get-message
 meta {
-    doc: """GET /channels/{channel_id}/messages/{message_id} - One message by id."""
+    doc: """
+    GET /channels/{channel_id}/messages/{message_id} - One message by id.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    message ::messages/get-message(::messages/GetMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000"
+    }))
+    message.content
+    ```
+    """
 }
 fn
 (request: GetMessageRequest): Map {
@@ -229,7 +243,21 @@ DeleteMessageRequest type {
 
 delete-message
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id} - Delete a message. Deleting another user's message needs MANAGE_MESSAGES."""
+    doc: """
+    DELETE /channels/{channel_id}/messages/{message_id} - Delete a message.
+    Deleting another user's message needs MANAGE_MESSAGES.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/delete-message(::messages/DeleteMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteMessageRequest): Bool {
@@ -247,7 +275,23 @@ BulkDeleteMessagesRequest type {
 
 bulk-delete-messages
 meta {
-    doc: """POST /channels/{channel_id}/messages/bulk-delete - Delete 2-100 messages at once. Messages older than 14 days are rejected. Needs MANAGE_MESSAGES. `reason` goes to the audit log."""
+    doc: """
+    POST /channels/{channel_id}/messages/bulk-delete - Delete 2-100 messages
+    at once. Messages older than 14 days are rejected. Needs
+    MANAGE_MESSAGES. `reason` goes to the audit log.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/bulk-delete-messages(::messages/BulkDeleteMessagesRequest({
+      channel_id: "1100000000000000000",
+      messages: ["1200000000000000000", "1200000000000000001"],
+      reason: "Spam cleanup"
+    }))
+    ```
+    """
 }
 fn
 (request: BulkDeleteMessagesRequest): Bool {
@@ -267,7 +311,22 @@ CrosspostMessageRequest type {
 
 crosspost-message
 meta {
-    doc: """POST /channels/{channel_id}/messages/{message_id}/crosspost - Publish a message in an Announcement channel to every following channel."""
+    doc: """
+    POST /channels/{channel_id}/messages/{message_id}/crosspost - Publish a
+    message in an Announcement channel to every following channel.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    published ::messages/crosspost-message(::messages/CrosspostMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000"
+    }))
+    published.id
+    ```
+    """
 }
 fn
 (request: CrosspostMessageRequest): Map {
@@ -283,7 +342,9 @@ fn
 // `emoji` is a Unicode emoji ("👍") or a custom emoji as `name:id`. It is
 // URL-encoded for you; already-encoded input is passed through.
 
-reaction-path fn (channel-id: Str, message-id: Str, emoji: Str): Str {
+reaction-path
+meta {no-doc: true}
+fn (channel-id: Str, message-id: Str, emoji: Str): Str {
   `/channels/${seg(channel-id)}/messages/${seg(message-id)}/reactions/${::api/emoji-segment(emoji)}`
 }
 
@@ -327,7 +388,23 @@ DeleteOwnReactionRequest type {
 
 delete-own-reaction
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me - Remove the bot's own reaction."""
+    doc: """
+    DELETE
+    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me -
+    Remove the bot's own reaction.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/delete-own-reaction(::messages/DeleteOwnReactionRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      emoji: "👍"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteOwnReactionRequest): Bool {
@@ -346,7 +423,24 @@ DeleteUserReactionRequest type {
 
 delete-user-reaction
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/{user_id} - Remove another user's reaction. Needs MANAGE_MESSAGES."""
+    doc: """
+    DELETE
+    /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/{user_id}
+    - Remove another user's reaction. Needs MANAGE_MESSAGES.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/delete-user-reaction(::messages/DeleteUserReactionRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      emoji: "👍",
+      user_id: "1300000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteUserReactionRequest): Bool {
@@ -367,7 +461,25 @@ GetReactionsRequest type {
 
 get-reactions
 meta {
-    doc: """GET /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Users who reacted with `emoji` (up to `limit`, 1-100). `type` 0 = normal, 1 = super reactions. Page with `after` (a user id)."""
+    doc: """
+    GET /channels/{channel_id}/messages/{message_id}/reactions/{emoji} -
+    Users who reacted with `emoji` (up to `limit`, 1-100). `type` 0 =
+    normal, 1 = super reactions. Page with `after` (a user id).
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    users ::messages/get-reactions(::messages/GetReactionsRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      emoji: "👍",
+      limit: 100
+    }))
+    map(users, %.username)
+    ```
+    """
 }
 fn
 (request: GetReactionsRequest): Vec<Map> {
@@ -386,7 +498,21 @@ DeleteAllReactionsRequest type {
 
 delete-all-reactions
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions - Remove every reaction from a message. Needs MANAGE_MESSAGES."""
+    doc: """
+    DELETE /channels/{channel_id}/messages/{message_id}/reactions - Remove
+    every reaction from a message. Needs MANAGE_MESSAGES.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/delete-all-reactions(::messages/DeleteAllReactionsRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteAllReactionsRequest): Bool {
@@ -404,7 +530,22 @@ DeleteAllReactionsForEmojiRequest type {
 
 delete-all-reactions-for-emoji
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji} - Remove every reaction of one emoji. Needs MANAGE_MESSAGES."""
+    doc: """
+    DELETE /channels/{channel_id}/messages/{message_id}/reactions/{emoji} -
+    Remove every reaction of one emoji. Needs MANAGE_MESSAGES.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/delete-all-reactions-for-emoji(::messages/DeleteAllReactionsForEmojiRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      emoji: "party:2300000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteAllReactionsForEmojiRequest): Bool {
@@ -455,7 +596,9 @@ fn
   }, opts)
 }
 
-get-all-pins-loop fn
+get-all-pins-loop
+meta {no-doc: true}
+fn
 (channel-id: Str, max-items: Int, before: Str?, acc: Vec): Vec<Map> {
   get-all-pins-loop(channel-id, max-items, before, acc, {})
 },
@@ -471,7 +614,17 @@ get-all-pins-loop fn
 
 get-all-pins
 meta {
-    doc: """Every pin in a channel (up to `max-items`, default 1000) as `[{pinned_at, message}]`, following `has_more`."""
+    doc: """
+    Every pin in a channel (up to `max-items`, default 1000) as
+    `[{pinned_at, message}]`, following `has_more`.
+
+    **Example**
+
+    ```hot
+    pins ::discord::messages/get-all-pins("1100000000000000000", 200)
+    map(pins, %.message.content)
+    ```
+    """
 }
 fn
 (channel-id: Str): Vec<Map> {
@@ -495,7 +648,22 @@ PinMessageRequest type {
 
 pin-message
 meta {
-    doc: """PUT /channels/{channel_id}/messages/pins/{message_id} - Pin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
+    doc: """
+    PUT /channels/{channel_id}/messages/pins/{message_id} - Pin a message.
+    Needs PIN_MESSAGES. `reason` goes to the audit log.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/pin-message(::messages/PinMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      reason: "Release notes"
+    }))
+    ```
+    """
 }
 fn
 (request: PinMessageRequest): Bool {
@@ -513,7 +681,22 @@ UnpinMessageRequest type {
 
 unpin-message
 meta {
-    doc: """DELETE /channels/{channel_id}/messages/pins/{message_id} - Unpin a message. Needs PIN_MESSAGES. `reason` goes to the audit log."""
+    doc: """
+    DELETE /channels/{channel_id}/messages/pins/{message_id} - Unpin a
+    message. Needs PIN_MESSAGES. `reason` goes to the audit log.
+
+    **Example**
+
+    ```hot
+    ::messages ::discord::messages
+
+    ::messages/unpin-message(::messages/UnpinMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      reason: "Outdated"
+    }))
+    ```
+    """
 }
 fn
 (request: UnpinMessageRequest): Bool {

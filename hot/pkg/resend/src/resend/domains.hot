@@ -123,7 +123,22 @@ POSTDomainsResponse type {
 
 create-new-domain
 meta {
-    doc: """Register a new sending domain. Returns the domain with DNS records that must be configured for verification."""
+    doc: """
+    Register a new sending domain. Returns the domain with DNS records that
+    must be configured for verification.
+
+    **Example**
+
+    ```hot
+    domain ::resend::domains/create-new-domain(::resend::domains/POSTDomainsRequest({
+        name: "mail.example.com",
+        region: "us-east-1"
+    }))
+
+    // DNS records to add before calling verify-existing-domain
+    domain.records
+    ```
+    """
 }
 fn
 (request: POSTDomainsRequest): POSTDomainsResponse {
@@ -197,7 +212,21 @@ PATCHDomainsDomainIdResponse type {
 
 update-existing-domain
 meta {
-    doc: """Update tracking settings (open tracking, click tracking, TLS) for an existing domain."""
+    doc: """
+    Update tracking settings (open tracking, click tracking, TLS) for an
+    existing domain.
+
+    **Example**
+
+    ```hot
+    updated ::resend::domains/update-existing-domain("d91cd9bd-1176-453e-8fc1-35364d380206", ::resend::domains/PATCHDomainsDomainIdRequest({
+        open_tracking: true,
+        click_tracking: false,
+        tls: "enforced"
+    }))
+    updated.id
+    ```
+    """
 }
 fn
 (domain-id: Str, request: PATCHDomainsDomainIdRequest): PATCHDomainsDomainIdResponse {
@@ -224,7 +253,18 @@ DELETEDomainsDomainIdResponse type {
 
 
 remove-existing-domain
-meta {doc: """Remove a domain from your Resend account. This cannot be undone."""}
+meta {
+    doc: """
+    Remove a domain from your Resend account. This cannot be undone.
+
+    **Example**
+
+    ```hot
+    result ::resend::domains/remove-existing-domain(::resend::domains/DELETEDomainsDomainIdRequest({domain-id: "d91cd9bd-1176-453e-8fc1-35364d380206"}))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DELETEDomainsDomainIdRequest): DELETEDomainsDomainIdResponse {
   remove-existing-domain(request, {})
@@ -250,7 +290,17 @@ POSTDomainsDomainIdVerifyResponse type {
 
 verify-existing-domain
 meta {
-    doc: """Trigger DNS verification for a domain. DNS records must be configured before calling this."""
+    doc: """
+    Trigger DNS verification for a domain. DNS records must be configured
+    before calling this.
+
+    **Example**
+
+    ```hot
+    result ::resend::domains/verify-existing-domain(::resend::domains/POSTDomainsDomainIdVerifyRequest({domain-id: "d91cd9bd-1176-453e-8fc1-35364d380206"}))
+    result.id
+    ```
+    """
 }
 fn
 (request: POSTDomainsDomainIdVerifyRequest): POSTDomainsDomainIdVerifyResponse {

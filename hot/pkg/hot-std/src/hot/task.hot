@@ -225,7 +225,7 @@ meta {
 
         cond {
             eq(msg, "shutdown") => { "done" }
-            => { process(msg) }
+            => { {received: msg} }
         }
     }
     ```
@@ -295,6 +295,7 @@ meta {
     ::task ::hot::task
 
     my-etl fn (config: Map): Any {
+        batch-size 100
         state or(::task/restore(), {offset: 0, processed: 0})
 
         // ... process batch starting from state.offset ...
@@ -354,7 +355,8 @@ meta {
     **Examples**
 
     ```hot
-    task ::box/start(BoxConf({"image": "alpine:3.21", "cmd": ["echo", "hello"], "size": "nano"}))
+    ::box ::hot::box
+    task ::box/start(::hot::box/BoxConf({"image": "alpine:3.21", "cmd": ["echo", "hello"], "size": "nano"}))
     result ::hot::task/await(task.id)
     result.status         // "completed"
     result.stdout         // "hello\n"

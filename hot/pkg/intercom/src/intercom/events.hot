@@ -14,6 +14,13 @@ meta {
     `created_at` (Unix seconds; defaults to now), `metadata` (a flat Map
     of Str/number/Bool values, or rich `{url, value}` / `{amount,
     currency}` objects). Unset fields are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::events/build-event-body("upgraded-plan", {email: "ada@example.com"}, {created_at: 1767225600})
+    // {event_name: "upgraded-plan", created_at: 1767225600, email: "ada@example.com"}
+    ```
     """
 }
 fn (event-name: Str, contact: Map, options: Map): Map {
@@ -53,7 +60,22 @@ fn
 
 list-events
 meta {
-    doc: """GET /events - A contact's events from the last 90 days. `contact`: `{intercom_user_id}`, `{user_id}` or `{email}`; `options`: `type` ("user" by default, or "lead"), `per_page`, `since`/`before` (Unix seconds), `summary` (Bool: counts per event name instead of the events)."""
+    doc: """
+    GET /events - A contact's events from the last 90 days. `contact`:
+    `{intercom_user_id}`, `{user_id}` or `{email}`; `options`: `type`
+    ("user" by default, or "lead"), `per_page`, `since`/`before` (Unix
+    seconds), `summary` (Bool: counts per event name instead of the events).
+
+    **Example**
+
+    ```hot
+    out ::intercom::events/list-events({email: "ada@example.com"}, {per_page: 50})
+    map(out.events, %.event_name)
+
+    // Counts per event name
+    ::intercom::events/list-events({user_id: "user-42"}, {summary: true})
+    ```
+    """
 }
 fn
 (contact: Map): Any {

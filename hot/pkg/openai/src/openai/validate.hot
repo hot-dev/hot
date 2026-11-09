@@ -23,7 +23,19 @@ ValidateGraderResponse type {
 
 validate-grader
 meta {
-    doc: """POST /fine_tuning/alpha/graders/validate - Validate a grader configuration before using it in fine-tuning."""
+    doc: """
+    POST /fine_tuning/alpha/graders/validate - Validate a grader
+    configuration before using it in fine-tuning.
+
+    **Example**
+
+    ```hot
+    result ::openai::validate/validate-grader(::openai::validate/ValidateGraderRequest({
+      grader: {type: "string_check", name: "Exact", input: "{{sample.output_text}}", operation: "eq", reference: "yes"}
+    }))
+    result.grader
+    ```
+    """
 }
 fn
 (request: ValidateGraderRequest): ValidateGraderResponse {

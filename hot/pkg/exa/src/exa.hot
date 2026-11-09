@@ -36,7 +36,17 @@ BASE_URL "https://api.exa.ai"
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` for a key. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    r ::exa/build-request("/search", {query: "hot language", category: null}, "test-key")
+    r.url  // "https://api.exa.ai/search"
+    r.body  // "{\"query\":\"hot language\"}"
+    ```
+    """
 }
 fn (path: Str, body: Map, api-key: Str): HttpRequest {
   HttpRequest({
@@ -50,7 +60,23 @@ fn (path: Str, body: Map, api-key: Str): HttpRequest {
   })
 }
 
-post fn
+post
+meta {
+    doc: """
+    POST a JSON body to an Exa path and return the decoded response. Use it
+    for endpoints this package does not wrap. Null body values are dropped.
+    The optional third argument is an `opts` Map or an API key. A failed
+    call is an Err carrying `::exa::http/HttpError`.
+
+    **Example**
+
+    ```hot
+    out ::exa/post("/answer", {query: "What is the Hot language?", text: true})
+    out.answer
+    ```
+    """
+}
+fn
 (path: Str, body: Map): Any {
   post(path, body, {})
 },
@@ -105,7 +131,27 @@ fn
 get-contents
 meta {
     ctx: {"exa.api.key": {required: false}},
-    doc: """POST /contents - Clean page text for URLs (or Exa result ids). The 2-arity form takes contents options such as `{text: {maxCharacters: 5000}, highlights: true, maxAgeHours: 0}`. Returns `{results: [{url, title, text}], statuses}`."""
+    doc: """
+    POST /contents - Clean page text for URLs (or Exa result ids). The
+    2-arity form takes contents options such as `{text: {maxCharacters:
+    5000}, highlights: true, maxAgeHours: 0}`. Returns `{results: [{url,
+    title, text}], statuses}`.
+
+    **Example**
+
+    ```hot
+    out ::exa/get-contents(["https://hot.dev"])
+    first(out.results).text
+
+    // Capped text with highlights, freshly crawled
+    fresh ::exa/get-contents(["https://hot.dev"], {
+      text: {maxCharacters: 5000},
+      highlights: true,
+      maxAgeHours: 0
+    })
+    fresh.statuses
+    ```
+    """
 }
 fn
 (urls: Vec): Map {
@@ -121,7 +167,22 @@ fn
 find-similar
 meta {
     ctx: {"exa.api.key": {required: false}},
-    doc: """POST /findSimilar - Pages similar to a URL. `options`: `numResults`, `includeDomains`/`excludeDomains`, `excludeSourceDomain`, `startPublishedDate`, `contents`."""
+    doc: """
+    POST /findSimilar - Pages similar to a URL. `options`: `numResults`,
+    `includeDomains`/`excludeDomains`, `excludeSourceDomain`,
+    `startPublishedDate`, `contents`.
+
+    **Example**
+
+    ```hot
+    out ::exa/find-similar("https://hot.dev", {numResults: 5, excludeSourceDomain: true})
+    map(out.results, (r) { r.url })
+
+    // With another tenant's key
+    key ::hot::ctx/get("tenant-b.exa.api.key")
+    ::exa/find-similar("https://hot.dev", {numResults: 5}, {api-key: key})
+    ```
+    """
 }
 fn
 (url: Str): Map {

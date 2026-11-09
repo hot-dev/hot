@@ -116,7 +116,17 @@ fn
 
 is-input-file
 meta {
-    doc: """True for an `InputFile` (or its untyped Map form: a Map whose `content` is Bytes). Exposed for testing."""
+    doc: """
+    True for an `InputFile` (or its untyped Map form: a Map whose `content`
+    is Bytes). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/is-input-file(::telegram::api/input-file(Bytes("hi"), "hi.txt"))  // true
+    ::telegram::api/is-input-file("AgACAgIAAxkBAAIB")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   plain untype(value)
@@ -129,7 +139,9 @@ fn (value: Any): Bool {
 // Fields of an InputMedia object that may carry a file.
 MEDIA_FILE_KEYS ["media", "thumbnail", "cover"]
 
-attach-media fn (item: Any, prefix: Str): Map {
+attach-media
+meta {no-doc: true}
+fn (item: Any, prefix: Str): Map {
   cond {
     not(is-map(item)) => { {item: item, files: []} }
     => {
@@ -156,6 +168,16 @@ meta {
     sendMediaGroup, `media: {...}` in editMessageMedia) become parts named
     `<field><index>_<key>` and are referenced as `attach://<name>`, per the
     Bot API. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    upload ::api/prepare-upload({chat_id: 123, document: ::api/input-file(Bytes("hi"), "hi.txt")})
+    upload.fields  // {chat_id: 123}
+    first(upload.files).name  // "document"
+    ```
     """
 }
 fn (body: Map): Map {
@@ -185,7 +207,19 @@ fn (body: Map): Map {
 
 field-text
 meta {
-    doc: """A multipart field's text: Str as-is, Map/Vec as JSON (the Bot API's "JSON-serialized" parameters), anything else interpolated. Exposed for testing."""
+    doc: """
+    A multipart field's text: Str as-is, Map/Vec as JSON (the Bot API's
+    "JSON-serialized" parameters), anything else interpolated. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/field-text("hello")  // "hello"
+    ::telegram::api/field-text([1, 2])  // "[1,2]"
+    ::telegram::api/field-text(true)  // "true"
+    ```
+    """
 }
 fn (value: Any): Str {
   cond {
@@ -195,7 +229,9 @@ fn (value: Any): Str {
   }
 }
 
-header-safe fn (value: Str): Str {
+header-safe
+meta {no-doc: true}
+fn (value: Str): Str {
   value
     |> ::hot::str/replace("\"", "%22")
     |> ::hot::str/replace("\r", "")
@@ -208,6 +244,16 @@ meta {
     Encode a prepared upload (`prepare-upload`) as a multipart/form-data
     body. Built as Bytes with `concat`, so binary file content is never
     passed through a string. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    upload ::api/prepare-upload({chat_id: 123})
+    body ::api/multipart-body(upload, "BOUNDARY")
+    starts-with(::hot::bytes/to-str(body), "--BOUNDARY")  // true
+    ```
     """
 }
 fn (upload: Map, boundary: Str): Bytes {
@@ -228,7 +274,16 @@ fn (upload: Map, boundary: Str): Bytes {
 
 method-url
 meta {
-    doc: """`https://api.telegram.org/bot<token>/<method>`. The token is a secret: never log this URL. Exposed for testing."""
+    doc: """
+    `https://api.telegram.org/bot<token>/<method>`. The token is a secret:
+    never log this URL. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/method-url("getMe", "test-token")  // "https://api.telegram.org/bottest-token/getMe"
+    ```
+    """
 }
 fn (method: Str, bot-token: Str): Str {
   `${::telegram::core/BASE_URL}/bot${bot-token}/${method}`
@@ -236,7 +291,16 @@ fn (method: Str, bot-token: Str): Str {
 
 clean-body
 meta {
-    doc: """`untype` a request body and drop its top-level nulls, so unset or explicitly-null optional parameters are never sent. Exposed for testing."""
+    doc: """
+    `untype` a request body and drop its top-level nulls, so unset or
+    explicitly-null optional parameters are never sent. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/clean-body({chat_id: 123, text: null})  // {chat_id: 123}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)
@@ -250,6 +314,22 @@ meta {
     HTTP status, typically 400/403/429); `err(HttpError)` for anything
     else (a non-JSON proxy error, a 5xx without an envelope). Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    ::api/parse-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {ok: true, result: {id: 1}}}))  // {id: 1}
+
+    limited ::api/parse-response(::hot::http/HttpResponse({status: 429, headers: {}, body: {
+      ok: false,
+      error_code: 429,
+      description: "Too Many Requests",
+      parameters: {retry_after: 5}
+    }}))
+    if-err(limited, (e) { e.retry_after })  // 5
+    ```
     """
 }
 fn (response: Result): Any {
@@ -282,13 +362,27 @@ fn (response: Result): Any {
   }
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{bot-token}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no token is set, or when `bot-token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{bot-token}` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables). An Err when no token is set,
+    or when `bot-token` is in `opts` but blank or null (that never falls
+    back to context). Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/resolve-from({}, {"telegram.bot.token": "test-token"})  // {bot-token: "test-token"}
+    is-err(::telegram::api/resolve-from({bot-token: ""}, {"telegram.bot.token": "test-token"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opts-token non-blank(get(opts, "bot-token"))
@@ -327,7 +421,9 @@ fn (opts: Map): Map {
   }
 }
 
-send fn (method: Str, body: Map, bot-token: Str): Any {
+send
+meta {no-doc: true}
+fn (method: Str, body: Map, bot-token: Str): Any {
   url method-url(method, bot-token)
   prepared clean-body(body)
   upload prepare-upload(prepared)
@@ -411,7 +507,17 @@ fn
 
 file-url
 meta {
-    doc: """`https://api.telegram.org/file/bot<token>/<file_path>` for a `file_path` from getFile. Contains the token: never log or share it. Exposed for testing."""
+    doc: """
+    `https://api.telegram.org/file/bot<token>/<file_path>` for a `file_path`
+    from getFile. Contains the token: never log or share it. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::telegram::api/file-url("photos/file 12.jpg", "test-token")  // "https://api.telegram.org/file/bottest-token/photos/file%2012.jpg"
+    ```
+    """
 }
 fn (file-path: Str, bot-token: Str): Str {
   segments map(split(file-path, "/"), (s) { ::uri/encode(s) })
@@ -422,7 +528,22 @@ download
 meta {
     ctx: {"telegram.bot.token": {required: false}},
     doc: """
-    Download a file by its `file_path` (from `::telegram::files/get-file`) and return its `Bytes`. Bots can download files up to 20 MB. Prefer `::telegram::files/download-file`, which takes a file_id.
+    Download a file by its `file_path` (from `::telegram::files/get-file`)
+    and return its `Bytes`. Bots can download files up to 20 MB. Prefer
+    `::telegram::files/download-file`, which takes a file_id.
+
+    **Example**
+
+    ```hot
+    ::api ::telegram::api
+
+    file ::telegram::files/get-file("AgACAgIAAxkBAAIB")
+    content ::api/download(file.file_path)
+    length(content)
+
+    // As another bot
+    other ::api/download(file.file_path, {bot-token: ::hot::ctx/get("tenant_b.telegram.token")})
+    ```
     """
 }
 fn

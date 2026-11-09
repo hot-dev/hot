@@ -44,7 +44,17 @@ READ_FIELDS "id,type,name,size,sha1,etag,sequence_id,file_version,parent,path_co
 
 range-header
 meta {
-    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`."""
+    doc: """
+    An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for
+    "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"`.
+
+    **Example**
+
+    ```hot
+    ::box::content/range-header(0, 1023)  // "bytes=0-1023"
+    ::box::content/range-header(1024, null)  // "bytes=1024-"
+    ```
+    """
 }
 fn (start: Int, end: Int?): Str {
   if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
@@ -52,7 +62,17 @@ fn (start: Int, end: Int?): Str {
 
 download-ranges
 meta {
-    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+    doc: """
+    Split `size` bytes into inclusive `[start, end]` ranges of at most
+    `chunk-size` bytes (pure). `download-ranges(10, 4)` is `[[0, 3], [4, 7],
+    [8, 9]]`.
+
+    **Example**
+
+    ```hot
+    ::box::content/download-ranges(10, 4)  // [[0, 3], [4, 7], [8, 9]]
+    ```
+    """
 }
 fn (size: Int, chunk-size: Int): Vec {
   c max(chunk-size, 1)
@@ -65,7 +85,17 @@ fn (size: Int, chunk-size: Int): Vec {
 
 is-size-limit-error
 meta {
-    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+    doc: """
+    True when a request failed because the response exceeded
+    `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    ::box::content/is-size-limit-error(err("response exceeds http.max-response-bytes"))  // true
+    ::box::content/is-size-limit-error(err("request failed"))  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(is-err(result), contains(err-message(result), "exceeds"))
@@ -79,7 +109,16 @@ DOWNLOAD_LOCAL_KEYS ["range", "chunk-size", "name", "mime-type", "boxapi"]
 
 download-params
 meta {
-    doc: """Query parameters for a download (pure): Box parameters from `opts`, such as `version` (a file version id for an older version)."""
+    doc: """
+    Query parameters for a download (pure): Box parameters from `opts`, such
+    as `version` (a file version id for an older version).
+
+    **Example**
+
+    ```hot
+    ::box::content/download-params({version: "99", chunk-size: 1024})  // {version: "99"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::box/query-params({}, opts, DOWNLOAD_LOCAL_KEYS)
@@ -87,7 +126,16 @@ fn (opts: Map): Map {
 
 download-headers
 meta {
-    doc: """The download request headers (pure): `Range` from `opts.range` (`{start, end}`, inclusive) and `boxapi` for shared-link access."""
+    doc: """
+    The download request headers (pure): `Range` from `opts.range` (`{start,
+    end}`, inclusive) and `boxapi` for shared-link access.
+
+    **Example**
+
+    ```hot
+    ::box::content/download-headers({range: {start: 0, end: 9}})  // {Range: "bytes=0-9"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   rng get(opts, "range")
@@ -95,11 +143,15 @@ fn (opts: Map): Map {
   if(is-map(rng), {...base, Range: range-header(rng.start, rng.end)}, base)
 }
 
-content-url fn (file-id: Str, opts: Map): Str {
+content-url
+meta {no-doc: true}
+fn (file-id: Str, opts: Map): Str {
   ::box/url(`/files/${::box/encode-id(file-id)}/content`, download-params(opts))
 }
 
-to-content fn (file-id: Str, response: Map, source: Str, opts: Map): FileContent {
+to-content
+meta {no-doc: true}
+fn (file-id: Str, response: Map, source: Str, opts: Map): FileContent {
   // dl.boxcloud.com often labels everything application/octet-stream; a
   // known name gives a better type.
   header-mime ::box/base-mime(get(or(response.headers, {}), "content-type"))
@@ -150,7 +202,23 @@ fn
 }
 
 download-range
-meta {doc: """Download bytes `start`..`end` (inclusive) of a file."""}
+meta {
+    doc: """
+    Download bytes `start`..`end` (inclusive) of a file.
+
+    **Example**
+
+    ```hot
+    // The first kilobyte
+    head ::box::content/download-range("12345", 0, 1023)
+    head.size
+
+    // From an older version
+    old ::box::content/download-range("12345", 0, 1023, {version: "99"})
+    old.bytes
+    ```
+    """
+}
 fn
 (file-id: Str, start: Int, end: Int): FileContent {
   download-range(file-id, start, end, {})
@@ -159,7 +227,9 @@ fn
   download-file(file-id, {...opts, range: {start: start, end: end}})
 }
 
-fetch-ranges fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
+fetch-ranges
+meta {no-doc: true}
+fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
   cond {
     gte(index, length(ranges)) => { acc }
     => {
@@ -185,6 +255,13 @@ meta {
     8 MiB; keep it under `http.max-response-bytes`) and join them, so
     files larger than one response can be read. The whole file is still
     held in memory.
+
+    **Example**
+
+    ```hot
+    video ::box::content/download-file-chunked("12345", {chunk-size: 4194304})
+    video.size
+    ```
     """
 }
 fn
@@ -211,7 +288,18 @@ fn
 }
 
 download-text
-meta {doc: """Download a file and decode it as UTF-8 text."""}
+meta {
+    doc: """
+    Download a file and decode it as UTF-8 text.
+
+    **Example**
+
+    ```hot
+    notes ::box::content/download-text("12345")
+    length(notes)
+    ```
+    """
+}
 fn
 (file-id: Str): Str {
   download-text(file-id, {})
@@ -254,7 +342,18 @@ type {
 
 find-representation
 meta {
-    doc: """The entry of `file.representations.entries` whose `representation` is `rep` (e.g. `"extracted_text"`), or null (pure)."""
+    doc: """
+    The entry of `file.representations.entries` whose `representation` is
+    `rep` (e.g. `"extracted_text"`), or null (pure).
+
+    **Example**
+
+    ```hot
+    file {representations: {entries: [{representation: "extracted_text", status: {state: "success"}}]}}
+    ::box::content/find-representation(file, "extracted_text").status.state  // "success"
+    ::box::content/find-representation(file, "pdf")  // null
+    ```
+    """
 }
 fn (file: Map, rep: Str): Map? {
   reps file.representations
@@ -265,7 +364,17 @@ fn (file: Map, rep: Str): Map? {
 
 representation-url
 meta {
-    doc: """Fill a representation `url_template` (pure): `{+asset_path}` becomes `asset-path` (`""` for unpaged representations such as `extracted_text`, `"1.png"` for page 1 of a paged one)."""
+    doc: """
+    Fill a representation `url_template` (pure): `{+asset_path}` becomes
+    `asset-path` (`""` for unpaged representations such as `extracted_text`,
+    `"1.png"` for page 1 of a paged one).
+
+    **Example**
+
+    ```hot
+    ::box::content/representation-url("https://dl.boxcloud.com/rep/{+asset_path}", "1.png")  // "https://dl.boxcloud.com/rep/1.png"
+    ```
+    """
 }
 fn (template: Str, asset-path: Str): Str {
   replace(template, ASSET_PATH_PLACEHOLDER, asset-path)
@@ -273,7 +382,17 @@ fn (template: Str, asset-path: Str): Str {
 
 representation-state
 meta {
-    doc: """The `status.state` of a representation entry (pure), or `"unavailable"` for a null entry."""
+    doc: """
+    The `status.state` of a representation entry (pure), or `"unavailable"`
+    for a null entry.
+
+    **Example**
+
+    ```hot
+    ::box::content/representation-state({status: {state: "pending"}})  // "pending"
+    ::box::content/representation-state(null)  // "unavailable"
+    ```
+    """
 }
 fn (entry: Map?): Str {
   cond {
@@ -285,7 +404,19 @@ fn (entry: Map?): Str {
 
 extracted-text-from
 meta {
-    doc: """Build an `ExtractedText` from file information that carries `representations` (pure; no text fetched)."""
+    doc: """
+    Build an `ExtractedText` from file information that carries
+    `representations` (pure; no text fetched).
+
+    **Example**
+
+    ```hot
+    file {representations: {entries: [{representation: "extracted_text", status: {state: "pending"}}]}}
+    status ::box::content/extracted-text-from("12345", file, null)
+    status.state  // "pending"
+    status.ready  // false
+    ```
+    """
 }
 fn (file-id: Str, file: Map, text: Str?): ExtractedText {
   entry find-representation(file, TEXT_REP)
@@ -303,21 +434,57 @@ fn (file-id: Str, file: Map, text: Str?): ExtractedText {
 
 is-done
 meta {
-    doc: """True when polling an `ExtractedText` again would not change it: `state` is `"success"`, `"unavailable"` or `"error"`."""
+    doc: """
+    True when polling an `ExtractedText` again would not change it: `state`
+    is `"success"`, `"unavailable"` or `"error"`.
+
+    **Example**
+
+    ```hot
+    ::box::content/is-done({state: "unavailable"})  // true
+    ::box::content/is-done({state: "pending"})  // false
+    ```
+    """
 }
 fn (status: Map): Bool {
   in(status.state, DONE_STATES)
 }
 
 is-ready
-meta {doc: """True when an `ExtractedText` carries the text."""}
+meta {
+    doc: """
+    True when an `ExtractedText` carries the text.
+
+    **Example**
+
+    ```hot
+    ::box::content/is-ready({ready: true})  // true
+    ::box::content/is-ready({ready: false})  // false
+    ```
+    """
+}
 fn (status: Map): Bool {
   eq(status.ready, true)
 }
 
 get-representations
 meta {
-    doc: """GET /files/{id}?fields=representations with an `x-rep-hints` header (e.g. `"[extracted_text]"`, `"[pdf][jpg?dimensions=320x320]"`). Returns the file information with `representations.entries`."""
+    doc: """
+    GET /files/{id}?fields=representations with an `x-rep-hints` header
+    (e.g. `"[extracted_text]"`, `"[pdf][jpg?dimensions=320x320]"`). Returns
+    the file information with `representations.entries`.
+
+    **Example**
+
+    ```hot
+    file ::box::content/get-representations("12345", "[extracted_text]")
+    file.representations.entries
+
+    // A thumbnail and a PDF rendition
+    thumbs ::box::content/get-representations("12345", "[pdf][jpg?dimensions=320x320]", {fields: "representations"})
+    thumbs.representations.entries
+    ```
+    """
 }
 fn
 (file-id: Str, hints: Str): Map {
@@ -327,7 +494,9 @@ fn
   ::files/get-file(file-id, {...opts, fields: or(get(opts, "fields"), READ_FIELDS), rep-hints: hints})
 }
 
-fetch-representation-text fn (url: Str, opts: Map): Any {
+fetch-representation-text
+meta {no-doc: true}
+fn (url: Str, opts: Map): Any {
   response ::api/request("GET", url, {}, "", ::box/creds(opts))
   cond {
     is-err(response) => { response }
@@ -337,14 +506,18 @@ fetch-representation-text fn (url: Str, opts: Map): Any {
   }
 }
 
-trigger-generation fn (info-url: Str?, opts: Map): Any {
+trigger-generation
+meta {no-doc: true}
+fn (info-url: Str?, opts: Map): Any {
   cond {
     is-null(info-url) => { null }
     => { ::api/json("GET", info-url, {}, "", ::box/creds(opts)) }
   }
 }
 
-resolve-text fn (status: ExtractedText, opts: Map): ExtractedText {
+resolve-text
+meta {no-doc: true}
+fn (status: ExtractedText, opts: Map): ExtractedText {
   cond {
     and(eq(status.state, "success"), is-some(status.content-url)) => {
       text fetch-representation-text(status.content-url, opts)
@@ -376,7 +549,7 @@ meta {
     ```hot
     status ::box::content/extracted-text("12345")
     cond {
-      ::box::content/is-ready(status) => { index-text(status.text) }
+      ::box::content/is-ready(status) => { println(status.text) }
       ::box::content/is-done(status) => { println(`box: no text for this file (${status.state})`) }
       => { println("box: text is still being generated; try again later") }
     }
@@ -403,13 +576,25 @@ READ_LOCAL_KEYS ["fields", "download-fallback", "rep-hints"]
 
 wants-original
 meta {
-    doc: """True when a `read-document` format asks for the stored bytes (`"original"`, `"download"`, `"raw"`, `"bytes"`), not text (pure)."""
+    doc: """
+    True when a `read-document` format asks for the stored bytes
+    (`"original"`, `"download"`, `"raw"`, `"bytes"`), not text (pure).
+
+    **Example**
+
+    ```hot
+    ::box::content/wants-original("raw")  // true
+    ::box::content/wants-original("text")  // false
+    ```
+    """
 }
 fn (format: Str?): Bool {
   in(lowercase(trim(or(format, "auto"))), ["original", "download", "raw", "bytes"])
 }
 
-with-file fn (content: Result, file: Map, format: Str?, text-state: Str?): FileContent {
+with-file
+meta {no-doc: true}
+fn (content: Result, file: Map, format: Str?, text-state: Str?): FileContent {
   cond {
     is-err(content) => { content }
     => {
@@ -418,7 +603,9 @@ with-file fn (content: Result, file: Map, format: Str?, text-state: Str?): FileC
   }
 }
 
-empty-content fn (file: Map, format: Str?, text-state: Str?): FileContent {
+empty-content
+meta {no-doc: true}
+fn (file: Map, format: Str?, text-state: Str?): FileContent {
   base ::box/content-from-bytes(Str(file.id), Bytes([]), null, "none")
   with-file(base, file, format, text-state)
 }
@@ -465,7 +652,9 @@ fn
   }
 }
 
-read-with-file fn (file-id: Str, file: Map, fmt: Str, original: Bool, opts: Map): FileContent {
+read-with-file
+meta {no-doc: true}
+fn (file-id: Str, file: Map, fmt: Str, original: Bool, opts: Map): FileContent {
   download-opts {...filter-keys(opts, (k) { not(in(k, READ_LOCAL_KEYS)) }), name: file.name}
   cond {
     original => { with-file(download-file(file-id, download-opts), file, fmt, null) }
@@ -489,7 +678,22 @@ read-with-file fn (file-id: Str, file: Map, fmt: Str, original: Bool, opts: Map)
 
 read-document-text
 meta {
-    doc: """`read-document`, returning just the text; an Err when there is no text yet (the message says whether Box is still generating it, so a schedule can try again)."""
+    doc: """
+    `read-document`, returning just the text; an Err when there is no text
+    yet (the message says whether Box is still generating it, so a schedule
+    can try again).
+
+    **Example**
+
+    ```hot
+    text ::box::content/read-document-text("12345")
+    length(text)
+
+    // Inside a schedule: an Err means try again later
+    result ::box::content/read-document-text("12345", "text", {as-user: "123"})
+    if(is-err(result), err-message(result), result)
+    ```
+    """
 }
 fn
 (file-id: Str): Str {

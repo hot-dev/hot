@@ -82,7 +82,20 @@ DeleteAssistantResponse type {
 
 
 delete-assistant
-meta {doc: """DELETE /assistants/{assistant_id} - Permanently delete an assistant."""}
+meta {
+    doc: """
+    DELETE /assistants/{assistant_id} - Permanently delete an assistant.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-assistant(::openai::delete/DeleteAssistantRequest({
+      assistant-id: "asst_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteAssistantRequest): DeleteAssistantResponse {
   delete-assistant(request, {})
@@ -109,7 +122,19 @@ DeleteChatCompletionResponse type {
 
 delete-chat-completion
 meta {
-    doc: """DELETE /chat/completions/{completion_id} - Delete a stored chat completion."""
+    doc: """
+    DELETE /chat/completions/{completion_id} - Delete a stored chat
+    completion.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-chat-completion(::openai::delete/DeleteChatCompletionRequest({
+      completion-id: "chatcmpl_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteChatCompletionRequest): DeleteChatCompletionResponse {
@@ -136,7 +161,20 @@ DeleteEvalResponse type {
 
 
 delete-eval
-meta {doc: """DELETE /evals/{eval_id} - Permanently delete an evaluation."""}
+meta {
+    doc: """
+    DELETE /evals/{eval_id} - Permanently delete an evaluation.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-eval(::openai::delete/DeleteEvalRequest({
+      eval-id: "eval_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteEvalRequest): DeleteEvalResponse {
   delete-eval(request, {})
@@ -163,7 +201,21 @@ DeleteEvalRunResponse type {
 
 
 delete-eval-run
-meta {doc: """DELETE /evals/{eval_id}/runs/{run_id} - Delete an evaluation run."""}
+meta {
+    doc: """
+    DELETE /evals/{eval_id}/runs/{run_id} - Delete an evaluation run.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-eval-run(::openai::delete/DeleteEvalRunRequest({
+      eval-id: "eval_abc123",
+      run-id: "evalrun_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteEvalRunRequest): DeleteEvalRunResponse {
   delete-eval-run(request, {})
@@ -189,7 +241,20 @@ DeleteFileResponse type {
 
 
 delete-file
-meta {doc: """DELETE /files/{file_id} - Delete an uploaded file."""}
+meta {
+    doc: """
+    DELETE /files/{file_id} - Delete an uploaded file.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-file(::openai::delete/DeleteFileRequest({
+      file-id: "file-abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteFileRequest): DeleteFileResponse {
   delete-file(request, {})
@@ -217,7 +282,21 @@ DeleteFineTuningCheckpointPermissionResponse type {
 
 delete-checkpoint-permission
 meta {
-    doc: """DELETE /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id} - Delete checkpoint permission"""
+    doc: """
+    DELETE
+    /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions/{permission_id}
+    - Delete checkpoint permission
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-checkpoint-permission(::openai::delete/DeleteFineTuningCheckpointPermissionRequest({
+      fine-tuned-model-checkpoint: "ft:gpt-4o-mini-2024-07-18:acme::abc123:ckpt-step-100",
+      permission-id: "cp_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteFineTuningCheckpointPermissionRequest): DeleteFineTuningCheckpointPermissionResponse {
@@ -245,7 +324,19 @@ DeleteModelResponse type {
 
 delete-finetuned-model
 meta {
-    doc: """DELETE /models/{model} - Delete a fine-tuned model. Only the owner organization can delete a model."""
+    doc: """
+    DELETE /models/{model} - Delete a fine-tuned model. Only the owner
+    organization can delete a model.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-finetuned-model(::openai::delete/DeleteModelRequest({
+      model: "ft:gpt-4o-mini-2024-07-18:acme::abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteModelRequest): DeleteModelResponse {
@@ -271,7 +362,17 @@ DeleteCertificateResponse type {
 
 delete-certificate
 meta {
-    doc: """DELETE /organization/certificates/{certificate_id} - Delete an organization certificate."""
+    doc: """
+    DELETE /organization/certificates/{certificate_id} - Delete an
+    organization certificate.
+
+    **Example**
+
+    ```hot
+    // The request path is not filled in from the request yet, so no certificate id can be passed.
+    result ::openai::delete/delete-certificate(::openai::delete/DeleteCertificateRequest({}))
+    ```
+    """
 }
 fn
 (request: DeleteCertificateRequest): DeleteCertificateResponse {
@@ -299,7 +400,20 @@ DeleteResponseResponse type {
 
 
 delete-model-response
-meta {doc: """DELETE /responses/{response_id} - Delete a stored model response."""}
+meta {
+    doc: """
+    DELETE /responses/{response_id} - Delete a stored model response.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-model-response(::openai::delete/DeleteResponseRequest({
+      response-id: "resp_abc123"
+    }))
+    is-err(result)
+    ```
+    """
+}
 fn
 (request: DeleteResponseRequest): DeleteResponseResponse {
   delete-model-response(request, {})
@@ -325,7 +439,20 @@ DeleteThreadResponse type {
 
 
 delete-thread
-meta {doc: """DELETE /threads/{thread_id} - Delete a thread and all its messages."""}
+meta {
+    doc: """
+    DELETE /threads/{thread_id} - Delete a thread and all its messages.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-thread(::openai::delete/DeleteThreadRequest({
+      thread-id: "thread_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteThreadRequest): DeleteThreadResponse {
   delete-thread(request, {})
@@ -353,7 +480,20 @@ DeleteMessageResponse type {
 
 delete-message
 meta {
-    doc: """DELETE /threads/{thread_id}/messages/{message_id} - Delete a message from a thread."""
+    doc: """
+    DELETE /threads/{thread_id}/messages/{message_id} - Delete a message
+    from a thread.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-message(::openai::delete/DeleteMessageRequest({
+      thread-id: "thread_abc123",
+      message-id: "msg_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteMessageRequest): DeleteMessageResponse {
@@ -381,7 +521,19 @@ DeleteVectorStoreResponse type {
 
 delete-vector-store
 meta {
-    doc: """DELETE /vector_stores/{vector_store_id} - Delete a vector store and all its files."""
+    doc: """
+    DELETE /vector_stores/{vector_store_id} - Delete a vector store and all
+    its files.
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-vector-store(::openai::delete/DeleteVectorStoreRequest({
+      vector-store-id: "vs_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteVectorStoreRequest): DeleteVectorStoreResponse {
@@ -410,7 +562,20 @@ DeleteVectorStoreFileResponse type {
 
 delete-vector-store-file
 meta {
-    doc: """DELETE /vector_stores/{vector_store_id}/files/{file_id} - Delete vector store file"""
+    doc: """
+    DELETE /vector_stores/{vector_store_id}/files/{file_id} - Delete vector
+    store file
+
+    **Example**
+
+    ```hot
+    result ::openai::delete/delete-vector-store-file(::openai::delete/DeleteVectorStoreFileRequest({
+      vector-store-id: "vs_abc123",
+      file-id: "file-abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteVectorStoreFileRequest): DeleteVectorStoreFileResponse {

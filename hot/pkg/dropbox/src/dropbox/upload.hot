@@ -62,7 +62,17 @@ type {
 
 to-bytes
 meta {
-    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, and anything else is JSON-encoded."""
+    doc: """
+    Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8
+    bytes, null is empty, and anything else is JSON-encoded.
+
+    **Example**
+
+    ```hot
+    length(::dropbox::upload/to-bytes("hello"))  // 5
+    length(::dropbox::upload/to-bytes(null))  // 0
+    ```
+    """
 }
 fn (content: Any): Bytes {
   cond {
@@ -103,7 +113,19 @@ fn (mode: Any, rev: Str?): Any {
 
 commit-info
 meta {
-    doc: """The `CommitInfo` for a path (pure): `path`, `mode` (see `write-mode`, from `opts.mode` / `opts.rev`) and `autorename`, `client_modified` (`"2026-11-01T12:00:00Z"`), `mute`, `strict_conflict`, `property_groups` from `opts`."""
+    doc: """
+    The `CommitInfo` for a path (pure): `path`, `mode` (see `write-mode`,
+    from `opts.mode` / `opts.rev`) and `autorename`, `client_modified`
+    (`"2026-11-01T12:00:00Z"`), `mute`, `strict_conflict`, `property_groups`
+    from `opts`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/commit-info("Reports/q3.csv", {mode: "overwrite", autorename: true})
+    // {autorename: true, path: "/Reports/q3.csv", mode: "overwrite"}
+    ```
+    """
 }
 fn (path: Str, opts: Map): Map {
   mode write-mode(get(opts, "mode"), get(opts, "rev"))
@@ -114,13 +136,25 @@ fn (path: Str, opts: Map): Map {
   }
 }
 
-hash-for fn (data: Bytes, opts: Map): Str? {
+hash-for
+meta {no-doc: true}
+fn (data: Bytes, opts: Map): Str? {
   if(eq(get(opts, "verify"), false), null, ::content/content-hash(data))
 }
 
 upload-arg
 meta {
-    doc: """The `files/upload` argument (pure): `commit-info` plus `content_hash` of `data` (unless `opts.verify` is false)."""
+    doc: """
+    The `files/upload` argument (pure): `commit-info` plus `content_hash` of
+    `data` (unless `opts.verify` is false).
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/upload-arg("/a.txt", Bytes("hello"), {verify: false})  // {path: "/a.txt", mode: "add"}
+    ::dropbox::upload/upload-arg("/a.txt", Bytes("hello"), {}).content_hash  // "9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50"
+    ```
+    """
 }
 fn (path: Str, data: Bytes, opts: Map): Map {
   commit commit-info(path, opts)
@@ -132,7 +166,17 @@ fn (path: Str, data: Bytes, opts: Map): Map {
 
 align-chunk-size
 meta {
-    doc: """Round a chunk size down to a multiple of 4 MiB (at least 4 MiB, at most 148 MiB so a request stays under Dropbox's 150 MiB cap)."""
+    doc: """
+    Round a chunk size down to a multiple of 4 MiB (at least 4 MiB, at most
+    148 MiB so a request stays under Dropbox's 150 MiB cap).
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/align-chunk-size(10000000)  // 8388608
+    ::dropbox::upload/align-chunk-size(1)  // 4194304
+    ```
+    """
 }
 fn (size: Int): Int {
   aligned mul(floor(div(size, BLOCK)), BLOCK)
@@ -141,14 +185,34 @@ fn (size: Int): Int {
 
 chunk-bounds
 meta {
-    doc: """The `[start, end)` byte range of the chunk starting at `offset` (pure): `chunk-bounds(0, 4, 10)` is `[0, 4]`, the last chunk is short."""
+    doc: """
+    The `[start, end)` byte range of the chunk starting at `offset` (pure):
+    `chunk-bounds(0, 4, 10)` is `[0, 4]`, the last chunk is short.
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/chunk-bounds(0, 4, 10)  // [0, 4]
+    ::dropbox::upload/chunk-bounds(8, 4, 10)  // [8, 10]
+    ```
+    """
 }
 fn (offset: Int, chunk-size: Int, total: Int): Vec {
   [offset, min(total, add(offset, chunk-size))]
 }
 
 session-cursor
-meta {doc: """An `UploadSessionCursor` (pure): `{session_id, offset}`."""}
+meta {
+    doc: """
+    An `UploadSessionCursor` (pure): `{session_id, offset}`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/session-cursor("AAFv3xQ", 8)  // {session_id: "AAFv3xQ", offset: 8}
+    ```
+    """
+}
 fn (session-id: Str, offset: Int): Map {
   {session_id: session-id, offset: offset}
 }
@@ -160,6 +224,16 @@ meta {
     the new offset when Dropbox answers `incorrect_offset` with exactly
     `offset + sent` (the data had arrived but the response was lost); an
     Err otherwise.
+
+    **Example**
+
+    ```hot
+    ::dropbox::upload/append-outcome({}, 0, 4)  // 4
+
+    // The data arrived but the response was lost
+    lost err({error: {".tag": "incorrect_offset", correct_offset: 4}})
+    ::dropbox::upload/append-outcome(lost, 0, 4)  // 4
+    ```
     """
 }
 fn (result: Result, offset: Int, sent: Int): Int {
@@ -173,7 +247,9 @@ fn (result: Result, offset: Int, sent: Int): Int {
   }
 }
 
-upload-error fn (message: Str, session-id: Str?, offset: Int?, cause: Result): UploadError {
+upload-error
+meta {no-doc: true}
+fn (message: Str, session-id: Str?, offset: Int?, cause: Result): UploadError {
   UploadError({
     message: `${message}: ${err-message(cause)}`,
     session-id: session-id,
@@ -188,7 +264,17 @@ upload-error fn (message: Str, session-id: Str?, offset: Int?, cause: Result): U
 
 upload-single
 meta {
-    doc: """POST files/upload (content host) - upload `content` (at most 150 MiB) in one request. Returns the file's metadata. Options as for `upload`."""
+    doc: """
+    POST files/upload (content host) - upload `content` (at most 150 MiB) in
+    one request. Returns the file's metadata. Options as for `upload`.
+
+    **Example**
+
+    ```hot
+    file ::dropbox::upload/upload-single("/notes/today.md", "# Today\n", {mode: "overwrite"})
+    file.rev
+    ```
+    """
 }
 fn (path: Str, content: Any, opts: Map): Map {
   data to-bytes(content)
@@ -237,7 +323,18 @@ fn
 
 start-upload-session
 meta {
-    doc: """POST files/upload_session/start - open a session with the first chunk of content (may be empty). Returns the `session_id` (a Str). Options: `session_type` (`"sequential"` default, or `"concurrent"`), `verify`."""
+    doc: """
+    POST files/upload_session/start - open a session with the first chunk of
+    content (may be empty). Returns the `session_id` (a Str). Options:
+    `session_type` (`"sequential"` default, or `"concurrent"`), `verify`.
+
+    **Example**
+
+    ```hot
+    session-id ::dropbox::upload/start-upload-session(Bytes("part 1"))
+    session-id
+    ```
+    """
 }
 fn
 (content: Any): Str {
@@ -252,7 +349,20 @@ fn
 
 append-upload-session
 meta {
-    doc: """POST files/upload_session/append_v2 - send the next chunk at `offset` (the bytes already sent). Returns the next offset (Int). A lost response whose data arrived is recognised (see `append-outcome`). Options: `close`, `verify`."""
+    doc: """
+    POST files/upload_session/append_v2 - send the next chunk at `offset`
+    (the bytes already sent). Returns the next offset (Int). A lost response
+    whose data arrived is recognised (see `append-outcome`). Options:
+    `close`, `verify`.
+
+    **Example**
+
+    ```hot
+    session-id ::dropbox::upload/start-upload-session(Bytes("part 1"))
+    offset ::dropbox::upload/append-upload-session(session-id, 6, Bytes("part 2"))
+    offset
+    ```
+    """
 }
 fn
 (session-id: Str, offset: Int, content: Any): Int {
@@ -267,7 +377,19 @@ fn
 
 finish-upload-session
 meta {
-    doc: """POST files/upload_session/finish - send the last chunk at `offset` (may be empty) and commit the file to `path`. Returns the file's metadata. Commit options as for `upload`."""
+    doc: """
+    POST files/upload_session/finish - send the last chunk at `offset` (may
+    be empty) and commit the file to `path`. Returns the file's metadata.
+    Commit options as for `upload`.
+
+    **Example**
+
+    ```hot
+    session-id ::dropbox::upload/start-upload-session(Bytes("part 1"))
+    file ::dropbox::upload/finish-upload-session(session-id, 6, Bytes("part 2"), "/logs/run.txt", {mode: "overwrite"})
+    file.content_hash
+    ```
+    """
 }
 fn
 (session-id: Str, offset: Int, content: Any, path: Str): Map {
@@ -285,7 +407,9 @@ fn
   }
 }
 
-send-chunks fn (session-id: Str, data: Bytes, offset: Int, chunk: Int, path: Str, opts: Map): Map {
+send-chunks
+meta {no-doc: true}
+fn (session-id: Str, data: Bytes, offset: Int, chunk: Int, path: Str, opts: Map): Map {
   total length(data)
   bounds chunk-bounds(offset, chunk, total)
   end last(bounds)
@@ -347,6 +471,17 @@ meta {
     file again) from `offset` (from the `UploadError`) and commit to
     `path`. Sessions expire 7 days after `start`; an expired one fails
     with `lookup_failed/not_found`, so start over with `upload`.
+
+    **Example**
+
+    ```hot
+    big ::hot::file/read-file-bytes("/tmp/video.mp4")
+    result ::dropbox::upload/upload-session("/Videos/talk.mp4", big)
+
+    // Continue from where the failed session stopped
+    failed if(is-err(result), err-value(result), null)
+    if(is-some(failed), ::dropbox::upload/resume-upload(failed.session-id, failed.offset, big, "/Videos/talk.mp4"), result)
+    ```
     """
 }
 fn

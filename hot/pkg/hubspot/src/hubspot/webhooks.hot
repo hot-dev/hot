@@ -20,7 +20,17 @@ MAX_AGE_SECONDS 300
 
 normalize-uri
 meta {
-    doc: """The URI as HubSpot signs it: any `#fragment` dropped, and the twelve characters in HubSpot's v3 table (`: / ? @ ! $ ' ( ) * , ;`) decoded from their percent-escapes, in either hex case. Exposed for testing."""
+    doc: """
+    The URI as HubSpot signs it: any `#fragment` dropped, and the twelve
+    characters in HubSpot's v3 table (`: / ? @ ! $ ' ( ) * , ;`) decoded
+    from their percent-escapes, in either hex case. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::webhooks/normalize-uri("https://example.com/hook%3Fa%20b#top")  // "https://example.com/hook?a%20b"
+    ```
+    """
 }
 fn (uri: Str): Str {
   without-fragment first(split(uri, "#"))
@@ -33,7 +43,17 @@ fn (uri: Str): Str {
 
 build-base-string
 meta {
-    doc: """The v3 signed message: `method + normalize-uri(uri) + rawBody + timestamp`. A `Bytes` body (non-UTF-8, from `::hot::http/raw-body`) yields `Bytes`, so it is signed verbatim. Exposed for testing."""
+    doc: """
+    The v3 signed message: `method + normalize-uri(uri) + rawBody +
+    timestamp`. A `Bytes` body (non-UTF-8, from `::hot::http/raw-body`)
+    yields `Bytes`, so it is signed verbatim. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::webhooks/build-base-string("POST", "https://example.com/hook", "{}", "1762000000000")  // "POSThttps://example.com/hook{}1762000000000"
+    ```
+    """
 }
 fn (method: Str, uri: Str, raw-body: Str | Bytes, timestamp: Str): Str | Bytes {
   prefix `${method}${normalize-uri(uri)}`

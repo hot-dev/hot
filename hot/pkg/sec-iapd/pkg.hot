@@ -2,7 +2,7 @@
 
 hot.pkg.sec-iapd {
   name: "hot.dev/sec-iapd",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.3",
   description: "SEC Investment Adviser Public Disclosure for Hot, with no key: monthly Form ADV Part 1 and ADV-W data files, one row per filing with regulatory assets and private fund totals, and firm lookups by name or CRD.",
   author: "Hot Dev",

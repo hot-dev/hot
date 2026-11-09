@@ -43,6 +43,13 @@ meta {
     strip any `=`, clear the unused low bits of the last character (the
     reference libraries decode leniently and ignore them; Hot's decoder
     is strict), and pad to a multiple of four. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::standard-webhooks/pad-base64("YQ")  // "YQ=="
+    ::increase::standard-webhooks/pad-base64("YWI")  // "YWI="
+    ```
     """
 }
 fn (text: Str): Str {
@@ -101,7 +108,17 @@ fn (secret: Str): Bytes {
 
 signed-content
 meta {
-    doc: """The bytes a Standard Webhooks signature covers: `{msg-id}.{timestamp}.` followed by the body exactly as received. A `Bytes` body stays bytes, so a body that isn't valid UTF-8 still verifies. Exposed for testing."""
+    doc: """
+    The bytes a Standard Webhooks signature covers: `{msg-id}.{timestamp}.`
+    followed by the body exactly as received. A `Bytes` body stays bytes, so
+    a body that isn't valid UTF-8 still verifies. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::standard-webhooks/signed-content("msg_1", "1614265330", "hello")  // "msg_1.1614265330.hello"
+    ```
+    """
 }
 fn (msg-id: Str, timestamp: Str, body: Str | Bytes): Str | Bytes {
   if(is-bytes(body), concat(Bytes(`${msg-id}.${timestamp}.`), body), `${msg-id}.${timestamp}.${body}`)
@@ -118,8 +135,8 @@ meta {
 
     ```hot
     key ::increase::standard-webhooks/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
-    ::increase::standard-webhooks/sign(key, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", "{\\"test\\": 2432232314}")
-    // => "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+    ::increase::standard-webhooks/sign(key, "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", "{\"test\": 2432232314}")
+    // "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
     ```
     """
 }
@@ -130,7 +147,17 @@ fn (key: Str | Bytes, msg-id: Str, timestamp: Str, body: Str | Bytes): Str {
 
 header
 meta {
-    doc: """A header value by name, ignoring case, trimmed; `""` when absent. Exposed for testing."""
+    doc: """
+    A header value by name, ignoring case, trimmed; `""` when absent.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::increase::standard-webhooks/header({Webhook-Id: " msg_1 "}, "webhook-id")  // "msg_1"
+    ::increase::standard-webhooks/header({}, "webhook-id")  // ""
+    ```
+    """
 }
 fn (headers: Map, name: Str): Str {
   wanted lowercase(name)
@@ -141,17 +168,30 @@ fn (headers: Map, name: Str): Str {
 
 signatures
 meta {
-    doc: """The space-separated entries of a `webhook-signature` header. Exposed for testing."""
+    doc: """
+    The space-separated entries of a `webhook-signature` header. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::increase::standard-webhooks/signatures("v1,abc v1,def")  // ["v1,abc", "v1,def"]
+    ```
+    """
 }
 fn (value: Str): Vec<Str> {
   filter(split(trim(value), " "), (s) { not(is-empty(s)) })
 }
 
-key-is-empty fn (key: Str | Bytes): Bool {
+key-is-empty
+meta {no-doc: true}
+fn (key: Str | Bytes): Bool {
   eq(length(key), 0)
 }
 
-timestamp-within fn (timestamp: Int, now: Int, tolerance-seconds: Int): Bool {
+timestamp-within
+meta {no-doc: true}
+fn (timestamp: Int, now: Int, tolerance-seconds: Int): Bool {
   and(lte(sub(now, timestamp), tolerance-seconds), lte(sub(timestamp, now), tolerance-seconds))
 }
 
@@ -165,6 +205,20 @@ meta {
     equals `sign(key, id, timestamp, body)`. Every candidate is compared
     in constant time. Exposed for testing with fixed vectors; use
     `verify` in handlers.
+
+    **Example**
+
+    ```hot
+    key ::increase::standard-webhooks/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
+    headers {
+      webhook-id: "msg_p5jXN8AQM9LWM0D4loKWxJek",
+      webhook-timestamp: "1614265330",
+      webhook-signature: "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+    }
+    body "{\"test\": 2432232314}"
+    ::increase::standard-webhooks/verify-at(headers, body, key, 300, 1614265330)  // true
+    ::increase::standard-webhooks/verify-at(headers, body, key, 300, 1614265931)  // false
+    ```
     """
 }
 fn (headers: Map, body: Str | Bytes, key: Str | Bytes, tolerance-seconds: Int, now: Int): Bool {
@@ -200,8 +254,15 @@ meta {
     **Example**
 
     ```hot
-    key ::increase::standard-webhooks/decode-secret(secret)
-    ok ::increase::standard-webhooks/verify(request.headers, ::hot::http/raw-body(request), key)
+    HttpResponse ::hot::http/HttpResponse
+
+    on-delivery
+    meta {webhook: {service: "billing", path: "/billing/webhook"}}
+    fn (request) {
+      key ::increase::standard-webhooks/decode-secret(::hot::ctx/get("billing.webhook.secret"))
+      is-genuine ::increase::standard-webhooks/verify(request.headers, ::hot::http/raw-body(request), key)
+      HttpResponse({status: if(is-genuine, 200, 401), body: ""})
+    }
     ```
     """
 }
@@ -215,7 +276,24 @@ fn
 
 verify-request
 meta {
-    doc: """`verify` for an inbound webhook request: its `headers` and `::hot::http/raw-body`."""
+    doc: """
+    `verify` for an inbound webhook request: its `headers` and
+    `::hot::http/raw-body`.
+
+    **Example**
+
+    ```hot
+    HttpResponse ::hot::http/HttpResponse
+
+    on-delivery
+    meta {webhook: {service: "billing", path: "/billing/webhook"}}
+    fn (request) {
+      key ::increase::standard-webhooks/decode-secret(::hot::ctx/get("billing.webhook.secret"))
+      status if(::increase::standard-webhooks/verify-request(request, key), 200, 401)
+      HttpResponse({status: status, body: ""})
+    }
+    ```
+    """
 }
 fn
 (request: Map, key: Str | Bytes): Bool {
@@ -227,7 +305,20 @@ fn
 
 endpoint-verification-response
 meta {
-    doc: """The `webhook-challenge-response` header value for a Standard Webhooks endpoint-verification `challenge`: `v1,` + base64 HMAC-SHA256 of the challenge under HMAC-SHA256(key, `"wev-v1"`). Increase doesn't send challenges; this is here for other Standard Webhooks senders."""
+    doc: """
+    The `webhook-challenge-response` header value for a Standard Webhooks
+    endpoint-verification `challenge`: `v1,` + base64 HMAC-SHA256 of the
+    challenge under HMAC-SHA256(key, `"wev-v1"`). Increase doesn't send
+    challenges; this is here for other Standard Webhooks senders.
+
+    **Example**
+
+    ```hot
+    key ::increase::standard-webhooks/decode-secret("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
+    ::increase::standard-webhooks/endpoint-verification-response(key, "challenge_123")
+    // "v1,kB/p+Are8EXsK+elLOyTQWWzz8D6msGsHc2httWz348="
+    ```
+    """
 }
 fn (key: Str | Bytes, challenge: Str): Str {
   verification-key ::ctx/mark-secret(::hmac/hmac-sha256-bytes(::ctx/mark-secret(key), "wev-v1"))

@@ -307,7 +307,20 @@ GetAssistantResponse type {
 
 
 retrieve-assistant
-meta {doc: """GET /assistants/{assistant_id} - Retrieve an assistant by its ID."""}
+meta {
+    doc: """
+    GET /assistants/{assistant_id} - Retrieve an assistant by its ID.
+
+    **Example**
+
+    ```hot
+    assistant ::openai::get/retrieve-assistant(::openai::get/GetAssistantRequest({
+      assistant-id: "asst_abc123"
+    }))
+    assistant.model
+    ```
+    """
+}
 fn
 (request: GetAssistantRequest): GetAssistantResponse {
   retrieve-assistant(request, {})
@@ -339,7 +352,19 @@ GetChatCompletionResponse type {
 
 get-chat-completion
 meta {
-    doc: """GET /chat/completions/{completion_id} - Retrieve a stored chat completion by ID."""
+    doc: """
+    GET /chat/completions/{completion_id} - Retrieve a stored chat
+    completion by ID.
+
+    **Example**
+
+    ```hot
+    completion ::openai::get/get-chat-completion(::openai::get/GetChatCompletionRequest({
+      completion-id: "chatcmpl_abc123"
+    }))
+    completion.choices[0].message.content
+    ```
+    """
 }
 fn
 (request: GetChatCompletionRequest): GetChatCompletionResponse {
@@ -372,7 +397,22 @@ GetChatCompletionMessagesResponse type {
 
 get-chat-messages
 meta {
-    doc: """GET /chat/completions/{completion_id}/messages - Retrieve messages from a stored chat completion."""
+    doc: """
+    GET /chat/completions/{completion_id}/messages - Retrieve messages from
+    a stored chat completion.
+
+    **Example**
+
+    ```hot
+    page ::openai::get/get-chat-messages({
+      completion-id: "chatcmpl_abc123",
+      limit: "20",
+      order: "asc"
+    })
+    page.data
+    page.has_more
+    ```
+    """
 }
 fn
 (request: GetChatCompletionMessagesRequest): GetChatCompletionMessagesResponse {
@@ -403,7 +443,18 @@ GetEvalResponse type {
 
 
 get-eval
-meta {doc: """GET /evals/{eval_id} - Retrieve an evaluation by its ID."""}
+meta {
+    doc: """
+    GET /evals/{eval_id} - Retrieve an evaluation by its ID.
+
+    **Example**
+
+    ```hot
+    evaluation ::openai::get/get-eval(::openai::get/GetEvalRequest({eval-id: "eval_abc123"}))
+    evaluation.name
+    ```
+    """
+}
 fn
 (request: GetEvalRequest): GetEvalResponse {
   get-eval(request, {})
@@ -435,7 +486,19 @@ GetEvalRunsResponse type {
 
 
 get-eval-runs
-meta {doc: """GET /evals/{eval_id}/runs - List all runs for an evaluation."""}
+meta {
+    doc: """
+    GET /evals/{eval_id}/runs - List all runs for an evaluation.
+
+    **Example**
+
+    ```hot
+    page ::openai::get/get-eval-runs({eval-id: "eval_abc123", limit: "20", status: "completed"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
+}
 fn
 (request: GetEvalRunsRequest): GetEvalRunsResponse {
   get-eval-runs(request, {})
@@ -474,7 +537,19 @@ GetEvalRunResponse type {
 
 get-eval-run
 meta {
-    doc: """GET /evals/{eval_id}/runs/{run_id} - Retrieve a specific evaluation run."""
+    doc: """
+    GET /evals/{eval_id}/runs/{run_id} - Retrieve a specific evaluation run.
+
+    **Example**
+
+    ```hot
+    eval-run ::openai::get/get-eval-run(::openai::get/GetEvalRunRequest({
+      eval-id: "eval_abc123",
+      run-id: "evalrun_abc123"
+    }))
+    eval-run.result_counts
+    ```
+    """
 }
 fn
 (request: GetEvalRunRequest): GetEvalRunResponse {
@@ -509,7 +584,22 @@ GetEvalRunOutputItemsResponse type {
 
 get-eval-run-output-items
 meta {
-    doc: """GET /evals/{eval_id}/runs/{run_id}/output_items - Get eval run output items"""
+    doc: """
+    GET /evals/{eval_id}/runs/{run_id}/output_items - Get eval run output
+    items
+
+    **Example**
+
+    ```hot
+    page ::openai::get/get-eval-run-output-items({
+      eval-id: "eval_abc123",
+      run-id: "evalrun_abc123",
+      limit: "20",
+      status: "fail"
+    })
+    map(page.data, %.results)
+    ```
+    """
 }
 fn
 (request: GetEvalRunOutputItemsRequest): GetEvalRunOutputItemsResponse {
@@ -546,7 +636,21 @@ GetEvalRunOutputItemResponse type {
 
 get-output-item-eval-run
 meta {
-    doc: """GET /evals/{eval_id}/runs/{run_id}/output_items/{output_item_id} - Get an output item of an eval run"""
+    doc: """
+    GET /evals/{eval_id}/runs/{run_id}/output_items/{output_item_id} - Get
+    an output item of an eval run
+
+    **Example**
+
+    ```hot
+    item ::openai::get/get-output-item-eval-run(::openai::get/GetEvalRunOutputItemRequest({
+      eval-id: "eval_abc123",
+      run-id: "evalrun_abc123",
+      output-item-id: "outputitem_abc123"
+    }))
+    item.status
+    ```
+    """
 }
 fn
 (request: GetEvalRunOutputItemRequest): GetEvalRunOutputItemResponse {
@@ -578,7 +682,18 @@ GetCertificateResponse type {
 
 get-certificate
 meta {
-    doc: """GET /organization/certificates/{certificate_id} - Retrieve an organization certificate."""
+    doc: """
+    GET /organization/certificates/{certificate_id} - Retrieve an
+    organization certificate.
+
+    **Example**
+
+    ```hot
+    cert ::openai::get/get-certificate({certificate-id: "cert_abc123", include: "content"})
+    cert.name
+    cert.certificate_details
+    ```
+    """
 }
 fn
 (request: GetCertificateRequest): GetCertificateResponse {
@@ -606,7 +721,19 @@ GetResponseResponse type Map
 
 
 get-model-response
-meta {doc: """GET /responses/{response_id} - Retrieve a model response by ID."""}
+meta {
+    doc: """
+    GET /responses/{response_id} - Retrieve a model response by ID.
+
+    **Example**
+
+    ```hot
+    response ::openai::get/get-model-response({response-id: "resp_abc123"})
+    response.status
+    response.output
+    ```
+    """
+}
 fn
 (request: GetResponseRequest): GetResponseResponse {
   get-model-response(request, {})
@@ -634,7 +761,20 @@ GetThreadResponse type {
 
 
 retrieve-thread
-meta {doc: """GET /threads/{thread_id} - Retrieve a thread by its ID."""}
+meta {
+    doc: """
+    GET /threads/{thread_id} - Retrieve a thread by its ID.
+
+    **Example**
+
+    ```hot
+    thread ::openai::get/retrieve-thread(::openai::get/GetThreadRequest({
+      thread-id: "thread_abc123"
+    }))
+    thread.metadata
+    ```
+    """
+}
 fn
 (request: GetThreadRequest): GetThreadResponse {
   retrieve-thread(request, {})
@@ -673,7 +813,20 @@ GetMessageResponse type {
 
 retrieve-message
 meta {
-    doc: """GET /threads/{thread_id}/messages/{message_id} - Retrieve a specific message from a thread."""
+    doc: """
+    GET /threads/{thread_id}/messages/{message_id} - Retrieve a specific
+    message from a thread.
+
+    **Example**
+
+    ```hot
+    message ::openai::get/retrieve-message(::openai::get/GetMessageRequest({
+      thread-id: "thread_abc123",
+      message-id: "msg_abc123"
+    }))
+    message.content
+    ```
+    """
 }
 fn
 (request: GetMessageRequest): GetMessageResponse {
@@ -726,7 +879,20 @@ GetRunResponse type {
 
 retrieve-run
 meta {
-    doc: """GET /threads/{thread_id}/runs/{run_id} - Retrieve the status and details of a run."""
+    doc: """
+    GET /threads/{thread_id}/runs/{run_id} - Retrieve the status and details
+    of a run.
+
+    **Example**
+
+    ```hot
+    run ::openai::get/retrieve-run(::openai::get/GetRunRequest({
+      thread-id: "thread_abc123",
+      run-id: "run_abc123"
+    }))
+    run.status
+    ```
+    """
 }
 fn
 (request: GetRunRequest): GetRunResponse {
@@ -770,7 +936,21 @@ GetRunStepResponse type {
 
 retrieve-run-step
 meta {
-    doc: """GET /threads/{thread_id}/runs/{run_id}/steps/{step_id} - Retrieve run step"""
+    doc: """
+    GET /threads/{thread_id}/runs/{run_id}/steps/{step_id} - Retrieve run
+    step
+
+    **Example**
+
+    ```hot
+    step ::openai::get/retrieve-run-step({
+      thread-id: "thread_abc123",
+      run-id: "run_abc123",
+      step-id: "step_abc123"
+    })
+    step.step_details
+    ```
+    """
 }
 fn
 (request: GetRunStepRequest): GetRunStepResponse {
@@ -806,7 +986,19 @@ GetVectorStoreResponse type {
 
 retrieve-vector-store
 meta {
-    doc: """GET /vector_stores/{vector_store_id} - Retrieve a vector store by its ID."""
+    doc: """
+    GET /vector_stores/{vector_store_id} - Retrieve a vector store by its
+    ID.
+
+    **Example**
+
+    ```hot
+    store ::openai::get/retrieve-vector-store(::openai::get/GetVectorStoreRequest({
+      vector-store-id: "vs_abc123"
+    }))
+    store.file_counts
+    ```
+    """
 }
 fn
 (request: GetVectorStoreRequest): GetVectorStoreResponse {
@@ -838,7 +1030,20 @@ GetVectorStoreFileBatchResponse type {
 
 retrieve-vector-store-file-batch
 meta {
-    doc: """GET /vector_stores/{vector_store_id}/file_batches/{batch_id} - Retrieve vector store file batch"""
+    doc: """
+    GET /vector_stores/{vector_store_id}/file_batches/{batch_id} - Retrieve
+    vector store file batch
+
+    **Example**
+
+    ```hot
+    file-batch ::openai::get/retrieve-vector-store-file-batch(::openai::get/GetVectorStoreFileBatchRequest({
+      vector-store-id: "vs_abc123",
+      batch-id: "vsfb_abc123"
+    }))
+    file-batch.status
+    ```
+    """
 }
 fn
 (request: GetVectorStoreFileBatchRequest): GetVectorStoreFileBatchResponse {
@@ -873,7 +1078,20 @@ GetVectorStoreFileResponse type {
 
 retrieve-vector-store-file
 meta {
-    doc: """GET /vector_stores/{vector_store_id}/files/{file_id} - Retrieve vector store file"""
+    doc: """
+    GET /vector_stores/{vector_store_id}/files/{file_id} - Retrieve vector
+    store file
+
+    **Example**
+
+    ```hot
+    store-file ::openai::get/retrieve-vector-store-file(::openai::get/GetVectorStoreFileRequest({
+      vector-store-id: "vs_abc123",
+      file-id: "file-abc123"
+    }))
+    store-file.status
+    ```
+    """
 }
 fn
 (request: GetVectorStoreFileRequest): GetVectorStoreFileResponse {

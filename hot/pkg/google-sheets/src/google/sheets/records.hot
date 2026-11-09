@@ -17,13 +17,24 @@ LETTERS "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 // Grids and records
 // ---------------------------------------------------------------------------
 
-is-blank-cell fn (cell: Any): Bool {
+is-blank-cell
+meta {no-doc: true}
+fn (cell: Any): Bool {
   or(is-null(cell), and(is-str(cell), eq(trim(cell), "")))
 }
 
 header-names
 meta {
-    doc: """The header row as column names: each cell as a trimmed Str; blank headers become null (their column is skipped)."""
+    doc: """
+    The header row as column names: each cell as a trimmed Str; blank
+    headers become null (their column is skipped).
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/header-names(["name", " score ", ""])  // ["name", "score", null]
+    ```
+    """
 }
 fn (header: Vec): Vec {
   map(header, (h) { if(is-blank-cell(h), null, trim(Str(h))) })
@@ -31,7 +42,16 @@ fn (header: Vec): Vec {
 
 row-to-record
 meta {
-    doc: """One row as a Map keyed by `columns` (from `header-names`); missing cells are null and null-named columns are skipped."""
+    doc: """
+    One row as a Map keyed by `columns` (from `header-names`); missing cells
+    are null and null-named columns are skipped.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/row-to-record(["name", "score"], ["Ada"])  // {name: "Ada", score: null}
+    ```
+    """
 }
 fn (columns: Vec, row: Vec): Map {
   n length(row)
@@ -70,7 +90,15 @@ fn (values: Vec?): Vec {
 
 record-columns
 meta {
-    doc: """The column names for `records`: every key, in order of first appearance."""
+    doc: """
+    The column names for `records`: every key, in order of first appearance.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/record-columns([{name: "Ada"}, {name: "Bob", score: 9}])  // ["name", "score"]
+    ```
+    """
 }
 fn (records: Vec): Vec {
   distinct(mapcat(records, (r) { map(keys(r), Str) }))
@@ -78,7 +106,18 @@ fn (records: Vec): Vec {
 
 cell-value
 meta {
-    doc: """A record value as a cell: Str, Int, Dec and Bool pass through; null becomes `""` (an empty cell); Maps and Vecs become JSON text."""
+    doc: """
+    A record value as a cell: Str, Int, Dec and Bool pass through; null
+    becomes `""` (an empty cell); Maps and Vecs become JSON text.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/cell-value(9)  // 9
+    ::google::sheets::records/cell-value(null)  // ""
+    ::google::sheets::records/cell-value(["a", "b"])  // "[\"a\",\"b\"]"
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -111,7 +150,17 @@ fn
 
 records-to-grid
 meta {
-    doc: """Records as a full grid: the header row (`columns`, default every key) followed by `records-to-rows`."""
+    doc: """
+    Records as a full grid: the header row (`columns`, default every key)
+    followed by `records-to-rows`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/records-to-grid([{name: "Ada", score: 9}])  // [["name", "score"], ["Ada", 9]]
+    ::google::sheets::records/records-to-grid([{name: "Ada", score: 9}], ["score"])  // [["score"], [9]]
+    ```
+    """
 }
 fn
 (records: Vec): Vec {
@@ -127,7 +176,17 @@ fn
 
 column-letter
 meta {
-    doc: """The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is `AA`, 701 is `ZZ`."""
+    doc: """
+    The A1 letters for a 0-based column index: 0 is `A`, 25 is `Z`, 26 is
+    `AA`, 701 is `ZZ`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/column-letter(0)  // "A"
+    ::google::sheets::records/column-letter(26)  // "AA"
+    ```
+    """
 }
 fn (index: Int): Str {
   position mod(index, 26)
@@ -143,7 +202,17 @@ fn (index: Int): Str {
 
 quote-sheet
 meta {
-    doc: """A sheet title quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"` becomes `'Q3 Plan'` and a `'` inside is doubled."""
+    doc: """
+    A sheet title quoted for A1 notation: `Sheet1` stays as is; `"Q3 Plan"`
+    becomes `'Q3 Plan'` and a `'` inside is doubled.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/quote-sheet("Sheet1")  // "Sheet1"
+    ::google::sheets::records/quote-sheet("Q3 Plan")  // "'Q3 Plan'"
+    ```
+    """
 }
 fn (title: Str): Str {
   cond {
@@ -157,7 +226,17 @@ fn (title: Str): Str {
 
 a1
 meta {
-    doc: """An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`; `a1("Data")` is the whole sheet (`Data`)."""
+    doc: """
+    An A1 range on a sheet: `a1("Q3 Plan", "A1:C10")` is `'Q3 Plan'!A1:C10`;
+    `a1("Data")` is the whole sheet (`Data`).
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/a1("Q3 Plan", "A1:C10")  // "'Q3 Plan'!A1:C10"
+    ::google::sheets::records/a1("Data")  // "Data"
+    ```
+    """
 }
 fn
 (sheet-title: Str): Str {
@@ -169,7 +248,16 @@ fn
 
 grid-a1
 meta {
-    doc: """The A1 range covering `rows` x `columns` cells from the top-left cell (0-based `start-row`, `start-column`): `grid-a1(0, 0, 3, 2)` is `A1:B3`."""
+    doc: """
+    The A1 range covering `rows` x `columns` cells from the top-left cell
+    (0-based `start-row`, `start-column`): `grid-a1(0, 0, 3, 2)` is `A1:B3`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets::records/grid-a1(0, 0, 3, 2)  // "A1:B3"
+    ```
+    """
 }
 fn (start-row: Int, start-column: Int, rows: Int, columns: Int): Str {
   first-cell `${column-letter(start-column)}${add(start-row, 1)}`

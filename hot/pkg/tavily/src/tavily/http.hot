@@ -20,7 +20,19 @@ type {
 
 error-detail
 meta {
-    doc: """Tavily's error text from a response body, or null. Understands `{detail: {error}}`, `{detail}`, and plain `{message}` or string bodies. Exposed for testing."""
+    doc: """
+    Tavily's error text from a response body, or null. Understands `{detail:
+    {error}}`, `{detail}`, and plain `{message}` or string bodies. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::tavily::http/error-detail({detail: {error: "Unauthorized"}})  // "Unauthorized"
+    ::tavily::http/error-detail({message: "Bad request"})  // "Bad request"
+    ::tavily::http/error-detail(500)  // null
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -36,13 +48,25 @@ fn (body: Any): Any {
   }
 }
 
-text-or-null fn (value: Any): Any {
+text-or-null
+meta {no-doc: true}
+fn (value: Any): Any {
   if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
 error-message
 meta {
-    doc: """`Tavily API error <status>: <detail>`, or without the detail when the body has none. Exposed for testing."""
+    doc: """
+    `Tavily API error <status>: <detail>`, or without the detail when the
+    body has none. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::tavily::http/error-message(401, {detail: {error: "Unauthorized"}})  // "Tavily API error 401: Unauthorized"
+    ::tavily::http/error-message(500, "")  // "Tavily API error 500"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   detail error-detail(body)
@@ -51,7 +75,18 @@ fn (status: Int, body: Any): Str {
 
 http-error
 meta {
-    doc: """Build the `HttpError` for a non-2xx response. Exposed for testing."""
+    doc: """
+    Build the `HttpError` for a non-2xx response. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 429, headers: {}, body: {detail: "Slow down"}})
+    e ::tavily::http/http-error(response)
+    e.status  // 429
+    e.message  // "Tavily API error 429: Slow down"
+    ```
+    """
 }
 fn (response: HttpResponse): HttpError {
   HttpError({
@@ -64,7 +99,18 @@ fn (response: HttpResponse): HttpError {
 
 send
 meta {
-    doc: """Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise, or the transport Err."""
+    doc: """
+    Send `request` and unwrap: the decoded JSON body on 2xx, an Err carrying
+    `HttpError` otherwise, or the transport Err.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("tavily.api.key")
+    out ::tavily::http/send(::tavily/build-request("/search", {query: "hot language"}, key))
+    if(is-err(out), out, map(out.results, (r) { r.url }))
+    ```
+    """
 }
 fn (request: HttpRequest): Any {
   response ::hot::http/request(request)

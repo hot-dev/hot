@@ -86,7 +86,16 @@ WRITE_PARAM_KEYS {summarize-errors: "summarizeErrors", unitdp: "unitdp"}
 
 canonical-name
 meta {
-    doc: """The canonical resource name (`"invoices"` gives `"Invoices"`), or an Err listing the supported names."""
+    doc: """
+    The canonical resource name (`"invoices"` gives `"Invoices"`), or an Err
+    listing the supported names.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/canonical-name("invoices")  // "Invoices"
+    ```
+    """
 }
 fn (name: Str): Str {
   wanted lowercase(trim(name))
@@ -99,7 +108,18 @@ fn (name: Str): Str {
 
 resource-info
 meta {
-    doc: """`{name, key, id, paged, page-size, ops, pdf, attachments}` for a resource, or an Err."""
+    doc: """
+    `{name, key, id, paged, page-size, ops, pdf, attachments}` for a
+    resource, or an Err.
+
+    **Example**
+
+    ```hot
+    info ::xero::accounting/resource-info("invoices")
+    info.id  // "InvoiceID"
+    info.paged  // true
+    ```
+    """
 }
 fn (name: Str): Map {
   canonical canonical-name(name)
@@ -110,7 +130,18 @@ fn (name: Str): Map {
 }
 
 require-op
-meta {doc: """The resource info when the resource supports `op`, else an Err."""}
+meta {
+    doc: """
+    The resource info when the resource supports `op`, else an Err.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/require-op("Invoices", "upsert").name  // "Invoices"
+    is-err(::xero::accounting/require-op("Payments", "update"))  // true
+    ```
+    """
+}
 fn (name: Str, op: Str): Map {
   info resource-info(name)
   cond {
@@ -120,7 +151,9 @@ fn (name: Str, op: Str): Map {
   }
 }
 
-check-id fn (id: Any, what: Str): Str {
+check-id
+meta {no-doc: true}
+fn (id: Any, what: Str): Str {
   cond {
     is-blank(id) => { err(`xero: ${what} needs a record id`) }
     => { Str(id) }
@@ -129,7 +162,16 @@ check-id fn (id: Any, what: Str): Str {
 
 compact
 meta {
-    doc: """Drop null values from a record (one level), so unset optionals are omitted rather than sent as null."""
+    doc: """
+    Drop null values from a record (one level), so unset optionals are
+    omitted rather than sent as null.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/compact({Name: "Acme", EmailAddress: null})  // {Name: "Acme"}
+    ```
+    """
 }
 fn (record: Map): Map {
   filter-vals(untype(record), is-some)
@@ -137,7 +179,17 @@ fn (record: Map): Map {
 
 write-body
 meta {
-    doc: """The write body for one record or a Vec: `{Invoices: [ ... ]}` with nulls dropped (pure)."""
+    doc: """
+    The write body for one record or a Vec: `{Invoices: [ ... ]}` with nulls
+    dropped (pure).
+
+    **Example**
+
+    ```hot
+    info ::xero::accounting/resource-info("Contacts")
+    ::xero::accounting/write-body(info, {Name: "Acme", EmailAddress: null})  // {Contacts: [{Name: "Acme"}]}
+    ```
+    """
 }
 fn (info: Map, records: Map | Vec): Map {
   rows if(is-vec(records), records, [records])
@@ -146,7 +198,16 @@ fn (info: Map, records: Map | Vec): Map {
 
 write-params
 meta {
-    doc: """Query params for a write from `opts` (pure): `summarize-errors` becomes `summarizeErrors`, `unitdp` stays."""
+    doc: """
+    Query params for a write from `opts` (pure): `summarize-errors` becomes
+    `summarizeErrors`, `unitdp` stays.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/write-params({summarize-errors: false, tenant-id: "ignored"})  // {summarizeErrors: false}
+    ```
+    """
 }
 fn (opts: Map): Map {
   reduce(keys(WRITE_PARAM_KEYS), (acc, k) {
@@ -163,6 +224,13 @@ meta {
     every other param (`where`, `order`, `IDs`, `Statuses`,
     `ContactIDs`, `searchTerm`, `includeArchived`, `summaryOnly`, ...)
     with nulls dropped.
+
+    **Example**
+
+    ```hot
+    info ::xero::accounting/resource-info("Invoices")
+    ::xero::accounting/list-params(info, {Statuses: ["PAID"], pageSize: 5000, where: null}, 2)  // {Statuses: ["PAID"], page: 2, pageSize: 1000}
+    ```
     """
 }
 fn (info: Map, params: Map, page: Int?): Map {
@@ -194,7 +262,20 @@ type {
 }
 
 to-page
-meta {doc: """Turn a list response into a `Page` (pure)."""}
+meta {
+    doc: """
+    Turn a list response into a `Page` (pure).
+
+    **Example**
+
+    ```hot
+    info ::xero::accounting/resource-info("Contacts")
+    page ::xero::accounting/to-page(info, {Contacts: [{Name: "Acme"}]}, 1, 100)
+    page.items  // [{Name: "Acme"}]
+    page.next-page  // null
+    ```
+    """
+}
 fn (info: Map, body: Any, page: Int?, size: Int): Page {
   b if(is-map(body), body, {})
   items or(get(b, info.key), [])
@@ -218,6 +299,15 @@ meta {
     record whose `HasValidationErrors` is true or that carries
     `ValidationErrors`. `id` is the record's id field when Xero returned
     one. Pass the response body (`{Invoices: [...]}`) or its Vec.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/element-errors("Invoices", {Invoices: [
+      {InvoiceID: "a1", HasValidationErrors: false},
+      {InvoiceID: "b2", HasValidationErrors: true, ValidationErrors: [{Message: "Contact is required"}]}
+    ]})  // [{index: 1, id: "b2", messages: ["Contact is required"]}]
+    ```
     """
 }
 fn (resource: Str, body: Any): Vec {
@@ -280,7 +370,9 @@ fn
   }
 }
 
-collect-loop fn (resource: Str, params: Map, page: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
+collect-loop
+meta {no-doc: true}
+fn (resource: Str, params: Map, page: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
   result list-page(resource, {...params, page: page}, opts)
   cond {
     is-err(result) => { result }
@@ -304,6 +396,17 @@ meta {
     Paged resources use `pageSize: 1000` unless `params.pageSize` says
     otherwise. Each page is a call against the per-minute and daily
     limits.
+
+    **Example**
+
+    ```hot
+    invoices ::xero::accounting/list-all("Invoices", {Statuses: ["AUTHORISED"]})
+    length(invoices)
+
+    // At most 250 contacts, from one organisation
+    contacts ::xero::accounting/list-all("Contacts", {order: "Name"}, 250, {tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"})
+    map(contacts, %.Name)
+    ```
     """
 }
 fn
@@ -338,7 +441,21 @@ fn
 
 get-record
 meta {
-    doc: """GET /{resource}/{id} - one record (the first of the returned collection), or an Err. For TaxRates the id is the `TaxType`."""
+    doc: """
+    GET /{resource}/{id} - one record (the first of the returned
+    collection), or an Err. For TaxRates the id is the `TaxType`.
+
+    **Example**
+
+    ```hot
+    invoice ::xero::accounting/get-record("Invoices", "243216c5-369e-4056-ac67-05388f86dc81")
+    invoice.Status
+
+    // From another organisation
+    contact ::xero::accounting/get-record("Contacts", "6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69", {tenant-id: "c2cc9b6e-9458-4c7d-93cc-f02b81b0594f"})
+    contact.Name
+    ```
+    """
 }
 fn
 (resource: Str, id: Str): Map {
@@ -364,7 +481,17 @@ fn
 
 get-organisation
 meta {
-    doc: """GET /Organisation - the connected organisation (name, base currency, country, financial year end, ...)."""
+    doc: """
+    GET /Organisation - the connected organisation (name, base currency,
+    country, financial year end, ...).
+
+    **Example**
+
+    ```hot
+    org ::xero::accounting/get-organisation()
+    org.BaseCurrency
+    ```
+    """
 }
 fn
 (): Map {
@@ -383,7 +510,9 @@ fn
 // Writes
 // ---------------------------------------------------------------------------
 
-written fn (info: Map, body: Any): Vec {
+written
+meta {no-doc: true}
+fn (info: Map, body: Any): Vec {
   cond {
     is-err(body) => { body }
     is-map(body) => { or(get(body, info.key), []) }
@@ -393,7 +522,22 @@ written fn (info: Map, body: Any): Vec {
 
 create-records
 meta {
-    doc: """PUT /{resource} - create one record or a Vec; returns the created records. See the namespace doc for `summarize-errors` and `idempotency-key`."""
+    doc: """
+    PUT /{resource} - create one record or a Vec; returns the created
+    records. See the namespace doc for `summarize-errors` and
+    `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    rows ::xero::accounting/create-records("Contacts", {Name: "Acme Corp"})
+    first(rows).ContactID
+
+    // A batch that reports errors per record
+    batch ::xero::accounting/create-records("Contacts", [{Name: "Acme"}, {Name: "Globex"}], {summarize-errors: false})
+    ::xero::accounting/element-errors("Contacts", batch)
+    ```
+    """
 }
 fn
 (resource: Str, records: Map | Vec): Vec {
@@ -409,7 +553,17 @@ fn
 
 upsert-records
 meta {
-    doc: """POST /{resource} - create or update one record or a Vec (records with an id are updated); returns the records."""
+    doc: """
+    POST /{resource} - create or update one record or a Vec (records with an
+    id are updated); returns the records.
+
+    **Example**
+
+    ```hot
+    rows ::xero::accounting/upsert-records("Contacts", {ContactID: "6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69", EmailAddress: "ap@acme.example"})
+    first(rows).EmailAddress
+    ```
+    """
 }
 fn
 (resource: Str, records: Map | Vec): Vec {
@@ -425,7 +579,17 @@ fn
 
 update-record
 meta {
-    doc: """POST /{resource}/{id} - update one record with the fields in `fields` (others are left as they are); returns it."""
+    doc: """
+    POST /{resource}/{id} - update one record with the fields in `fields`
+    (others are left as they are); returns it.
+
+    **Example**
+
+    ```hot
+    invoice ::xero::accounting/update-record("Invoices", "243216c5-369e-4056-ac67-05388f86dc81", {Reference: "PO-4411"}, {idempotency-key: "po-4411-ref"})
+    invoice.Reference
+    ```
+    """
 }
 fn
 (resource: Str, id: Str, fields: Map): Map {
@@ -450,7 +614,16 @@ fn
 
 delete-record
 meta {
-    doc: """DELETE /{resource}/{id} for Accounts, Items and TrackingCategories. Returns true. Transactions are voided or deleted by status instead."""
+    doc: """
+    DELETE /{resource}/{id} for Accounts, Items and TrackingCategories.
+    Returns true. Transactions are voided or deleted by status instead.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/delete-record("Items", "5c7e2a10-9b34-4f6d-8e21-7a4d0c1b3f55")
+    ```
+    """
 }
 fn
 (resource: Str, id: Str): Bool {
@@ -471,7 +644,17 @@ fn
 
 void-invoice
 meta {
-    doc: """Void an authorised invoice or bill (`Status: "VOIDED"`). Paid invoices must have their payments removed first."""
+    doc: """
+    Void an authorised invoice or bill (`Status: "VOIDED"`). Paid invoices
+    must have their payments removed first.
+
+    **Example**
+
+    ```hot
+    invoice ::xero::accounting/void-invoice("243216c5-369e-4056-ac67-05388f86dc81")
+    invoice.Status
+    ```
+    """
 }
 fn
 (invoice-id: Str): Map {
@@ -482,7 +665,18 @@ fn
 }
 
 delete-draft-invoice
-meta {doc: """Delete a draft or submitted invoice (`Status: "DELETED"`)."""}
+meta {
+    doc: """
+    Delete a draft or submitted invoice (`Status: "DELETED"`).
+
+    **Example**
+
+    ```hot
+    invoice ::xero::accounting/delete-draft-invoice("243216c5-369e-4056-ac67-05388f86dc81")
+    invoice.Status
+    ```
+    """
+}
 fn
 (invoice-id: Str): Map {
   delete-draft-invoice(invoice-id, {})
@@ -492,7 +686,18 @@ fn
 }
 
 archive-contact
-meta {doc: """Archive a contact (`ContactStatus: "ARCHIVED"`)."""}
+meta {
+    doc: """
+    Archive a contact (`ContactStatus: "ARCHIVED"`).
+
+    **Example**
+
+    ```hot
+    contact ::xero::accounting/archive-contact("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69")
+    contact.ContactStatus
+    ```
+    """
+}
 fn
 (contact-id: Str): Map {
   archive-contact(contact-id, {})
@@ -503,7 +708,17 @@ fn
 
 delete-payment
 meta {
-    doc: """POST /Payments/{id} with `Status: "DELETED"` - remove a payment (its invoice becomes unpaid again). Returns the payment."""
+    doc: """
+    POST /Payments/{id} with `Status: "DELETED"` - remove a payment (its
+    invoice becomes unpaid again). Returns the payment.
+
+    **Example**
+
+    ```hot
+    payment ::xero::accounting/delete-payment("8a2c1f30-5b7d-4e19-9c44-1d6f0b3e7a12")
+    payment.Status
+    ```
+    """
 }
 fn
 (payment-id: Str): Map {
@@ -526,7 +741,17 @@ fn
 
 record-pdf
 meta {
-    doc: """GET /{resource}/{id} as `application/pdf` (Invoices, CreditNotes, PurchaseOrders, Quotes). Returns `Bytes`."""
+    doc: """
+    GET /{resource}/{id} as `application/pdf` (Invoices, CreditNotes,
+    PurchaseOrders, Quotes). Returns `Bytes`.
+
+    **Example**
+
+    ```hot
+    pdf ::xero::accounting/record-pdf("CreditNotes", "1f3a9d42-6c7e-4b18-a5d0-2e8c4f7b6a31")
+    length(pdf)
+    ```
+    """
 }
 fn
 (resource: Str, id: Str): Bytes {
@@ -544,7 +769,18 @@ fn
 }
 
 invoice-pdf
-meta {doc: """An invoice (or bill) as PDF `Bytes`."""}
+meta {
+    doc: """
+    An invoice (or bill) as PDF `Bytes`.
+
+    **Example**
+
+    ```hot
+    pdf ::xero::accounting/invoice-pdf("243216c5-369e-4056-ac67-05388f86dc81")
+    length(pdf)
+    ```
+    """
+}
 fn
 (invoice-id: Str): Bytes {
   record-pdf("Invoices", invoice-id, {})
@@ -555,7 +791,18 @@ fn
 
 email-invoice
 meta {
-    doc: """POST /Invoices/{id}/Email - email a sales invoice (ACCREC, status SUBMITTED, AUTHORISED or PAID) to its contact, using the organisation's email template. Returns true. Xero limits how many invoice emails an organisation can send per day."""
+    doc: """
+    POST /Invoices/{id}/Email - email a sales invoice (ACCREC, status
+    SUBMITTED, AUTHORISED or PAID) to its contact, using the organisation's
+    email template. Returns true. Xero limits how many invoice emails an
+    organisation can send per day.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/email-invoice("243216c5-369e-4056-ac67-05388f86dc81")
+    ```
+    """
 }
 fn
 (invoice-id: Str): Bool {
@@ -574,7 +821,17 @@ fn
 
 online-invoice-url
 meta {
-    doc: """GET /Invoices/{id}/OnlineInvoice - the customer-facing online invoice URL (sales invoices that are not drafts)."""
+    doc: """
+    GET /Invoices/{id}/OnlineInvoice - the customer-facing online invoice
+    URL (sales invoices that are not drafts).
+
+    **Example**
+
+    ```hot
+    url ::xero::accounting/online-invoice-url("243216c5-369e-4056-ac67-05388f86dc81")
+    println(url)
+    ```
+    """
 }
 fn
 (invoice-id: Str): Str {
@@ -600,7 +857,9 @@ fn
 // Attachments
 // ---------------------------------------------------------------------------
 
-attachments-info fn (resource: Str, id: Str, what: Str): Map {
+attachments-info
+meta {no-doc: true}
+fn (resource: Str, id: Str, what: Str): Map {
   info resource-info(resource)
   checked check-id(id, what)
   cond {
@@ -613,7 +872,17 @@ attachments-info fn (resource: Str, id: Str, what: Str): Map {
 
 check-file-name
 meta {
-    doc: """A file name for an attachment, or an Err: non-empty, at most 255 characters, no `/` or `\`."""
+    doc: """
+    A file name for an attachment, or an Err: non-empty, at most 255
+    characters, no `/` or `\`.
+
+    **Example**
+
+    ```hot
+    ::xero::accounting/check-file-name("receipt.pdf")  // "receipt.pdf"
+    is-err(::xero::accounting/check-file-name("a/b.pdf"))  // true
+    ```
+    """
 }
 fn (name: Str): Str {
   cond {
@@ -626,7 +895,17 @@ fn (name: Str): Str {
 
 list-attachments
 meta {
-    doc: """GET /{resource}/{id}/Attachments - `[{AttachmentID, FileName, Url, MimeType, ContentLength, IncludeOnline}]`."""
+    doc: """
+    GET /{resource}/{id}/Attachments - `[{AttachmentID, FileName, Url,
+    MimeType, ContentLength, IncludeOnline}]`.
+
+    **Example**
+
+    ```hot
+    files ::xero::accounting/list-attachments("Invoices", "243216c5-369e-4056-ac67-05388f86dc81")
+    map(files, %.FileName)
+    ```
+    """
 }
 fn
 (resource: Str, id: Str): Vec {
@@ -653,6 +932,7 @@ meta {
     the attachment record.
 
     ```hot
+    invoice-id "243216c5-369e-4056-ac67-05388f86dc81"
     receipt ::hot::file/read-file-bytes("receipt-4411.pdf")
     ::xero::accounting/upload-attachment("Invoices", invoice-id, "receipt-4411.pdf", receipt, "application/pdf")
     ```
@@ -685,7 +965,17 @@ fn
 
 get-attachment
 meta {
-    doc: """GET /{resource}/{id}/Attachments/{file-name} - the file as `Bytes` (`mime-type` is sent as `Accept`)."""
+    doc: """
+    GET /{resource}/{id}/Attachments/{file-name} - the file as `Bytes`
+    (`mime-type` is sent as `Accept`).
+
+    **Example**
+
+    ```hot
+    file ::xero::accounting/get-attachment("Invoices", "243216c5-369e-4056-ac67-05388f86dc81", "receipt-4411.pdf", "application/pdf")
+    length(file)
+    ```
+    """
 }
 fn
 (resource: Str, id: Str, file-name: Str, mime-type: Str): Bytes {

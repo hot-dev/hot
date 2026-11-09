@@ -28,6 +28,16 @@ meta {
     GET /{id} - the presentation: `presentationId`, `title`, `pageSize`,
     `slides`, `masters`, `layouts`, `revisionId`. Pass `fields` to trim
     the response. Scope: `presentations.readonly`.
+
+    **Example**
+
+    ```hot
+    deck ::google::slides::presentations/get-presentation("1AbCdEf")
+    length(deck.slides)
+
+    // Only the fields you need
+    ::google::slides::presentations/get-presentation("1AbCdEf", {fields: "title,slides.objectId"})
+    ```
     """
 }
 fn
@@ -40,7 +50,17 @@ fn
 
 build-presentation
 meta {
-    doc: """The `presentations.create` body (pure): `{title}` plus `presentationId` (choose the id), `locale` and `pageSize` from `opts` when set."""
+    doc: """
+    The `presentations.create` body (pure): `{title}` plus `presentationId`
+    (choose the id), `locale` and `pageSize` from `opts` when set.
+
+    **Example**
+
+    ```hot
+    ::google::slides::presentations/build-presentation("Q3 review", {locale: "en"})  // {title: "Q3 review", locale: "en"}
+    ::google::slides::presentations/build-presentation("Q3 review", {token: "ya29.abc"})  // {title: "Q3 review"}
+    ```
+    """
 }
 fn (title: Str, opts: Map): Map {
   ::slides/compact({
@@ -60,6 +80,16 @@ meta {
     `move-file`); a service account without domain-wide delegation owns
     it alone, so share it before anyone else can open it. Scope:
     `presentations` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    deck ::google::slides::presentations/create-presentation("Q3 review")
+    deck.presentationId
+
+    // Choose the id
+    ::google::slides::presentations/create-presentation("Q3 review", {presentationId: "q3-review-2026"})
+    ```
     """
 }
 fn
@@ -72,7 +102,20 @@ fn
 
 batch-update-body
 meta {
-    doc: """The `batchUpdate` body (pure): `{requests}` plus `writeControl` from `opts` when set (`{requiredRevisionId}` fails the write if the presentation changed)."""
+    doc: """
+    The `batchUpdate` body (pure): `{requests}` plus `writeControl` from
+    `opts` when set (`{requiredRevisionId}` fails the write if the
+    presentation changed).
+
+    **Example**
+
+    ```hot
+    ::google::slides::presentations/batch-update-body([{deleteObject: {objectId: "s1"}}], {writeControl: {requiredRevisionId: "r1"}})
+    // {requests: [{deleteObject: {objectId: "s1"}}], writeControl: {requiredRevisionId: "r1"}}
+
+    ::google::slides::presentations/batch-update-body([], {})  // {requests: []}
+    ```
+    """
 }
 fn (requests: Vec, opts: Map): Map {
   ::slides/compact({requests: requests, writeControl: get(opts, "writeControl")})
@@ -87,6 +130,23 @@ meta {
     earlier ones. `::google::slides::requests` builds requests; any
     request as a plain Map works too. Scope: `presentations` (or
     `drive.file`).
+
+    **Example**
+
+    ```hot
+    ::req ::google::slides::requests
+
+    reply ::google::slides::presentations/batch-update("1AbCdEf", [
+      ::req/replace-all-text("2025", "2026"),
+      ::req/delete-object("old_slide")
+    ])
+    reply.replies[0].replaceAllText.occurrencesChanged
+
+    // Fails instead of applying if someone edited the deck first
+    ::google::slides::presentations/batch-update("1AbCdEf", [::req/delete-object("old_slide")], {
+      writeControl: {requiredRevisionId: "AOV_f4..."}
+    })
+    ```
     """
 }
 fn
@@ -97,13 +157,28 @@ fn
   ::slides/json(::slides/SCOPE, "POST", ::slides/url(`/${::slides/encode-id(presentation-id)}:batchUpdate`), batch-update-body(requests, opts), opts)
 }
 
-page-path fn (presentation-id: Str, page-id: Str): Str {
+page-path
+meta {no-doc: true}
+fn (presentation-id: Str, page-id: Str): Str {
   `/${::slides/encode-id(presentation-id)}/pages/${::slides/encode-id(page-id)}`
 }
 
 get-page
 meta {
-    doc: """GET /{id}/pages/{pageId} - one slide, layout or master. Scope: `presentations.readonly`."""
+    doc: """
+    GET /{id}/pages/{pageId} - one slide, layout or master. Scope:
+    `presentations.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::slides::presentations/get-page("1AbCdEf", "p1")
+    ::google::slides::content/slide-text(page)
+
+    // Only the fields you need
+    ::google::slides::presentations/get-page("1AbCdEf", "p1", {fields: "pageElements.objectId"})
+    ```
+    """
 }
 fn
 (presentation-id: Str, page-id: Str): Map {
@@ -115,7 +190,19 @@ fn
 
 thumbnail-params
 meta {
-    doc: """The query parameters `get-thumbnail` sends (pure), from `opts.mimeType` (`PNG`) and `opts.thumbnailSize` (`SMALL`, `MEDIUM`, `LARGE`)."""
+    doc: """
+    The query parameters `get-thumbnail` sends (pure), from `opts.mimeType`
+    (`PNG`) and `opts.thumbnailSize` (`SMALL`, `MEDIUM`, `LARGE`).
+
+    **Example**
+
+    ```hot
+    ::google::slides::presentations/thumbnail-params({mimeType: "PNG", thumbnailSize: "LARGE"})
+    // {"thumbnailProperties.mimeType": "PNG", "thumbnailProperties.thumbnailSize": "LARGE"}
+
+    ::google::slides::presentations/thumbnail-params({})  // {}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::slides/compact({
@@ -131,6 +218,15 @@ meta {
     for a rendered image of a page. `contentUrl` is short-lived (about 30
     minutes) and needs no credentials. Counts against the expensive-read
     quota. Scope: `presentations.readonly`.
+
+    **Example**
+
+    ```hot
+    thumb ::google::slides::presentations/get-thumbnail("1AbCdEf", "p1")
+    thumb.contentUrl
+
+    ::google::slides::presentations/get-thumbnail("1AbCdEf", "p1", {mimeType: "PNG", thumbnailSize: "LARGE"})
+    ```
     """
 }
 fn
@@ -147,7 +243,20 @@ fn
 
 outline
 meta {
-    doc: """Every slide as `{id, title, text, notes}`; see `::google::slides::content/outline`. Scope: `presentations.readonly`."""
+    doc: """
+    Every slide as `{id, title, text, notes}`; see
+    `::google::slides::content/outline`. Scope: `presentations.readonly`.
+
+    **Example**
+
+    ```hot
+    slides ::google::slides::presentations/outline("1AbCdEf")
+    map(slides, %.title)
+
+    // With an explicit token
+    ::google::slides::presentations/outline("1AbCdEf", {token: "ya29.abc"})
+    ```
+    """
 }
 fn
 (presentation-id: Str): Vec {
@@ -160,7 +269,20 @@ fn
 
 text-slide-requests
 meta {
-    doc: """The requests `add-text-slide` sends (pure): a `TITLE_AND_BODY` slide with ids in `ids` (`{slide, title, body}`), then its title and body text. `opts.insertionIndex` places the slide."""
+    doc: """
+    The requests `add-text-slide` sends (pure): a `TITLE_AND_BODY` slide
+    with ids in `ids` (`{slide, title, body}`), then its title and body
+    text. `opts.insertionIndex` places the slide.
+
+    **Example**
+
+    ```hot
+    ids {slide: "slide1", title: "title1", body: "body1"}
+    requests ::google::slides::presentations/text-slide-requests("Agenda", "Intro", ids, {insertionIndex: 1})
+    requests[0].createSlide.insertionIndex  // 1
+    requests[1]  // {insertText: {objectId: "title1", text: "Agenda"}}
+    ```
+    """
 }
 fn (title: Str, body: Str, ids: Map, opts: Map): Vec {
   [
@@ -183,6 +305,16 @@ meta {
     Add a title-and-body slide, at the end unless `opts.insertionIndex`.
     Returns `{slide, title, body}`, the new object ids, for further
     edits. Scope: `presentations` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    ids ::google::slides::presentations/add-text-slide("1AbCdEf", "Highlights", "Revenue up 12%")
+    ids.body
+
+    // As the second slide
+    ::google::slides::presentations/add-text-slide("1AbCdEf", "Agenda", "Intro\nDemo", {insertionIndex: 1})
+    ```
     """
 }
 fn
@@ -202,6 +334,16 @@ meta {
     page unless `{pageObjectIds: [...]}`. Case-sensitive unless
     `{matchCase: false}`. The reply's `replaceAllText.occurrencesChanged`
     is the count. Scope: `presentations` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    reply ::google::slides::presentations/replace-text("1AbCdEf", "2025", "2026")
+    reply.replies[0].replaceAllText.occurrencesChanged
+
+    // Case-insensitive, on one slide
+    ::google::slides::presentations/replace-text("1AbCdEf", "acme", "Hot", {matchCase: false, pageObjectIds: ["p1"]})
+    ```
     """
 }
 fn
@@ -219,6 +361,17 @@ meta {
     `values` (values are converted with `Str`; null values are skipped).
     The usual template flow is google-drive's `copy-file`, then this on
     the copy. Scope: `presentations` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    // The deck contains {{name}} and {{quarter}}
+    reply ::google::slides::presentations/fill-template("1AbCdEf", {name: "Ada", quarter: "Q3"})
+    length(reply.replies)
+
+    // Only on one slide
+    ::google::slides::presentations/fill-template("1AbCdEf", {name: "Ada"}, {pageObjectIds: ["p1"]})
+    ```
     """
 }
 fn

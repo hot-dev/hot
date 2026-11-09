@@ -19,7 +19,7 @@ meta {
     each expose a `chat-with-tools` function matching the new
     `chat-fn` contract:
 
-    ```hot
+    ```
     chat-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?): ChatReply
     ```
 
@@ -33,7 +33,7 @@ meta {
     `chat-stream-opts-fn` slots, on `ChatOptions` or on a
     `ProviderRegistration`:
 
-    ```hot
+    ```
     chat-opts-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?, provider-opts: Map): ChatReply
     chat-stream-opts-fn(model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?, on-delta: Fn, provider-opts: Map): ChatReply
     ```
@@ -136,7 +136,18 @@ type {
 
 prefix-detector
 meta {
-    doc: "Build a `detect` function that matches when the model starts with `prefix` (case-insensitive)."
+    doc: """
+    Build a `detect` function that matches when the model starts with
+    `prefix` (case-insensitive).
+
+    **Example**
+
+    ```hot
+    detect ::ai::chat/prefix-detector("mistral")
+    detect("Mistral-Large")  // true
+    detect("gpt-4o")  // false
+    ```
+    """
 }
 fn (prefix: Str): Fn {
     p lowercase(prefix)
@@ -151,6 +162,13 @@ meta {
     only carry `variant`, `detect`, and `display-name`. Concrete
     `chat-fn` references live in user-facing setup code or in the
     `with-provider-fns` helper below.
+
+    **Example**
+
+    ```hot
+    map(::ai::chat/builtin-providers(), %.display-name)
+    // ["Anthropic", "OpenAI", "xAI", "Google Gemini"]
+    ```
     """
 }
 fn (): Vec<ProviderRegistration> {
@@ -207,10 +225,19 @@ meta {
     proxy).
 
     ```hot
-    REGISTRY ::ai::chat/with-providers([
-        ::ollama-chat/provider(),
-        ::mistral-chat/provider(),
-    ])
+    ::chat ::ai::chat
+
+    proxy ::chat/ProviderRegistration({
+        variant: ::chat/Provider.OpenAi,
+        detect: ::chat/prefix-detector("gpt"),
+        display-name: "OpenAI Proxy",
+        chat-fn: null,
+        chat-stream-fn: null,
+        embed-fn: null,
+    })
+
+    registry ::chat/with-providers([proxy])
+    ::chat/detect-provider-from(registry, "gpt-4o").display-name  // "OpenAI Proxy"
     ```
     """
 }
@@ -224,6 +251,14 @@ meta {
     Find the registry entry whose `detect` returns true for `model`.
     Walks `registry` from the end first so user-supplied overrides win
     over built-ins. Returns `null` when nothing matches.
+
+    **Example**
+
+    ```hot
+    registry ::ai::chat/builtin-providers()
+    ::ai::chat/detect-provider-from(registry, "GPT-4o").display-name  // "OpenAI"
+    ::ai::chat/detect-provider-from(registry, "llama3")  // null
+    ```
     """
 }
 fn (registry: Vec<ProviderRegistration>, model: Str): ProviderRegistration? {
@@ -244,8 +279,8 @@ meta {
     **Example**
 
     ```hot
-    detect-provider("claude-sonnet-4-5")  // Provider.Anthropic
-    detect-provider("gpt-4o")             // Provider.OpenAi
+    ::ai::chat/detect-provider("claude-sonnet-4-5")  // Provider.Anthropic
+    ::ai::chat/detect-provider("gpt-4o")             // Provider.OpenAi
     ```
     """
 }
@@ -268,6 +303,12 @@ meta {
     short name for any provider enrolled by a third-party package via
     `Source -> Provider.Variant` arrows. The `_` default arm is
     required because `Provider` is an open enum.
+
+    **Example**
+
+    ```hot
+    ::ai::chat/provider-name(::ai::chat/Provider.OpenAi)  // "OpenAI"
+    ```
     """
 }
 fn match (provider: Provider): Str {
@@ -292,13 +333,27 @@ meta {
     directly on the returned registration to dispatch.
 
     ```hot
-    REGISTRY ::ai::chat/with-providers([::ollama-chat/provider()])
-    opts ::ai::chat/ChatOptions({model: "ollama/llama3", providers: REGISTRY})
-    reg ::ai::chat/resolve-registration(opts)
-    cond {
-        is-null(reg) => { fail(`No provider for ${opts.model}`) }
-        => { reg.chat-fn(opts.model, messages, opts.system, tools) }
+    ::chat ::ai::chat
+
+    local-chat (model, messages, system, tools) {
+        ::chat/ChatReply({text: "Hello from llama3", stop-reason: "end_turn"})
     }
+
+    registry ::chat/with-providers([
+        ::chat/ProviderRegistration({
+            variant: ::chat/Provider.OpenAi,
+            detect: ::chat/prefix-detector("ollama/"),
+            display-name: "Ollama",
+            chat-fn: local-chat,
+            chat-stream-fn: null,
+            embed-fn: null,
+        })
+    ])
+
+    opts ::chat/ChatOptions({model: "ollama/llama3", providers: registry})
+    reg ::chat/resolve-registration(opts)
+    reply reg.chat-fn(opts.model, [::chat/user-message("Hi")], opts.system, null)
+    reply.text  // "Hello from llama3"
     ```
     """
 }
@@ -316,13 +371,17 @@ PROVIDER_SETTING_KEYS ["base-url", "management-base-url", "api-version", "region
 PROVIDER_PLAIN_KEYS ["base-url", "management-base-url", "api-version", "region", "environment", "endpoint", "path-style", "transport"]
 
 is-blank-opt
-meta { doc: """Internal: true for null and for a blank Str.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: true for null and for a blank Str."""
+}
 fn (value: Any): Bool {
     or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
 mark-provider-opts
 meta {
+    no-doc: true,
     doc: """
     Internal: mask every credential in `provider-opts` in the run's call records.
     Every key but the settings in `PROVIDER_SETTING_KEYS` and `endpoint`,
@@ -355,6 +414,16 @@ meta {
     `token`, ...), so for `base-url` any credential other than
     `management-api-key` passes here, and the provider's own resolver checks
     the exact key. Failures name keys, never values.
+
+    **Example**
+
+    ```hot
+    // Passes: the credential has a value
+    ::ai::chat/check-provider-opts({api-key: ::hot::ctx/get("tenant.acme.api.key")})
+
+    // Fails: a blank credential never falls back to the ctx key
+    ::ai::chat/check-provider-opts({api-key: ""})
+    ```
     """
 }
 fn (provider-opts: Map?): Null {
@@ -384,6 +453,7 @@ fn (provider-opts: Map?): Null {
 
 reject-provider-opts
 meta {
+    no-doc: true,
     doc: """
     Internal: fail when `provider-opts` is set but `label`, the chat function
     about to be called, has no way to receive it. Running anyway would use the
@@ -416,6 +486,17 @@ meta {
     Use this helper in any code that wants to honor
     `ChatOptions.providers` without bypassing `chat-fn`'s
     explicit-override semantics.
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    reply-fn (model, messages, system, tools) {
+        ::chat/ChatReply({text: `${model} says hi`, stop-reason: "end_turn"})
+    }
+    opts ::chat/ChatOptions({chat-fn: reply-fn, model: "claude-sonnet-4-5"})
+    ::chat/dispatch-chat(opts, [::chat/user-message("Hello")], null).text  // "claude-sonnet-4-5 says hi"
+    ```
     """
 }
 fn (opts: ChatOptions, messages: Any, tools: Any): Any {
@@ -459,6 +540,18 @@ meta {
     `opts.chat-stream-opts-fn` and `opts.chat-stream-fn` first, then the
     same two slots on `opts.providers[*]`. `chat-stream-opts-fn` receives
     `opts.provider-opts` (`{}` when unset).
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    stream-fn (model, messages, system, tools, on-delta) {
+        on-delta(::chat/ReplyDelta.TextDelta({text: "hi"}))
+        ::chat/ChatReply({text: "hi", stop-reason: "end_turn"})
+    }
+    opts ::chat/ChatOptions({chat-stream-fn: stream-fn, model: "claude-sonnet-4-5"})
+    ::chat/dispatch-chat-stream(opts, [::chat/user-message("Hello")], null, ::chat/noop-on-delta).text  // "hi"
+    ```
     """
 }
 fn (opts: ChatOptions, messages: Any, tools: Any, on-delta: Fn): Any {
@@ -502,6 +595,15 @@ meta {
     run a tool loop. With `opts.chat-opts-fn`, sends the prompt as a single
     user message along with `opts.provider-opts`. Otherwise calls the legacy
     `chat-fn` contract, `(model, prompt, system) -> Str`.
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    prompt-fn (model, prompt, system) { `${model}: ${prompt}` }
+    opts ::chat/ChatOptions({chat-fn: prompt-fn, model: "gpt-4o"})
+    ::chat/complete-prompt(opts, "Summarize this.", null)  // "gpt-4o: Summarize this."
+    ```
     """
 }
 fn (opts: ChatOptions, prompt: Str, system: Str?): Any {
@@ -562,7 +664,17 @@ type {
 }
 
 text-part
-meta { doc: "Convenience: build a `MessagePart({kind: \"text\", text: …})`." }
+meta {
+    doc: """
+    Convenience: build a `MessagePart({kind: "text", text: …})`.
+
+    **Example**
+
+    ```hot
+    ::ai::chat/text-part("Hello").kind  // "text"
+    ```
+    """
+}
 fn (text: Str): MessagePart {
     MessagePart({
         kind: "text",
@@ -581,6 +693,13 @@ meta {
     Convenience: build an image `MessagePart`. Either `data`
     (base64) or `url` should be set; `mime` should describe the
     encoding when `data` is set.
+
+    **Example**
+
+    ```hot
+    ::ai::chat/image-part("https://example.com/cat.png").url  // "https://example.com/cat.png"
+    ::ai::chat/image-part("iVBORw0KGgo=", "image/png").mime  // "image/png"
+    ```
     """
 }
 fn
@@ -617,6 +736,14 @@ meta {
     attached even when the bytes can't be sent.
 
     Returns the empty string for empty input.
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    ::chat/flatten-parts([::chat/text-part("Caption"), ::chat/image-part("https://example.com/cat.png")])
+    // "Caption\n\n[image:image (https://example.com/cat.png)]"
+    ```
     """
 }
 fn (parts: Vec<MessagePart>?): Str {
@@ -631,7 +758,10 @@ fn (parts: Vec<MessagePart>?): Str {
 }
 
 render-part
-meta { doc: "Internal: render a single `MessagePart` for `flatten-parts`." }
+meta {
+    no-doc: true,
+    doc: "Internal: render a single `MessagePart` for `flatten-parts`."
+}
 fn (p: MessagePart): Str {
     cond {
         eq(p.kind, "text") => { or(p.text, "") }
@@ -725,6 +855,14 @@ meta {
     it's stored in `content` or in `parts`. Adapters that haven't
     moved to multi-part input use this to keep working with
     multi-part-aware callers.
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    ::chat/message-text(::chat/user-message("Hello"))  // "Hello"
+    ::chat/message-text(::chat/Message({role: "user", content: "", parts: [::chat/text-part("Hi there")]}))  // "Hi there"
+    ```
     """
 }
 fn (msg: Message): Str {
@@ -780,7 +918,8 @@ meta {
         prompt_tokens: 120,
         completion_tokens: 84,
         latency_ms: 1280,
-    })
+    }, "OpenAI", "gpt-4o")
+    usage.total-tokens  // 204
     ```
     """
 }
@@ -940,6 +1079,12 @@ meta {
     doc: """
     Default `on-delta` callback used when a streaming caller does not
     supply one. Discards every event.
+
+    **Example**
+
+    ```hot
+    ::ai::chat/noop-on-delta(::ai::chat/ReplyDelta.TextDelta({text: "hi"}))  // null
+    ```
     """
 }
 fn (delta: ReplyDelta): Null { null }
@@ -953,6 +1098,7 @@ PER_MESSAGE_OVERHEAD_TOKENS 4
 
 count-message-chars
 meta {
+    no-doc: true,
     doc: """Internal: serialize a single Message to a char-count for the shared heuristic."""
 }
 fn (m: Message): Int {
@@ -983,8 +1129,14 @@ meta {
 
     Contract matches the `count-tokens-fn` slot:
 
-    ```hot
+    ```
     (messages: Vec<Message>, model: Str): Int
+    ```
+
+    **Example**
+
+    ```hot
+    ::ai::chat/count-tokens-heuristic([::ai::chat/user-message("Hello there")], "gpt-4o")  // 8
     ```
     """
 }
@@ -1134,7 +1286,15 @@ DEFAULT_MAX_ITERATIONS 10
 
 user-message
 meta {
-    doc: """Construct a `Message` with `role: "user"` and the given text content."""
+    doc: """
+    Construct a `Message` with `role: "user"` and the given text content.
+
+    **Example**
+
+    ```hot
+    ::ai::chat/user-message("Hello").role  // "user"
+    ```
+    """
 }
 fn (text: Str): Message {
     Message({role: "user", content: text})
@@ -1147,6 +1307,14 @@ meta {
     `tool-calls` is non-null the message records a tool-use turn that
     must be paired with one or more `tool-result-message` entries on
     the next user turn.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "tu_1", name: "get-weather", input: {city: "Paris"}})
+    first(::ai::chat/assistant-message("Checking.", [call]).tool-calls).name  // "get-weather"
+    ::ai::chat/assistant-message(null, null).content  // ""
+    ```
     """
 }
 fn (text: Str?, tool-calls: Vec<::ai::tool/ToolCall>?): Message {
@@ -1163,6 +1331,13 @@ meta {
     Construct a `Message` carrying a `::ai::tool/dispatch` result back
     to the model. Echoes `result.id` as `tool-call-id` so providers
     can correlate it with the originating `ToolCall`.
+
+    **Example**
+
+    ```hot
+    result ::ai::tool/ToolResult({id: "tu_1", output: "18C and clear", is-error: false})
+    ::ai::chat/tool-result-message(result).tool-call-id  // "tu_1"
+    ```
     """
 }
 fn (result: ::ai::tool/ToolResult): Message {
@@ -1182,7 +1357,7 @@ meta {
 
     `opts.chat-fn` must match the tools-aware contract:
 
-    ```hot
+    ```
     (model: Str, messages: Vec<Message>, system: Str?, tools: Vec<Tool>?) -> ChatReply
     ```
 
@@ -1201,12 +1376,12 @@ meta {
     **Example**
 
     ```hot
-    add fn (x: Int, y: Int): Int { add(x, y) }
+    sum fn (x: Int, y: Int): Int { add(x, y) }
 
     opts ::ai::chat/ChatOptions({
         chat-fn: ::anthropic::messages/chat-with-tools,
         model: "claude-sonnet-4-5",
-        tools: [::ai::tool/from-fn(add)],
+        tools: [::ai::tool/from-fn(sum)],
         max-iterations: 5
     })
 
@@ -1228,6 +1403,11 @@ meta {
     **Example**
 
     ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::anthropic::messages/chat-with-tools,
+        model: "claude-sonnet-4-5"
+    })
+
     history [
         ::ai::chat/user-message("Hi"),
         ::ai::chat/assistant-message("Hello!", null),
@@ -1282,6 +1462,7 @@ DEFAULT_WARN_CONTEXT_PCT 0.8
 
 estimate-tools-tokens
 meta {
+    no-doc: true,
     doc: """
     Internal: char-based heuristic for the JSON-serialized weight of
     a tool list. Adds ~10 tokens of overhead per tool to account for
@@ -1302,7 +1483,10 @@ fn (tools: Vec<::ai::tool/Tool>?): Int {
 }
 
 estimate-system-tokens
-meta { doc: """Internal: char/4 heuristic for the system prompt.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: char/4 heuristic for the system prompt."""
+}
 fn (system: Str?): Int {
     cond {
         is-null(system) => { 0 }
@@ -1312,7 +1496,10 @@ fn (system: Str?): Int {
 }
 
 format-budget-breakdown
-meta { doc: """Internal: human-readable breakdown of a token budget overrun.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: human-readable breakdown of a token budget overrun."""
+}
 fn (parts: Map, total: Int, limit: Int): Str {
     `Approaching context limit (${total} / ${limit}):
   system prompt: ${parts.system}
@@ -1322,6 +1509,7 @@ fn (parts: Map, total: Int, limit: Int): Str {
 
 check-budget
 meta {
+    no-doc: true,
     doc: """
     Internal: enforce `opts.max-context-tokens` /
     `opts.warn-context-pct` against `messages` + `system` + `tools`.
@@ -1379,6 +1567,7 @@ fn (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>?): Nu
 
 emit-stream-delta
 meta {
+    no-doc: true,
     doc: """
     Internal: forward a `ReplyDelta` to the current run's stream when
     `opts.emit-stream-deltas` is on. Errors (e.g. no stream context)
@@ -1398,6 +1587,7 @@ fn (opts: ChatOptions, delta: ReplyDelta): Null {
 
 wrap-on-delta
 meta {
+    no-doc: true,
     doc: """
     Internal: build the effective per-turn `on-delta` callback —
     combines an optional caller-supplied `user-on-delta` with the
@@ -1419,6 +1609,7 @@ fn (opts: ChatOptions, user-on-delta: Fn?): Fn {
 
 step-payload
 meta {
+    no-doc: true,
     doc: """Internal: the per-turn step record `emit-step` publishes. Lists its fields, so `provider-opts` can't reach the stream."""
 }
 fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?): Map {
@@ -1435,6 +1626,7 @@ fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?
 
 emit-step
 meta {
+    no-doc: true,
     doc: """
     Internal: publish a per-turn step record to the current run's
     stream when `opts.emit-steps` is on. Errors (e.g. no stream
@@ -1453,7 +1645,10 @@ fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?
 }
 
 run-loop-step
-meta { doc: """Internal: one iteration of `run-loop`. Tail-recursive.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: one iteration of `run-loop`. Tail-recursive."""
+}
 fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int): Str {
     lte(remaining, 0) => {
         fail(`run-loop exceeded max-iterations`, {messages: messages})
@@ -1499,7 +1694,7 @@ meta {
 
     `opts.chat-stream-fn` must match the streaming contract:
 
-    ```hot
+    ```
     (model: Str, messages: Vec<Message>, system: Str?,
      tools: Vec<Tool>?, on-delta: Fn) -> ChatReply
     ```
@@ -1526,10 +1721,12 @@ meta {
         }
     }
 
+    sum fn (x: Int, y: Int): Int { add(x, y) }
+
     opts ::ai::chat/ChatOptions({
         chat-stream-fn: ::anthropic::chat-tools/chat-with-tools-stream,
         model: "claude-sonnet-4-5",
-        tools: [::ai::tool/from-fn(add)]
+        tools: [::ai::tool/from-fn(sum)]
     })
 
     answer ::ai::chat/run-loop-stream(opts, "What is 17 + 25?", on-token)
@@ -1550,6 +1747,19 @@ meta {
     Variant of `run-loop-stream` that takes an explicit
     `Vec<Message>` as starting history. Useful for resuming an
     existing conversation while still streaming the next response.
+
+    **Example**
+
+    ```hot
+    ::chat ::ai::chat
+    stream-fn (model, messages, system, tools, on-delta) {
+        on-delta(::chat/ReplyDelta.TextDelta({text: "Why did the tool cross the road?"}))
+        ::chat/ChatReply({text: "Why did the tool cross the road?", stop-reason: "end_turn"})
+    }
+    opts ::chat/ChatOptions({chat-stream-fn: stream-fn, model: "claude-sonnet-4-5"})
+    history [::chat/user-message("Hi"), ::chat/assistant-message("Hello!", null), ::chat/user-message("Tell me a joke.")]
+    ::chat/run-loop-stream-messages(opts, history, null)  // "Why did the tool cross the road?"
+    ```
     """
 }
 fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
@@ -1592,7 +1802,10 @@ fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
 }
 
 run-loop-stream-step
-meta { doc: """Internal: one iteration of `run-loop-stream`. Tail-recursive.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: one iteration of `run-loop-stream`. Tail-recursive."""
+}
 fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int, on-delta: Fn): Str {
     lte(remaining, 0) => {
         fail(`run-loop-stream exceeded max-iterations`, {messages: messages})

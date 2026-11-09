@@ -50,7 +50,17 @@ type {
 
 error-message
 meta {
-    doc: """Readable text for a failed response: Firecrawl's `error` (or `message`) field when present, prefixed with the HTTP status. Exposed for testing."""
+    doc: """
+    Readable text for a failed response: Firecrawl's `error` (or `message`)
+    field when present, prefixed with the HTTP status. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/error-message(402, {success: false, error: "Insufficient credits"})  // "Firecrawl API error 402: Insufficient credits"
+    ::firecrawl::api/error-message(500, null)  // "Firecrawl API error 500"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   detail cond {
@@ -62,7 +72,9 @@ fn (status: Int, body: Any): Str {
   if(is-some(detail), `Firecrawl API error ${status}: ${detail}`, `Firecrawl API error ${status}`)
 }
 
-text-or-null fn (value: Any): Any {
+text-or-null
+meta {no-doc: true}
+fn (value: Any): Any {
   if(and(is-str(value), not(is-blank(value))), value, null)
 }
 
@@ -79,13 +91,30 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 // Credentials
 // =============================================================================
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key, base-url}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults. An
+    Err when no API key is set, when `api-key` is in `opts` but blank or
+    null (that never falls back to context), or when `opts` has `base-url`
+    without `api-key`. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::api ::firecrawl::api
+
+    ::api/resolve-from({}, {"firecrawl.api.key": "ctx-key"}).api-key  // "ctx-key"
+    ::api/resolve-from({api-key: "tenant-key"}, {}).base-url  // "https://api.firecrawl.dev/v2"
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opt-key non-blank(get(opts, "api-key"))
@@ -130,7 +159,21 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). A `""` body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). A
+    `""` body sends no `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::firecrawl::api/build-request("POST", "/scrape", {url: "https://example.com"}, {
+      api-key: "tenant-key",
+      base-url: "https://api.firecrawl.dev/v2"
+    })
+    req.url  // "https://api.firecrawl.dev/v2/scrape"
+    req.body  // "{\"url\":\"https://example.com\"}"
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, resolved: Map): HttpRequest {
   auth {Authorization: `Bearer ${resolved.api-key}`}
@@ -149,6 +192,16 @@ meta {
     v2 base URL; pass `""` as `body` for requests without one. Returns
     the decoded JSON body on 2xx, an Err carrying `HttpError` otherwise,
     or the transport Err.
+
+    **Example**
+
+    ```hot
+    body ::firecrawl::api/request("POST", "/scrape", {url: "https://example.com", formats: ["markdown"]})
+    body.data.markdown
+
+    // Act for another tenant, with its key from context
+    ::firecrawl::api/request("GET", "/crawl/active", "", {api-key: ::hot::ctx/get("tenant.firecrawl.key")})
+    ```
     """
 }
 fn
@@ -177,7 +230,17 @@ fn
 
 job-path
 meta {
-    doc: """`/<kind>/<id>` with the id URL-encoded, plus an optional suffix (e.g. `"/errors"`). Exposed for testing."""
+    doc: """
+    `/<kind>/<id>` with the id URL-encoded, plus an optional suffix (e.g.
+    `"/errors"`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/job-path("crawl", "abc")  // "/crawl/abc"
+    ::firecrawl::api/job-path("batch/scrape", "abc", "/errors")  // "/batch/scrape/abc/errors"
+    ```
+    """
 }
 fn
 (kind: Str, id: Str): Str {
@@ -189,7 +252,18 @@ fn
 
 body-with
 meta {
-    doc: """Merge caller `options` with the required fields (required fields win) and drop null values, so unset options are omitted rather than sent as JSON null. Exposed for testing."""
+    doc: """
+    Merge caller `options` with the required fields (required fields win)
+    and drop null values, so unset options are omitted rather than sent as
+    JSON null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/body-with({url: "https://example.com"}, {limit: 5, url: "ignored", webhook: null})
+    // {url: "https://example.com", limit: 5}
+    ```
+    """
 }
 fn (required: Map, options: Map): Map {
   filter-vals({...options, ...required}, is-some)
@@ -209,6 +283,13 @@ meta {
     `base-url` (default the v2 base URL), or null when there is no next
     page. A `next` that points anywhere other than that API root is never
     followed, so the API key is only ever sent there. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/next-path("https://api.firecrawl.dev/v2/crawl/abc?skip=10")  // "/crawl/abc?skip=10"
+    ::firecrawl::api/next-path("https://other.example/crawl/abc")  // null
+    ```
     """
 }
 fn
@@ -234,6 +315,16 @@ meta {
     `next` so you can resume), or on an Err from `fetch` (returned).
     `base-url` (default the v2 base URL) is the only root it follows.
     Exposed for testing.
+
+    **Example**
+
+    ```hot
+    pages {"/crawl/abc?skip=1": {status: "completed", data: [{n: 2}]}}
+    page-one {status: "scraping", data: [{n: 1}], next: "https://api.firecrawl.dev/v2/crawl/abc?skip=1"}
+    out ::firecrawl::api/collect-pages(page-one, (path) { get(pages, path) })
+    out.status  // "completed"
+    out.data  // [{n: 1}, {n: 2}]
+    ```
     """
 }
 fn
@@ -244,7 +335,9 @@ fn
   collect-loop(page, or(get(page, "data"), []), fetch, 0, base-url)
 }
 
-collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int, base-url: Str): Map {
+collect-loop
+meta {no-doc: true}
+fn (page: Map, docs: Vec, fetch: Fn, count: Int, base-url: Str): Map {
   path next-path(get(page, "next"), base-url)
   cond {
     is-null(path) => { {...page, data: docs} }
@@ -268,7 +361,19 @@ collect-loop fn (page: Map, docs: Vec, fetch: Fn, count: Int, base-url: Str): Ma
 
 get-all-pages
 meta {
-    doc: """`GET` a status path and follow `next` across the pages, with the credentials and API root from `opts`."""
+    doc: """
+    `GET` a status path and follow `next` across the pages, with the
+    credentials and API root from `opts`.
+
+    **Example**
+
+    ```hot
+    ::api ::firecrawl::api
+
+    job ::api/get-all-pages(::api/job-path("crawl", "0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90"), {})
+    length(job.data)
+    ```
+    """
 }
 fn (path: Str, opts: Map): Map {
   resolved resolve(opts)
@@ -287,7 +392,17 @@ fn (path: Str, opts: Map): Map {
 
 is-terminal
 meta {
-    doc: """True for a job status that will not change again: "completed", "failed", or "cancelled". Exposed for testing."""
+    doc: """
+    True for a job status that will not change again: "completed", "failed",
+    or "cancelled". Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::api/is-terminal("completed")  // true
+    ::firecrawl::api/is-terminal("scraping")  // false
+    ```
+    """
 }
 fn (status: Any): Bool {
   in(status, ["completed", "failed", "cancelled"])

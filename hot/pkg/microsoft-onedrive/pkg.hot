@@ -2,7 +2,7 @@
 
 hot.pkg.microsoft-onedrive {
   name: "hot.dev/microsoft-onedrive",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "OneDrive and SharePoint document library bindings for Hot over Microsoft Graph driveItems: drives by user, site or group, items by id or path, listing and search, read any file for RAG (as stored, PDF conversion, or text), Range downloads past the response cap, binary-safe simple and resumable upload sessions, folders, move, copy, sharing links and invitations, versions, and delta sync with change-notification subscriptions.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.microsoft-onedrive {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/microsoft-graph": "0.1.1"
+    "hot.dev/microsoft-graph": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

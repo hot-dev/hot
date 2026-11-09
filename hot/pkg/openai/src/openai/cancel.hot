@@ -244,7 +244,19 @@ CancelBatchResponse type {
 
 cancel-batch
 meta {
-    doc: """POST /batches/{batch_id}/cancel - Cancel an in-progress batch. The batch status will change to "cancelling"."""
+    doc: """
+    POST /batches/{batch_id}/cancel - Cancel an in-progress batch. The batch
+    status will change to "cancelling".
+
+    **Example**
+
+    ```hot
+    batch ::openai::cancel/cancel-batch(::openai::cancel/CancelBatchRequest({
+      batch-id: "batch_abc123"
+    }))
+    batch.status
+    ```
+    """
 }
 fn
 (request: CancelBatchRequest): CancelBatchResponse {
@@ -284,7 +296,20 @@ CancelEvalRunResponse type {
 
 cancel-eval-run
 meta {
-    doc: """POST /evals/{eval_id}/runs/{run_id} - Cancel an in-progress evaluation run."""
+    doc: """
+    POST /evals/{eval_id}/runs/{run_id} - Cancel an in-progress evaluation
+    run.
+
+    **Example**
+
+    ```hot
+    eval-run ::openai::cancel/cancel-eval-run(::openai::cancel/CancelEvalRunRequest({
+      eval-id: "eval_abc123",
+      run-id: "evalrun_abc123"
+    }))
+    eval-run.status
+    ```
+    """
 }
 fn
 (request: CancelEvalRunRequest): CancelEvalRunResponse {
@@ -328,7 +353,19 @@ CancelFineTuningJobResponse type {
 
 cancel-finetuning
 meta {
-    doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/cancel - Cancel an in-progress fine-tuning job."""
+    doc: """
+    POST /fine_tuning/jobs/{fine_tuning_job_id}/cancel - Cancel an
+    in-progress fine-tuning job.
+
+    **Example**
+
+    ```hot
+    job ::openai::cancel/cancel-finetuning(::openai::cancel/CancelFineTuningJobRequest({
+      fine-tuning-job-id: "ftjob_abc123"
+    }))
+    job.status
+    ```
+    """
 }
 fn
 (request: CancelFineTuningJobRequest): CancelFineTuningJobResponse {
@@ -353,7 +390,19 @@ CancelResponseResponse type Map
 
 cancel-response
 meta {
-    doc: """POST /responses/{response_id}/cancel - Cancel an in-progress model response."""
+    doc: """
+    POST /responses/{response_id}/cancel - Cancel an in-progress model
+    response.
+
+    **Example**
+
+    ```hot
+    response ::openai::cancel/cancel-response(::openai::cancel/CancelResponseRequest({
+      response-id: "resp_abc123"
+    }))
+    response.status
+    ```
+    """
 }
 fn
 (request: CancelResponseRequest): CancelResponseResponse {
@@ -406,7 +455,20 @@ CancelRunResponse type {
 
 cancel-run
 meta {
-    doc: """POST /threads/{thread_id}/runs/{run_id}/cancel - Cancel an in-progress assistant run."""
+    doc: """
+    POST /threads/{thread_id}/runs/{run_id}/cancel - Cancel an in-progress
+    assistant run.
+
+    **Example**
+
+    ```hot
+    run ::openai::cancel/cancel-run(::openai::cancel/CancelRunRequest({
+      thread-id: "thread_abc123",
+      run-id: "run_abc123"
+    }))
+    run.status
+    ```
+    """
 }
 fn
 (request: CancelRunRequest): CancelRunResponse {
@@ -440,7 +502,19 @@ CancelUploadResponse type {
 
 cancel-upload
 meta {
-    doc: """POST /uploads/{upload_id}/cancel - Cancel an in-progress multi-part upload."""
+    doc: """
+    POST /uploads/{upload_id}/cancel - Cancel an in-progress multi-part
+    upload.
+
+    **Example**
+
+    ```hot
+    upload ::openai::cancel/cancel-upload(::openai::cancel/CancelUploadRequest({
+      upload-id: "upload_abc123"
+    }))
+    upload.status
+    ```
+    """
 }
 fn
 (request: CancelUploadRequest): CancelUploadResponse {
@@ -472,7 +546,20 @@ CancelVectorStoreFileBatchResponse type {
 
 cancel-vector-store-file-batch
 meta {
-    doc: """POST /vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel - Cancel vector store file batch"""
+    doc: """
+    POST /vector_stores/{vector_store_id}/file_batches/{batch_id}/cancel -
+    Cancel vector store file batch
+
+    **Example**
+
+    ```hot
+    file-batch ::openai::cancel/cancel-vector-store-file-batch(::openai::cancel/CancelVectorStoreFileBatchRequest({
+      vector-store-id: "vs_abc123",
+      batch-id: "vsfb_abc123"
+    }))
+    file-batch.file_counts
+    ```
+    """
 }
 fn
 (request: CancelVectorStoreFileBatchRequest): CancelVectorStoreFileBatchResponse {

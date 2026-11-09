@@ -33,7 +33,20 @@ seg ::middesk::api/seg
 
 verify-signature
 meta {
-    doc: """Verify an `X-Middesk-Signature-256` value against a raw body: lowercase hex HMAC-SHA256 of the body with `secret`, compared in constant time. Fails closed on an empty secret or signature. Exposed for testing; `verify-request` reads them from the request."""
+    doc: """
+    Verify an `X-Middesk-Signature-256` value against a raw body: lowercase
+    hex HMAC-SHA256 of the body with `secret`, compared in constant time.
+    Fails closed on an empty secret or signature. Exposed for testing;
+    `verify-request` reads them from the request.
+
+    **Example**
+
+    ```hot
+    body "{\"id\":\"evt_1\",\"type\":\"business.updated\"}"
+    signature "5ee3d4a621ede3053cda09d5..."
+    ::middesk::webhooks/verify-signature(signature, body, ::hot::ctx/get("middesk.webhook.secret"))
+    ```
+    """
 }
 fn (signature: Str, raw-body: Str | Bytes, secret: Str): Bool {
   sig lowercase(trim(signature))
@@ -91,6 +104,19 @@ meta {
     object-type, object-id, object}`. `type` is e.g. `"business.updated"`
     or `"order.updated"`; `object` is `data.object` (for business events,
     the business with its status). Dedupe on `id`.
+
+    **Example**
+
+    ```hot
+    event ::middesk::webhooks/parse-event({
+      id: "evt_1",
+      type: "business.updated",
+      data: {object: {object: "business", id: "biz_1", status: "in_review"}}
+    })
+    event.type  // "business.updated"
+    event.object-id  // "biz_1"
+    event.object.status  // "in_review"
+    ```
     """
 }
 fn (body: Any): Map {
@@ -160,7 +186,16 @@ fn
 
 list-webhooks
 meta {
-    doc: """GET /webhooks - Your webhook endpoints. `params`: `page`, `per_page`."""
+    doc: """
+    GET /webhooks - Your webhook endpoints. `params`: `page`, `per_page`.
+
+    **Example**
+
+    ```hot
+    hooks ::middesk::webhooks/list-webhooks({per_page: 50})
+    map(hooks.data, %.url)
+    ```
+    """
 }
 fn
 (): Map {
@@ -175,7 +210,17 @@ fn
 
 mark-webhook-secret
 meta {
-    doc: """Mask the signing secret in `create-webhook` or `update-webhook` params in call records, and return the params unchanged. Exposed for testing."""
+    doc: """
+    Mask the signing secret in `create-webhook` or `update-webhook` params
+    in call records, and return the params unchanged. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    params ::middesk::webhooks/mark-webhook-secret({secret: ::hot::ctx/get("middesk.webhook.secret")})
+    ::middesk::webhooks/update-webhook("whk_j1k2l3", params)
+    ```
+    """
 }
 fn (params: Map): Map {
   secret get(params, "secret")
@@ -212,7 +257,16 @@ fn
 
 get-webhook
 meta {
-    doc: """GET /webhooks/{id} - Retrieve an endpoint (the secret is not returned)."""
+    doc: """
+    GET /webhooks/{id} - Retrieve an endpoint (the secret is not returned).
+
+    **Example**
+
+    ```hot
+    hook ::middesk::webhooks/get-webhook("whk_j1k2l3")
+    hook.enabled_events
+    ```
+    """
 }
 fn
 (webhook-id: Str): Map {
@@ -224,7 +278,17 @@ fn
 
 update-webhook
 meta {
-    doc: """PUT /webhooks/{id} - Update `url`, `secret`, `enabled_events` or `disabled_at` (a timestamp pauses deliveries)."""
+    doc: """
+    PUT /webhooks/{id} - Update `url`, `secret`, `enabled_events` or
+    `disabled_at` (a timestamp pauses deliveries).
+
+    **Example**
+
+    ```hot
+    // Pause deliveries
+    ::middesk::webhooks/update-webhook("whk_j1k2l3", {disabled_at: "2026-11-09T00:00:00Z"})
+    ```
+    """
 }
 fn
 (webhook-id: Str, params: Map): Map {
@@ -237,7 +301,15 @@ fn
 
 delete-webhook
 meta {
-    doc: """DELETE /webhooks/{id} - Remove an endpoint."""
+    doc: """
+    DELETE /webhooks/{id} - Remove an endpoint.
+
+    **Example**
+
+    ```hot
+    ::middesk::webhooks/delete-webhook("whk_j1k2l3")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Any {

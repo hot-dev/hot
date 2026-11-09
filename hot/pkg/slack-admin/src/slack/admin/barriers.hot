@@ -34,6 +34,18 @@ meta {
 
     Scope: `admin.barriers:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-all`.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    page ::barriers/list()
+    page.barriers
+
+    // One page at a time
+    ::barriers/list(::barriers/ListRequest({limit: 50, cursor: "dXNlcjpVMDYx"}))
+    ```
     """
 }
 fn
@@ -50,7 +62,18 @@ fn
 list-all
 meta {
     doc: """
-    Every `barriers` entry from `admin.barriers.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `barriers` entry from `admin.barriers.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    barriers ::barriers/list-all()
+    length(barriers)
+    ```
     """
 }
 fn
@@ -79,6 +102,19 @@ meta {
     admin.barriers.create - Create a barrier between IDP groups.
 
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    res ::barriers/create(::barriers/CreateRequest({
+      primary_usergroup_id: "S0123ABCDEF",
+      barriered_from_usergroup_ids: ["S0456GHIJKL"],
+      restricted_subjects: ["im", "mpim", "call"]
+    }))
+    res.barrier.id
+    ```
     """
 }
 fn
@@ -102,6 +138,19 @@ meta {
     admin.barriers.update - Replace a barrier's groups and subjects.
 
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    ::barriers/update-barrier(::barriers/UpdateBarrierRequest({
+      barrier_id: "Ba0123ABCDEF",
+      primary_usergroup_id: "S0123ABCDEF",
+      barriered_from_usergroup_ids: ["S0456GHIJKL"],
+      restricted_subjects: ["im", "mpim", "call"]
+    }))
+    ```
     """
 }
 fn
@@ -122,6 +171,14 @@ meta {
     admin.barriers.delete - Delete a barrier.
 
     Scope: `admin.barriers:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::barriers ::slack::admin::barriers
+
+    ::barriers/delete-barrier(::barriers/DeleteBarrierRequest({barrier_id: "Ba0123ABCDEF"}))
+    ```
     """
 }
 fn

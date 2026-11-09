@@ -29,7 +29,20 @@ AddUploadPartResponse type {
 
 add-upload-part
 meta {
-    doc: """POST /uploads/{upload_id}/parts - Add a part to a multi-part upload. Returns the part ID to use when completing the upload."""
+    doc: """
+    POST /uploads/{upload_id}/parts - Add a part to a multi-part upload.
+    Returns the part ID to use when completing the upload.
+
+    **Example**
+
+    ```hot
+    part ::openai::add/add-upload-part("upload_abc123", ::openai::add/AddUploadPartRequest({
+      data: "first chunk of the file"
+    }))
+    // Pass part.id to complete-upload.
+    part.id
+    ```
+    """
 }
 fn
 (upload-id: Str, request: AddUploadPartRequest): AddUploadPartResponse {

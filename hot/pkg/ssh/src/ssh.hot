@@ -38,40 +38,193 @@ meta {
     Connect and authenticate. Expected failures return Err, including a missing
     or mismatched host-key. Passwords, private keys and passphrases are marked
     secret in run records. Hot's outbound network policy applies.
+
+    **Example**
+
+    ```hot
+    // host-key is the server's OpenSSH public key from a trusted channel,
+    // such as a line from ssh-keyscan without the host name.
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+
+    // The SHA256 fingerprint that was verified
+    connection.host-key
+    ::ssh/close(connection)
+
+    // Pin a SHA256 fingerprint and sign in with a password
+    other ::ssh/connect({
+      host: "files.example.com",
+      port: 2222,
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.fingerprint"),
+      password: ::hot::ctx/get("files.password"),
+      timeout: 10000
+    })
+    ::ssh/close(other)
+    ```
     """
 }
 fn (options: ConnectOptions): Connection { call-lib(::hot::internal::ssh/connect, [options]) }
 
 open-subsystem
 meta {
-    doc: "Open a named subsystem and wait for server acceptance. Reuse one connection for multiple channels."
+    doc: """
+    Open a named subsystem and wait for server acceptance. Reuse one
+    connection for multiple channels.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    channel ::ssh/open-subsystem(connection, "my-subsystem")
+    ::ssh/write(channel, "ping")
+    reply ::ssh/read(channel, 65536)
+    if(is-null(reply), "closed by server", ::hot::bytes/to-str(reply))
+    ::ssh/close(channel)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (connection: Connection, name: Str): Channel { call-lib(::hot::internal::ssh/open-subsystem, [connection, name]) }
 
 read
 meta {
-    doc: "Read up to max bytes (1..67108864). Returns null at EOF. Each channel has independent read/write locks."
+    doc: """
+    Read up to max bytes (1..67108864). Returns null at EOF. Each channel
+    has independent read/write locks.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    channel ::ssh/open-subsystem(connection, "my-subsystem")
+    ::ssh/write(channel, "ping")
+
+    // Up to 64 KiB, or null once the server has closed the stream
+    chunk ::ssh/read(channel, 65536)
+    if(is-null(chunk), 0, length(chunk))
+    ::ssh/close(channel)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (channel: Channel, max: Int): Bytes? { call-lib(::hot::internal::ssh/read, [channel, max]) }
 
 read-exact
 meta {
-    doc: "Read exactly size bytes. An error closes the channel for further I/O because a partial frame may have been consumed."
+    doc: """
+    Read exactly size bytes. An error closes the channel for further I/O
+    because a partial frame may have been consumed.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    channel ::ssh/open-subsystem(connection, "my-subsystem")
+    // A frame with a 4-byte big-endian length prefix
+    header ::ssh/read-exact(channel, 4)
+    body ::ssh/read-exact(channel, ::hot::bytes/to-uint(header))
+    ::hot::bytes/to-str(body)
+    ::ssh/close(channel)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (channel: Channel, size: Int): Bytes { call-lib(::hot::internal::ssh/read-exact, [channel, size]) }
 
 write
 meta {
-    doc: "Write Bytes or UTF-8 Str and flush. Returns the byte count. An interrupted write makes the channel unusable."
+    doc: """
+    Write Bytes or UTF-8 Str and flush. Returns the byte count. An
+    interrupted write makes the channel unusable.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    channel ::ssh/open-subsystem(connection, "my-subsystem")
+    // Each call returns the number of bytes sent
+    sent ::ssh/write(channel, "ping")
+    more ::ssh/write(channel, Bytes([0, 1, 2]))
+    add(sent, more)
+    ::ssh/close(channel)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (channel: Channel, data: Bytes | Str): Int { call-lib(::hot::internal::ssh/write, [channel, data]) }
 
 close
 meta {
-    doc: "Close a connection or channel. Closing a connection invalidates its channels and SFTP sessions. Safe to repeat."
+    doc: """
+    Close a connection or channel. Closing a connection invalidates its
+    channels and SFTP sessions. Safe to repeat.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+    channel ::ssh/open-subsystem(connection, "my-subsystem")
+    ::ssh/write(channel, "bye")
+
+    // Channels first, then the connection that carries them
+    ::ssh/close(channel)
+    ::ssh/close(connection)
+    ```
+    """
 }
 fn (handle: Connection | Channel): Bool { call-lib(::hot::internal::ssh/close, [handle]) }
 
 is-open
-meta {doc: "Check local handle state; this does not probe the peer."}
+meta {
+    doc: """
+    Check local handle state; this does not probe the peer.
+
+    **Example**
+
+    ```hot
+    connection ::ssh/connect({
+      host: "files.example.com",
+      user: "integration",
+      host-key: ::hot::ctx/get("files.host.key"),
+      private-key: ::hot::ctx/get("files.private.key")
+    })
+
+    // True here. It turns false after close, or when the session has ended.
+    ::ssh/is-open(connection)
+
+    ::ssh/close(connection)
+    ::ssh/is-open(connection)
+    ```
+    """
+}
 fn (handle: Connection | Channel): Bool { call-lib(::hot::internal::ssh/is-open, [handle]) }

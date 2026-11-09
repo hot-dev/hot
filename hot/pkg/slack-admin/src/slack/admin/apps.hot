@@ -32,6 +32,17 @@ meta {
     admin.apps.approve - Approve an app (by `app_id`) or an install request (by `request_id`).
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/approve(::apps/ApproveRequest({app_id: "A0123ABCDEF", team_id: "T0123ABCDEF"}))
+
+    // Approve a pending install request
+    ::apps/approve(::apps/ApproveRequest({request_id: "Ar0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -58,6 +69,14 @@ meta {
     admin.apps.restrict - Restrict an app (by `app_id`) or deny an install request (by `request_id`).
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/restrict(::apps/RestrictRequest({app_id: "A0123ABCDEF", enterprise_id: "E0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -83,6 +102,14 @@ meta {
     admin.apps.clearResolution - Clear an app's approved/restricted status.
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/clear-resolution(::apps/ClearResolutionRequest({app_id: "A0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -105,6 +132,14 @@ meta {
     admin.apps.uninstall - Uninstall an app from workspaces (`team_ids`) or the whole org (`enterprise_id`).
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/uninstall(::apps/UninstallRequest({app_id: "A0123ABCDEF", team_ids: ["T0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -130,6 +165,16 @@ meta {
 
     Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `approved-list-all`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    page ::apps/approved-list(::apps/ApprovedListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.approved_apps
+    page.response_metadata.next_cursor
+    ```
     """
 }
 fn
@@ -146,7 +191,18 @@ fn
 approved-list-all
 meta {
     doc: """
-    Every `approved_apps` entry from `admin.apps.approved.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `approved_apps` entry from `admin.apps.approved.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    apps ::apps/approved-list-all(::apps/ApprovedListRequest({team_id: "T0123ABCDEF"}), 500)
+    length(apps)
+    ```
     """
 }
 fn
@@ -178,6 +234,15 @@ meta {
 
     Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `restricted-list-all`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    page ::apps/restricted-list(::apps/RestrictedListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    page.restricted_apps
+    ```
     """
 }
 fn
@@ -194,7 +259,18 @@ fn
 restricted-list-all
 meta {
     doc: """
-    Every `restricted_apps` entry from `admin.apps.restricted.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `restricted_apps` entry from `admin.apps.restricted.list`,
+    following `next_cursor` until the last page or `max-items` (default
+    1000). `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    apps ::apps/restricted-list-all(::apps/RestrictedListRequest({team_id: "T0123ABCDEF"}), 500)
+    length(apps)
+    ```
     """
 }
 fn
@@ -226,6 +302,18 @@ meta {
 
     Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `requests-list-all`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    page ::apps/requests-list(::apps/RequestsListRequest({team_id: "T0123ABCDEF", limit: 100}))
+    map(page.app_requests, %.id)
+
+    // As another organization
+    ::apps/requests-list(::apps/RequestsListRequest({team_id: "T0123ABCDEF"}), {token: ::hot::ctx/get("tenant-b.slack.admin.token")})
+    ```
     """
 }
 fn
@@ -242,7 +330,18 @@ fn
 requests-list-all
 meta {
     doc: """
-    Every `app_requests` entry from `admin.apps.requests.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `app_requests` entry from `admin.apps.requests.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    pending ::apps/requests-list-all(::apps/RequestsListRequest({enterprise_id: "E0123ABCDEF"}))
+    length(pending)
+    ```
     """
 }
 fn
@@ -271,6 +370,14 @@ meta {
     admin.apps.requests.cancel - Cancel an install request.
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/requests-cancel(::apps/RequestsCancelRequest({request_id: "Ar0123ABCDEF", team_id: "T0123ABCDEF"}))
+    ```
     """
 }
 fn
@@ -304,6 +411,20 @@ meta {
 
     Scope: `admin.app_activities:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `activities-list-all`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    page ::apps/activities-list(::apps/ActivitiesListRequest({
+      app_id: "A0123ABCDEF",
+      component_type: "workflows",
+      min_log_level: "warn",
+      limit: 100
+    }))
+    page.activities
+    ```
     """
 }
 fn
@@ -320,7 +441,18 @@ fn
 activities-list-all
 meta {
     doc: """
-    Every `activities` entry from `admin.apps.activities.list`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `activities` entry from `admin.apps.activities.list`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    errors ::apps/activities-list-all(::apps/ActivitiesListRequest({app_id: "A0123ABCDEF", min_log_level: "error"}), 2000)
+    length(errors)
+    ```
     """
 }
 fn
@@ -347,6 +479,14 @@ meta {
     admin.apps.config.lookup - Read app configuration (domain restrictions, workflow auth strategy).
 
     Scope: `admin.apps:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/config-lookup(::apps/ConfigLookupRequest({app_ids: ["A0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -369,6 +509,18 @@ meta {
     admin.apps.config.set - Set app configuration. `domain_restrictions: {urls?, emails?}`; `workflow_auth_strategy`: `builder_choice` or `end_user_only`.
 
     Scope: `admin.apps:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::apps ::slack::admin::apps
+
+    ::apps/config-set(::apps/ConfigSetRequest({
+      app_id: "A0123ABCDEF",
+      domain_restrictions: {urls: ["https://example.com"]},
+      workflow_auth_strategy: "end_user_only"
+    }))
+    ```
     """
 }
 fn

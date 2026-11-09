@@ -12,7 +12,19 @@ DEFAULT_API_VERSION "v26.0"
 
 normalize-version
 meta {
-    doc: """Normalize a Graph API version string to the `vNN.N` path form (`"26.0"` and `"v26.0"` both give `"v26.0"`). Exposed for testing."""
+    doc: """
+    Normalize a Graph API version string to the `vNN.N` path form (`"26.0"`
+    and `"v26.0"` both give `"v26.0"`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::core ::whatsapp::core
+
+    ::core/normalize-version("26.0")  // "v26.0"
+    ::core/normalize-version(" v25.0 ")  // "v25.0"
+    ```
+    """
 }
 fn (version: Str): Str {
   trimmed trim(version)
@@ -26,6 +38,14 @@ meta {
     The Graph API version for a call: `api-version` in `opts`, then the
     `whatsapp.api.version` context variable (e.g. `"v25.0"`), otherwise
     `DEFAULT_API_VERSION`.
+
+    **Example**
+
+    ```hot
+    ::core ::whatsapp::core
+
+    ::core/api-version({api-version: "25.0"})  // "v25.0"
+    ```
     """
 }
 fn
@@ -40,7 +60,18 @@ fn
 
 base-url
 meta {
-    doc: """The versioned Graph API base URL, e.g. `https://graph.facebook.com/v26.0`."""
+    doc: """
+    The versioned Graph API base URL, e.g.
+    `https://graph.facebook.com/v26.0`.
+
+    **Example**
+
+    ```hot
+    ::core ::whatsapp::core
+
+    ::core/base-url({api-version: "v25.0"})  // "https://graph.facebook.com/v25.0"
+    ```
+    """
 }
 fn
 (): Str {

@@ -29,7 +29,9 @@ meta {
 DEFAULT_OPENSANCTIONS_URL "https://api.opensanctions.org"
 DEFAULT_DATASET "default"
 
-given fn (v: Any): Bool {
+given
+meta {no-doc: true}
+fn (v: Any): Bool {
   match v {
     Null => { false }
     Str => { not(is-empty(trim(v))) }
@@ -37,7 +39,9 @@ given fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -59,7 +63,7 @@ meta {
     **Example**
 
     ```hot
-    cfg ::opensanctions::config/resolve({api-key: tenant.opensanctions-key, dataset: "sanctions"})
+    cfg ::opensanctions::config/resolve({api-key: ::hot::ctx/get("tenant.opensanctions-key"), dataset: "sanctions"})
     ```
     """
 }
@@ -83,7 +87,18 @@ fn (opts: Map): Map {
 
 require-api-key
 meta {
-    doc: """The resolved OpenSanctions API key. The hosted API needs one, so its absence there is an Err naming where to set it; a self-hosted yente may need none, which gives null."""
+    doc: """
+    The resolved OpenSanctions API key. The hosted API needs one, so its
+    absence there is an Err naming where to set it; a self-hosted yente may
+    need none, which gives null.
+
+    **Example**
+
+    ```hot
+    ::opensanctions::config/require-api-key({api-key: null, base-url: "https://yente.internal"})  // null
+    is-err(::opensanctions::config/require-api-key({api-key: null, base-url: "https://api.opensanctions.org"}))  // true
+    ```
+    """
 }
 fn (cfg: Map): Str? {
   cond {

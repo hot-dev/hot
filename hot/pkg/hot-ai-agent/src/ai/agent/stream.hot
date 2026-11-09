@@ -31,46 +31,171 @@ MEMORY_EXPORT_END "ai:agent:memory:export:end"
 MEMORY_EXPORT_ERROR "ai:agent:memory:export:error"
 
 label
-meta { doc: "Build an agent-specific stream label, e.g. `team-agent:reply:delta`." }
+meta {
+    doc: """
+    Build an agent-specific stream label, e.g. `team-agent:reply:delta`.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/label("team-agent", "reply", "delta")  // "team-agent:reply:delta"
+    ```
+    """
+}
 fn (agent-name: Str, topic: Str, verb: Str): Str {
     `${agent-name}:${topic}:${verb}`
 }
 
 emit
-meta { doc: "Emit a stream event, swallowing missing-stream-context errors." }
+meta {
+    doc: """
+    Emit a stream event, swallowing missing-stream-context errors.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit("team-agent:status", {state: "typing"})
+    ```
+    """
+}
 fn (data-type: Str, payload: Any): Null {
     if-err(::hot::stream/data(data-type, payload), null)
     null
 }
 
-emit-reply-start fn (agent-name: Str, payload: Map): Null {
+emit-reply-start
+meta {
+    doc: """
+    Emit `<agent-name>:reply:start`. Send it before the first delta. Returns
+    `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-reply-start("team-agent", {session_id: "s1", message_id: "m1"})
+    ```
+    """
+}
+fn (agent-name: Str, payload: Map): Null {
     emit(label(agent-name, "reply", "start"), payload)
 }
 
-emit-reply-delta fn (agent-name: Str, payload: Map): Null {
+emit-reply-delta
+meta {
+    doc: """
+    Emit `<agent-name>:reply:delta` with the next piece of reply text in
+    `payload.delta`. Returns `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-reply-delta("team-agent", {session_id: "s1", message_id: "m1", delta: "Hel"})
+    ```
+    """
+}
+fn (agent-name: Str, payload: Map): Null {
     emit(label(agent-name, "reply", "delta"), payload)
 }
 
-emit-reply-sources fn (agent-name: Str, payload: Map): Null {
+emit-reply-sources
+meta {
+    doc: """
+    Emit `<agent-name>:reply:sources` so a client can show what a reply drew
+    on. Returns `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-reply-sources("team-agent", {session_id: "s1", message_id: "m1", sources: [{title: "Runbook"}]})
+    ```
+    """
+}
+fn (agent-name: Str, payload: Map): Null {
     emit(label(agent-name, "reply", "sources"), payload)
 }
 
-emit-reply-end fn (agent-name: Str, payload: Map): Null {
+emit-reply-end
+meta {
+    doc: """
+    Emit `<agent-name>:reply:end` with the final reply in `payload.text`.
+    Returns `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-reply-end("team-agent", {session_id: "s1", message_id: "m1", text: "Hello."})
+    ```
+    """
+}
+fn (agent-name: Str, payload: Map): Null {
     emit(label(agent-name, "reply", "end"), payload)
 }
 
-emit-reply-error fn (agent-name: Str, payload: Map): Null {
+emit-reply-error
+meta {
+    doc: """
+    Emit `<agent-name>:reply:error` when a reply cannot finish. Returns
+    `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-reply-error("team-agent", {session_id: "s1", message_id: "m1", error: "provider timed out"})
+    ```
+    """
+}
+fn (agent-name: Str, payload: Map): Null {
     emit(label(agent-name, "reply", "error"), payload)
 }
 
-emit-memory-start fn (agent-name: Str, action: Str, payload: Map): Null {
+emit-memory-start
+meta {
+    doc: """
+    Emit `<agent-name>:memory:<action>:start`, where `action` is a word such
+    as `forget`, `compact` or `export`. Returns `null`. Does nothing outside
+    a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-memory-start("team-agent", "forget", {session_id: "s1"})
+    ```
+    """
+}
+fn (agent-name: Str, action: Str, payload: Map): Null {
     emit(label(agent-name, "memory", `${action}:start`), payload)
 }
 
-emit-memory-end fn (agent-name: Str, action: Str, payload: Map): Null {
+emit-memory-end
+meta {
+    doc: """
+    Emit `<agent-name>:memory:<action>:end` when a memory action finishes.
+    Returns `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-memory-end("team-agent", "forget", {session_id: "s1", deleted: 12})
+    ```
+    """
+}
+fn (agent-name: Str, action: Str, payload: Map): Null {
     emit(label(agent-name, "memory", `${action}:end`), payload)
 }
 
-emit-memory-error fn (agent-name: Str, action: Str, payload: Map): Null {
+emit-memory-error
+meta {
+    doc: """
+    Emit `<agent-name>:memory:<action>:error` when a memory action fails.
+    Returns `null`. Does nothing outside a stream context.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::stream/emit-memory-error("team-agent", "forget", {session_id: "s1", error: "store unavailable"})
+    ```
+    """
+}
+fn (agent-name: Str, action: Str, payload: Map): Null {
     emit(label(agent-name, "memory", `${action}:error`), payload)
 }

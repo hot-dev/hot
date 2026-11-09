@@ -11,7 +11,17 @@ sign-url ::aws::core/sign-url
 // Presign one request with resolved settings
 presign
 meta {
-    doc: """A presigned URL for `method` on an object, with credentials, region and endpoint from `opts`. An Err when the bucket or region isn't valid."""
+    doc: """
+    A presigned URL for `method` on an object, with credentials, region and
+    endpoint from `opts`. An Err when the bucket or region isn't valid.
+
+    **Example**
+
+    ```hot
+    url ::aws::s3::presigned/presign("GET", "my-bucket", "report.pdf", 900, {region: "eu-west-1"})
+    ::hot::http/get(url).status
+    ```
+    """
 }
 fn (method: Str, bucket: Str, key: Str, expires_in: Int, opts: Map): Str {
     if-ok(::api/resolve(opts, bucket), (resolved) {

@@ -330,7 +330,7 @@ meta {
 
     ```hot
     // Start a container task
-    task ::hot::box/start(BoxConf({
+    task ::hot::box/start(::hot::box/BoxConf({
         "image": "python:3.13-alpine",
         "cmd": ["python", "-c", "print('Hello from container')"]
     }))
@@ -338,7 +338,7 @@ meta {
     // task.stream-id — the stream ID
 
     // Start with environment variables and custom limits
-    task ::hot::box/start(BoxConf({
+    task ::hot::box/start(::hot::box/BoxConf({
         "image": "node:22-alpine",
         "cmd": ["node", "-e", "console.log(process.env.NAME)"],
         "env": {"NAME": "Hot"},

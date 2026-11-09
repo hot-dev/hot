@@ -25,7 +25,21 @@ MAX_TOKEN_LENGTH 2048
 secret
 meta {
     ctx: {"cloudflare.turnstile.secret": {required: false}},
-    doc: """The widget secret for a call: `secret-key` in `opts`, masked in this run's records, else `cloudflare.turnstile.secret`. An Err carrying `ConfigError` when it is unset, or when `secret-key` is in `opts` but blank or null. Exposed for testing."""
+    doc: """
+    The widget secret for a call: `secret-key` in `opts`, masked in this
+    run's records, else `cloudflare.turnstile.secret`. An Err carrying
+    `ConfigError` when it is unset, or when `secret-key` is in `opts` but
+    blank or null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    key ::cloudflare::turnstile/secret({})
+
+    // Another widget's secret, masked in call records
+    tenant-key ::cloudflare::turnstile/secret({secret-key: ::hot::ctx/get("tenant-b.turnstile.secret")})
+    ```
+    """
 }
 fn (opts: Map): Str {
   explicit ::cloudflare::api/non-blank(get(opts, "secret-key"))
@@ -42,7 +56,18 @@ fn (opts: Map): Str {
 
 siteverify-body
 meta {
-    doc: """The siteverify JSON body: `{secret, response, remoteip?, idempotency_key?}`; unset options are omitted. Exposed for testing."""
+    doc: """
+    The siteverify JSON body: `{secret, response, remoteip?,
+    idempotency_key?}`; unset options are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("cloudflare.turnstile.secret")
+    body ::cloudflare::turnstile/siteverify-body(key, "0.widget-token", {remoteip: "203.0.113.7"})
+    body.remoteip
+    ```
+    """
 }
 fn (secret: Str, token: Str, opts: Map): Map {
   {secret: secret, response: token}
@@ -60,6 +85,13 @@ meta {
     retry safely), and `secret-key` to override `cloudflare.turnstile.secret`.
     A failed validation is a normal result (`success: false`); only
     transport errors, non-2xx responses, and a missing secret are Errs.
+
+    **Example**
+
+    ```hot
+    result ::cloudflare::turnstile/siteverify("0.widget-token", {remoteip: "203.0.113.7"})
+    if(result.success, result.hostname, get(result, "error-codes"))
+    ```
     """
 }
 fn
@@ -94,6 +126,14 @@ meta {
     names `expected_action` or `expected_hostname` they must match the
     result's `action` / `hostname`. Exposed for testing; `is-valid`
     applies it.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::turnstile/check-result({success: true, action: "signup"}, {expected_action: "signup"})  // true
+    ::cloudflare::turnstile/check-result({success: true, action: "login"}, {expected_action: "signup"})  // false
+    ::cloudflare::turnstile/check-result({success: false}, {})  // false
+    ```
     """
 }
 fn (result: Map, opts: Map): Bool {

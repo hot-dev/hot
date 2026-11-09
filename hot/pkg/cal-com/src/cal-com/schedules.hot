@@ -13,11 +13,22 @@ meta {
 
 ::api ::cal-com::api
 
-v fn (): Str { ::cal-com/VERSION_SCHEDULES }
+v
+meta {no-doc: true}
+fn (): Str { ::cal-com/VERSION_SCHEDULES }
 
 list-schedules
 meta {
-    doc: """GET /schedules - All of the API key owner's schedules (Vec)."""
+    doc: """
+    GET /schedules - All of the API key owner's schedules (Vec).
+
+    **Example**
+
+    ```hot
+    schedules ::cal-com::schedules/list-schedules()
+    map(schedules, %.name)
+    ```
+    """
 }
 fn
 (): Any {
@@ -29,7 +40,16 @@ fn
 
 get-default-schedule
 meta {
-    doc: """GET /schedules/default - The owner's default schedule."""
+    doc: """
+    GET /schedules/default - The owner's default schedule.
+
+    **Example**
+
+    ```hot
+    schedule ::cal-com::schedules/get-default-schedule()
+    schedule.timeZone
+    ```
+    """
 }
 fn
 (): Any {
@@ -41,7 +61,16 @@ fn
 
 get-schedule
 meta {
-    doc: """GET /schedules/{id} - One schedule."""
+    doc: """
+    GET /schedules/{id} - One schedule.
+
+    **Example**
+
+    ```hot
+    schedule ::cal-com::schedules/get-schedule(456)
+    schedule.availability
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -53,7 +82,19 @@ fn
 
 build-create-body
 meta {
-    doc: """Build the create body from the required `name`, `timeZone` and `isDefault`, plus `options` (`availability`, `overrides`). Without `availability`, Cal.com defaults to Monday–Friday 09:00–17:00. Exposed for testing."""
+    doc: """
+    Build the create body from the required `name`, `timeZone` and
+    `isDefault`, plus `options` (`availability`, `overrides`). Without
+    `availability`, Cal.com defaults to Monday–Friday 09:00–17:00. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::schedules/build-create-body("Support hours", "America/Chicago", false, {})
+    // {name: "Support hours", timeZone: "America/Chicago", isDefault: false}
+    ```
+    """
 }
 fn (name: Str, time-zone: Str, is-default: Bool, options: Map): Map {
   ::api/compact({...options, name: name, timeZone: time-zone, isDefault: is-default})
@@ -87,7 +128,19 @@ fn
 
 update-schedule
 meta {
-    doc: """PATCH /schedules/{id} - Update `name`, `timeZone`, `isDefault`, `availability` or `overrides`. `availability` and `overrides` replace the existing lists. Unset fields are omitted."""
+    doc: """
+    PATCH /schedules/{id} - Update `name`, `timeZone`, `isDefault`,
+    `availability` or `overrides`. `availability` and `overrides` replace
+    the existing lists. Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::cal-com::schedules/update-schedule(456, {
+      availability: [{days: ["Tuesday", "Thursday"], startTime: "09:00", endTime: "12:00"}]
+    })
+    ```
+    """
 }
 fn
 (id: Any, changes: Map): Any {
@@ -99,7 +152,15 @@ fn
 
 delete-schedule
 meta {
-    doc: """DELETE /schedules/{id} - Delete a schedule."""
+    doc: """
+    DELETE /schedules/{id} - Delete a schedule.
+
+    **Example**
+
+    ```hot
+    ::cal-com::schedules/delete-schedule(456)
+    ```
+    """
 }
 fn
 (id: Any): Any {

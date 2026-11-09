@@ -24,6 +24,7 @@ meta {
     **Example**
 
     ```hot
+    host ::pinecone::indexes/describe-index("docs").host
     ::pinecone::records/upsert-records(host, "notes", [
       {_id: "n1", chunk_text: "Hot runs workflows as code.", category: "docs"},
       {_id: "n2", chunk_text: "Pinecone stores the vectors.", category: "docs"}
@@ -46,6 +47,12 @@ meta {
     top_k, filter?}` plus the set options among `fields` and `rerank`.
     `options`: `top_k` (default 10), `filter`, `fields`, `rerank`
     (`{model, rank_fields, top_n?}`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::records/build-search-body("what runs workflows?", {top_k: 3})  // {query: {inputs: {text: "what runs workflows?"}, top_k: 3}}
+    ```
     """
 }
 fn (text: Str, options: Map): Map {
@@ -71,6 +78,7 @@ meta {
     **Example**
 
     ```hot
+    host ::pinecone::indexes/describe-index("docs").host
     out ::pinecone::records/search-records(host, "notes", "what runs workflows?", {
       top_k: 5,
       fields: ["chunk_text", "category"],

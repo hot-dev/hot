@@ -6,14 +6,18 @@ meta {
 // Adapt ::pg to the driver contract: the runtime always passes a params
 // Vec, and ::pg expects `$N` placeholders — which is exactly what the
 // runtime compiles `?` / `:name` into for the "dollar" style.
-pg-query fn (conn: Any, sql: Str, params: Vec): Vec {
+pg-query
+meta {no-doc: true}
+fn (conn: Any, sql: Str, params: Vec): Vec {
   cond {
     is-empty(params) => { ::pg/query(conn, sql) }
     => { ::pg/query(conn, sql, params) }
   }
 }
 
-pg-execute fn (conn: Any, sql: Str, params: Vec): Map {
+pg-execute
+meta {no-doc: true}
+fn (conn: Any, sql: Str, params: Vec): Map {
   cond {
     is-empty(params) => { ::pg/execute(conn, sql) }
     => { ::pg/execute(conn, sql, params) }

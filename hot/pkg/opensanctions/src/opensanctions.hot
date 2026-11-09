@@ -91,7 +91,16 @@ type {
 
 round4
 meta {
-    doc: """Round a number to four decimal places."""
+    doc: """
+    Round a number to four decimal places.
+
+    **Example**
+
+    ```hot
+    ::opensanctions/round4(div(2, 3))  // 0.6667
+    ::opensanctions/round4(1)  // 1.0
+    ```
+    """
 }
 fn (x: Any): Dec {
   div(Dec(round(mul(x, 10000))), 10000)
@@ -99,7 +108,17 @@ fn (x: Any): Dec {
 
 notice-for
 meta {
-    doc: """`REVIEW_NOTICE` followed by what was searched, so the notice says what a `"no-match"` covers wherever it is read."""
+    doc: """
+    `REVIEW_NOTICE` followed by what was searched, so the notice says what a
+    `"no-match"` covers wherever it is read.
+
+    **Example**
+
+    ```hot
+    notice ::opensanctions/notice-for([{list: "OpenSanctions (sanctions)"}])
+    ends-with(notice, "Searched: OpenSanctions (sanctions).")  // true
+    ```
+    """
 }
 fn (sources: Vec): Str {
   `${REVIEW_NOTICE} Searched: ${join(map(sources, (s) { s.list }), ", ")}.`
@@ -154,7 +173,19 @@ fn (name: Str, opts: Map): Map {
 
 match-query
 meta {
-    doc: """The `/match` query string (pure): `threshold`, `limit`, `algorithm` and `topics` only when set in `opts`, and `include_dataset` from `opts.include-datasets`."""
+    doc: """
+    The `/match` query string (pure): `threshold`, `limit`, `algorithm` and
+    `topics` only when set in `opts`, and `include_dataset` from
+    `opts.include-datasets`.
+
+    **Example**
+
+    ```hot
+    ::opensanctions/match-query({threshold: 0.8, limit: 5})  // "?threshold=0.8&limit=5"
+    ::opensanctions/match-query({topics: ["sanction"]})  // "?topics=sanction"
+    ::opensanctions/match-query({})  // ""
+    ```
+    """
 }
 fn (opts: Map): Str {
   base ::hot::uri/query-string(filter-vals({
@@ -172,12 +203,16 @@ fn (opts: Map): Str {
   }
 }
 
-first-of fn (props: Map, key: Str): Vec<Str> {
+first-of
+meta {no-doc: true}
+fn (props: Map, key: Str): Vec<Str> {
   v get(props, key)
   if(is-vec(v), filter(map(v, (x) { if(is-str(x), x, null) }), is-some), [])
 }
 
-feature-line fn (name: Str, f: Any): Str {
+feature-line
+meta {no-doc: true}
+fn (name: Str, f: Any): Str {
   cond {
     is-map(f) => {
       why get(f, "explanation")
@@ -189,7 +224,22 @@ feature-line fn (name: Str, f: Any): Str {
 
 to-match
 meta {
-    doc: """Turn one OpenSanctions scored result into a `Match` (pure). The `entry` carries `source: "opensanctions"`, the OpenSanctions id, the datasets as `programs`, and the score explanations."""
+    doc: """
+    Turn one OpenSanctions scored result into a `Match` (pure). The `entry`
+    carries `source: "opensanctions"`, the OpenSanctions id, the datasets as
+    `programs`, and the score explanations.
+
+    **Example**
+
+    ```hot
+    r {id: "NK-abc", caption: "John Doe", schema: "Person", score: 0.91, match: true, datasets: ["us_ofac_sdn"], properties: {name: ["John Doe", "Johnny Doe"]}}
+    m ::opensanctions/to-match(r, "https://api.opensanctions.org")
+    m.status  // "possible-match"
+    m.score  // 0.91
+    m.entry.kind  // "individual"
+    m.entry.aliases  // ["Johnny Doe"]
+    ```
+    """
 }
 fn (r: Map, base-url: Str): Match {
   props or(get(r, "properties"), {})
@@ -227,7 +277,20 @@ fn (r: Map, base-url: Str): Match {
 
 parse-response
 meta {
-    doc: """Turn a `/match` response body into a `ScreenResult` (pure)."""
+    doc: """
+    Turn a `/match` response body into a `ScreenResult` (pure).
+
+    **Example**
+
+    ```hot
+    body {responses: {q: {results: [{id: "NK-abc", caption: "John Doe", schema: "Person", score: 0.91, match: true, properties: {}}]}}}
+    out ::opensanctions/parse-response(body, "John Doe", {dataset: "sanctions"}, "https://api.opensanctions.org")
+    out.status  // "possible-match"
+    out.review-required  // true
+    length(out.matches)  // 1
+    first(out.sources).dataset  // "sanctions"
+    ```
+    """
 }
 fn (body: Any, name: Str, opts: Map, base-url: Str): ScreenResult {
   results or(get-in(or(body, {}), ["responses", "q", "results"]), [])
@@ -251,7 +314,16 @@ fn (body: Any, name: Str, opts: Map, base-url: Str): ScreenResult {
 
 match-url
 meta {
-    doc: """`{base-url}/match/{dataset}{query}` with the dataset path-encoded (pure)."""
+    doc: """
+    `{base-url}/match/{dataset}{query}` with the dataset path-encoded
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::opensanctions/match-url("https://api.opensanctions.org", "sanctions", {limit: 5})  // "https://api.opensanctions.org/match/sanctions?limit=5"
+    ```
+    """
 }
 fn (base-url: Str, dataset: Str, opts: Map): Str {
   `${base-url}/match/${::hot::uri/encode(dataset)}${match-query(opts)}`
@@ -259,7 +331,16 @@ fn (base-url: Str, dataset: Str, opts: Map): Str {
 
 match-headers
 meta {
-    doc: """The `/match` request headers (pure): `Authorization: ApiKey ...` only when there is a key, since a self-hosted yente may need none."""
+    doc: """
+    The `/match` request headers (pure): `Authorization: ApiKey ...` only
+    when there is a key, since a self-hosted yente may need none.
+
+    **Example**
+
+    ```hot
+    ::opensanctions/match-headers(null)  // {Content-Type: "application/json", Accept: "application/json"}
+    ```
+    """
 }
 fn (key: Str?): Map {
   filter-vals({

@@ -73,7 +73,9 @@ OPERATIONS {
 // Verification
 // ---------------------------------------------------------------------------
 
-signature-header fn (request: Map): Str {
+signature-header
+meta {no-doc: true}
+fn (request: Map): Str {
   trim(Str(or(get(or(get(request, "headers"), {}), "intuit-signature"), "")))
 }
 
@@ -85,6 +87,15 @@ meta {
     of its raw body under the verifier token (constant-time compare).
     The 1-arity form reads `quickbooks.webhook.verifier` and fails the
     run when it is unset; an explicit empty verifier returns false.
+
+    **Example**
+
+    ```hot
+    request {headers: {intuit-signature: "c2lnbmF0dXJl"}, body-raw: "[]"}
+    verifier ::hot::ctx/get("quickbooks.webhook.verifier")
+
+    if(::quickbooks::webhooks/verify-request(request, verifier), "ok", "rejected")
+    ```
     """
 }
 fn
@@ -112,7 +123,18 @@ fn
 
 entity-name
 meta {
-    doc: """The canonical entity name for a webhook's entity (`"invoice"` or `"Invoice"` gives `"Invoice"`); unknown names pass through unchanged."""
+    doc: """
+    The canonical entity name for a webhook's entity (`"invoice"` or
+    `"Invoice"` gives `"Invoice"`); unknown names pass through unchanged.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::webhooks/entity-name("invoice")  // "Invoice"
+    ::quickbooks::webhooks/entity-name("purchaseorder")  // "PurchaseOrder"
+    ::quickbooks::webhooks/entity-name("Widget")  // "Widget"
+    ```
+    """
 }
 fn (name: Str): Str {
   canonical ::entities/canonical-name(name)
@@ -126,7 +148,18 @@ fn (name: Str): Str {
 
 operation-name
 meta {
-    doc: """The legacy-style operation for a CloudEvents verb: `created` gives `Create`, `updated` `Update`, `deleted` `Delete`, `merged` `Merge`, `voided` `Void`, `emailed` `Emailed`."""
+    doc: """
+    The legacy-style operation for a CloudEvents verb: `created` gives
+    `Create`, `updated` `Update`, `deleted` `Delete`, `merged` `Merge`,
+    `voided` `Void`, `emailed` `Emailed`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::webhooks/operation-name("created")  // "Create"
+    ::quickbooks::webhooks/operation-name("archived")  // "Archived"
+    ```
+    """
 }
 fn (verb: Str): Str {
   hit get(OPERATIONS, lowercase(verb))
@@ -138,7 +171,28 @@ fn (verb: Str): Str {
 }
 
 from-cloud-event
-meta {doc: """Normalise one CloudEvents event (`type: "qbo.{entity}.{verb}.v1"`)."""}
+meta {
+    doc: """
+    Normalise one CloudEvents event (`type: "qbo.{entity}.{verb}.v1"`).
+
+    **Example**
+
+    ```hot
+    event {
+      id: "evt-1",
+      type: "qbo.invoice.created.v1",
+      intuitaccountid: "9341453",
+      intuitentityid: "130",
+      time: "2026-11-01T12:00:00Z"
+    }
+
+    record ::quickbooks::webhooks/from-cloud-event(event)
+    record.entity  // "Invoice"
+    record.operation  // "Create"
+    record.realm-id  // "9341453"
+    ```
+    """
+}
 fn (e: Map): Map {
   parts split(Str(or(get(e, "type"), "")), ".")
   entity if(gte(length(parts), 3), entity-name(parts[1]), null)
@@ -158,7 +212,22 @@ fn (e: Map): Map {
 
 from-legacy
 meta {
-    doc: """Normalise a legacy `eventNotifications` payload into one record per changed entity."""
+    doc: """
+    Normalise a legacy `eventNotifications` payload into one record per
+    changed entity.
+
+    **Example**
+
+    ```hot
+    body {eventNotifications: [{realmId: "9341453", dataChangeEvent: {entities: [
+      {name: "invoice", id: "130", operation: "Update", lastUpdated: "2026-11-01T12:00:00Z"}
+    ]}}]}
+
+    record first(::quickbooks::webhooks/from-legacy(body))
+    record.entity  // "Invoice"
+    record.operation  // "Update"
+    ```
+    """
 }
 fn (body: Map): Vec {
   mapcat(filter(or(get(body, "eventNotifications"), []), is-map), (n) {
@@ -194,6 +263,18 @@ meta {
 
     Returns `[]` for an empty or unrecognised body, and an Err for
     invalid JSON.
+
+    **Example**
+
+    ```hot
+    body {eventNotifications: [{realmId: "9341453", dataChangeEvent: {entities: [
+      {name: "invoice", id: "130", operation: "Update", lastUpdated: "2026-11-01T12:00:00Z"}
+    ]}}]}
+
+    map(::quickbooks::webhooks/parse-events(body), %.format)  // ["legacy"]
+    ::quickbooks::webhooks/parse-events("[]")  // []
+    is-err(::quickbooks::webhooks/parse-events("not json"))  // true
+    ```
     """
 }
 fn (body: Any): Vec {
@@ -223,7 +304,20 @@ fn (body: Any): Vec {
 
 construct-events
 meta {
-    doc: """Verify the request (see `verify-request`) and return its parsed events, or an Err when the signature is invalid."""
+    doc: """
+    Verify the request (see `verify-request`) and return its parsed events,
+    or an Err when the signature is invalid.
+
+    **Example**
+
+    ```hot
+    request {headers: {intuit-signature: "c2lnbmF0dXJl"}, body-raw: "[]"}
+    verifier ::hot::ctx/get("quickbooks.webhook.verifier")
+
+    events ::quickbooks::webhooks/construct-events(request, verifier)
+    if(is-err(events), 0, length(events))
+    ```
+    """
 }
 fn
 (request: Map): Vec {
@@ -246,6 +340,19 @@ meta {
     Verify and parse a delivery in one step: `{verified, events,
     response}`. `response` is the `HttpResponse` to return: 200 when the
     signature is valid, 401 when it is not (events are then `[]`).
+
+    **Example**
+
+    ```hot
+    request {headers: {intuit-signature: "c2lnbmF0dXJl"}, body-raw: "[]"}
+    verifier ::hot::ctx/get("quickbooks.webhook.verifier")
+
+    received ::quickbooks::webhooks/receive(request, verifier)
+    if(received.verified, length(received.events), 0)
+
+    // Return this from the webhook handler
+    received.response
+    ```
     """
 }
 fn

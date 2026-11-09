@@ -42,7 +42,17 @@ fn
 
 get-transaction
 meta {
-    doc: """GET /transactions/{transaction_id}: retrieve a Transaction."""
+    doc: """
+    GET /transactions/{transaction_id}: retrieve a Transaction.
+
+    **Example**
+
+    ```hot
+    transaction ::increase::transactions/get-transaction("transaction_uyrp7fld2ium70oa7oi")
+    transaction.amount
+    transaction.source
+    ```
+    """
 }
 fn
 (transaction-id: Str): Map {
@@ -54,7 +64,18 @@ fn
 
 list-pending-transactions
 meta {
-    doc: """GET /pending_transactions: one page of Pending Transactions. Filters: `account_id`, `route_id`, `"category.in"`, `"status.in"` (`pending`, `complete`), `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /pending_transactions: one page of Pending Transactions. Filters:
+    `account_id`, `route_id`, `"category.in"`, `"status.in"` (`pending`,
+    `complete`), `created_at`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::transactions/list-pending-transactions({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["pending"]})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -69,7 +90,18 @@ fn
 
 get-pending-transaction
 meta {
-    doc: """GET /pending_transactions/{pending_transaction_id}: retrieve a Pending Transaction."""
+    doc: """
+    GET /pending_transactions/{pending_transaction_id}: retrieve a Pending
+    Transaction.
+
+    **Example**
+
+    ```hot
+    pending ::increase::transactions/get-pending-transaction("pending_transaction_k1sfetcau2qbvjbzgju4")
+    pending.status
+    pending.amount
+    ```
+    """
 }
 fn
 (pending-transaction-id: Str): Map {
@@ -81,7 +113,18 @@ fn
 
 list-declined-transactions
 meta {
-    doc: """GET /declined_transactions: one page of Declined Transactions. Filters: `account_id`, `route_id`, `"category.in"`, `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /declined_transactions: one page of Declined Transactions. Filters:
+    `account_id`, `route_id`, `"category.in"`, `created_at`, `limit`,
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::transactions/list-declined-transactions({account_id: "account_in71c4amph0vgo2qllky", limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -96,7 +139,18 @@ fn
 
 get-declined-transaction
 meta {
-    doc: """GET /declined_transactions/{declined_transaction_id}: retrieve a Declined Transaction."""
+    doc: """
+    GET /declined_transactions/{declined_transaction_id}: retrieve a
+    Declined Transaction.
+
+    **Example**
+
+    ```hot
+    declined ::increase::transactions/get-declined-transaction("declined_transaction_17jbn0yyhvkt4v4ooym8")
+    declined.amount
+    declined.source
+    ```
+    """
 }
 fn
 (declined-transaction-id: Str): Map {

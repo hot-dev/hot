@@ -23,7 +23,22 @@ MAX_LINK_TTL_SECONDS 2592000
 
 mark-returned
 meta {
-    doc: """Mask the bearer credential at `key` of a response in call records and return the response unchanged. An Err passes through. Exposed for testing."""
+    doc: """
+    Mask the bearer credential at `key` of a response in call records and
+    return the response unchanged. An Err passes through. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    response ::sumsub::api/request("POST", "/resources/accessTokens/sdk", {
+      userId: "user-42",
+      levelName: "basic-kyc-level"
+    })
+    out ::sumsub::sdk/mark-returned(response, "token")
+    out.token
+    ```
+    """
 }
 fn (response: Result, key: Str): Any {
   cond {
@@ -43,6 +58,14 @@ meta {
     `ttlInSecs` (Sumsub default 600), `applicantIdentifiers` (`{email,
     phone}`, prefilled in the SDK) and `externalActionId` (for applicant
     actions). Unset options are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::sdk/access-token-request("user-42", "basic-kyc-level", {ttlInSecs: 1200})
+    spec.path  // "/resources/accessTokens/sdk"
+    spec.body  // {userId: "user-42", levelName: "basic-kyc-level", ttlInSecs: 1200}
+    ```
     """
 }
 fn (user-id: Str, level-name: Str, options: Map): Map {
@@ -99,6 +122,14 @@ meta {
     (`{successUrl, rejectUrl, signKey?, allowedQueryParams?}`), and query
     options `lang`, `customizationName`, `translationName` and `source`.
     Unset options are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::sdk/websdk-link-request("basic-kyc-level", {userId: "user-42", lang: "en"})
+    spec.path  // "/resources/sdkIntegrations/levels/-/websdkLink?lang=en"
+    spec.body  // {userId: "user-42", levelName: "basic-kyc-level"}
+    ```
     """
 }
 fn (level-name: Str, options: Map): Map {

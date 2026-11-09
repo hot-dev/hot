@@ -19,7 +19,18 @@ SIGNATURE_PREFIX "sha256="
 
 signature-hex
 meta {
-    doc: """The hex digest from an `X-Firecrawl-Signature` value (`sha256=<hex>`), or `""` when the header is missing or lacks the `sha256=` prefix. Exposed for testing."""
+    doc: """
+    The hex digest from an `X-Firecrawl-Signature` value (`sha256=<hex>`),
+    or `""` when the header is missing or lacks the `sha256=` prefix.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::firecrawl::webhooks/signature-hex("sha256=ab12")  // "ab12"
+    ::firecrawl::webhooks/signature-hex("ab12")  // ""
+    ```
+    """
 }
 fn (header: Any): Str {
   cond {

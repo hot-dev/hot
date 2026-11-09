@@ -26,7 +26,17 @@ READ_TEXT_KEYS ["tabId"]
 
 get-params
 meta {
-    doc: """The query parameters `get-document` sends (pure): `includeTabsContent`, `suggestionsViewMode`, `commentsViewMode`, `fields`; only the ones you set."""
+    doc: """
+    The query parameters `get-document` sends (pure): `includeTabsContent`,
+    `suggestionsViewMode`, `commentsViewMode`, `fields`; only the ones you
+    set.
+
+    **Example**
+
+    ```hot
+    ::google::docs::documents/get-params({includeTabsContent: true, fields: "title"})  // {includeTabsContent: true, fields: "title"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::docs/query-params({}, opts)
@@ -40,6 +50,20 @@ meta {
     `{includeTabsContent: true}` to get every tab under `tabs` instead,
     and `suggestionsViewMode` (e.g. `"PREVIEW_WITHOUT_SUGGESTIONS"`) to
     choose how suggestions render. Scope: `documents.readonly`.
+
+    **Example**
+
+    ```hot
+    doc ::google::docs::documents/get-document("1AbCdEf")
+    doc.title
+
+    // Every tab, with suggestions accepted
+    all-tabs ::google::docs::documents/get-document("1AbCdEf", {
+      includeTabsContent: true,
+      suggestionsViewMode: "PREVIEW_SUGGESTIONS_ACCEPTED"
+    })
+    length(all-tabs.tabs)
+    ```
     """
 }
 fn
@@ -59,6 +83,13 @@ meta {
     My Drive root (move it with google-drive's `move-file`); a service
     account without domain-wide delegation owns it alone, so share it
     before anyone else can open it. Scope: `documents` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    doc ::google::docs::documents/create-document("Weekly report")
+    doc.documentId
+    ```
     """
 }
 fn
@@ -71,7 +102,20 @@ fn
 
 batch-update-body
 meta {
-    doc: """The `batchUpdate` body (pure): `{requests}` plus `writeControl` from `opts` when set (`{requiredRevisionId}` fails the write if the document changed; `{targetRevisionId}` merges with changes since)."""
+    doc: """
+    The `batchUpdate` body (pure): `{requests}` plus `writeControl` from
+    `opts` when set (`{requiredRevisionId}` fails the write if the document
+    changed; `{targetRevisionId}` merges with changes since).
+
+    **Example**
+
+    ```hot
+    ::google::docs::documents/batch-update-body([{deleteHeader: {headerId: "h1"}}], {writeControl: {requiredRevisionId: "r1"}})
+    // {requests: [{deleteHeader: {headerId: "h1"}}], writeControl: {requiredRevisionId: "r1"}}
+
+    ::google::docs::documents/batch-update-body([], {})  // {requests: []}
+    ```
+    """
 }
 fn (requests: Vec, opts: Map): Map {
   ::docs/compact({requests: requests, writeControl: get(opts, "writeControl")})
@@ -87,6 +131,18 @@ meta {
     highest index first. `::google::docs::requests` builds requests; any
     request as a plain Map works too. Scope: `documents` (or
     `drive.file`).
+
+    **Example**
+
+    ```hot
+    ::req ::google::docs::requests
+
+    // Fails instead of applying if someone edited the document first
+    ::google::docs::documents/batch-update("1AbCdEf", [
+      ::req/insert-text("Status\n", 1),
+      ::req/heading(1, 8, 1)
+    ], {writeControl: {requiredRevisionId: "AOV_f4..."}})
+    ```
     """
 }
 fn
@@ -103,6 +159,15 @@ meta {
     The document as plain text, with every tab's body in tab order. Pass
     `{tabId: "t.abc"}` for one tab; an Err when that tab does not exist.
     Scope: `documents.readonly`.
+
+    **Example**
+
+    ```hot
+    ::google::docs::documents/read-text("1AbCdEf")
+
+    // One tab
+    ::google::docs::documents/read-text("1AbCdEf", {tabId: "t.0"})
+    ```
     """
 }
 fn
@@ -125,7 +190,20 @@ fn
 
 append-text
 meta {
-    doc: """Add `text` at the end of the document's body (first tab unless `opts.tabId`). End `text` with a newline to start a new paragraph after it. Scope: `documents` (or `drive.file`)."""
+    doc: """
+    Add `text` at the end of the document's body (first tab unless
+    `opts.tabId`). End `text` with a newline to start a new paragraph after
+    it. Scope: `documents` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    ::google::docs::documents/append-text("1AbCdEf", "Shipped the importer.\n")
+
+    // In a second tab
+    ::google::docs::documents/append-text("1AbCdEf", "Notes\n", {tabId: "t.1"})
+    ```
+    """
 }
 fn
 (document-id: Str, text: Str): Map {
@@ -137,7 +215,18 @@ fn
 
 insert-text
 meta {
-    doc: """Insert `text` at a body index (first tab unless `opts.tabId`). An index must fall inside an existing paragraph; the document starts at 1. Scope: `documents` (or `drive.file`)."""
+    doc: """
+    Insert `text` at a body index (first tab unless `opts.tabId`). An index
+    must fall inside an existing paragraph; the document starts at 1. Scope:
+    `documents` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    // At the very start of the body
+    ::google::docs::documents/insert-text("1AbCdEf", "Draft\n", 1)
+    ```
+    """
 }
 fn
 (document-id: Str, text: Str, index: Int): Map {
@@ -155,6 +244,16 @@ meta {
     treats `search` as a regular expression; `{tabIds: [...]}` limits the
     tabs. The reply's `replaceAllText.occurrencesChanged` is the count.
     Scope: `documents` (or `drive.file`).
+
+    **Example**
+
+    ```hot
+    reply ::google::docs::documents/replace-text("1AbCdEf", "2025", "2026")
+    reply.replies[0].replaceAllText.occurrencesChanged
+
+    // Case-insensitive
+    ::google::docs::documents/replace-text("1AbCdEf", "acme", "Hot", {matchCase: false})
+    ```
     """
 }
 fn
@@ -173,7 +272,10 @@ meta {
     template flow is google-drive's `copy-file`, then this on the copy.
     Scope: `documents` (or `drive.file`).
 
+    **Example**
+
     ```hot
+    copy ::google::drive::files/copy-file("1TemplateId", {name: "Welcome Ada"})
     ::google::docs::documents/fill-template(copy.id, {name: "Ada", plan: "Pro"})
     ```
     """

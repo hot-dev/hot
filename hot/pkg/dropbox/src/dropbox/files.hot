@@ -41,6 +41,12 @@ meta {
     (1..2000, approximate), `include_deleted`, `include_mounted_folders`,
     `include_non_downloadable_files`, `include_has_explicit_shared_members`,
     `include_restorable_info`, `shared_link` (`{url, password?}`).
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/list-folder-arg("Reports/", {recursive: true, retry: false})  // {path: "/Reports", recursive: true}
+    ```
     """
 }
 fn (path: Str?, opts: Map): Map {
@@ -70,7 +76,18 @@ fn
 
 list-folder-continue
 meta {
-    doc: """POST files/list_folder/continue - the next page after `cursor`. A 409 `reset` (check `::dropbox::api/is-reset`) means the cursor is no longer valid: list again from `list-folder`."""
+    doc: """
+    POST files/list_folder/continue - the next page after `cursor`. A 409
+    `reset` (check `::dropbox::api/is-reset`) means the cursor is no longer
+    valid: list again from `list-folder`.
+
+    **Example**
+
+    ```hot
+    page ::dropbox::files/list-folder("/Reports")
+    more if(page.has_more, ::dropbox::files/list-folder-continue(page.cursor), null)
+    ```
+    """
 }
 fn
 (cursor: Str): Map {
@@ -105,7 +122,17 @@ fn
 
 list-files
 meta {
-    doc: """The files (not folders) under `path`, as `DocFile`s, all pages. Options as for `list-folder` (pass `{recursive: true}` for the tree)."""
+    doc: """
+    The files (not folders) under `path`, as `DocFile`s, all pages. Options
+    as for `list-folder` (pass `{recursive: true}` for the tree).
+
+    **Example**
+
+    ```hot
+    files ::dropbox::files/list-files("/Reports", {recursive: true})
+    map(files, %.path)
+    ```
+    """
 }
 fn
 (path: Str?): Vec {
@@ -143,7 +170,18 @@ fn
 }
 
 get-doc-file
-meta {doc: """`get-metadata` as a `DocFile`."""}
+meta {
+    doc: """
+    `get-metadata` as a `DocFile`.
+
+    **Example**
+
+    ```hot
+    file ::dropbox::files/get-doc-file("/Reports/Q3.pdf")
+    file.content-hash
+    ```
+    """
+}
 fn
 (path: Str): DocFile {
   get-doc-file(path, {})
@@ -155,7 +193,16 @@ fn
 
 exists
 meta {
-    doc: """True when something exists at `path`, false on 409 `not_found`; other failures are returned as the Err."""
+    doc: """
+    True when something exists at `path`, false on 409 `not_found`; other
+    failures are returned as the Err.
+
+    **Example**
+
+    ```hot
+    if(::dropbox::files/exists("/Reports/Q3.pdf"), "found", "missing")
+    ```
+    """
 }
 fn
 (path: Str): Bool {
@@ -185,6 +232,13 @@ meta {
     (`"pdf"`, `"document"`, `"spreadsheet"`, ...), `account_id` go into
     `options`; `include_highlights` goes into `match_field_options`. An
     `options` Map in `opts` is merged too.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/search-arg("plan", {path: "Reports", max_results: 10})
+    // {query: "plan", options: {path: "/Reports", max_results: 10}}
+    ```
     """
 }
 fn (query: Str, opts: Map): Map {
@@ -225,7 +279,17 @@ fn
 
 search-continue
 meta {
-    doc: """POST files/search/continue_v2 - the next page of a search after `cursor`."""
+    doc: """
+    POST files/search/continue_v2 - the next page of a search after
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::dropbox::files/search("quarterly plan")
+    more if(page.has_more, ::dropbox::files/search-continue(page.cursor), null)
+    ```
+    """
 }
 fn
 (cursor: Str): Map {
@@ -237,7 +301,16 @@ fn
 
 match-metadata
 meta {
-    doc: """The metadata entry of a search match (pure): `match.metadata.metadata`, or null."""
+    doc: """
+    The metadata entry of a search match (pure): `match.metadata.metadata`,
+    or null.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/match-metadata({metadata: {metadata: {name: "a.txt"}}})  // {name: "a.txt"}
+    ```
+    """
 }
 fn (match-entry: Map): Map? {
   m get(match-entry, "metadata")
@@ -251,7 +324,17 @@ fn (match-entry: Map): Map? {
 
 search-all
 meta {
-    doc: """Every match's metadata entry for `query` (all pages), or at most `limit` (null for no limit). Options as for `search`."""
+    doc: """
+    Every match's metadata entry for `query` (all pages), or at most `limit`
+    (null for no limit). Options as for `search`.
+
+    **Example**
+
+    ```hot
+    entries ::dropbox::files/search-all("quarterly plan", {path: "/Reports"}, 200)
+    map(entries, %.path_display)
+    ```
+    """
 }
 fn
 (query: Str): Vec {
@@ -270,13 +353,31 @@ fn
 // Writes
 // ---------------------------------------------------------------------------
 
-result-metadata fn (result: Result): Any {
+result-metadata
+meta {no-doc: true}
+fn (result: Result): Any {
   if(is-err(result), result, or(get(result, "metadata"), result))
 }
 
 create-folder
 meta {
-    doc: """POST files/create_folder_v2 - create a folder (and any missing parents). Returns its metadata. Options: `autorename` (pick a free name instead of failing on a conflict). A 409 `path/conflict/folder` means it already exists."""
+    doc: """
+    POST files/create_folder_v2 - create a folder (and any missing parents).
+    Returns its metadata. Options: `autorename` (pick a free name instead of
+    failing on a conflict). A 409 `path/conflict/folder` means it already
+    exists.
+
+    **Example**
+
+    ```hot
+    folder ::dropbox::files/create-folder("/Reports/2026")
+    folder.id
+
+    // Pick a free name instead of failing on a conflict
+    copy ::dropbox::files/create-folder("/Reports/2026", {autorename: true})
+    copy.name
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -288,7 +389,17 @@ fn
 
 ensure-folder
 meta {
-    doc: """Create a folder unless it already exists. Returns its metadata either way."""
+    doc: """
+    Create a folder unless it already exists. Returns its metadata either
+    way.
+
+    **Example**
+
+    ```hot
+    folder ::dropbox::files/ensure-folder("/Reports/2026")
+    folder.id
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -304,7 +415,17 @@ fn
 
 relocation-arg
 meta {
-    doc: """The `files/move_v2` / `copy_v2` argument (pure): `from_path`, `to_path` plus `autorename`, `allow_ownership_transfer` from `opts`."""
+    doc: """
+    The `files/move_v2` / `copy_v2` argument (pure): `from_path`, `to_path`
+    plus `autorename`, `allow_ownership_transfer` from `opts`.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/relocation-arg("a.txt", "/b/a.txt", {autorename: true})
+    // {from_path: "/a.txt", to_path: "/b/a.txt", autorename: true}
+    ```
+    """
 }
 fn (from-path: Str, to-path: Str, opts: Map): Map {
   ::api/build-arg({from_path: ::dropbox/normalize-path(from-path), to_path: ::dropbox/normalize-path(to-path)}, opts)
@@ -312,7 +433,18 @@ fn (from-path: Str, to-path: Str, opts: Map): Map {
 
 move-path
 meta {
-    doc: """POST files/move_v2 - move or rename a file or folder (a folder moves with its contents). Returns the moved entry's metadata. Options: `autorename`, `allow_ownership_transfer`."""
+    doc: """
+    POST files/move_v2 - move or rename a file or folder (a folder moves
+    with its contents). Returns the moved entry's metadata. Options:
+    `autorename`, `allow_ownership_transfer`.
+
+    **Example**
+
+    ```hot
+    moved ::dropbox::files/move-path("/Inbox/Q3.pdf", "/Reports/Q3.pdf", {autorename: true})
+    moved.path_display
+    ```
+    """
 }
 fn
 (from-path: Str, to-path: Str): Map {
@@ -324,7 +456,17 @@ fn
 
 copy-path
 meta {
-    doc: """POST files/copy_v2 - copy a file or folder. Returns the copy's metadata. Options: `autorename`."""
+    doc: """
+    POST files/copy_v2 - copy a file or folder. Returns the copy's metadata.
+    Options: `autorename`.
+
+    **Example**
+
+    ```hot
+    copied ::dropbox::files/copy-path("/Reports/Q3.pdf", "/Archive/Q3.pdf")
+    copied.id
+    ```
+    """
 }
 fn
 (from-path: Str, to-path: Str): Map {
@@ -336,7 +478,22 @@ fn
 
 delete-path
 meta {
-    doc: """POST files/delete_v2 - delete a file or folder (with its contents). Deleted files can be restored with `restore-file` within the account's version-history window. Returns the deleted entry's metadata. Options: `parent_rev` (only delete if the file is still at that rev; files only)."""
+    doc: """
+    POST files/delete_v2 - delete a file or folder (with its contents).
+    Deleted files can be restored with `restore-file` within the account's
+    version-history window. Returns the deleted entry's metadata. Options:
+    `parent_rev` (only delete if the file is still at that rev; files only).
+
+    **Example**
+
+    ```hot
+    deleted ::dropbox::files/delete-path("/tmp/a.txt")
+    deleted.name
+
+    // Only if the file has not changed
+    ::dropbox::files/delete-path("/tmp/b.txt", {parent_rev: "a1c10ce0dd78"})
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -348,7 +505,18 @@ fn
 
 restore-file
 meta {
-    doc: """POST files/restore - restore a file to revision `rev` (from `list-revisions`), deleted or not. Returns the restored file's metadata."""
+    doc: """
+    POST files/restore - restore a file to revision `rev` (from
+    `list-revisions`), deleted or not. Returns the restored file's metadata.
+
+    **Example**
+
+    ```hot
+    revisions ::dropbox::files/list-revisions("/Reports/Q3.pdf")
+    oldest last(revisions.entries)
+    ::dropbox::files/restore-file("/Reports/Q3.pdf", oldest.rev)
+    ```
+    """
 }
 fn
 (path: Str, rev: Str): Map {
@@ -360,7 +528,19 @@ fn
 
 list-revisions
 meta {
-    doc: """POST files/list_revisions - a file's revisions, newest first: `{is_deleted, entries, server_deleted?}`. Options: `limit` (1..100, default 10), `mode` (`"path"` (default) or `"id"`), `before_rev` (path mode only)."""
+    doc: """
+    POST files/list_revisions - a file's revisions, newest first:
+    `{is_deleted, entries, server_deleted?}`. Options: `limit` (1..100,
+    default 10), `mode` (`"path"` (default) or `"id"`), `before_rev` (path
+    mode only).
+
+    **Example**
+
+    ```hot
+    revisions ::dropbox::files/list-revisions("/Reports/Q3.pdf", {limit: 50})
+    map(revisions.entries, %.rev)
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -398,7 +578,18 @@ type {
 
 to-batch-job
 meta {
-    doc: """Normalise a batch launch (`{".tag": "async_job_id" | "complete", ...}`) or check result (`in_progress` / `complete` / `failed`) into a `BatchJob` (pure)."""
+    doc: """
+    Normalise a batch launch (`{".tag": "async_job_id" | "complete", ...}`)
+    or check result (`in_progress` / `complete` / `failed`) into a
+    `BatchJob` (pure).
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/to-batch-job({".tag": "async_job_id", async_job_id: "dbjid:AAB"}).state  // "async"
+    ::dropbox::files/to-batch-job({".tag": "async_job_id", async_job_id: "dbjid:AAB"}).job-id  // "dbjid:AAB"
+    ```
+    """
 }
 fn (result: Map): BatchJob {
   tag get(result, ".tag")
@@ -419,7 +610,17 @@ fn (result: Map): BatchJob {
 
 is-done
 meta {
-    doc: """True when a `BatchJob` (or a raw launch/check result) has finished, successfully or not."""
+    doc: """
+    True when a `BatchJob` (or a raw launch/check result) has finished,
+    successfully or not.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/is-done({state: "in_progress"})  // false
+    ::dropbox::files/is-done({".tag": "complete", entries: []})  // true
+    ```
+    """
 }
 fn (job: Map): Bool {
   state if(is-some(get(job, "state")), get(job, "state"), to-batch-job(job).state)
@@ -428,7 +629,18 @@ fn (job: Map): Bool {
 
 entry-metadata
 meta {
-    doc: """The metadata of a successful batch entry (pure): handles `{".tag": "success", metadata: {...}}` and `{".tag": "success", success: {...}}`. Null for failures."""
+    doc: """
+    The metadata of a successful batch entry (pure): handles `{".tag":
+    "success", metadata: {...}}` and `{".tag": "success", success: {...}}`.
+    Null for failures.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/entry-metadata({".tag": "success", metadata: {name: "a.txt"}})  // {name: "a.txt"}
+    ::dropbox::files/entry-metadata({".tag": "failure"})  // null
+    ```
+    """
 }
 fn (entry: Map): Map? {
   cond {
@@ -441,25 +653,49 @@ fn (entry: Map): Map? {
 
 batch-failures
 meta {
-    doc: """The failed entries of a complete `BatchJob` (each `{".tag": "failure", failure: <error union>}`)."""
+    doc: """
+    The failed entries of a complete `BatchJob` (each `{".tag": "failure",
+    failure: <error union>}`).
+
+    **Example**
+
+    ```hot
+    job {entries: [{".tag": "success"}, {".tag": "failure", failure: {".tag": "too_many_write_operations"}}]}
+    length(::dropbox::files/batch-failures(job))  // 1
+    ```
+    """
 }
 fn (job: Map): Vec {
   filter(or(get(job, "entries"), []), (e) { eq(get(e, ".tag"), "failure") })
 }
 
-launch fn (route: Str, arg: Map, opts: Map): BatchJob {
+launch
+meta {no-doc: true}
+fn (route: Str, arg: Map, opts: Map): BatchJob {
   result ::api/rpc(route, arg, opts)
   if(is-err(result), result, to-batch-job(result))
 }
 
-check fn (route: Str, job-id: Str, opts: Map): BatchJob {
+check
+meta {no-doc: true}
+fn (route: Str, job-id: Str, opts: Map): BatchJob {
   result ::api/rpc(route, {async_job_id: job-id}, opts)
   if(is-err(result), result, to-batch-job(result))
 }
 
 relocation-entries
 meta {
-    doc: """Batch relocation entries (pure): a Vec of `[from, to]` pairs or `{from_path, to_path}` Maps becomes `[{from_path, to_path}]` with normalised paths."""
+    doc: """
+    Batch relocation entries (pure): a Vec of `[from, to]` pairs or
+    `{from_path, to_path}` Maps becomes `[{from_path, to_path}]` with
+    normalised paths.
+
+    **Example**
+
+    ```hot
+    ::dropbox::files/relocation-entries([["a.txt", "/b/a.txt"]])  // [{from_path: "/a.txt", to_path: "/b/a.txt"}]
+    ```
+    """
 }
 fn (pairs: Vec): Vec {
   map(pairs, (p) {
@@ -494,7 +730,17 @@ fn
 
 check-delete-batch
 meta {
-    doc: """POST files/delete_batch/check - the status of a delete batch job, as a `BatchJob`."""
+    doc: """
+    POST files/delete_batch/check - the status of a delete batch job, as a
+    `BatchJob`.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/check-delete-batch("dbjid:AAB")
+    job.state
+    ```
+    """
 }
 fn
 (job-id: Str): BatchJob {
@@ -506,7 +752,18 @@ fn
 
 copy-batch
 meta {
-    doc: """POST files/copy_batch_v2 - copy up to 1000 `[from, to]` pairs (or `{from_path, to_path}` Maps) in one job. Options: `autorename`. Returns a `BatchJob`; poll `check-copy-batch` later when async."""
+    doc: """
+    POST files/copy_batch_v2 - copy up to 1000 `[from, to]` pairs (or
+    `{from_path, to_path}` Maps) in one job. Options: `autorename`. Returns
+    a `BatchJob`; poll `check-copy-batch` later when async.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/copy-batch([["/a.txt", "/Archive/a.txt"], ["/b.txt", "/Archive/b.txt"]], {autorename: true})
+    job.state
+    ```
+    """
 }
 fn
 (pairs: Vec): BatchJob {
@@ -518,7 +775,17 @@ fn
 
 check-copy-batch
 meta {
-    doc: """POST files/copy_batch/check_v2 - the status of a copy batch job, as a `BatchJob`."""
+    doc: """
+    POST files/copy_batch/check_v2 - the status of a copy batch job, as a
+    `BatchJob`.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/check-copy-batch("dbjid:AAB")
+    ::dropbox::files/is-done(job)
+    ```
+    """
 }
 fn
 (job-id: Str): BatchJob {
@@ -530,7 +797,18 @@ fn
 
 move-batch
 meta {
-    doc: """POST files/move_batch_v2 - move up to 1000 `[from, to]` pairs in one job. Options: `autorename`, `allow_ownership_transfer`. Returns a `BatchJob`; poll `check-move-batch` later when async."""
+    doc: """
+    POST files/move_batch_v2 - move up to 1000 `[from, to]` pairs in one
+    job. Options: `autorename`, `allow_ownership_transfer`. Returns a
+    `BatchJob`; poll `check-move-batch` later when async.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/move-batch([["/Inbox/a.txt", "/Done/a.txt"], ["/Inbox/b.txt", "/Done/b.txt"]])
+    job.state
+    ```
+    """
 }
 fn
 (pairs: Vec): BatchJob {
@@ -542,7 +820,17 @@ fn
 
 check-move-batch
 meta {
-    doc: """POST files/move_batch/check_v2 - the status of a move batch job, as a `BatchJob`."""
+    doc: """
+    POST files/move_batch/check_v2 - the status of a move batch job, as a
+    `BatchJob`.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/check-move-batch("dbjid:AAB")
+    ::dropbox::files/is-done(job)
+    ```
+    """
 }
 fn
 (job-id: Str): BatchJob {
@@ -554,7 +842,18 @@ fn
 
 create-folder-batch
 meta {
-    doc: """POST files/create_folder_batch - create up to 10,000 folders. Options: `autorename`, `force_async`. Returns a `BatchJob`; poll `check-create-folder-batch` later when async."""
+    doc: """
+    POST files/create_folder_batch - create up to 10,000 folders. Options:
+    `autorename`, `force_async`. Returns a `BatchJob`; poll
+    `check-create-folder-batch` later when async.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/create-folder-batch(["/Reports/2026", "/Reports/2027"], {force_async: true})
+    job.job-id
+    ```
+    """
 }
 fn
 (paths: Vec): BatchJob {
@@ -566,7 +865,17 @@ fn
 
 check-create-folder-batch
 meta {
-    doc: """POST files/create_folder_batch/check - the status of a create-folder batch job, as a `BatchJob`."""
+    doc: """
+    POST files/create_folder_batch/check - the status of a create-folder
+    batch job, as a `BatchJob`.
+
+    **Example**
+
+    ```hot
+    job ::dropbox::files/check-create-folder-batch("dbjid:AAB")
+    job.entries
+    ```
+    """
 }
 fn
 (job-id: Str): BatchJob {

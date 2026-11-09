@@ -4,7 +4,17 @@
 
 viewer
 meta {
-    doc: """The authenticated user (`{id, name, email}`) — the cheapest way to smoke-test a key."""
+    doc: """
+    The authenticated user (`{id, name, email}`). The cheapest way to
+    smoke-test a key.
+
+    **Example**
+
+    ```hot
+    me ::linear::teams/viewer()
+    me.email
+    ```
+    """
 }
 fn
 (): Map {
@@ -21,7 +31,17 @@ fn
 
 list-teams
 meta {
-    doc: """List teams (`{nodes: [{id, key, name}], ...}`). Team ids are what `create-issue` needs."""
+    doc: """
+    List teams (`{nodes: [{id, key, name}], ...}`). Team ids are what
+    `create-issue` needs.
+
+    **Example**
+
+    ```hot
+    teams ::linear::teams/list-teams()
+    map(teams.nodes, %.key)
+    ```
+    """
 }
 fn
 (): Map {
@@ -38,7 +58,17 @@ fn
 
 get-team-by-key
 meta {
-    doc: """Find a team by its key (the "ENG" in "ENG-123"). Returns the team or null."""
+    doc: """
+    Find a team by its key (the "ENG" in "ENG-123"). Returns the team or
+    null.
+
+    **Example**
+
+    ```hot
+    team ::linear::teams/get-team-by-key("ENG")
+    if(is-null(team), "no such team", team.id)
+    ```
+    """
 }
 fn
 (key: Str): Any {
@@ -58,7 +88,17 @@ fn
 
 list-labels
 meta {
-    doc: """A team's issue labels (`{nodes: [{id, name, color}], ...}`). Label ids feed `create-issue({labelIds: [...]})`."""
+    doc: """
+    A team's issue labels (`{nodes: [{id, name, color}], ...}`). Label ids
+    feed `create-issue({labelIds: [...]})`.
+
+    **Example**
+
+    ```hot
+    labels ::linear::teams/list-labels(::linear::teamsM)
+    map(labels.nodes, %.name)
+    ```
+    """
 }
 fn
 (team-id: Str): Map {
@@ -82,7 +122,18 @@ fn
 
 list-states
 meta {
-    doc: """A team's workflow states (`{id, name, type}` — types: triage/backlog/unstarted/started/completed/canceled). State ids drive `update-issue({stateId: ...})`."""
+    doc: """
+    A team's workflow states (`{id, name, type}`; types:
+    triage/backlog/unstarted/started/completed/canceled). State ids drive
+    `update-issue({stateId: ...})`.
+
+    **Example**
+
+    ```hot
+    states ::linear::teams/list-states(::linear::teamsM)
+    find-first(states.nodes, (s) { eq(s.type, "completed") })
+    ```
+    """
 }
 fn
 (team-id: Str): Map {

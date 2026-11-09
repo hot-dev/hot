@@ -18,7 +18,16 @@ seg ::discord::api/seg
 
 mark-webhook-tokens
 meta {
-    doc: """Mask the `token` of a webhook object, or of each in a Vec, in call records. Returns `value` unchanged. Exposed for testing."""
+    doc: """
+    Mask the `token` of a webhook object, or of each in a Vec, in call
+    records. Returns `value` unchanged. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::discord::webhooks/mark-webhook-tokens({id: "1", token: "abc"})  // {id: "1", token: "abc"}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -75,7 +84,19 @@ GetChannelWebhooksRequest type {
 
 get-channel-webhooks
 meta {
-    doc: """GET /channels/{channel_id}/webhooks - Webhooks in a channel. Needs MANAGE_WEBHOOKS."""
+    doc: """
+    GET /channels/{channel_id}/webhooks - Webhooks in a channel. Needs
+    MANAGE_WEBHOOKS.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    hooks ::webhooks/get-channel-webhooks(::webhooks/GetChannelWebhooksRequest({channel_id: "1100000000000000000"}))
+    map(hooks, %.name)
+    ```
+    """
 }
 fn
 (request: GetChannelWebhooksRequest): Vec<Map> {
@@ -91,7 +112,19 @@ GetGuildWebhooksRequest type {
 
 get-guild-webhooks
 meta {
-    doc: """GET /guilds/{guild_id}/webhooks - Webhooks in a guild. Needs MANAGE_WEBHOOKS."""
+    doc: """
+    GET /guilds/{guild_id}/webhooks - Webhooks in a guild. Needs
+    MANAGE_WEBHOOKS.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    hooks ::webhooks/get-guild-webhooks(::webhooks/GetGuildWebhooksRequest({guild_id: "1000000000000000000"}))
+    map(hooks, %.channel_id)
+    ```
+    """
 }
 fn
 (request: GetGuildWebhooksRequest): Vec<Map> {
@@ -107,7 +140,18 @@ GetWebhookRequest type {
 
 get-webhook
 meta {
-    doc: """GET /webhooks/{webhook_id} - A webhook by id. Needs MANAGE_WEBHOOKS."""
+    doc: """
+    GET /webhooks/{webhook_id} - A webhook by id. Needs MANAGE_WEBHOOKS.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    hook ::webhooks/get-webhook(::webhooks/GetWebhookRequest({webhook_id: "1600000000000000000"}))
+    hook.name
+    ```
+    """
 }
 fn
 (request: GetWebhookRequest): Map {
@@ -163,7 +207,20 @@ DeleteWebhookRequest type {
 
 delete-webhook
 meta {
-    doc: """DELETE /webhooks/{webhook_id} - Delete a webhook. Needs MANAGE_WEBHOOKS."""
+    doc: """
+    DELETE /webhooks/{webhook_id} - Delete a webhook. Needs MANAGE_WEBHOOKS.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/delete-webhook(::webhooks/DeleteWebhookRequest({
+      webhook_id: "1600000000000000000",
+      reason: "Rotating integrations"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteWebhookRequest): Bool {
@@ -177,7 +234,9 @@ fn
 // Webhook-token routes (no bot token)
 // ============================================================================
 
-token-path fn (webhook-id: Str, webhook-token: Str): Str {
+token-path
+meta {no-doc: true}
+fn (webhook-id: Str, webhook-token: Str): Str {
   `/webhooks/${seg(webhook-id)}/${::api/token-seg(webhook-token)}`
 }
 
@@ -188,7 +247,22 @@ GetWebhookWithTokenRequest type {
 
 get-webhook-with-token
 meta {
-    doc: """GET /webhooks/{webhook_id}/{webhook_token} - A webhook, authenticated by its token (no bot token, no `user` field)."""
+    doc: """
+    GET /webhooks/{webhook_id}/{webhook_token} - A webhook, authenticated by
+    its token (no bot token, no `user` field).
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    hook ::webhooks/get-webhook-with-token(::webhooks/GetWebhookWithTokenRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token")
+    }))
+    hook.channel_id
+    ```
+    """
 }
 fn
 (request: GetWebhookWithTokenRequest): Map {
@@ -208,7 +282,22 @@ ModifyWebhookWithTokenRequest type {
 
 modify-webhook-with-token
 meta {
-    doc: """PATCH /webhooks/{webhook_id}/{webhook_token} - Rename a webhook or change its avatar using its token. Cannot move channels."""
+    doc: """
+    PATCH /webhooks/{webhook_id}/{webhook_token} - Rename a webhook or
+    change its avatar using its token. Cannot move channels.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/modify-webhook-with-token(::webhooks/ModifyWebhookWithTokenRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token"),
+      name: "Deploy Alerts"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyWebhookWithTokenRequest): Map {
@@ -228,7 +317,21 @@ DeleteWebhookWithTokenRequest type {
 
 delete-webhook-with-token
 meta {
-    doc: """DELETE /webhooks/{webhook_id}/{webhook_token} - Delete a webhook using its token."""
+    doc: """
+    DELETE /webhooks/{webhook_id}/{webhook_token} - Delete a webhook using
+    its token.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/delete-webhook-with-token(::webhooks/DeleteWebhookWithTokenRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token")
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteWebhookWithTokenRequest): Bool {
@@ -320,7 +423,23 @@ GetWebhookMessageRequest type {
 
 get-webhook-message
 meta {
-    doc: """GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - A message this webhook sent. Pass `thread_id` for messages in a thread."""
+    doc: """
+    GET /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - A
+    message this webhook sent. Pass `thread_id` for messages in a thread.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    message ::webhooks/get-webhook-message(::webhooks/GetWebhookMessageRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token"),
+      message_id: "1200000000000000000"
+    }))
+    message.content
+    ```
+    """
 }
 fn
 (request: GetWebhookMessageRequest): Map {
@@ -356,6 +475,19 @@ meta {
     PATCH /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} -
     Edit a message this webhook sent. Only fields you set are sent.
     `attachments` is the full list to keep; new `files` are appended.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/edit-webhook-message(::webhooks/EditWebhookMessageRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token"),
+      message_id: "1200000000000000000",
+      content: "Deploy complete (edited)"
+    }))
+    ```
     """
 }
 fn
@@ -380,7 +512,22 @@ DeleteWebhookMessageRequest type {
 
 delete-webhook-message
 meta {
-    doc: """DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} - Delete a message this webhook sent."""
+    doc: """
+    DELETE /webhooks/{webhook_id}/{webhook_token}/messages/{message_id} -
+    Delete a message this webhook sent.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::discord::webhooks
+
+    ::webhooks/delete-webhook-message(::webhooks/DeleteWebhookMessageRequest({
+      webhook_id: "1600000000000000000",
+      webhook_token: ::hot::ctx/get("discord.webhook.token"),
+      message_id: "1200000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteWebhookMessageRequest): Bool {
@@ -404,7 +551,9 @@ fn
 //
 // See: https://discord.com/developers/docs/interactions/receiving-and-responding#security-and-authorization
 
-signed-message fn (timestamp: Str, raw: Str | Bytes): Str | Bytes {
+signed-message
+meta {no-doc: true}
+fn (timestamp: Str, raw: Str | Bytes): Str | Bytes {
   if(is-bytes(raw), concat(Bytes(timestamp), raw), `${timestamp}${raw}`)
 }
 

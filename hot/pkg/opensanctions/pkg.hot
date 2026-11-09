@@ -2,7 +2,7 @@
 
 hot.pkg.opensanctions {
   name: "hot.dev/opensanctions",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The OpenSanctions /match API for Hot with your own key: the hosted API or a self-hosted yente server, returning explained possible-match or no-match results for human review. Commercial use needs an OpenSanctions license.",
   author: "Hot Dev",

@@ -165,7 +165,17 @@ fn
 
 request-options
 meta {
-    doc: """The provider's `ChatRequestOptions`, or `::openai::chat-tools/DEFAULT_REQUEST_OPTIONS` when unset."""
+    doc: """
+    The provider's `ChatRequestOptions`, or
+    `::openai::chat-tools/DEFAULT_REQUEST_OPTIONS` when unset.
+
+    **Example**
+
+    ```hot
+    local ::openai::compatible/config("Ollama", ::openai::api/endpoint("http://localhost:11434/v1"), "ollama/")
+    ::openai::compatible/request-options(local).max-completion-tokens  // 1024
+    ```
+    """
 }
 fn (p: CompatibleProvider): ChatRequestOptions {
     or(p.options, ::tools/DEFAULT_REQUEST_OPTIONS)
@@ -249,7 +259,7 @@ meta {
     opts ::ai::chat/ChatOptions({
         chat-opts-fn: ::openai::compatible/chat-opts-fn(groq),
         model: "llama-3.3-70b-versatile",
-        provider-opts: {api-key: tenant-key}
+        provider-opts: {api-key: ::hot::ctx/get("tenant.groq.key")}
     })
     ```
     """
@@ -262,7 +272,10 @@ fn (p: CompatibleProvider): Fn {
 }
 
 chat-with-opts
-meta { doc: """Internal: one chat call to provider `p` under a call's `opts`.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: one chat call to provider `p` under a call's `opts`."""
+}
 fn (p: CompatibleProvider, model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, opts: Map): ::ai-chat/ChatReply {
     ep resolve(p, opts)
     cond {
@@ -276,6 +289,14 @@ meta {
     doc: """
     A `::ai::chat/run-loop-stream` chat function, `(model, messages,
     system, tools, on-delta) -> ChatReply`, bound to this provider.
+
+    **Example**
+
+    ```hot
+    local ::openai::compatible/config("Ollama", ::openai::api/endpoint("http://localhost:11434/v1"), "ollama/")
+    opts ::ai::chat/ChatOptions({model: "llama3.2", chat-stream-fn: ::openai::compatible/chat-stream-fn(local)})
+    ::ai::chat/run-loop-stream(opts, "Hello!", (delta) { print(delta) })
+    ```
     """
 }
 fn (p: CompatibleProvider): Fn {
@@ -290,6 +311,18 @@ meta {
     doc: """
     A `chat-stream-opts-fn` bound to this provider: `chat-stream-fn` that also
     takes `ChatOptions.provider-opts` (see `resolve`).
+
+    **Example**
+
+    ```hot
+    groq ::openai::compatible/config("Groq", ::openai::api/endpoint("https://api.groq.com/openai/v1", ::hot::ctx/get("groq.api.key")), "groq/")
+    opts ::ai::chat/ChatOptions({
+      model: "llama-3.3-70b-versatile",
+      chat-stream-opts-fn: ::openai::compatible/chat-stream-opts-fn(groq),
+      provider-opts: {api-key: ::hot::ctx/get("tenant.groq.key")}
+    })
+    ::ai::chat/run-loop-stream(opts, "Hello!", (delta) { print(delta) })
+    ```
     """
 }
 fn (p: CompatibleProvider): Fn {
@@ -301,6 +334,7 @@ fn (p: CompatibleProvider): Fn {
 
 chat-stream-with-opts
 meta {
+    no-doc: true,
     doc: """Internal: one streaming chat call to provider `p` under a call's `opts`."""
 }
 fn (p: CompatibleProvider, model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, opts: Map): ::ai-chat/ChatReply {
@@ -313,7 +347,18 @@ fn (p: CompatibleProvider, model: Str, messages: Vec<::ai-chat/Message>, system:
 
 detect-fn
 meta {
-    doc: """A `ProviderRegistration.detect` function matching models that start with `prefix` (case-insensitive)."""
+    doc: """
+    A `ProviderRegistration.detect` function matching models that start with
+    `prefix` (case-insensitive).
+
+    **Example**
+
+    ```hot
+    detect ::openai::compatible/detect-fn("groq/")
+    detect("groq/llama-3.3-70b")  // true
+    detect("gpt-4o")  // false
+    ```
+    """
 }
 fn (prefix: Str?): Fn {
     p prefix
@@ -375,6 +420,14 @@ meta {
     GET /models on the provider's endpoint. Returns the decoded body
     (`{data: [{id, ...}]}` on most servers) as a Map, or an Err carrying
     `HttpError`.
+
+    **Example**
+
+    ```hot
+    groq ::openai::compatible/config("Groq", ::openai::api/endpoint("https://api.groq.com/openai/v1", ::hot::ctx/get("groq.api.key")), "groq/")
+    models ::openai::compatible/list-models(groq)
+    map(models.data, %.id)
+    ```
     """
 }
 fn
@@ -395,6 +448,14 @@ meta {
     POST /embeddings on the provider's endpoint. `request` is the OpenAI
     embeddings body (`{model, input, dimensions?, encoding_format?}`).
     Returns the decoded body as a Map, or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    local ::openai::compatible/config("Ollama", ::openai::api/endpoint("http://localhost:11434/v1"), "ollama/")
+    result ::openai::compatible/create-embeddings(local, {model: "ollama/nomic-embed-text", input: "Hello"})
+    result.data[0].embedding
+    ```
     """
 }
 fn

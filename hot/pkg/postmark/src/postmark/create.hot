@@ -20,7 +20,17 @@ CreateInboundRuleResponse type {
 
 create-inbound-rule-trigger
 meta {
-    doc: """Create a new inbound rule trigger. The rule specifies an email pattern to match for inbound processing."""
+    doc: """
+    Create a new inbound rule trigger. The rule specifies an email pattern
+    to match for inbound processing.
+
+    **Example**
+
+    ```hot
+    rule ::postmark::create/create-inbound-rule-trigger(::postmark::create/CreateInboundRuleRequest({Rule: "spam@example.com"}))
+    rule.ID
+    ```
+    """
 }
 fn
 (request: CreateInboundRuleRequest): CreateInboundRuleResponse {

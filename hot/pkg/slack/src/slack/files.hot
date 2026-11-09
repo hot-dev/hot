@@ -20,7 +20,19 @@ FilesDeleteResponse type {
 
 files-delete
 meta {
-    doc: """POST /files.delete - Delete a file. The file is permanently removed and cannot be recovered."""
+    doc: """
+    POST /files.delete - Delete a file. The file is permanently removed and
+    cannot be recovered.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-delete(::slack::files/FilesDeleteRequest({
+      file: "F1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: FilesDeleteRequest): FilesDeleteResponse {
@@ -55,7 +67,24 @@ FilesInfoResponse type {
 
 files-info
 meta {
-    doc: """GET /files.info - Get information about a file. Returns the file metadata, comments, and paging info."""
+    doc: """
+    GET /files.info - Get information about a file. Returns the file
+    metadata, comments, and paging info.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-info(::slack::files/FilesInfoRequest({
+      file: "F1234567"
+    }))
+    response.file.name
+
+    // With a per-call token
+    ::slack::files/files-info(::slack::files/FilesInfoRequest({
+      file: "F1234567"
+    }), {api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (request: FilesInfoRequest): FilesInfoResponse {
@@ -130,7 +159,19 @@ FilesRevokePublicURLResponse type {
 
 files-revoke-public-url
 meta {
-    doc: """POST /files.revokePublicURL - Revoke public sharing of a file. The public URL will no longer be accessible."""
+    doc: """
+    POST /files.revokePublicURL - Revoke public sharing of a file. The
+    public URL will no longer be accessible.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-revoke-public-url(::slack::files/FilesRevokePublicURLRequest({
+      file: "F1234567"
+    }))
+    response.file.id
+    ```
+    """
 }
 fn
 (request: FilesRevokePublicURLRequest): FilesRevokePublicURLResponse {
@@ -158,7 +199,19 @@ FilesSharedPublicURLResponse type {
 
 files-shared-public-url
 meta {
-    doc: """POST /files.sharedPublicURL - Enable public sharing of a file. Returns the file object with the public permalink."""
+    doc: """
+    POST /files.sharedPublicURL - Enable public sharing of a file. Returns
+    the file object with the public permalink.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-shared-public-url(::slack::files/FilesSharedPublicURLRequest({
+      file: "F1234567"
+    }))
+    response.file.permalink_public
+    ```
+    """
 }
 fn
 (request: FilesSharedPublicURLRequest): FilesSharedPublicURLResponse {
@@ -193,7 +246,24 @@ FilesUploadResponse type {
 
 files-upload
 meta {
-    doc: """POST /files.upload - Upload a file. Provide `content` for text-based uploads or `file` for binary files. Optionally share to channels and add an initial comment."""
+    doc: """
+    POST /files.upload - Upload a file. Provide `content` for text-based
+    uploads or `file` for binary files. Optionally share to channels and add
+    an initial comment.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-upload(::slack::files/FilesUploadRequest({
+      channels: "C1234567",
+      content: "name,total\nacme,42\n",
+      filename: "totals.csv",
+      title: "Totals",
+      initial_comment: "Latest totals"
+    }))
+    response.file.id
+    ```
+    """
 }
 fn
 (request: FilesUploadRequest): FilesUploadResponse {
@@ -225,7 +295,20 @@ FilesCommentsDeleteResponse type {
 
 files-comments-delete
 meta {
-    doc: """POST /files.comments.delete - Delete a file comment. This API is deprecated but still available."""
+    doc: """
+    POST /files.comments.delete - Delete a file comment. This API is
+    deprecated but still available.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-comments-delete(::slack::files/FilesCommentsDeleteRequest({
+      file: "F1234567",
+      id: "Fc1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: FilesCommentsDeleteRequest): FilesCommentsDeleteResponse {
@@ -262,7 +345,21 @@ FilesRemoteAddResponse type {
 
 files-remote-add
 meta {
-    doc: """POST /files.remote.add - Add a remote file. Register an external file with Slack by providing an `external_id`, `external_url`, and `title`."""
+    doc: """
+    POST /files.remote.add - Add a remote file. Register an external file
+    with Slack by providing an `external_id`, `external_url`, and `title`.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-add(::slack::files/FilesRemoteAddRequest({
+      external_id: "report-42",
+      external_url: "https://example.com/reports/42",
+      title: "Q3 report"
+    }))
+    response.file.id
+    ```
+    """
 }
 fn
 (request: FilesRemoteAddRequest): FilesRemoteAddResponse {
@@ -291,7 +388,19 @@ FilesRemoteInfoResponse type {
 
 files-remote-info
 meta {
-    doc: """GET /files.remote.info - Retrieve information about a remote file. Look up by Slack `file` ID or `external_id`."""
+    doc: """
+    GET /files.remote.info - Retrieve information about a remote file. Look
+    up by Slack `file` ID or `external_id`.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-info(::slack::files/FilesRemoteInfoRequest({
+      external_id: "report-42"
+    }))
+    response.file.title
+    ```
+    """
 }
 fn
 (request: FilesRemoteInfoRequest): FilesRemoteInfoResponse {
@@ -324,7 +433,20 @@ FilesRemoteListResponse type {
 
 files-remote-list
 meta {
-    doc: """GET /files.remote.list - List remote files. Filter by channel and timestamp range. Supports cursor-based pagination."""
+    doc: """
+    GET /files.remote.list - List remote files. Filter by channel and
+    timestamp range. Supports cursor-based pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-list(::slack::files/FilesRemoteListRequest({
+      channel: "C1234567",
+      limit: 50
+    }))
+    map(response.files, %.title)
+    ```
+    """
 }
 fn
 (request: FilesRemoteListRequest): FilesRemoteListResponse {
@@ -352,7 +474,19 @@ FilesRemoteRemoveResponse type {
 
 files-remote-remove
 meta {
-    doc: """POST /files.remote.remove - Remove a remote file. Identify the file by Slack `file` ID or `external_id`."""
+    doc: """
+    POST /files.remote.remove - Remove a remote file. Identify the file by
+    Slack `file` ID or `external_id`.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-remove(::slack::files/FilesRemoteRemoveRequest({
+      external_id: "report-42"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: FilesRemoteRemoveRequest): FilesRemoteRemoveResponse {
@@ -382,7 +516,20 @@ FilesRemoteShareResponse type {
 
 files-remote-share
 meta {
-    doc: """GET /files.remote.share - Share a remote file into a channel. Pass a comma-separated list of channel IDs in `channels`."""
+    doc: """
+    GET /files.remote.share - Share a remote file into a channel. Pass a
+    comma-separated list of channel IDs in `channels`.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-share(::slack::files/FilesRemoteShareRequest({
+      external_id: "report-42",
+      channels: "C1234567,C2345678"
+    }))
+    response.file.id
+    ```
+    """
 }
 fn
 (request: FilesRemoteShareRequest): FilesRemoteShareResponse {
@@ -416,7 +563,20 @@ FilesRemoteUpdateResponse type {
 
 files-remote-update
 meta {
-    doc: """POST /files.remote.update - Update a remote file. Identify by Slack `file` ID or `external_id`, then update the URL, title, or other fields."""
+    doc: """
+    POST /files.remote.update - Update a remote file. Identify by Slack
+    `file` ID or `external_id`, then update the URL, title, or other fields.
+
+    **Example**
+
+    ```hot
+    response ::slack::files/files-remote-update(::slack::files/FilesRemoteUpdateRequest({
+      external_id: "report-42",
+      title: "Q3 report (final)"
+    }))
+    response.file.title
+    ```
+    """
 }
 fn
 (request: FilesRemoteUpdateRequest): FilesRemoteUpdateResponse {

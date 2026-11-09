@@ -46,7 +46,9 @@ type {
     reasons: Vec<Str>
 }
 
-make fn (doc: Any, decision: Str, reasons: Vec): Decision {
+make
+meta {no-doc: true}
+fn (doc: Any, decision: Str, reasons: Vec): Decision {
   r ::api/resource(doc)
   Decision({
     decision: decision,
@@ -58,7 +60,9 @@ make fn (doc: Any, decision: Str, reasons: Vec): Decision {
   })
 }
 
-status-of fn (doc: Any): Str {
+status-of
+meta {no-doc: true}
+fn (doc: Any): Str {
   Str(or(::api/attr(doc, "status"), ""))
 }
 
@@ -74,6 +78,18 @@ meta {
     `initiated`/`submitted`/`requires_retry` → pending,
     `tentatively_passed`/`tentatively_failed` → needs-review,
     `canceled`/`skipped` → failed.
+
+    **Example**
+
+    ```hot
+    v {data: {id: "ver_1", type: "verification/government-id", attributes: {
+      status: "failed",
+      checks: [{name: "id_expired", status: "failed"}]
+    }}}
+    d ::persona::decisions/verification-decision(v)
+    d.decision  // "declined"
+    d.reasons  // ["verification/government-id failed: id_expired"]
+    ```
     """
 }
 fn (doc: Any): Decision {
@@ -96,7 +112,20 @@ fn (doc: Any): Decision {
 
 report-decision
 meta {
-    doc: """Normalize a report: `pending` → pending, `errored` → failed, `ready` with `has-match` → needs-review (a match always needs a look), `ready` without a match → approved."""
+    doc: """
+    Normalize a report: `pending` → pending, `errored` → failed, `ready`
+    with `has-match` → needs-review (a match always needs a look), `ready`
+    without a match → approved.
+
+    **Example**
+
+    ```hot
+    r {data: {id: "rep_1", type: "report/watchlist", attributes: {status: "ready", has-match: true}}}
+    d ::persona::decisions/report-decision(r)
+    d.decision  // "needs-review"
+    d.reasons  // ["report/watchlist has a match"]
+    ```
+    """
 }
 fn (doc: Any): Decision {
   s status-of(doc)
@@ -112,7 +141,18 @@ fn (doc: Any): Decision {
 
 included-reasons
 meta {
-    doc: """Reasons from the verifications and reports included in an inquiry document: failed or retry-needed verifications (with their failed check names) and reports with a match or an error. Exposed for testing."""
+    doc: """
+    Reasons from the verifications and reports included in an inquiry
+    document: failed or retry-needed verifications (with their failed check
+    names) and reports with a match or an error. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    doc {included: [{id: "rep_1", type: "report/watchlist", attributes: {status: "ready", has-match: true}}]}
+    ::persona::decisions/included-reasons(doc)  // ["report/watchlist has a match"]
+    ```
+    """
 }
 fn (doc: Any): Vec<Str> {
   verifications ::api/included(doc, "verification")
@@ -190,7 +230,19 @@ fn
 
 transaction-decision
 meta {
-    doc: """Normalize a transaction (KYB): `approved`, `declined`, `needs_review` map directly, `errored` → failed, `created`/`pending` → pending, and any custom status → needs-review."""
+    doc: """
+    Normalize a transaction (KYB): `approved`, `declined`, `needs_review`
+    map directly, `errored` → failed, `created`/`pending` → pending, and any
+    custom status → needs-review.
+
+    **Example**
+
+    ```hot
+    d ::persona::decisions/transaction-decision({data: {id: "txn_1", type: "transaction", attributes: {status: "errored"}}})
+    d.decision  // "failed"
+    d.reasons  // ["transaction errored"]
+    ```
+    """
 }
 fn (doc: Any): Decision {
   s status-of(doc)
@@ -206,7 +258,19 @@ fn (doc: Any): Decision {
 
 case-decision
 meta {
-    doc: """Normalize a case. Case statuses are configured per template, so this reads them case-insensitively: `approved` → approved, `declined`/`rejected` → declined, anything else (open, pending, in review, ...) → pending until a reviewer resolves it."""
+    doc: """
+    Normalize a case. Case statuses are configured per template, so this
+    reads them case-insensitively: `approved` → approved,
+    `declined`/`rejected` → declined, anything else (open, pending, in
+    review, ...) → pending until a reviewer resolves it.
+
+    **Example**
+
+    ```hot
+    ::persona::decisions/case-decision({data: {id: "case_1", type: "case", attributes: {status: "Approved"}}}).decision  // "approved"
+    ::persona::decisions/case-decision({data: {id: "case_2", type: "case", attributes: {status: "Open"}}}).decision  // "pending"
+    ```
+    """
 }
 fn (doc: Any): Decision {
   s lowercase(status-of(doc))
@@ -219,7 +283,18 @@ fn (doc: Any): Decision {
 
 decide
 meta {
-    doc: """Normalize any supported resource by its JSON:API `type`: `inquiry`, `report/*`, `verification/*`, `transaction` or `case`. Other types give needs-review."""
+    doc: """
+    Normalize any supported resource by its JSON:API `type`: `inquiry`,
+    `report/*`, `verification/*`, `transaction` or `case`. Other types give
+    needs-review.
+
+    **Example**
+
+    ```hot
+    ::persona::decisions/decide({data: {id: "inq_1", type: "inquiry", attributes: {status: "approved"}}}).decision  // "approved"
+    ::persona::decisions/decide({data: {id: "x_1", type: "widget", attributes: {}}}).decision  // "needs-review"
+    ```
+    """
 }
 fn (doc: Any): Decision {
   r ::api/resource(doc)

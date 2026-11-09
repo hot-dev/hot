@@ -216,3 +216,51 @@ meta ["test"] fn () {
     assert-eq("1:00", opts.end)
     assert-eq("mp3", opts.format)
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::sox/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::sox/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::sox/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::sox/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::sox/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::sox/shell-quote("a\nb"))
+    assert-eq("''", ::sox/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::sox/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::sox/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::sox/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::sox/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::sox/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::sox/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::sox/file-ext("hot://uploads/a.x y"))
+}

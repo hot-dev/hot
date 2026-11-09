@@ -7,7 +7,17 @@ meta {
 
 build-embed-body
 meta {
-    doc: """The `POST /embed` body: `inputs` as `[{text}]`, plus `parameters` when given (e.g. `{input_type: "passage", truncate: "END"}`). Exposed for testing."""
+    doc: """
+    The `POST /embed` body: `inputs` as `[{text}]`, plus `parameters` when
+    given (e.g. `{input_type: "passage", truncate: "END"}`). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::inference/build-embed-body("llama-text-embed-v2", ["Hi"], {input_type: "query"})  // {model: "llama-text-embed-v2", inputs: [{text: "Hi"}], parameters: {input_type: "query"}}
+    ```
+    """
 }
 fn (model: Str, texts: Vec, parameters: Any): Map {
   ::api/compact({
@@ -49,7 +59,17 @@ fn
 
 build-rerank-body
 meta {
-    doc: """The `POST /rerank` body: `documents` may be strings (sent as `{text}`) or Maps; set `options` among `top_n`, `return_documents`, `rank_fields`, `parameters` are included. Exposed for testing."""
+    doc: """
+    The `POST /rerank` body: `documents` may be strings (sent as `{text}`)
+    or Maps; set `options` among `top_n`, `return_documents`, `rank_fields`,
+    `parameters` are included. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::pinecone::inference/build-rerank-body("bge-reranker-v2-m3", "What is Hot?", ["A", {id: "b", text: "B"}], {top_n: 1}).documents  // [{text: "A"}, {id: "b", text: "B"}]
+    ```
+    """
 }
 fn (model: Str, query: Str, documents: Vec, options: Map): Map {
   ::api/compact({

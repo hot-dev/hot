@@ -28,7 +28,23 @@ CallsAddResponse type {
 
 calls-add
 meta {
-    doc: """POST /calls.add - Register a new call. Requires an `external_unique_id` and `join_url`. Optionally include a title, participants, and start time."""
+    doc: """
+    POST /calls.add - Register a new call. Requires an `external_unique_id`
+    and `join_url`. Optionally include a title, participants, and start
+    time.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-add(::slack::calls/CallsAddRequest({
+      external_unique_id: "call-2025-0042",
+      join_url: "https://example.com/join/42",
+      title: "Weekly sync",
+      users: [{slack_id: "U1234567"}, {external_id: "guest-1", display_name: "Sam"}]
+    }))
+    response.call.id
+    ```
+    """
 }
 fn
 (request: CallsAddRequest): CallsAddResponse {
@@ -56,7 +72,20 @@ CallsEndResponse type {
 
 calls-end
 meta {
-    doc: """POST /calls.end - End a call. Pass the call `id` and optionally a `duration` in seconds."""
+    doc: """
+    POST /calls.end - End a call. Pass the call `id` and optionally a
+    `duration` in seconds.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-end(::slack::calls/CallsEndRequest({
+      id: "R1234567",
+      duration: 1800
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: CallsEndRequest): CallsEndResponse {
@@ -84,7 +113,19 @@ CallsInfoResponse type {
 
 calls-info
 meta {
-    doc: """GET /calls.info - Get information about a call. Returns the call object with title, participants, and status."""
+    doc: """
+    GET /calls.info - Get information about a call. Returns the call object
+    with title, participants, and status.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-info(::slack::calls/CallsInfoRequest({
+      id: "R1234567"
+    }))
+    response.call.title
+    ```
+    """
 }
 fn
 (request: CallsInfoRequest): CallsInfoResponse {
@@ -115,7 +156,20 @@ CallsUpdateResponse type {
 
 calls-update
 meta {
-    doc: """POST /calls.update - Update information about a call. Can change the title and join URLs."""
+    doc: """
+    POST /calls.update - Update information about a call. Can change the
+    title and join URLs.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-update(::slack::calls/CallsUpdateRequest({
+      id: "R1234567",
+      title: "Weekly sync (moved)"
+    }))
+    response.call.title
+    ```
+    """
 }
 fn
 (request: CallsUpdateRequest): CallsUpdateResponse {
@@ -147,7 +201,21 @@ CallsParticipantsAddResponse type {
 
 calls-participants-add
 meta {
-    doc: """POST /calls.participants.add - Add new participants to a call. Each user in the `users` Vec should be a Map with a `slack_id` or `external_id` and `display_name`."""
+    doc: """
+    POST /calls.participants.add - Add new participants to a call. Each user
+    in the `users` Vec should be a Map with a `slack_id` or `external_id`
+    and `display_name`.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-participants-add(::slack::calls/CallsParticipantsAddRequest({
+      id: "R1234567",
+      users: [{slack_id: "U1234567"}, {external_id: "guest-1", display_name: "Sam"}]
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: CallsParticipantsAddRequest): CallsParticipantsAddResponse {
@@ -175,7 +243,21 @@ CallsParticipantsRemoveResponse type {
 
 calls-participants-remove
 meta {
-    doc: """POST /calls.participants.remove - Remove participants from a call. Each user in the `users` Vec should be a Map with a `slack_id` or `external_id`."""
+    doc: """
+    POST /calls.participants.remove - Remove participants from a call. Each
+    user in the `users` Vec should be a Map with a `slack_id` or
+    `external_id`.
+
+    **Example**
+
+    ```hot
+    response ::slack::calls/calls-participants-remove(::slack::calls/CallsParticipantsRemoveRequest({
+      id: "R1234567",
+      users: [{slack_id: "U1234567"}]
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: CallsParticipantsRemoveRequest): CallsParticipantsRemoveResponse {

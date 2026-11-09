@@ -12,7 +12,18 @@ streams. Every notification category is explicitly opted in.
 ::types ::mcp::types
 
 wire-filter
-meta {doc: """Convert a typed subscription filter to the MCP wire shape."""}
+meta {
+    doc: """
+    Convert a typed subscription filter to the MCP wire shape.
+
+    **Example**
+
+    ```hot
+    opt-ins ::mcp::types/SubscriptionFilter({tools-list-changed: true})
+    ::mcp::subscriptions/wire-filter(opt-ins)  // {toolsListChanged: true}
+    ```
+    """
+}
 fn (filter: ::types/SubscriptionFilter): Map {
   {}
     |> assoc-some("toolsListChanged", filter.tools-list-changed)
@@ -21,12 +32,34 @@ fn (filter: ::types/SubscriptionFilter): Map {
     |> assoc-some("resourceSubscriptions", filter.resource-subscriptions)
 }
 
-require-supported fn (supported: Bool, message: Str): Any {
+require-supported
+meta {no-doc: true}
+fn (supported: Bool, message: Str): Any {
   if(supported, null, fail(message))
 }
 
 validate-filter
-meta {doc: """Validate subscription opt-ins against discovered server capabilities."""}
+meta {
+    doc: """
+    Validate subscription opt-ins against discovered server capabilities.
+
+    **Example**
+
+    ```hot
+    session ::mcp::types/Session({
+      url: "https://mcp.example.com/mcp",
+      protocol-version: "2026-07-28",
+      server-info: ::mcp::types/ServerInfo({name: "server", version: "1"}),
+      server-capabilities: ::mcp::types/ServerCapabilities({tools: {listChanged: true}}),
+      headers: {},
+      era: "modern",
+      client-info: ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    })
+    opt-ins ::mcp::types/SubscriptionFilter({tools-list-changed: true})
+    ::mcp::subscriptions/validate-filter(session, opt-ins)  // {toolsListChanged: true}
+    ```
+    """
+}
 fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Map {
   caps untype(session.server-capabilities)
   tools get(caps, "tools", {})
@@ -71,12 +104,22 @@ fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Map {
 listen
 meta {
     doc: """
-Open a modern long-lived notification stream.
+    Open a modern long-lived notification stream.
 
-Returns an iterator of parsed `StreamEvent` values. The final event, when a
-server closes the subscription gracefully, contains the
-`subscriptions/listen` JSON-RPC result.
-"""
+    Returns an iterator of parsed `StreamEvent` values. The final event, when a
+    server closes the subscription gracefully, contains the
+    `subscriptions/listen` JSON-RPC result.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    opt-ins ::mcp::types/SubscriptionFilter({tools-list-changed: true})
+    events ::mcp::subscriptions/listen(session, opt-ins)
+    for-each(events, (event) { println(event.data.method) })
+    ```
+    """
 }
 fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Iter {
   if(

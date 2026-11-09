@@ -99,8 +99,8 @@ meta {
     **Example**
 
     ```hot
-    conn ::redis/connect({host: "localhost", port: 6379, password: "secret", db: 1})
-    if-err(conn, (e) { ... fall back ... })
+    conn ::redis/connect({host: "localhost", port: 6379, password: ::hot::ctx/get("redis.password"), db: 1})
+    if-err(conn, (e) { println(`redis unavailable: ${e}`) })
     ```
 
     See `RedisOptions` for the accepted fields.
@@ -126,13 +126,17 @@ fn (options: Map): RedisConnection {
     })
 }
 
-negotiate-tls fn (socket, tls-opts: Map, host: Str): Any {
+negotiate-tls
+meta {no-doc: true}
+fn (socket, tls-opts: Map, host: Str): Any {
     // upgrade secures the socket handle in place.
     if-ok(::tls/upgrade(socket, {...tls-opts, server-name: ::coll/get(tls-opts, "server-name", host)}), (upgraded) { true })
 }
 
 // AUTH, or HELLO 3 (with optional AUTH) when RESP3 is requested.
-maybe-auth fn (conn: RedisConnection, username, password, resp3: Bool): Any {
+maybe-auth
+meta {no-doc: true}
+fn (conn: RedisConnection, username, password, resp3: Bool): Any {
     cond {
         resp3 => {
             hello-args cond {
@@ -150,7 +154,9 @@ maybe-auth fn (conn: RedisConnection, username, password, resp3: Bool): Any {
     }
 }
 
-maybe-select fn (conn: RedisConnection, db: Int): Any {
+maybe-select
+meta {no-doc: true}
+fn (conn: RedisConnection, db: Int): Any {
     if(eq(db, 0), null, command(conn, ["SELECT", Str(db)]))
 }
 
@@ -173,6 +179,8 @@ meta {
     **Example**
 
     ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+
     ::redis/command(conn, ["SET", "k", "v"])          // "OK"
     ::redis/command(conn, ["INCRBY", "n", "5"])       // 5
     ::redis/command(conn, ["MGET", "a", "b"])         // ["1", null]
@@ -190,7 +198,18 @@ fn (conn: RedisConnection, args: Vec): Any {
 // ---------------------------------------------------------------------------
 
 ping
-meta {doc: """Ping the server. Returns "PONG"."""}
+meta {
+    doc: """
+    Ping the server. Returns "PONG".
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    ::redis/ping(conn)
+    ```
+    """
+}
 fn (conn: RedisConnection): Str { command(conn, ["PING"]) }
 
 get
@@ -198,6 +217,14 @@ meta {
     doc: """
     Get the value of `key`, or null if it does not exist. Values decode
     to Str, or to Bytes when they are not valid UTF-8.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    value ::redis/get(conn, "user:42:name")
+    or(value, "anonymous")
+    ```
     """
 }
 fn (conn: RedisConnection, key: Str): Any { command(conn, ["GET", key]) }
@@ -211,7 +238,8 @@ meta {
     **Example**
 
     ```hot
-    ::redis/set(conn, "session:42", token)
+    conn ::redis/connect({host: "localhost", port: 6379})
+    ::redis/set(conn, "session:42", "active")
     ```
     """
 }
@@ -221,31 +249,90 @@ fn (conn: RedisConnection, key: Str, value: Any): Str {
 
 set-ex
 meta {
-    doc: """Set `key` to `value` with an expiry in `seconds`, like `set`. Returns "OK"."""
+    doc: """
+    Set `key` to `value` with an expiry in `seconds`, like `set`. Returns
+    "OK".
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    // Gone after an hour
+    ::redis/set-ex(conn, "session:42", "active", 3600)
+    ```
+    """
 }
 fn (conn: RedisConnection, key: Str, value: Any, seconds: Int): Str {
     command(conn, ["SET", key, value, "EX", Str(seconds)])
 }
 
 del
-meta {doc: """Delete one or more `keys`. Returns the number removed."""}
+meta {
+    doc: """
+    Delete one or more `keys`. Returns the number removed.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    removed ::redis/del(conn, ["session:42", "session:43"])
+    gt(removed, 0)
+    ```
+    """
+}
 fn (conn: RedisConnection, keys: Vec): Int {
     command(conn, concat(["DEL"], keys))
 }
 
 exists
-meta {doc: """Return the number of the given `keys` that exist."""}
+meta {
+    doc: """
+    Return the number of the given `keys` that exist.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    found ::redis/exists(conn, ["session:42", "session:43"])
+    eq(found, 2)
+    ```
+    """
+}
 fn (conn: RedisConnection, keys: Vec): Int {
     command(conn, concat(["EXISTS"], keys))
 }
 
 incr
-meta {doc: """Increment the integer at `key` by one and return the new value."""}
+meta {
+    doc: """
+    Increment the integer at `key` by one and return the new value.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    visits ::redis/incr(conn, "visits")
+    println(`visit number ${visits}`)
+    ```
+    """
+}
 fn (conn: RedisConnection, key: Str): Int { command(conn, ["INCR", key]) }
 
 expire
 meta {
-    doc: """Set a `seconds` TTL on `key`. Returns 1 if set, 0 if the key does not exist."""
+    doc: """
+    Set a `seconds` TTL on `key`. Returns 1 if set, 0 if the key does not
+    exist.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    ::redis/set(conn, "lock:report", "held")
+    applied ::redis/expire(conn, "lock:report", 30)
+    eq(applied, 1)
+    ```
+    """
 }
 fn (conn: RedisConnection, key: Str, seconds: Int): Int {
     command(conn, ["EXPIRE", key, Str(seconds)])
@@ -256,6 +343,14 @@ meta {
     doc: """
     Close the connection (send QUIT and shut down the socket). Safe to call
     more than once.
+
+    **Example**
+
+    ```hot
+    conn ::redis/connect({host: "localhost", port: 6379})
+    ::redis/ping(conn)
+    ::redis/close(conn)
+    ```
     """
 }
 fn (conn: RedisConnection): Bool {

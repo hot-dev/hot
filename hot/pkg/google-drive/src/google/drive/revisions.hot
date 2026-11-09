@@ -21,7 +21,17 @@ LIST_FIELDS "nextPageToken,revisions(id,mimeType,modifiedTime,keepForever,publis
 
 list-revisions
 meta {
-    doc: """GET /files/{id}/revisions - one page (`{revisions, nextPageToken?}`). Options: `pageSize` (max 1000), `pageToken`, `fields`, credentials."""
+    doc: """
+    GET /files/{id}/revisions - one page (`{revisions, nextPageToken?}`).
+    Options: `pageSize` (max 1000), `pageToken`, `fields`, credentials.
+
+    **Example**
+
+    ```hot
+    page ::google::drive::revisions/list-revisions("1AbCfile", {pageSize: 100})
+    map(page.revisions, %.id)
+    ```
+    """
 }
 fn
 (file-id: Str): Map {
@@ -33,7 +43,18 @@ fn
 }
 
 list-all-revisions
-meta {doc: """Every revision Drive returns for a file (follows `nextPageToken`)."""}
+meta {
+    doc: """
+    Every revision Drive returns for a file (follows `nextPageToken`).
+
+    **Example**
+
+    ```hot
+    revisions ::google::drive::revisions/list-all-revisions("1AbCfile")
+    map(revisions, %.modifiedTime)
+    ```
+    """
+}
 fn
 (file-id: Str): Vec {
   list-all-revisions(file-id, {})
@@ -44,7 +65,17 @@ fn
 
 get-revision
 meta {
-    doc: """GET /files/{id}/revisions/{revisionId} - revision metadata (`"head"` is not accepted; use the file's `headRevisionId`)."""
+    doc: """
+    GET /files/{id}/revisions/{revisionId} - revision metadata (`"head"` is
+    not accepted; use the file's `headRevisionId`).
+
+    **Example**
+
+    ```hot
+    revision ::google::drive::revisions/get-revision("1AbCfile", "0B7rev")
+    revision.modifiedTime
+    ```
+    """
 }
 fn
 (file-id: Str, revision-id: Str): Map {
@@ -57,7 +88,17 @@ fn
 
 download-revision
 meta {
-    doc: """GET /files/{id}/revisions/{revisionId}?alt=media - a blob revision's bytes as a `FileContent`. Options: `acknowledgeAbuse`, credentials."""
+    doc: """
+    GET /files/{id}/revisions/{revisionId}?alt=media - a blob revision's
+    bytes as a `FileContent`. Options: `acknowledgeAbuse`, credentials.
+
+    **Example**
+
+    ```hot
+    old ::google::drive::revisions/download-revision("1AbCfile", "0B7rev")
+    old.bytes
+    ```
+    """
 }
 fn
 (file-id: Str, revision-id: Str): FileContent {
@@ -76,7 +117,16 @@ fn
 
 keep-forever
 meta {
-    doc: """PATCH a blob revision's `keepForever` flag (pinned revisions are never purged; at most 200 per file)."""
+    doc: """
+    PATCH a blob revision's `keepForever` flag (pinned revisions are never
+    purged; at most 200 per file).
+
+    **Example**
+
+    ```hot
+    ::google::drive::revisions/keep-forever("1AbCfile", "0B7rev", true)
+    ```
+    """
 }
 fn
 (file-id: Str, revision-id: Str, keep: Bool): Map {

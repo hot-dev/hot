@@ -35,7 +35,17 @@ fn
 
 get-transaction
 meta {
-    doc: """GET /api/transactions/{id}: retrieve a transaction (`reconciled` says whether it matched)."""
+    doc: """
+    GET /api/transactions/{id}: retrieve a transaction (`reconciled` says
+    whether it matched).
+
+    **Example**
+
+    ```hot
+    transaction ::modern-treasury::transactions/get-transaction("e07c5a93-14d6-4f2b-9c38-7a0b6e2d1f45")
+    transaction.reconciled
+    ```
+    """
 }
 fn
 (transaction-id: Str): Map {
@@ -47,7 +57,17 @@ fn
 
 list-line-items
 meta {
-    doc: """GET /api/transactions/{id}/line_items: one page of the line items a transaction is split into."""
+    doc: """
+    GET /api/transactions/{id}/line_items: one page of the line items a
+    transaction is split into.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::transactions/list-line-items("e07c5a93-14d6-4f2b-9c38-7a0b6e2d1f45", {per_page: 50})
+    map(page.items, %.amount)
+    ```
+    """
 }
 fn
 (transaction-id: Str): Map {

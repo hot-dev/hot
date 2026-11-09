@@ -28,7 +28,17 @@ MAX_SUBREQUESTS 25
 
 with-type
 meta {
-    doc: """Add `attributes: {type}` to each record (collections need it) unless the record already carries one. Exposed for testing."""
+    doc: """
+    Add `attributes: {type}` to each record (collections need it) unless the
+    record already carries one. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/with-type("Contact", [{LastName: "Lovelace"}])
+    // [{LastName: "Lovelace", attributes: {type: "Contact"}}]
+    ```
+    """
 }
 fn (sobject-type: Str, records: Vec): Vec {
   map(records, (r) {
@@ -41,7 +51,17 @@ fn (sobject-type: Str, records: Vec): Vec {
 
 build-collection-body
 meta {
-    doc: """The `{allOrNone, records}` body for collection create/update/upsert. Exposed for testing."""
+    doc: """
+    The `{allOrNone, records}` body for collection create/update/upsert.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/build-collection-body("Contact", [{LastName: "Lovelace"}], true)
+    // {allOrNone: true, records: [{LastName: "Lovelace", attributes: {type: "Contact"}}]}
+    ```
+    """
 }
 fn (sobject-type: Str, records: Vec, all-or-none: Bool): Map {
   {allOrNone: all-or-none, records: with-type(sobject-type, records)}
@@ -49,7 +69,18 @@ fn (sobject-type: Str, records: Vec, all-or-none: Bool): Map {
 
 chunks
 meta {
-    doc: """Split `items` into groups of at most `size`; an Err when `all-or-none` is set and they do not fit in one group (an all-or-none call cannot span requests). Exposed for testing."""
+    doc: """
+    Split `items` into groups of at most `size`; an Err when `all-or-none`
+    is set and they do not fit in one group (an all-or-none call cannot span
+    requests). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/chunks([1, 2, 3], 2, false)  // [[1, 2], [3]]
+    is-err(::salesforce::composite/chunks([1, 2, 3], 2, true))  // true
+    ```
+    """
 }
 fn (items: Vec, size: Int, all-or-none: Bool): Vec {
   cond {
@@ -61,11 +92,15 @@ fn (items: Vec, size: Int, all-or-none: Bool): Vec {
   }
 }
 
-all-or-none-of fn (options: Map): Bool {
+all-or-none-of
+meta {no-doc: true}
+fn (options: Map): Bool {
   Bool(get(options, "all-or-none", false))
 }
 
-run-groups fn (groups: Vec, call: Fn, acc: Vec): Vec {
+run-groups
+meta {no-doc: true}
+fn (groups: Vec, call: Fn, acc: Vec): Vec {
   cond {
     is-empty(groups) => { acc }
     => {
@@ -78,7 +113,9 @@ run-groups fn (groups: Vec, call: Fn, acc: Vec): Vec {
   }
 }
 
-run-chunks fn (groups: Result, call: Fn): Vec {
+run-chunks
+meta {no-doc: true}
+fn (groups: Result, call: Fn): Vec {
   cond {
     is-err(groups) => { groups }
     => { run-groups(groups, call, []) }
@@ -122,7 +159,20 @@ fn
 
 update-records
 meta {
-    doc: """PATCH /composite/sobjects - Update records of one type by `Id` (each record must carry `Id`), 200 per call. `options`: `all-or-none`."""
+    doc: """
+    PATCH /composite/sobjects - Update records of one type by `Id` (each
+    record must carry `Id`), 200 per call. `options`: `all-or-none`.
+
+    **Example**
+
+    ```hot
+    results ::salesforce::composite/update-records("Contact", [
+      {Id: "003A", Title: "CTO"},
+      {Id: "003B", Title: "VP Eng"}
+    ], {all-or-none: true})
+    map(results, (r) { r.success })
+    ```
+    """
 }
 fn
 (sobject-type: Str, records: Vec): Vec {
@@ -173,7 +223,17 @@ fn
 
 delete-path
 meta {
-    doc: """The `/composite/sobjects?ids=...&allOrNone=...` path for a delete. Exposed for testing."""
+    doc: """
+    The `/composite/sobjects?ids=...&allOrNone=...` path for a delete.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/delete-path(["001A", "001B"], false)
+    // "/composite/sobjects?ids=001A%2C001B&allOrNone=false"
+    ```
+    """
 }
 fn (ids: Vec, all-or-none: Bool): Str {
   `/composite/sobjects${::api/query-string({ids: ids, allOrNone: if(all-or-none, "true", "false")})}`
@@ -181,7 +241,17 @@ fn (ids: Vec, all-or-none: Bool): Str {
 
 delete-records
 meta {
-    doc: """DELETE /composite/sobjects?ids= - Delete records (of any types) by id, 200 per call; they go to the recycle bin. `options`: `all-or-none`."""
+    doc: """
+    DELETE /composite/sobjects?ids= - Delete records (of any types) by id,
+    200 per call; they go to the recycle bin. `options`: `all-or-none`.
+
+    **Example**
+
+    ```hot
+    results ::salesforce::composite/delete-records(["003A", "003B"])
+    filter(results, (r) { not(r.success) })
+    ```
+    """
 }
 fn
 (ids: Vec): Vec {
@@ -199,7 +269,18 @@ fn
 
 get-records
 meta {
-    doc: """POST /composite/sobjects/{type} - Retrieve up to 2000 records of one type by id with the given `fields`, in id order (null for ids that do not exist). Larger id lists are split."""
+    doc: """
+    POST /composite/sobjects/{type} - Retrieve up to 2000 records of one
+    type by id with the given `fields`, in id order (null for ids that do
+    not exist). Larger id lists are split.
+
+    **Example**
+
+    ```hot
+    rows ::salesforce::composite/get-records("Contact", ["003A", "003B"], ["Id", "Email"])
+    map(filter(rows, is-some), (r) { r.Email })
+    ```
+    """
 }
 fn
 (sobject-type: Str, ids: Vec, fields: Vec): Vec {
@@ -224,6 +305,13 @@ meta {
     can cite as `@{reference-id.id}`, and an optional `body`. The 5-arity
     form builds the URL with the `api-version` in `opts`; pass the same
     `opts` to `composite`.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/subrequest("POST", "/sobjects/Account", "acct", {Name: "Acme"}, {api-version: "v66.0"})
+    // {method: "POST", url: "/services/data/v66.0/sobjects/Account", referenceId: "acct", body: {Name: "Acme"}}
+    ```
     """
 }
 fn
@@ -240,7 +328,16 @@ fn
 
 build-composite-body
 meta {
-    doc: """The `/composite` body: `{allOrNone, collateSubrequests?, compositeRequest}`; an Err over 25 subrequests. Exposed for testing."""
+    doc: """
+    The `/composite` body: `{allOrNone, collateSubrequests?,
+    compositeRequest}`; an Err over 25 subrequests. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::composite/build-composite-body([], {all-or-none: true})  // {allOrNone: true, compositeRequest: []}
+    ```
+    """
 }
 fn (subrequests: Vec, options: Map): Map {
   cond {

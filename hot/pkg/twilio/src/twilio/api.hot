@@ -111,7 +111,9 @@ fn (account-sid: Str, key-sid: Str, key-secret: Str): Client {
   Client({account-sid: account-sid, username: key-sid, password: ::ctx/mark-secret(key-secret)})
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
@@ -119,7 +121,20 @@ CREDENTIAL_KEYS ["account-sid", "auth-token", "api-key-sid", "api-key-secret"]
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/blank-credential({auth-token: ""}, ["account-sid", "auth-token"])  // "auth-token"
+    ::api/blank-credential({}, ["auth-token"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -127,7 +142,20 @@ fn (opts: Map, names: Vec): Str? {
 
 client-from-values
 meta {
-    doc: """A `Client` from an Account SID and the credentials given, API key first, or an Err when an API key is half set or there is no credential. `source` names where the values came from, for the error."""
+    doc: """
+    A `Client` from an Account SID and the credentials given, API key first,
+    or an Err when an API key is half set or there is no credential.
+    `source` names where the values came from, for the error.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/client-from-values("AC123", null, null, "test-token", "the test").username  // "AC123"
+    is-err(::api/client-from-values("AC123", null, null, null, "the test"))  // true
+    ```
+    """
 }
 fn (account-sid: Str, key-sid: Str?, key-secret: Str?, auth-token: Str?, source: Str): Client {
   cond {
@@ -146,6 +174,16 @@ meta {
     back to context), when `opts` has `account-sid` without credentials or
     credentials without `account-sid`, when `opts` has half an API key, or
     when nothing is set. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ctx-values {"twilio.account.sid": "AC123", "twilio.auth.token": "test-token"}
+    ::api/resolve-from({}, ctx-values).account-sid  // "AC123"
+    is-err(::api/resolve-from({account-sid: "AC999"}, ctx-values))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Client {
@@ -239,6 +277,15 @@ meta {
     preferred when both are set) or `twilio.auth.token`. An Err with a clear
     message when the Account SID or both credential forms are missing. Same
     as `resolve({})`.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/client-from-ctx()
+    ::twilio::accounts/get-account(c).friendly_name
+    ```
     """
 }
 fn (): Client {
@@ -247,7 +294,19 @@ fn (): Client {
 
 auth-header
 meta {
-    doc: """The HTTP Basic `Authorization` header value for a `Client`. Exposed for testing."""
+    doc: """
+    The HTTP Basic `Authorization` header value for a `Client`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/Client({account-sid: "AC123", username: "AC123", password: "test"})
+    ::api/auth-header(c)  // "Basic QUMxMjM6dGVzdA=="
+    ```
+    """
 }
 fn (client: Client): Str {
   pair `${client.username}:${client.password}`
@@ -256,7 +315,19 @@ fn (client: Client): Str {
 
 account-url
 meta {
-    doc: """The 2010-04-01 base URL scoped to the client's account: `https://api.twilio.com/2010-04-01/Accounts/{AccountSid}`."""
+    doc: """
+    The 2010-04-01 base URL scoped to the client's account:
+    `https://api.twilio.com/2010-04-01/Accounts/{AccountSid}`.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/Client({account-sid: "AC123", username: "AC123", password: "test"})
+    ::api/account-url(c)  // "https://api.twilio.com/2010-04-01/Accounts/AC123"
+    ```
+    """
 }
 fn (client: Client): Str {
   `${::twilio::core/BASE_URL}/Accounts/${::uri/encode(client.account-sid)}`
@@ -266,17 +337,34 @@ fn (client: Client): Str {
 // Encoding
 // ============================================================================
 
-encode-value fn (value: Any): Str {
+encode-value
+meta {no-doc: true}
+fn (value: Any): Str {
   `${value}`
 }
 
-encode-pair fn (key: Str, value: Any): Str {
+encode-pair
+meta {no-doc: true}
+fn (key: Str, value: Any): Str {
   `${::uri/encode(key)}=${::uri/encode(encode-value(value))}`
 }
 
 form-encode
 meta {
-    doc: """Encode a Map as application/x-www-form-urlencoded. Null values are omitted. Vec values are encoded as repeated parameters (`MediaUrl=a&MediaUrl=b`) per Twilio's convention."""
+    doc: """
+    Encode a Map as application/x-www-form-urlencoded. Null values are
+    omitted. Vec values are encoded as repeated parameters
+    (`MediaUrl=a&MediaUrl=b`) per Twilio's convention.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/form-encode({To: "+15558675310", Body: null})  // "To=%2B15558675310"
+    ::api/form-encode({MediaUrl: ["a.png", "b.png"]})  // "MediaUrl=a.png&MediaUrl=b.png"
+    ```
+    """
 }
 fn (data: Map): Str {
   filtered filter-vals(data, is-some)
@@ -294,7 +382,20 @@ fn (data: Map): Str {
 
 query-string
 meta {
-    doc: """Build a query string (`?a=1&b=2`) from a Map. Null values are omitted; returns an empty string when no parameters remain. Values are percent-encoded, so `+` in phone numbers is preserved."""
+    doc: """
+    Build a query string (`?a=1&b=2`) from a Map. Null values are omitted;
+    returns an empty string when no parameters remain. Values are
+    percent-encoded, so `+` in phone numbers is preserved.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/query-string({PageSize: 20, Page: null})  // "?PageSize=20"
+    ::api/query-string({Page: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   filtered filter-vals(params, is-some)
@@ -370,7 +471,20 @@ fn
 
 json
 meta {
-    doc: """Make a request and return the parsed JSON body, or `err(HttpError)` on a non-2xx response."""
+    doc: """
+    Make a request and return the parsed JSON body, or `err(HttpError)` on a
+    non-2xx response.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/client-from-ctx()
+    body ::api/json(c, "GET", `${::api/account-url(c)}/Messages.json?PageSize=5`)
+    map(body.messages, %.status)
+    ```
+    """
 }
 fn
 (client: Client, method: Str, url: Str): Map {
@@ -390,7 +504,20 @@ fn
 
 delete-request
 meta {
-    doc: """DELETE a resource; `true` on success (Twilio answers 204), `err(HttpError)` otherwise."""
+    doc: """
+    DELETE a resource; `true` on success (Twilio answers 204),
+    `err(HttpError)` otherwise.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/client-from-ctx()
+    deleted ::api/delete-request(c, `${::api/account-url(c)}/Messages/SM123.json`)
+    if(deleted, "Removed")
+    ```
+    """
 }
 fn
 (url: Str, opts: Map): Bool {
@@ -414,7 +541,21 @@ fn
 
 next-page-ref
 meta {
-    doc: """The next-page reference of a list response, from `next_page_uri` (2010-04-01 APIs) or `meta.next_page_url` (v2 APIs); null on the last page. Exposed for testing."""
+    doc: """
+    The next-page reference of a list response, from `next_page_uri`
+    (2010-04-01 APIs) or `meta.next_page_url` (v2 APIs); null on the last
+    page. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/next-page-ref({next_page_uri: "/2010-04-01/Accounts/AC123/Messages.json?PageToken=PA1"})  // "/2010-04-01/Accounts/AC123/Messages.json?PageToken=PA1"
+    ::api/next-page-ref({meta: {next_page_url: "https://verify.twilio.com/v2/Services?Page=1"}})  // "https://verify.twilio.com/v2/Services?Page=1"
+    ::api/next-page-ref({messages: []})  // null
+    ```
+    """
 }
 fn (page: Map): Str? {
   uri or(get(page, "next_page_uri"), get-in(page, ["meta", "next_page_url"]))
@@ -423,7 +564,20 @@ fn (page: Map): Str? {
 
 is-twilio-url
 meta {
-    doc: """True for an `https://` URL on a `twilio.com` host. Pagination only follows these, so a page reference never sends credentials elsewhere. Exposed for testing."""
+    doc: """
+    True for an `https://` URL on a `twilio.com` host. Pagination only
+    follows these, so a page reference never sends credentials elsewhere.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/is-twilio-url("https://verify.twilio.com/v2/Services")  // true
+    ::api/is-twilio-url("https://twilio.com.example.org/v2")  // false
+    ```
+    """
 }
 fn (url: Str): Bool {
   // Host is everything up to the first "/"; it must be plain DNS labels
@@ -433,7 +587,20 @@ fn (url: Str): Bool {
 
 page-url
 meta {
-    doc: """Resolve a page reference to an absolute URL: a path is joined to `https://api.twilio.com`; an absolute URL must be on a twilio.com host. Exposed for testing."""
+    doc: """
+    Resolve a page reference to an absolute URL: a path is joined to
+    `https://api.twilio.com`; an absolute URL must be on a twilio.com host.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    ::api/page-url("/2010-04-01/Accounts/AC123/Calls.json?Page=1")  // "https://api.twilio.com/2010-04-01/Accounts/AC123/Calls.json?Page=1"
+    is-err(::api/page-url("https://example.com/next"))  // true
+    ```
+    """
 }
 fn (ref: Str): Str {
   cond {
@@ -472,7 +639,9 @@ fn
   }
 }
 
-fetch-page fn (client: Client, ref: Str): Map {
+fetch-page
+meta {no-doc: true}
+fn (client: Client, ref: Str): Map {
   url page-url(ref)
   cond {
     is-err(url) => { url }
@@ -486,6 +655,17 @@ meta {
     Collect the items under `key` from `page` and the pages after it, up
     to `limit` items (pages are fetched only while more are needed). Each
     `list-all-*` function uses this. A failed page comes back as its Err.
+
+    **Example**
+
+    ```hot
+    ::api ::twilio::api
+
+    c ::api/client-from-ctx()
+    page ::api/json(c, "GET", `${::api/account-url(c)}/Calls.json?PageSize=100`)
+    calls ::api/collect-pages(c, page, "calls", 250)
+    length(calls)
+    ```
     """
 }
 fn

@@ -49,7 +49,17 @@ EPHEMERAL 64
 // ============================================================================
 
 pong
-meta {doc: """The PONG response (`{type: 1}`) for Discord's PING."""}
+meta {
+    doc: """
+    The PONG response (`{type: 1}`) for Discord's PING.
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/pong()  // {type: 1}
+    ```
+    """
+}
 fn (): Map {
   {type: PONG}
 }
@@ -80,7 +90,18 @@ fn
 
 deferred-response
 meta {
-    doc: """ACK now and show "thinking..." (callback type 5); finish later with `edit-original-interaction-response`. Pass `true` for an ephemeral reply."""
+    doc: """
+    ACK now and show "thinking..." (callback type 5); finish later with
+    `edit-original-interaction-response`. Pass `true` for an ephemeral
+    reply.
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/deferred-response()  // {type: 5}
+    ::discord::interactions/deferred-response(true)  // {type: 5, data: {flags: 64}}
+    ```
+    """
 }
 fn
 (): Map {
@@ -92,7 +113,17 @@ fn
 
 update-message-response
 meta {
-    doc: """For component interactions: edit the message the component is on (callback type 7)."""
+    doc: """
+    For component interactions: edit the message the component is on
+    (callback type 7).
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/update-message-response({content: "Approved", components: []})
+    // {type: 7, data: {content: "Approved", components: []}}
+    ```
+    """
 }
 fn (data: Map): Map {
   {type: UPDATE_MESSAGE, data: data}
@@ -100,7 +131,16 @@ fn (data: Map): Map {
 
 deferred-update-response
 meta {
-    doc: """For component interactions: ACK without a loading state, edit later (callback type 6)."""
+    doc: """
+    For component interactions: ACK without a loading state, edit later
+    (callback type 6).
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/deferred-update-response()  // {type: 6}
+    ```
+    """
 }
 fn (): Map {
   {type: DEFERRED_UPDATE_MESSAGE}
@@ -108,7 +148,17 @@ fn (): Map {
 
 autocomplete-response
 meta {
-    doc: """Answer an autocomplete interaction with up to 25 `choices` (`[{name, value}]`, callback type 8)."""
+    doc: """
+    Answer an autocomplete interaction with up to 25 `choices` (`[{name,
+    value}]`, callback type 8).
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/autocomplete-response([{name: "Production", value: "prod"}])
+    // {type: 8, data: {choices: [{name: "Production", value: "prod"}]}}
+    ```
+    """
 }
 fn (choices: Vec<Map>): Map {
   {type: APPLICATION_COMMAND_AUTOCOMPLETE_RESULT, data: {choices: choices}}
@@ -116,7 +166,20 @@ fn (choices: Vec<Map>): Map {
 
 modal-response
 meta {
-    doc: """Open a modal (callback type 9). `components` are the modal's label/text-input components."""
+    doc: """
+    Open a modal (callback type 9). `components` are the modal's
+    label/text-input components.
+
+    **Example**
+
+    ```hot
+    modal ::discord::interactions/modal-response("feedback", "Send feedback", [
+      {type: 18, label: "Comments", component: {type: 4, custom_id: "comments", style: 2}}
+    ])
+    modal.type  // 9
+    modal.data.custom_id  // "feedback"
+    ```
+    """
 }
 fn (custom-id: Str, title: Str, components: Vec<Map>): Map {
   {type: MODAL, data: {custom_id: custom-id, title: title, components: components}}
@@ -144,7 +207,9 @@ fn (interaction: Map, name: Str): Any {
   if(is-null(hit), null, get(hit, "value"))
 }
 
-json-response fn (status: Int, body: Map): HttpResponse {
+json-response
+meta {no-doc: true}
+fn (status: Int, body: Map): HttpResponse {
   HttpResponse({status: status, headers: {content-type: "application/json"}, body: body})
 }
 
@@ -186,7 +251,17 @@ fn
 
 respond
 meta {
-    doc: """The dispatch step of `handle-request` after verification. Exposed for testing."""
+    doc: """
+    The dispatch step of `handle-request` after verification. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::discord::interactions/respond({body: {type: 1}}, true, (i) { ::discord::interactions/pong() }).status  // 200
+    ::discord::interactions/respond({body: {type: 2}}, false, (i) { ::discord::interactions/pong() }).status  // 401
+    ```
+    """
 }
 fn (request: Map, verified: Bool, handler: Fn): HttpResponse {
   interaction or(get(request, "body"), {})
@@ -264,7 +339,9 @@ fn
 // Original response and followups
 // ============================================================================
 
-original-path fn (application-id: Str, interaction-token: Str): Str {
+original-path
+meta {no-doc: true}
+fn (application-id: Str, interaction-token: Str): Str {
   `/webhooks/${seg(application-id)}/${::api/token-seg(interaction-token)}/messages/@original`
 }
 
@@ -275,7 +352,22 @@ GetOriginalInteractionResponseRequest type {
 
 get-original-interaction-response
 meta {
-    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/@original - The initial response message."""
+    doc: """
+    GET /webhooks/{application_id}/{interaction_token}/messages/@original -
+    The initial response message.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    message ::interactions/get-original-interaction-response(::interactions/GetOriginalInteractionResponseRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token")
+    }))
+    message.id
+    ```
+    """
 }
 fn
 (request: GetOriginalInteractionResponseRequest): Map {
@@ -346,7 +438,21 @@ DeleteOriginalInteractionResponseRequest type {
 
 delete-original-interaction-response
 meta {
-    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/@original - Delete the initial response."""
+    doc: """
+    DELETE /webhooks/{application_id}/{interaction_token}/messages/@original
+    - Delete the initial response.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/delete-original-interaction-response(::interactions/DeleteOriginalInteractionResponseRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token")
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteOriginalInteractionResponseRequest): Bool {
@@ -372,7 +478,24 @@ CreateFollowupMessageRequest type {
 
 create-followup-message
 meta {
-    doc: """POST /webhooks/{application_id}/{interaction_token} - Send a followup message. `flags: 64` makes it ephemeral. Returns the message."""
+    doc: """
+    POST /webhooks/{application_id}/{interaction_token} - Send a followup
+    message. `flags: 64` makes it ephemeral. Returns the message.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    followup ::interactions/create-followup-message(::interactions/CreateFollowupMessageRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token"),
+      content: "Only you can see this",
+      flags: 64
+    }))
+    followup.id
+    ```
+    """
 }
 fn
 (request: CreateFollowupMessageRequest): Map {
@@ -402,7 +525,23 @@ GetFollowupMessageRequest type {
 
 get-followup-message
 meta {
-    doc: """GET /webhooks/{application_id}/{interaction_token}/messages/{message_id} - A followup message."""
+    doc: """
+    GET /webhooks/{application_id}/{interaction_token}/messages/{message_id}
+    - A followup message.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    followup ::interactions/get-followup-message(::interactions/GetFollowupMessageRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token"),
+      message_id: "2500000000000000000"
+    }))
+    followup.content
+    ```
+    """
 }
 fn
 (request: GetFollowupMessageRequest): Map {
@@ -429,7 +568,24 @@ EditFollowupMessageRequest type {
 
 edit-followup-message
 meta {
-    doc: """PATCH /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Edit a followup message. Only fields you set are sent."""
+    doc: """
+    PATCH
+    /webhooks/{application_id}/{interaction_token}/messages/{message_id} -
+    Edit a followup message. Only fields you set are sent.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/edit-followup-message(::interactions/EditFollowupMessageRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token"),
+      message_id: "2500000000000000000",
+      content: "Done"
+    }))
+    ```
+    """
 }
 fn
 (request: EditFollowupMessageRequest): Map {
@@ -451,7 +607,23 @@ DeleteFollowupMessageRequest type {
 
 delete-followup-message
 meta {
-    doc: """DELETE /webhooks/{application_id}/{interaction_token}/messages/{message_id} - Delete a followup message."""
+    doc: """
+    DELETE
+    /webhooks/{application_id}/{interaction_token}/messages/{message_id} -
+    Delete a followup message.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/delete-followup-message(::interactions/DeleteFollowupMessageRequest({
+      application_id: "1800000000000000000",
+      interaction_token: ::hot::ctx/get("discord.interaction.token"),
+      message_id: "2500000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteFollowupMessageRequest): Bool {
@@ -471,11 +643,15 @@ fn
 // `integration_types` (0 guild install, 1 user install) replace the
 // deprecated `dm_permission`.
 
-global-commands-path fn (application-id: Str): Str {
+global-commands-path
+meta {no-doc: true}
+fn (application-id: Str): Str {
   `/applications/${seg(application-id)}/commands`
 }
 
-guild-commands-path fn (application-id: Str, guild-id: Str): Str {
+guild-commands-path
+meta {no-doc: true}
+fn (application-id: Str, guild-id: Str): Str {
   `/applications/${seg(application-id)}/guilds/${seg(guild-id)}/commands`
 }
 
@@ -486,7 +662,18 @@ GetGlobalCommandsRequest type {
 
 get-global-commands
 meta {
-    doc: """GET /applications/{application_id}/commands - Every global command."""
+    doc: """
+    GET /applications/{application_id}/commands - Every global command.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    commands ::interactions/get-global-commands(::interactions/GetGlobalCommandsRequest({application_id: "1800000000000000000"}))
+    map(commands, %.name)
+    ```
+    """
 }
 fn
 (request: GetGlobalCommandsRequest): Vec<Map> {
@@ -549,7 +736,22 @@ GetGlobalCommandRequest type {
 
 get-global-command
 meta {
-    doc: """GET /applications/{application_id}/commands/{command_id} - One global command."""
+    doc: """
+    GET /applications/{application_id}/commands/{command_id} - One global
+    command.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    command ::interactions/get-global-command(::interactions/GetGlobalCommandRequest({
+      application_id: "1800000000000000000",
+      command_id: "2400000000000000000"
+    }))
+    command.version
+    ```
+    """
 }
 fn
 (request: GetGlobalCommandRequest): Map {
@@ -578,7 +780,23 @@ EditGlobalCommandRequest type {
 
 edit-global-command
 meta {
-    doc: """PATCH /applications/{application_id}/commands/{command_id} - Change a global command. Only fields you set are sent; `clear: ["default_member_permissions"]` resets permissions to the default."""
+    doc: """
+    PATCH /applications/{application_id}/commands/{command_id} - Change a
+    global command. Only fields you set are sent; `clear:
+    ["default_member_permissions"]` resets permissions to the default.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/edit-global-command(::interactions/EditGlobalCommandRequest({
+      application_id: "1800000000000000000",
+      command_id: "2400000000000000000",
+      description: "Say hello from Hot"
+    }))
+    ```
+    """
 }
 fn
 (request: EditGlobalCommandRequest): Map {
@@ -597,7 +815,21 @@ DeleteGlobalCommandRequest type {
 
 delete-global-command
 meta {
-    doc: """DELETE /applications/{application_id}/commands/{command_id} - Delete a global command."""
+    doc: """
+    DELETE /applications/{application_id}/commands/{command_id} - Delete a
+    global command.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/delete-global-command(::interactions/DeleteGlobalCommandRequest({
+      application_id: "1800000000000000000",
+      command_id: "2400000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteGlobalCommandRequest): Bool {
@@ -652,7 +884,22 @@ GetGuildCommandsRequest type {
 
 get-guild-commands
 meta {
-    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands - The app's commands in one guild."""
+    doc: """
+    GET /applications/{application_id}/guilds/{guild_id}/commands - The
+    app's commands in one guild.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    commands ::interactions/get-guild-commands(::interactions/GetGuildCommandsRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000"
+    }))
+    map(commands, %.name)
+    ```
+    """
 }
 fn
 (request: GetGuildCommandsRequest): Vec<Map> {
@@ -677,7 +924,26 @@ CreateGuildCommandRequest type {
 
 create-guild-command
 meta {
-    doc: """POST /applications/{application_id}/guilds/{guild_id}/commands - Create (or overwrite by name) a guild command. Available immediately, which makes guild commands the way to test."""
+    doc: """
+    POST /applications/{application_id}/guilds/{guild_id}/commands - Create
+    (or overwrite by name) a guild command. Available immediately, which
+    makes guild commands the way to test.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    command ::interactions/create-guild-command(::interactions/CreateGuildCommandRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000",
+      name: "deploy",
+      description: "Start a deploy",
+      options: [{name: "env", description: "Target", type: 3, required: true}]
+    }))
+    command.id
+    ```
+    """
 }
 fn
 (request: CreateGuildCommandRequest): Map {
@@ -697,7 +963,24 @@ GetGuildCommandRequest type {
 
 get-guild-command
 meta {
-    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - One guild command."""
+    doc: """
+    GET
+    /applications/{application_id}/guilds/{guild_id}/commands/{command_id} -
+    One guild command.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    command ::interactions/get-guild-command(::interactions/GetGuildCommandRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000",
+      command_id: "2400000000000000000"
+    }))
+    command.name
+    ```
+    """
 }
 fn
 (request: GetGuildCommandRequest): Map {
@@ -723,7 +1006,24 @@ EditGuildCommandRequest type {
 
 edit-guild-command
 meta {
-    doc: """PATCH /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Change a guild command. Only fields you set are sent."""
+    doc: """
+    PATCH
+    /applications/{application_id}/guilds/{guild_id}/commands/{command_id} -
+    Change a guild command. Only fields you set are sent.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/edit-guild-command(::interactions/EditGuildCommandRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000",
+      command_id: "2400000000000000000",
+      description: "Start a production deploy"
+    }))
+    ```
+    """
 }
 fn
 (request: EditGuildCommandRequest): Map {
@@ -743,7 +1043,23 @@ DeleteGuildCommandRequest type {
 
 delete-guild-command
 meta {
-    doc: """DELETE /applications/{application_id}/guilds/{guild_id}/commands/{command_id} - Delete a guild command."""
+    doc: """
+    DELETE
+    /applications/{application_id}/guilds/{guild_id}/commands/{command_id} -
+    Delete a guild command.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    ::interactions/delete-guild-command(::interactions/DeleteGuildCommandRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000",
+      command_id: "2400000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteGuildCommandRequest): Bool {
@@ -761,7 +1077,23 @@ BulkOverwriteGuildCommandsRequest type {
 
 bulk-overwrite-guild-commands
 meta {
-    doc: """PUT /applications/{application_id}/guilds/{guild_id}/commands - Replace every command in one guild."""
+    doc: """
+    PUT /applications/{application_id}/guilds/{guild_id}/commands - Replace
+    every command in one guild.
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    commands ::interactions/bulk-overwrite-guild-commands(::interactions/BulkOverwriteGuildCommandsRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000",
+      commands: [{name: "deploy", description: "Start a deploy"}]
+    }))
+    map(commands, %.id)
+    ```
+    """
 }
 fn
 (request: BulkOverwriteGuildCommandsRequest): Vec<Map> {
@@ -780,7 +1112,24 @@ GetGuildCommandPermissionsRequest type {
 
 get-guild-command-permissions
 meta {
-    doc: """GET /applications/{application_id}/guilds/{guild_id}/commands/permissions - Permission overrides for every command in a guild. (Editing them needs a user OAuth2 Bearer token, not a bot token.)"""
+    doc: """
+    GET
+    /applications/{application_id}/guilds/{guild_id}/commands/permissions -
+    Permission overrides for every command in a guild. (Editing them needs a
+    user OAuth2 Bearer token, not a bot token.)
+
+    **Example**
+
+    ```hot
+    ::interactions ::discord::interactions
+
+    perms ::interactions/get-guild-command-permissions(::interactions/GetGuildCommandPermissionsRequest({
+      application_id: "1800000000000000000",
+      guild_id: "1000000000000000000"
+    }))
+    map(perms, %.permissions)
+    ```
+    """
 }
 fn
 (request: GetGuildCommandPermissionsRequest): Vec<Map> {

@@ -3,7 +3,7 @@ meta {
     doc: """
     Anthropic adapter that satisfies the `::ai::chat/run-loop` contract:
 
-    ```hot
+    ```
     chat-with-tools(
         model: Str,
         messages: Vec<::ai::chat/Message>,
@@ -82,6 +82,7 @@ DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
 
 mark-system-prompt
 meta {
+    no-doc: true,
     doc: """
     Internal: `request` with its system prompt as a block that holds
     `cache-control`. An empty prompt stays as it is: there's nothing to cache,
@@ -97,7 +98,21 @@ fn (request: Map, cache-control: Map): Map {
 }
 
 apply-request-options
-meta { doc: "Apply output, effort and cache controls to an Anthropic request map." }
+meta {
+    doc: """
+    Apply output, effort and cache controls to an Anthropic request map.
+
+    **Example**
+
+    ```hot
+    options ::anthropic::chat-tools/ChatRequestOptions({max-tokens: 4096, effort: "high", cache-control: {type: "ephemeral"}})
+    request ::anthropic::chat-tools/apply-request-options({model: "claude-sonnet-4-5", system: "Be brief."}, options)
+    request.max_tokens  // 4096
+    request.output_config  // {effort: "high"}
+    first(request.system).cache_control  // {type: "ephemeral"}
+    ```
+    """
+}
 fn (request: Map, options: ChatRequestOptions): Map {
     with-output assoc(request, "max_tokens", options.max-tokens)
     with-effort match options.effort {
@@ -119,7 +134,17 @@ fn (request: Map, options: ChatRequestOptions): Map {
 
 to-tool-use-block
 meta {
-    doc: """Convert a `::ai::tool/ToolCall` into an Anthropic `tool_use` content block."""
+    doc: """
+    Convert a `::ai::tool/ToolCall` into an Anthropic `tool_use` content
+    block.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "toolu_1", name: "search", input: {q: "hot"}})
+    ::anthropic::chat-tools/to-tool-use-block(call)  // {type: "tool_use", id: "toolu_1", name: "search", input: {q: "hot"}}
+    ```
+    """
 }
 fn (call: ::ai-tool/ToolCall): Map {
     {
@@ -136,6 +161,15 @@ meta {
     Convert a single normalized `::ai::chat/Message` into Anthropic's
     `InputMessage` shape. Tool results are emitted as `user` turns
     with a `tool_result` content block (Anthropic's wire convention).
+
+    **Example**
+
+    ```hot
+    ::anthropic::chat-tools/to-anthropic-message(::ai::chat/user-message("Hi"))  // {role: "user", content: "Hi"}
+
+    result ::ai::chat/Message({role: "tool", content: {sum: 42}, tool-call-id: "toolu_1"})
+    first(::anthropic::chat-tools/to-anthropic-message(result).content).tool_use_id  // "toolu_1"
+    ```
     """
 }
 fn cond (m: ::ai-chat/Message): Map {
@@ -166,6 +200,19 @@ meta {
     doc: """
     Convert a `::ai::tool/Tool` into Anthropic's `Tool` shape (rename
     `input-schema` to `input_schema`, keep `name` and `description`).
+
+    **Example**
+
+    ```hot
+    tool ::ai::tool/Tool({
+      name: "search",
+      description: "Search the docs.",
+      input-schema: {type: "object", properties: {q: {type: "string"}}},
+      fn: (input) { [] }
+    })
+    ::anthropic::chat-tools/to-anthropic-tool(tool).name  // "search"
+    ::anthropic::chat-tools/to-anthropic-tool(tool).input_schema.type  // "object"
+    ```
     """
 }
 fn (t: ::ai-tool/Tool): Map {
@@ -182,14 +229,35 @@ fn (t: ::ai-tool/Tool): Map {
 // ============================================================================
 
 block-text
-meta { doc: """Text from a single content block, or empty string.""" }
+meta {
+    doc: """
+    Text from a single content block, or empty string.
+
+    **Example**
+
+    ```hot
+    ::anthropic::chat-tools/block-text({type: "text", text: "Hello"})  // "Hello"
+    ::anthropic::chat-tools/block-text({type: "tool_use", id: "toolu_1", name: "search"})  // ""
+    ```
+    """
+}
 fn (b: Map): Str {
     if(eq(b.type, "text"), or(b.text, ""), "")
 }
 
 block-tool-call
 meta {
-    doc: """Convert a `tool_use` content block into a `::ai::tool/ToolCall`, or null otherwise."""
+    doc: """
+    Convert a `tool_use` content block into a `::ai::tool/ToolCall`, or null
+    otherwise.
+
+    **Example**
+
+    ```hot
+    ::anthropic::chat-tools/block-tool-call({type: "tool_use", id: "toolu_1", name: "search", input: {q: "hot"}}).name  // "search"
+    ::anthropic::chat-tools/block-tool-call({type: "text", text: "Hello"})  // null
+    ```
+    """
 }
 fn (b: Map): ::ai-tool/ToolCall? {
     cond {
@@ -199,14 +267,34 @@ fn (b: Map): ::ai-tool/ToolCall? {
 }
 
 response-text
-meta { doc: """Concatenate text content blocks from an Anthropic response.""" }
+meta {
+    doc: """
+    Concatenate text content blocks from an Anthropic response.
+
+    **Example**
+
+    ```hot
+    ::anthropic::chat-tools/response-text([{type: "text", text: "Hello "}, {type: "text", text: "world"}])  // "Hello world"
+    ```
+    """
+}
 fn (blocks: Vec): Str {
     join(map(blocks, block-text), "")
 }
 
 response-tool-calls
 meta {
-    doc: """Extract `::ai::tool/ToolCall` entries from a list of Anthropic content blocks."""
+    doc: """
+    Extract `::ai::tool/ToolCall` entries from a list of Anthropic content
+    blocks.
+
+    **Example**
+
+    ```hot
+    blocks [{type: "text", text: "Searching."}, {type: "tool_use", id: "toolu_1", name: "search", input: {q: "hot"}}]
+    map(::anthropic::chat-tools/response-tool-calls(blocks), %.id)  // ["toolu_1"]
+    ```
+    """
 }
 fn (blocks: Vec): Vec<::ai-tool/ToolCall> {
     filter(
@@ -217,6 +305,7 @@ fn (blocks: Vec): Vec<::ai-tool/ToolCall> {
 
 prompt-usage
 meta {
+    no-doc: true,
     doc: """
     Internal: a reply's usage. Anthropic's `input_tokens` is only what the
     cache didn't cover, so `input-tokens` adds the cached tokens back: it
@@ -239,6 +328,15 @@ meta {
     doc: """
     Normalize Anthropic's usage shape into `{input-tokens, output-tokens,
     cache-read-tokens, cache-write-tokens}`.
+
+    **Example**
+
+    ```hot
+    ::anthropic::chat-tools/response-usage({input_tokens: 10, cache_read_input_tokens: 90, output_tokens: 5})
+    // {input-tokens: 100, output-tokens: 5, cache-read-tokens: 90, cache-write-tokens: 0}
+
+    ::anthropic::chat-tools/response-usage(null)  // null
+    ```
     """
 }
 fn (u: Any): Map? {
@@ -313,6 +411,22 @@ meta {
     Bind this function in a closure when a session needs model-specific
     controls while retaining the normalized four-argument chat contract.
     A trailing `opts` carries per-call credentials and settings.
+
+    **Example**
+
+    ```hot
+    options ::anthropic::chat-tools/ChatRequestOptions({max-tokens: 4096, effort: "high"})
+
+    reply ::anthropic::chat-tools/chat-with-tools-options(
+      "claude-sonnet-4-5",
+      [::ai::chat/user-message("Summarize the release notes.")],
+      "Be brief.",
+      null,
+      options
+    )
+    reply.text
+    reply.usage.output-tokens
+    ```
     """
 }
 fn
@@ -371,7 +485,7 @@ meta {
     Compatible with the `count-tokens-fn` slot on
     `::ai::chat/ChatOptions`:
 
-    ```hot
+    ```
     (messages: Vec<Message>, model: Str): Int
     ```
 
@@ -387,6 +501,16 @@ meta {
     The `count-tokens-fn` slot has no credentials argument. For a per-call
     key, bind the three-argument form in a closure:
     `(messages, model) { count-tokens(messages, model, {api-key: key}) }`.
+
+    **Example**
+
+    ```hot
+    messages [::ai::chat/user-message("How many tokens is this?")]
+    ::anthropic::chat-tools/count-tokens(messages, "claude-sonnet-4-5")
+
+    // With a per-call key
+    ::anthropic::chat-tools/count-tokens(messages, "claude-sonnet-4-5", {api-key: ::hot::ctx/get("tenant.anthropic-key")})
+    ```
     """
 }
 fn
@@ -420,6 +544,7 @@ EMPTY_STATE {
 
 handle-content-block-start
 meta {
+    no-doc: true,
     doc: """Internal: dispatch a `content_block_start` SSE event into ReplyDelta + state."""
 }
 fn (state: Map, idx: Int, block: Map, on-delta: Fn): Map {
@@ -444,6 +569,7 @@ fn (state: Map, idx: Int, block: Map, on-delta: Fn): Map {
 
 handle-content-block-delta
 meta {
+    no-doc: true,
     doc: """Internal: dispatch a `content_block_delta` SSE event into ReplyDelta + state."""
 }
 fn (state: Map, idx: Int, delta: Map, on-delta: Fn): Map {
@@ -471,6 +597,7 @@ fn (state: Map, idx: Int, delta: Map, on-delta: Fn): Map {
 
 handle-content-block-stop
 meta {
+    no-doc: true,
     doc: """Internal: dispatch a `content_block_stop` SSE event into ReplyDelta + state."""
 }
 fn (state: Map, idx: Int, on-delta: Fn): Map {
@@ -486,6 +613,7 @@ fn (state: Map, idx: Int, on-delta: Fn): Map {
 
 handle-message-delta
 meta {
+    no-doc: true,
     doc: """Internal: capture stop_reason and output token usage from a `message_delta` event."""
 }
 fn (state: Map, data: Map): Map {
@@ -499,7 +627,10 @@ fn (state: Map, data: Map): Map {
 }
 
 handle-message-start
-meta { doc: """Internal: capture initial input usage from a `message_start` event.""" }
+meta {
+    no-doc: true,
+    doc: """Internal: capture initial input usage from a `message_start` event."""
+}
 fn (state: Map, data: Map): Map {
     msg or(data.message, {})
     usage or(msg.usage, {})
@@ -513,6 +644,7 @@ fn (state: Map, data: Map): Map {
 
 handle-event
 meta {
+    no-doc: true,
     doc: """
     Internal: dispatch a single SSE event from Anthropic's
     `post-stream` into the appropriate ReplyDelta emissions and a
@@ -547,6 +679,7 @@ fn cond (state: Map, event: Map, on-delta: Fn): Map {
 
 drain-stream
 meta {
+    no-doc: true,
     doc: """
     Internal: tail-recursively consume `iter`, accumulating ReplyDelta events
     into `state`. An `error` event ends it in an Err carrying `HttpError`. The
@@ -567,6 +700,7 @@ fn cond (iter: Any, on-delta: Fn, state: Map): Map {
 
 finalize-state
 meta {
+    no-doc: true,
     doc: """
     Internal: convert accumulated stream state into a `ChatReply`.
     Concatenates text blocks in index order, parses the buffered
@@ -635,14 +769,14 @@ meta {
     ```hot
     on-text (delta) {
         match delta {
-            ::ai::chat/TextDelta => { print(delta.text) }
+            ::ai::chat/ReplyDelta.TextDelta => { print(delta.text) }
             => { null }
         }
     }
 
-    reply chat-with-tools-stream(
+    reply ::anthropic::chat-tools/chat-with-tools-stream(
         "claude-sonnet-4-5",
-        [::ai-chat/user-message("Hi")],
+        [::ai::chat/user-message("Hi")],
         null,
         null,
         on-text
@@ -684,7 +818,25 @@ fn
 
 chat-with-tools-stream-options
 meta {
-    doc: "Streaming `chat-with-tools` with explicit output and effort controls."
+    doc: """
+    Streaming `chat-with-tools` with explicit output and effort controls.
+
+    **Example**
+
+    ```hot
+    options ::anthropic::chat-tools/ChatRequestOptions({max-tokens: 4096, effort: "high"})
+
+    reply ::anthropic::chat-tools/chat-with-tools-stream-options(
+      "claude-sonnet-4-5",
+      [::ai::chat/user-message("Summarize the release notes.")],
+      "Be brief.",
+      null,
+      ::ai::chat/noop-on-delta,
+      options
+    )
+    reply.text
+    ```
+    """
 }
 fn
 (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {

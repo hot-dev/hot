@@ -19,13 +19,24 @@ meta {
 
 draft-body
 meta {
-    doc: """The JSON body for `drafts.create` / `drafts.update` (pure): `{id?, message: {raw, threadId?}}`."""
+    doc: """
+    The JSON body for `drafts.create` / `drafts.update` (pure): `{id?,
+    message: {raw, threadId?}}`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::drafts/draft-body(Bytes("Hi"), "t1", "d1")  // {id: "d1", message: {raw: "SGk", threadId: "t1"}}
+    ```
+    """
 }
 fn (raw: Bytes, thread-id: Str?, draft-id: Str?): Map {
   ::gmail/compact({id: draft-id, message: ::messages/send-body(raw, thread-id)})
 }
 
-save-draft fn (method: Str, path: Str, message: Map, draft-id: Str?, opts: Map): Map {
+save-draft
+meta {no-doc: true}
+fn (method: Str, path: Str, message: Map, draft-id: Str?, opts: Map): Map {
   raw ::mime/build-message(message, or(get(opts, "boundary"), ::mime/new-boundary()))
   thread ::messages/thread-id-of(opts)
   cond {
@@ -49,6 +60,16 @@ meta {
     as `::google::gmail::messages/send`). Options: `thread-id`, `upload`.
     Returns `{id, message: {id, threadId, labelIds}}`. Scope:
     `gmail.compose`.
+
+    **Example**
+
+    ```hot
+    draft ::google::gmail::drafts/create-draft({to: "ada@example.com", subject: "Q3 plan", text: "First pass."})
+    draft.id
+
+    // In an existing thread
+    ::google::gmail::drafts/create-draft({to: "ada@example.com", subject: "Re: Q3 plan", text: "Second pass."}, {thread-id: "18f2a"})
+    ```
     """
 }
 fn
@@ -68,7 +89,7 @@ meta {
     `gmail.compose`.
 
     ```hot
-    draft ::google::gmail::drafts/create-reply-draft(email.id, {text: "Proposed answer..."})
+    draft ::google::gmail::drafts/create-reply-draft("18f2a", {text: "Proposed answer..."})
     ```
     """
 }
@@ -83,7 +104,17 @@ fn
 
 update-draft
 meta {
-    doc: """PUT /users/me/drafts/{id} - replace a draft's message (all fields; Gmail keeps nothing from the old one). Options: `thread-id`, `upload`. Scope: `gmail.compose`."""
+    doc: """
+    PUT /users/me/drafts/{id} - replace a draft's message (all fields; Gmail
+    keeps nothing from the old one). Options: `thread-id`, `upload`. Scope:
+    `gmail.compose`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::drafts/update-draft("r-123", {to: "ada@example.com", subject: "Q3 plan", text: "Revised."})
+    ```
+    """
 }
 fn
 (draft-id: Str, message: Map): Map {
@@ -95,7 +126,17 @@ fn
 
 send-draft
 meta {
-    doc: """POST /users/me/drafts/send - send an existing draft as is. Returns the sent message; the draft is removed. Scope: `gmail.compose`."""
+    doc: """
+    POST /users/me/drafts/send - send an existing draft as is. Returns the
+    sent message; the draft is removed. Scope: `gmail.compose`.
+
+    **Example**
+
+    ```hot
+    sent ::google::gmail::drafts/send-draft("r-123")
+    sent.threadId
+    ```
+    """
 }
 fn
 (draft-id: Str): Map {
@@ -107,7 +148,18 @@ fn
 
 list-drafts
 meta {
-    doc: """GET /users/me/drafts - one page of drafts: `{drafts: [{id, message: {id, threadId}}], nextPageToken?}`. Options: `q`, `maxResults` (max 500), `pageToken`, `includeSpamTrash`. Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/drafts - one page of drafts: `{drafts: [{id, message: {id,
+    threadId}}], nextPageToken?}`. Options: `q`, `maxResults` (max 500),
+    `pageToken`, `includeSpamTrash`. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    page ::google::gmail::drafts/list-drafts({maxResults: 20})
+    map(or(page.drafts, []), %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -118,7 +170,18 @@ fn
 }
 
 list-all-drafts
-meta {doc: """Every draft (all pages), or at most `limit`. Scope: `gmail.readonly`."""}
+meta {
+    doc: """
+    Every draft (all pages), or at most `limit`. Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    drafts ::google::gmail::drafts/list-all-drafts({}, 100)
+    length(drafts)
+    ```
+    """
+}
 fn
 (opts: Map): Vec {
   list-all-drafts(opts, null)
@@ -130,7 +193,17 @@ fn
 
 get-draft
 meta {
-    doc: """GET /users/me/drafts/{id} - a draft with its message. Options: `format` (`full` default, `metadata`, `minimal`, `raw`). Scope: `gmail.readonly`."""
+    doc: """
+    GET /users/me/drafts/{id} - a draft with its message. Options: `format`
+    (`full` default, `metadata`, `minimal`, `raw`). Scope: `gmail.readonly`.
+
+    **Example**
+
+    ```hot
+    draft ::google::gmail::drafts/get-draft("r-123")
+    ::google::gmail::parse/to-email(draft.message).subject
+    ```
+    """
 }
 fn
 (draft-id: Str): Map {
@@ -143,7 +216,17 @@ fn
 
 delete-draft
 meta {
-    doc: """DELETE /users/me/drafts/{id} - discard a draft (immediately and permanently; it does not go to the trash). Returns true. Scope: `gmail.compose`."""
+    doc: """
+    DELETE /users/me/drafts/{id} - discard a draft (immediately and
+    permanently; it does not go to the trash). Returns true. Scope:
+    `gmail.compose`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail::drafts/delete-draft("r-123")
+    ```
+    """
 }
 fn
 (draft-id: Str): Bool {

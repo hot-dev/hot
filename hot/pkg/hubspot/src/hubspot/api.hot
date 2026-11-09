@@ -53,13 +53,28 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{token, api-version}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no token is set, or when `token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{token, api-version}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults. An
+    Err when no token is set, or when `token` is in `opts` but blank or null
+    (that never falls back to context). Exposed for testing; `resolve` feeds
+    it the context.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/resolve-from({api-version: "2026-03"}, {"hubspot.token": "pat-example"}).api-version  // "2026-03"
+    is-err(::hubspot::api/resolve-from({}, {}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   token or(non-blank(get(opts, "token")), non-blank(get(ctx-values, "hubspot.token")))
@@ -80,7 +95,18 @@ fn (opts: Map, ctx-values: Map): Map {
 
 mark-credentials
 meta {
-    doc: """Mask the `token` in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+    doc: """
+    Mask the `token` in `opts` in this run's call records. Called first
+    wherever `opts` arrives, so the records of the calls after it are masked
+    too. Returns null.
+
+    **Example**
+
+    ```hot
+    opts {token: ::hot::ctx/get("tenant.hubspot.token")}
+    ::hubspot::api/mark-credentials(opts)
+    ```
+    """
 }
 fn (opts: Map): Any {
   ::ctx/mark-secret(opts.token)
@@ -120,7 +146,18 @@ fn (opts: Map): Map {
 api-version
 meta {
     ctx: {"hubspot.api.version": {required: false, secret: false}},
-    doc: """The date-based API version used in CRM paths: `api-version` in `opts`, then the `hubspot.api.version` context variable (e.g. `"2026-03"`), otherwise `DEFAULT_API_VERSION`."""
+    doc: """
+    The date-based API version used in CRM paths: `api-version` in `opts`,
+    then the `hubspot.api.version` context variable (e.g. `"2026-03"`),
+    otherwise `DEFAULT_API_VERSION`.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/api-version()  // "2026-09"
+    ::hubspot::api/api-version({api-version: "2026-03"})  // "2026-03"
+    ```
+    """
 }
 fn
 (): Str {
@@ -138,6 +175,13 @@ meta {
     `/crm/objects/2026-09/contacts/123`. `api` is the API family:
     `objects`, `associations`, `pipelines`, `properties`, `owners`, or
     `lists`. `opts` can carry the call's `api-version`.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/crm-path("objects", "/contacts/123")  // "/crm/objects/2026-09/contacts/123"
+    ::hubspot::api/crm-path("lists", "", {api-version: "2026-03"})  // "/crm/lists/2026-03"
+    ```
     """
 }
 fn
@@ -150,7 +194,16 @@ fn
 
 segment
 meta {
-    doc: """Percent-encode one path segment (an id, object type, or name). Exposed for testing."""
+    doc: """
+    Percent-encode one path segment (an id, object type, or name). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/segment("a b/c")  // "a%20b%2Fc"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -158,7 +211,16 @@ fn (value: Any): Str {
 
 query-string
 meta {
-    doc: """Build a query string from a Map, omitting nulls; Vec values become comma-separated (HubSpot's `properties=email,firstname` style)."""
+    doc: """
+    Build a query string from a Map, omitting nulls; Vec values become
+    comma-separated (HubSpot's `properties=email,firstname` style).
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/query-string({limit: 10, after: null})  // "?limit=10"
+    ```
+    """
 }
 fn (params: Map): Str {
   flattened map-vals(filter-vals(params, is-some), (v) { if(is-vec(v), join(v, ","), v) })
@@ -167,7 +229,19 @@ fn (params: Map): Str {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` for a token. A `""` body sends no body and no `Content-Type`; `additional-headers` win over the defaults. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` for a token. A `""` body sends no body and no
+    `Content-Type`; `additional-headers` win over the defaults. Pure;
+    exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::hubspot::api/build-request("POST", "/crm/objects/2026-09/contacts", {}, {properties: {email: "ada@example.com"}}, "pat-example")
+    req.url  // "https://api.hubapi.com/crm/objects/2026-09/contacts"
+    req.headers  // {Authorization: "Bearer pat-example", Content-Type: "application/json"}
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpRequest {
   default-headers {
@@ -188,7 +262,24 @@ fn (method: Str, path: Str, additional-headers: Map, body: Any, token: Str): Htt
 
 request
 meta {
-    doc: """Make an authenticated HubSpot request and return the raw `HttpResponse`. `path` is relative to api.hubapi.com (e.g. `/crm/objects/2026-09/contacts`). A `""` body sends no body; anything else is sent as JSON. Build the path with `crm-path` and the same `opts` so a per-call `api-version` reaches it."""
+    doc: """
+    Make an authenticated HubSpot request and return the raw `HttpResponse`.
+    `path` is relative to api.hubapi.com (e.g.
+    `/crm/objects/2026-09/contacts`). A `""` body sends no body; anything
+    else is sent as JSON. Build the path with `crm-path` and the same `opts`
+    so a per-call `api-version` reaches it.
+
+    **Example**
+
+    ```hot
+    response ::hubspot::api/request("GET", ::hubspot::api/crm-path("objects", "/contacts/12345"))
+    response.status
+
+    // Another portal's token for this call
+    opts {token: ::hot::ctx/get("tenant.hubspot.token")}
+    ::hubspot::api/request("POST", ::hubspot::api/crm-path("objects", "/contacts", opts), {}, {properties: {email: "ada@example.com"}}, opts)
+    ```
+    """
 }
 fn
 (method: Str, path: Str): HttpResponse {
@@ -216,7 +307,18 @@ fn
 
 handle-response
 meta {
-    doc: """Unwrap a response: the decoded body on 2xx (null for an empty 204), an Err carrying `HttpError` otherwise. Exposed for testing."""
+    doc: """
+    Unwrap a response: the decoded body on 2xx (null for an empty 204), an
+    Err carrying `HttpError` otherwise. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/handle-response(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}}))  // {id: "1"}
+    ::hubspot::api/handle-response(::hot::http/HttpResponse({status: 204, headers: {}, body: ""}))  // null
+    is-err(::hubspot::api/handle-response(::hot::http/HttpResponse({status: 409, headers: {}, body: {message: "Conflict"}})))  // true
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -228,7 +330,21 @@ fn (response: Result): Any {
 
 json
 meta {
-    doc: """Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err carrying `HttpError` (HubSpot's `category`/`message` in `body`). Transport failures pass through as Errs."""
+    doc: """
+    Like `request`, but unwraps: the decoded JSON body on 2xx, or an Err
+    carrying `HttpError` (HubSpot's `category`/`message` in `body`).
+    Transport failures pass through as Errs.
+
+    **Example**
+
+    ```hot
+    contact ::hubspot::api/json("GET", ::hubspot::api/crm-path("objects", "/contacts/12345"))
+    contact.properties.email
+
+    created ::hubspot::api/json("POST", ::hubspot::api/crm-path("objects", "/contacts"), {}, {properties: {email: "ada@example.com"}})
+    created.id
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
@@ -256,7 +372,17 @@ fn
 
 error-message
 meta {
-    doc: """The message from a failed call's error value: HubSpot's `body.message` when present, otherwise the stringified body."""
+    doc: """
+    The message from a failed call's error value: HubSpot's `body.message`
+    when present, otherwise the stringified body.
+
+    **Example**
+
+    ```hot
+    e ::hubspot::api/HttpError(::hot::http/HttpResponse({status: 409, headers: {}, body: {message: "Contact already exists"}}))
+    ::hubspot::api/error-message(e)  // "Contact already exists"
+    ```
+    """
 }
 fn (error: Any): Str? {
   fields untype(error)
@@ -275,14 +401,26 @@ fn (error: Any): Str? {
 
 next-after
 meta {
-    doc: """The cursor for the next page (`paging.next.after`) of a HubSpot list or search response, or null on the last page."""
+    doc: """
+    The cursor for the next page (`paging.next.after`) of a HubSpot list or
+    search response, or null on the last page.
+
+    **Example**
+
+    ```hot
+    ::hubspot::api/next-after({results: [], paging: {next: {after: "100"}}})  // "100"
+    ::hubspot::api/next-after({results: []})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   after if(is-map(page), get-in(page, ["paging", "next", "after"]), null)
   if(is-some(after), Str(after), null)
 }
 
-collect-pages fn (fetch: Fn, after: Str?, acc: Vec, pages-left: Int): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, after: Str?, acc: Vec, pages-left: Int): Vec {
   page fetch(after)
   cond {
     is-err(page) => { page }

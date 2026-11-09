@@ -39,7 +39,17 @@ ActivateBounceResponse type {
 
 activate-bounce
 meta {
-    doc: """Reactivate an email address that was deactivated due to a bounce, allowing future sends to that address."""
+    doc: """
+    Reactivate an email address that was deactivated due to a bounce,
+    allowing future sends to that address.
+
+    **Example**
+
+    ```hot
+    result ::postmark::activate/activate-bounce(::postmark::activate/ActivateBounceRequest({bounceid: "692560173"}))
+    result.Bounce.Inactive
+    ```
+    """
 }
 fn
 (request: ActivateBounceRequest): ActivateBounceResponse {

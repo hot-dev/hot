@@ -58,22 +58,30 @@ type {
     body: Any
 }
 
-str-or-null fn (value: Any): Str? {
+str-or-null
+meta {no-doc: true}
+fn (value: Any): Str? {
     if(is-str(value), value, null)
 }
 
 // `com.amazon.coral.service#ThrottlingException` and `ValidationException:http://...` name the same thing as their plain forms.
-error-code-name fn (code: Str?): Str? {
+error-code-name
+meta {no-doc: true}
+fn (code: Str?): Str? {
     if(is-null(code), null, first(split(last(split(code, "#")), ":")))
 }
 
-xml-child-text fn (elem: Any, name: Str): Str? {
+xml-child-text
+meta {no-doc: true}
+fn (elem: Any, name: Str): Str? {
     child ::hot::xml/child(elem, name)
     if(is-null(child), null, ::hot::xml/text(child))
 }
 
 // S3 answers `<Error><Code>`; query APIs answer `<ErrorResponse><Error><Code>` with `<RequestId>` beside it.
-xml-error-fields fn (root: Result): Map {
+xml-error-fields
+meta {no-doc: true}
+fn (root: Result): Map {
     cond {
         is-err(root) => { {} }
         => {
@@ -90,7 +98,22 @@ xml-error-fields fn (root: Result): Map {
 
 error-fields
 meta {
-    doc: """The `code`, `message` and `request_id` an AWS error body carries, from JSON (`__type`, `code`, `message`) or XML (`<Code>`, `<Message>`, `<RequestId>`). A field the body doesn't carry is missing. Exposed for testing."""
+    doc: """
+    The `code`, `message` and `request_id` an AWS error body carries, from
+    JSON (`__type`, `code`, `message`) or XML (`<Code>`, `<Message>`,
+    `<RequestId>`). A field the body doesn't carry is missing. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    fields ::aws::core/error-fields({__type: "ThrottlingException", message: "Rate exceeded"})
+    fields.code  // "ThrottlingException"
+    fields.message  // "Rate exceeded"
+
+    ::aws::core/error-fields("<Error><Code>NoSuchKey</Code></Error>").code  // "NoSuchKey"
+    ```
+    """
 }
 fn (body: Any): Map {
     cond {
@@ -120,7 +143,9 @@ HttpResponse -> AwsError fn (response: HttpResponse): AwsError {
 }
 
 // Blank strings count as unset, so "" in opts or ctx never signs a request.
-non-blank fn (value: Any): Any {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Any {
     cond {
         not(is-str(value)) => { value }
         eq(trim(value), "") => { null }
@@ -131,7 +156,9 @@ non-blank fn (value: Any): Any {
 MISSING_CREDENTIALS "aws: credentials are not set. Set aws.access-key-id and aws.secret-access-key in Context Variables, or pass {access-key-id: ..., secret-access-key: ...} in the call's opts."
 
 // Credentials from the context variable values, or an Err naming them.
-credentials-from-ctx fn (ctx-values: Map): Credentials {
+credentials-from-ctx
+meta {no-doc: true}
+fn (ctx-values: Map): Credentials {
     access_key_id non-blank(get(ctx-values, "aws.access-key-id"))
     secret_access_key non-blank(get(ctx-values, "aws.secret-access-key"))
     session_token non-blank(get(ctx-values, "aws.session-token"))
@@ -143,7 +170,9 @@ credentials-from-ctx fn (ctx-values: Map): Credentials {
 }
 
 // A ready `credentials` value from opts: a Credentials, or a Map in either spelling.
-credentials-from-value fn (value: Any): Credentials {
+credentials-from-value
+meta {no-doc: true}
+fn (value: Any): Credentials {
     fields untype(value)
     access_key_id cond {
         is-map(fields) => { non-blank(or(get(fields, "access_key_id"), get(fields, "access-key-id"))) }
@@ -173,7 +202,9 @@ CREDENTIAL_OPTS ["credentials", "access-key-id", "secret-access-key"]
 
 // Credentials from opts, null when opts carries none, or an Err for a blank key or partial set.
 // Keys are never mixed with ctx: a key in opts next to a secret in ctx would sign with the wrong pair.
-credentials-from-opts fn (opts: Map): Any {
+credentials-from-opts
+meta {no-doc: true}
+fn (opts: Map): Any {
     blank-keys filter(CREDENTIAL_OPTS, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
     given get(opts, "credentials")
     access_key_id non-blank(get(opts, "access-key-id"))
@@ -225,6 +256,14 @@ meta {
     Without a custom endpoint it goes into an AWS hostname and must be a plain AWS region
     name like `us-east-1`. With one (`has-endpoint`) it only signs, so a store's own name
     like `auto` passes, but still nothing that could leave its place.
+
+    **Example**
+
+    ```hot
+    ::aws::core/check-region("us-east-1", "opts.region", false)  // "us-east-1"
+    ::aws::core/check-region("auto", "opts.region", true)  // "auto"
+    is-err(::aws::core/check-region("auto", "opts.region", false))  // true
+    ```
     """
 }
 fn (region: Any, source: Str, has-endpoint: Bool): Any {
@@ -238,7 +277,19 @@ fn (region: Any, source: Str, has-endpoint: Bool): Any {
 
 is-virtual-host-bucket
 meta {
-    doc: """True when a bucket can be a hostname label: 3 to 63 lowercase letters, numbers and hyphens. Dotted names don't match the TLS wildcard certificate, and uppercase legacy names don't survive a hostname, so those use path-style."""
+    doc: """
+    True when a bucket can be a hostname label: 3 to 63 lowercase letters,
+    numbers and hyphens. Dotted names don't match the TLS wildcard
+    certificate, and uppercase legacy names don't survive a hostname, so
+    those use path-style.
+
+    **Example**
+
+    ```hot
+    ::aws::core/is-virtual-host-bucket("my-bucket")  // true
+    ::aws::core/is-virtual-host-bucket("my.dotted.bucket")  // false
+    ```
+    """
 }
 fn (bucket: Str): Bool {
     ::hot::regex/is-match(bucket, VIRTUAL_HOST_BUCKET_PATTERN)
@@ -246,7 +297,19 @@ fn (bucket: Str): Bool {
 
 check-bucket
 meta {
-    doc: """`bucket` when it is a valid S3 bucket name (3 to 255 letters, numbers, dots, hyphens and underscores, starting and ending with a letter or number, no `..`), else an Err that doesn't echo the value. Dotted names are valid; see `is-virtual-host-bucket`."""
+    doc: """
+    `bucket` when it is a valid S3 bucket name (3 to 255 letters, numbers,
+    dots, hyphens and underscores, starting and ending with a letter or
+    number, no `..`), else an Err that doesn't echo the value. Dotted names
+    are valid; see `is-virtual-host-bucket`.
+
+    **Example**
+
+    ```hot
+    ::aws::core/check-bucket("my.dotted.bucket")  // "my.dotted.bucket"
+    is-err(::aws::core/check-bucket("a..b"))  // true
+    ```
+    """
 }
 fn (bucket: Any): Any {
     cond {
@@ -258,7 +321,9 @@ fn (bucket: Any): Any {
 }
 
 // A custom endpoint without its trailing slash, or an Err when it isn't a plain http(s) URL.
-normalize-endpoint fn (endpoint: Any, source: Str): Any {
+normalize-endpoint
+meta {no-doc: true}
+fn (endpoint: Any, source: Str): Any {
     value non-blank(endpoint)
     cond {
         is-null(value) => { null }
@@ -275,6 +340,13 @@ meta {
     doc: """
     Get AWS credentials from context (aws.access-key-id, aws.secret-access-key,
     aws.session-token). Returns an Err naming the variables when they aren't set.
+
+    **Example**
+
+    ```hot
+    creds ::aws::core/get-credentials()
+    creds.access_key_id
+    ```
     """,
     ctx: {
         "aws.access-key-id": {required: false},
@@ -293,7 +365,17 @@ fn (): Credentials {
 // Get AWS region from context
 get-region
 meta {
-    doc: """Get AWS region from context (aws.region). Defaults to us-east-1 if not set. An Err when it isn't a plain region name; see `check-region`.""",
+    doc: """
+    Get AWS region from context (aws.region). Defaults to us-east-1 if not
+    set. An Err when it isn't a plain region name; see `check-region`.
+
+    **Example**
+
+    ```hot
+    region ::aws::core/get-region()
+    ::aws::core/sqs-endpoint(region)
+    ```
+    """,
     ctx: {
         "aws.region": {required: false, secret: false, default: "us-east-1"},
         "aws.endpoint": {required: false, secret: false}
@@ -322,6 +404,17 @@ meta {
     Credentials in `opts` mean the context credentials, session token included,
     are ignored for the call.
     Nothing is written to ctx. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    settings ::aws::core/resolve-from({region: "eu-west-1"}, {
+      "aws.access-key-id": ::hot::ctx/get("aws.access-key-id"),
+      "aws.secret-access-key": ::hot::ctx/get("aws.secret-access-key")
+    })
+    settings.region
+    settings.credentials.access_key_id
+    ```
     """
 }
 fn (opts: Map?, ctx-values: Map): Map {
@@ -363,7 +456,9 @@ fn (opts: Map?, ctx-values: Map): Map {
 
 // Mask the credentials opts carries in the run's call records. A Credentials value is unwrapped
 // so that its fields are what gets registered.
-mark-opts-credentials fn (opts: Map?): Null {
+mark-opts-credentials
+meta {no-doc: true}
+fn (opts: Map?): Null {
     o if(is-null(opts), {}, untype(opts))
     given o.credentials
     ::ctx/mark-secret([
@@ -435,7 +530,18 @@ fn
 // Base URL for a service: the custom endpoint when there is one, else the regional AWS host.
 service-url
 meta {
-    doc: """Base URL (no trailing slash) for a service host prefix such as `sqs` or `bedrock-runtime`: `resolved.endpoint` when set, else `https://<prefix>.<region>.amazonaws.com`."""
+    doc: """
+    Base URL (no trailing slash) for a service host prefix such as `sqs` or
+    `bedrock-runtime`: `resolved.endpoint` when set, else
+    `https://<prefix>.<region>.amazonaws.com`.
+
+    **Example**
+
+    ```hot
+    ::aws::core/service-url({region: "eu-west-1"}, "sqs")  // "https://sqs.eu-west-1.amazonaws.com"
+    ::aws::core/service-url({region: "us-east-1", endpoint: "http://localhost:4566"}, "sqs")  // "http://localhost:4566"
+    ```
+    """
 }
 fn (resolved: Map, prefix: Str): Str {
     endpoint get(resolved, "endpoint")
@@ -445,7 +551,17 @@ fn (resolved: Map, prefix: Str): Str {
 // Every AWS hostname built from a region goes through here.
 regional-url
 meta {
-    doc: """`https://<prefix>.<region>.amazonaws.com`, or an Err when `region` isn't a plain AWS region name."""
+    doc: """
+    `https://<prefix>.<region>.amazonaws.com`, or an Err when `region` isn't
+    a plain AWS region name.
+
+    **Example**
+
+    ```hot
+    ::aws::core/regional-url("bedrock-runtime", "us-west-2")  // "https://bedrock-runtime.us-west-2.amazonaws.com"
+    is-err(::aws::core/regional-url("sqs", "not a region"))  // true
+    ```
+    """
 }
 fn (prefix: Str, region: Str): Str {
     if-ok(check-region(region, "region", false), (checked) { `https://${prefix}.${checked}.amazonaws.com` })
@@ -454,7 +570,18 @@ fn (prefix: Str, region: Str): Str {
 // Read a response header. The runtime lowercases response header names.
 response-header
 meta {
-    doc: """Read a header from an HTTP response by name, in any case. HTTP responses carry lowercase header names."""
+    doc: """
+    Read a header from an HTTP response by name, in any case. HTTP responses
+    carry lowercase header names.
+
+    **Example**
+
+    ```hot
+    response {headers: {"content-type": "application/json"}}
+    ::aws::core/response-header(response, "Content-Type")  // "application/json"
+    ::aws::core/response-header(response, "ETag")  // null
+    ```
+    """
 }
 fn (response: Any, name: Str): Str? {
     headers or(response.headers, {})
@@ -464,7 +591,18 @@ fn (response: Any, name: Str): Str? {
 // Parse a whole non-negative number, null for anything else.
 parse-int
 meta {
-    doc: """A whole non-negative number from a header or XML text, or null when it is absent or isn't one. Never fails."""
+    doc: """
+    A whole non-negative number from a header or XML text, or null when it
+    is absent or isn't one. Never fails.
+
+    **Example**
+
+    ```hot
+    ::aws::core/parse-int("1024")  // 1024
+    ::aws::core/parse-int("12.5")  // null
+    ::aws::core/parse-int(null)  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
     cond {
@@ -478,7 +616,17 @@ fn (value: Any): Int? {
 // Some AWS JSON date fields are epoch numbers; the response types declare them Str.
 opt-str
 meta {
-    doc: """`Str(value)`, keeping null as null. For JSON fields that AWS sends as numbers (epoch dates) and the response types declare `Str?`."""
+    doc: """
+    `Str(value)`, keeping null as null. For JSON fields that AWS sends as
+    numbers (epoch dates) and the response types declare `Str?`.
+
+    **Example**
+
+    ```hot
+    ::aws::core/opt-str(1700000000)  // "1700000000"
+    ::aws::core/opt-str(null)  // null
+    ```
+    """
 }
 fn (value: Any): Str? {
     if(is-null(value), null, Str(value))
@@ -492,6 +640,17 @@ meta {
     Return `response` as an `HttpResponse`, with a JSON body parsed when the runtime left it
     as Bytes (`application/x-amz-json-1.0` and `-1.1` responses). A `transport` in opts can
     return a plain Map, so the result is typed here for `AwsError(response)` to run its arrow.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({
+      status: 200,
+      headers: {"content-type": "application/x-amz-json-1.0"},
+      body: Bytes("{\"QueueUrl\":\"https://example.test/q\"}")
+    })
+    ::aws::core/parse-json-body(response).body  // {QueueUrl: "https://example.test/q"}
+    ```
     """
 }
 fn (response: Result): Any {
@@ -513,6 +672,18 @@ meta {
     Sign a request with `resolved` (from `resolve`) and send it, through
     `resolved.transport` when set. The Host header comes from `url`. JSON bodies
     are parsed whatever the JSON content type. Used by all AWS service packages.
+
+    **Example**
+
+    ```hot
+    resolved ::aws::core/resolve({region: "eu-west-1"})
+    url `${::aws::core/service-url(resolved, "sqs")}/`
+    headers {"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonSQS.ListQueues"}
+
+    response ::aws::core/send-signed("POST", url, "sqs", resolved, headers, "{}")
+    response.status
+    response.body.QueueUrls
+    ```
     """
 }
 fn (method: Str, url: Str, service: Str, resolved: Map, headers: Map, body: Str | Bytes): HttpResponse {
@@ -535,7 +706,18 @@ fn (method: Str, url: Str, service: Str, resolved: Map, headers: Map, body: Str 
 // Parse URL to extract host, path, and query string
 parse-url
 meta {
-    doc: """Parse a URL into components: {host, path, query}"""
+    doc: """
+    Parse a URL into components: {host, path, query}
+
+    **Example**
+
+    ```hot
+    parts ::aws::core/parse-url("https://s3.us-east-1.amazonaws.com:443/my/key?list-type=2")
+    parts.host  // "s3.us-east-1.amazonaws.com"
+    parts.path  // "/my/key"
+    parts.query  // "list-type=2"
+    ```
+    """
 }
 fn (url: Str): Map {
     // Remove protocol
@@ -575,7 +757,18 @@ fn (url: Str): Map {
 // Get current UTC timestamp in AWS format
 get-amz-date
 meta {
-    doc: """Get current UTC timestamp in AWS format (YYYYMMDD'T'HHMMSS'Z')"""
+    doc: """
+    Get current UTC timestamp in AWS format (YYYYMMDD'T'HHMMSS'Z')
+
+    **Example**
+
+    ```hot
+    amz-date ::aws::core/get-amz-date()
+
+    // Sign a request at this exact time
+    ::aws::core/sign-request("GET", "https://sqs.us-east-1.amazonaws.com/", "us-east-1", "sqs", ::aws::core/get-credentials(), {}, null, amz-date)
+    ```
+    """
 }
 fn (): Str {
     // now() returns Instant which is UTC
@@ -606,7 +799,16 @@ fn (): Str {
 // Get date stamp (YYYYMMDD)
 get-date-stamp
 meta {
-    doc: """Get current UTC date in AWS format (YYYYMMDD)"""
+    doc: """
+    Get current UTC date in AWS format (YYYYMMDD)
+
+    **Example**
+
+    ```hot
+    date-stamp ::aws::core/get-date-stamp()
+    `${date-stamp}/us-east-1/s3/aws4_request`
+    ```
+    """
 }
 fn (): Str {
     // now() returns Instant which is UTC
@@ -628,7 +830,16 @@ fn (): Str {
 // URI encode a string (AWS-style)
 uri-encode
 meta {
-    doc: """URI encode a string for an AWS request: every byte except `A-Z a-z 0-9 - _ . ~` becomes `%XX` (uppercase hex, UTF-8), `/` and `%` included."""
+    doc: """
+    URI encode a string for an AWS request: every byte except `A-Z a-z 0-9 -
+    _ . ~` becomes `%XX` (uppercase hex, UTF-8), `/` and `%` included.
+
+    **Example**
+
+    ```hot
+    ::aws::core/uri-encode("a b/c")  // "a%20b%2Fc"
+    ```
+    """
 }
 fn (s: Str): Str {
     ::hot::uri/encode(s)
@@ -637,14 +848,25 @@ fn (s: Str): Str {
 // URI encode a path, keeping the slashes
 uri-encode-path
 meta {
-    doc: """URI encode a path or S3 object key for a request URL: `uri-encode` on each `/`-separated segment."""
+    doc: """
+    URI encode a path or S3 object key for a request URL: `uri-encode` on
+    each `/`-separated segment.
+
+    **Example**
+
+    ```hot
+    ::aws::core/uri-encode-path("my folder/a+b.txt")  // "my%20folder/a%2Bb.txt"
+    ```
+    """
 }
 fn (path: Str): Str {
     split(path, "/") |> map(uri-encode) |> join("/")
 }
 
 // The two hex digits an escape starts with, or null
-hex-prefix fn (s: Str): Str? {
+hex-prefix
+meta {no-doc: true}
+fn (s: Str): Str? {
     prefix slice(s, 0, 2)
     if(::hot::regex/is-match(prefix, "^[0-9A-Fa-f]{2}$"), prefix, null)
 }
@@ -652,7 +874,18 @@ hex-prefix fn (s: Str): Str? {
 // Encode what isn't already encoded
 normalize-encoding
 meta {
-    doc: """URI encode `s`, keeping valid `%XX` escapes (in uppercase) so already-encoded input isn't encoded twice. A `%` that doesn't start an escape becomes `%25`."""
+    doc: """
+    URI encode `s`, keeping valid `%XX` escapes (in uppercase) so
+    already-encoded input isn't encoded twice. A `%` that doesn't start an
+    escape becomes `%25`.
+
+    **Example**
+
+    ```hot
+    ::aws::core/normalize-encoding("a%2fb c")  // "a%2Fb%20c"
+    ::aws::core/normalize-encoding("100%")  // "100%25"
+    ```
+    """
 }
 fn (s: Str): Str {
     pieces split(s, "%")
@@ -669,7 +902,15 @@ fn (s: Str): Str {
 // URL-encode a single value for AWS canonical query string
 url-encode-value
 meta {
-    doc: """URL-encode a value for an AWS query string. The same as `uri-encode`."""
+    doc: """
+    URL-encode a value for an AWS query string. The same as `uri-encode`.
+
+    **Example**
+
+    ```hot
+    ::aws::core/url-encode-value("a=b")  // "a%3Db"
+    ```
+    """
 }
 fn (value: Str): Str {
     uri-encode(value)
@@ -678,7 +919,17 @@ fn (value: Str): Str {
 // URL-encode a path for AWS canonical URI (does NOT encode /)
 url-encode-path
 meta {
-    doc: """URL-encode a URI path once for an AWS request, keeping `/` and existing `%XX` escapes. This is the S3 canonical URI; see `canonical-uri` for other services."""
+    doc: """
+    URL-encode a URI path once for an AWS request, keeping `/` and existing
+    `%XX` escapes. This is the S3 canonical URI; see `canonical-uri` for
+    other services.
+
+    **Example**
+
+    ```hot
+    ::aws::core/url-encode-path("/a b/c%2Fd")  // "/a%20b/c%2Fd"
+    ```
+    """
 }
 fn (path: Str): Str {
     split(path, "/") |> map(normalize-encoding) |> join("/")
@@ -688,7 +939,17 @@ fn (path: Str): Str {
 // Everything else goes on the wire as written, so a second pass must see it unescaped.
 wire-path
 meta {
-    doc: """The path as the HTTP client sends it: spaces, quotes, angle brackets, braces, backticks and non-ASCII characters escaped, everything else (existing `%XX` included) unchanged."""
+    doc: """
+    The path as the HTTP client sends it: spaces, quotes, angle brackets,
+    braces, backticks and non-ASCII characters escaped, everything else
+    (existing `%XX` included) unchanged.
+
+    **Example**
+
+    ```hot
+    ::aws::core/wire-path("/a b/c:d")  // "/a%20b/c:d"
+    ```
+    """
 }
 fn (path: Str): Str {
     ::hot::regex/find-all(path, "[ \"<>`{}]|[^\\x00-\\x7F]")
@@ -702,6 +963,13 @@ meta {
     The canonical URI of a request path. S3 signs the path as sent, single-encoded.
     Every other service encodes the sent path again, so a path segment `a%3Ab` signs
     as `a%253Ab`. `/` is never encoded in either case.
+
+    **Example**
+
+    ```hot
+    ::aws::core/canonical-uri("/a%3Ab", "s3")  // "/a%3Ab"
+    ::aws::core/canonical-uri("/a%3Ab", "sqs")  // "/a%253Ab"
+    ```
     """
 }
 fn (path: Str, service: Str): Str {
@@ -714,7 +982,15 @@ fn (path: Str, service: Str): Str {
 // Helper to replace all occurrences of a character
 replace-all-char
 meta {
-    doc: """Replace all occurrences of char in string"""
+    doc: """
+    Replace all occurrences of char in string
+
+    **Example**
+
+    ```hot
+    ::aws::core/replace-all-char("a.b.c", ".", "-")  // "a-b-c"
+    ```
+    """
 }
 fn cond (s: Str, from: Str, to: Str): Str {
     not(contains(s, from)) => { s }
@@ -728,7 +1004,18 @@ fn cond (s: Str, from: Str, to: Str): Str {
 // Encode a single query parameter (key=value)
 encode-query-param
 meta {
-    doc: """URL-encode the name and value of a query parameter, keeping existing `%XX` escapes. A parameter with no `=` gets an empty value (`uploads` becomes `uploads=`)."""
+    doc: """
+    URL-encode the name and value of a query parameter, keeping existing
+    `%XX` escapes. A parameter with no `=` gets an empty value (`uploads`
+    becomes `uploads=`).
+
+    **Example**
+
+    ```hot
+    ::aws::core/encode-query-param("prefix=a b")  // "prefix=a%20b"
+    ::aws::core/encode-query-param("uploads")  // "uploads="
+    ```
+    """
 }
 fn (param: Str): Str {
     // Split by = - first part is key, rest is value (may contain =)
@@ -741,7 +1028,17 @@ fn (param: Str): Str {
 // Sort query parameters for canonical query string
 sort-query-params
 meta {
-    doc: """The canonical query string: each name and value URL-encoded, sorted by encoded name, then by encoded value."""
+    doc: """
+    The canonical query string: each name and value URL-encoded, sorted by
+    encoded name, then by encoded value.
+
+    **Example**
+
+    ```hot
+    ::aws::core/sort-query-params("b=2&a=1")  // "a=1&b=2"
+    ::aws::core/sort-query-params(null)  // ""
+    ```
+    """
 }
 fn (query: Str?): Str {
     match query {
@@ -756,7 +1053,9 @@ fn (query: Str?): Str {
 }
 
 // Collapse runs of spaces inside a header value
-collapse-spaces fn (value: Str): Str {
+collapse-spaces
+meta {no-doc: true}
+fn (value: Str): Str {
     cond {
         contains(value, "  ") => { split(value, " ") |> filter(ne(%, "")) |> join(" ") }
         => { value }
@@ -766,7 +1065,17 @@ collapse-spaces fn (value: Str): Str {
 // Create canonical headers string
 canonical-headers
 meta {
-    doc: """Create canonical headers string for AWS Signature V4: lowercase names sorted by name, values trimmed with runs of spaces collapsed."""
+    doc: """
+    Create canonical headers string for AWS Signature V4: lowercase names
+    sorted by name, values trimmed with runs of spaces collapsed.
+
+    **Example**
+
+    ```hot
+    ::aws::core/canonical-headers({Host: "example.com", "X-Amz-Date": "20261109T120000Z"})
+    // "host:example.com\nx-amz-date:20261109T120000Z\n"
+    ```
+    """
 }
 fn (headers: Map): Str {
     // Sort by name, not by "name:value": "a-b:" sorts before "a:" but "a" comes first
@@ -781,7 +1090,15 @@ fn (headers: Map): Str {
 // Create signed headers string
 signed-headers
 meta {
-    doc: """Create signed headers list (semicolon-separated lowercase header names)"""
+    doc: """
+    Create signed headers list (semicolon-separated lowercase header names)
+
+    **Example**
+
+    ```hot
+    ::aws::core/signed-headers({Host: "example.com", "X-Amz-Date": "20261109T120000Z"})  // "host;x-amz-date"
+    ```
+    """
 }
 fn (headers: Map): Str {
     headers
@@ -794,7 +1111,18 @@ fn (headers: Map): Str {
 // Derive the signing key using HMAC chain
 derive-signing-key
 meta {
-    doc: """Derive AWS signing key using HMAC-SHA256 chain"""
+    doc: """
+    Derive AWS signing key using HMAC-SHA256 chain
+
+    **Example**
+
+    ```hot
+    key ::aws::core/derive-signing-key(::hot::ctx/get("aws.secret-access-key"), "20261109", "us-east-1", "s3")
+
+    // Bytes, ready for hmac-sha256 over the string to sign
+    ::hot::hmac/hmac-sha256(key, "string to sign")
+    ```
+    """
 }
 fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
     // date -> region -> service -> "aws4_request", each keyed on the last. Each one can sign
@@ -808,7 +1136,16 @@ fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
 // Create the canonical request string
 create-canonical-request
 meta {
-    doc: """Create AWS Signature V4 canonical request string"""
+    doc: """
+    Create AWS Signature V4 canonical request string
+
+    **Example**
+
+    ```hot
+    ::aws::core/create-canonical-request("GET", "/", "a=1", "host:example.com\n", "host", "UNSIGNED-PAYLOAD")
+    // "GET\n/\na=1\nhost:example.com\n\nhost\nUNSIGNED-PAYLOAD"
+    ```
+    """
 }
 fn (method: Str, path: Str, query: Str, headers-str: Str, signed-headers-str: Str, payload-hash: Str): Str {
     join([method, path, query, headers-str, signed-headers-str, payload-hash], "\n")
@@ -817,7 +1154,16 @@ fn (method: Str, path: Str, query: Str, headers-str: Str, signed-headers-str: St
 // Create the string to sign
 create-string-to-sign
 meta {
-    doc: """Create AWS Signature V4 string to sign"""
+    doc: """
+    Create AWS Signature V4 string to sign
+
+    **Example**
+
+    ```hot
+    ::aws::core/create-string-to-sign("20261109T120000Z", "20261109", "us-east-1", "s3", "abc123")
+    // "AWS4-HMAC-SHA256\n20261109T120000Z\n20261109/us-east-1/s3/aws4_request\nabc123"
+    ```
+    """
 }
 fn (amz-date: Str, date-stamp: Str, region: Str, service: Str, canonical-request-hash: Str): Str {
     algorithm "AWS4-HMAC-SHA256"
@@ -828,7 +1174,17 @@ fn (amz-date: Str, date-stamp: Str, region: Str, service: Str, canonical-request
 // The signature over a canonical request
 signature-for
 meta {
-    doc: """The hex SigV4 signature of a canonical request at `amz-date`, in `region` and `service`."""
+    doc: """
+    The hex SigV4 signature of a canonical request at `amz-date`, in
+    `region` and `service`.
+
+    **Example**
+
+    ```hot
+    canonical ::aws::core/create-canonical-request("GET", "/", "", "host:sqs.us-east-1.amazonaws.com\n", "host", ::hot::hash/sha256(""))
+    ::aws::core/signature-for(canonical, "20261109T120000Z", "us-east-1", "sqs", ::hot::ctx/get("aws.secret-access-key"))
+    ```
+    """
 }
 fn (canonical-request: Str, amz-date: Str, region: Str, service: Str, secret-access-key: Str): Str {
     date-stamp slice(amz-date, 0, 8)
@@ -839,7 +1195,19 @@ fn (canonical-request: Str, amz-date: Str, region: Str, service: Str, secret-acc
 // Nothing is signed for a target that could be something other than it looks.
 check-signing-target
 meta {
-    doc: """Null when `url` and `region` are safe to sign for: a plain host with no user info, no backslash or control characters in the URL, and a region that stays one segment of the signing scope. Else an Err that doesn't echo them."""
+    doc: """
+    Null when `url` and `region` are safe to sign for: a plain host with no
+    user info, no backslash or control characters in the URL, and a region
+    that stays one segment of the signing scope. Else an Err that doesn't
+    echo them.
+
+    **Example**
+
+    ```hot
+    ::aws::core/check-signing-target("https://s3.us-east-1.amazonaws.com/my-bucket", "us-east-1")  // null
+    is-err(::aws::core/check-signing-target("https://user@evil.example/", "us-east-1"))  // true
+    ```
+    """
 }
 fn (url: Str, region: Any): Any {
     checked-region check-region(region, "region", true)
@@ -862,6 +1230,17 @@ meta {
     the HTTP client sends that host whatever the headers say. The arity with `amz-date`
     (`YYYYMMDD'T'HHMMSS'Z'`) signs at that time instead of now. An Err when the URL's host or
     the region isn't plain; see `check-signing-target`.
+
+    **Example**
+
+    ```hot
+    creds ::aws::core/get-credentials()
+    headers ::aws::core/sign-request("GET", "https://sqs.us-east-1.amazonaws.com/", "us-east-1", "sqs", creds, {}, null)
+
+    // Signed headers, ready to send
+    headers.Authorization
+    headers.x-amz-date
+    ```
     """
 }
 fn
@@ -925,6 +1304,24 @@ meta {
 
     Handles credential retrieval and Signature V4 signing automatically.
     Used internally by all AWS service packages.
+
+    **Example**
+
+    ```hot
+    region ::aws::core/get-region()
+    url `${::aws::core/sqs-endpoint(region)}/`
+    headers {"Content-Type": "application/x-amz-json-1.0", "X-Amz-Target": "AmazonSQS.ListQueues"}
+
+    response ::aws::core/request("POST", url, "sqs", region, headers, "{}")
+    response.status
+
+    // With another tenant's credentials
+    tenant ::aws::core/request("POST", url, "sqs", region, headers, "{}", {
+      access-key-id: ::hot::ctx/get("tenant.aws-access-key-id"),
+      secret-access-key: ::hot::ctx/get("tenant.aws-secret-access-key")
+    })
+    tenant.body
+    ```
     """
 }
 fn
@@ -971,6 +1368,16 @@ meta {
     - amz-date: signing time (YYYYMMDD'T'HHMMSS'Z'), default now
 
     An Err when the URL's host or the region isn't plain; see `check-signing-target`.
+
+    **Example**
+
+    ```hot
+    creds ::aws::core/get-credentials()
+
+    // Anyone holding this URL can download the object for 15 minutes
+    url ::aws::core/sign-url("GET", "https://my-bucket.s3.us-east-1.amazonaws.com/report.pdf", "us-east-1", "s3", creds, 900)
+    ::hot::http/get(url).status
+    ```
     """
 }
 fn
@@ -1054,6 +1461,13 @@ meta {
     the standard form in every region including us-east-1. A bucket that can't be a hostname label
     (dots, legacy uppercase names) gets the path-style form, `https://s3.<region>.amazonaws.com/<bucket>`.
     An Err when the bucket or region isn't valid.
+
+    **Example**
+
+    ```hot
+    ::aws::core/s3-endpoint("my-bucket", "us-east-1")  // "https://my-bucket.s3.us-east-1.amazonaws.com"
+    ::aws::core/s3-endpoint("my.dotted.bucket", "us-east-1")  // "https://s3.us-east-1.amazonaws.com/my.dotted.bucket"
+    ```
     """
 }
 fn (bucket: Str, region: Str): Str {
@@ -1070,7 +1484,15 @@ fn (bucket: Str, region: Str): Str {
 // SES endpoint helper
 ses-endpoint
 meta {
-    doc: """Get the SES endpoint URL for a given region"""
+    doc: """
+    Get the SES endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/ses-endpoint("us-east-1")  // "https://email.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("email", region)
@@ -1079,7 +1501,15 @@ fn (region: Str): Str {
 // Lambda endpoint helper
 lambda-endpoint
 meta {
-    doc: """Get the Lambda endpoint URL for a given region"""
+    doc: """
+    Get the Lambda endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/lambda-endpoint("us-east-1")  // "https://lambda.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("lambda", region)
@@ -1088,7 +1518,15 @@ fn (region: Str): Str {
 // SQS endpoint helper
 sqs-endpoint
 meta {
-    doc: """Get the SQS endpoint URL for a given region"""
+    doc: """
+    Get the SQS endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/sqs-endpoint("us-east-1")  // "https://sqs.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("sqs", region)
@@ -1097,7 +1535,15 @@ fn (region: Str): Str {
 // DynamoDB endpoint helper
 dynamodb-endpoint
 meta {
-    doc: """Get the DynamoDB endpoint URL for a given region"""
+    doc: """
+    Get the DynamoDB endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/dynamodb-endpoint("us-east-1")  // "https://dynamodb.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("dynamodb", region)
@@ -1106,7 +1552,15 @@ fn (region: Str): Str {
 // Secrets Manager endpoint helper
 secrets-manager-endpoint
 meta {
-    doc: """Get the Secrets Manager endpoint URL for a given region"""
+    doc: """
+    Get the Secrets Manager endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/secrets-manager-endpoint("us-east-1")  // "https://secretsmanager.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("secretsmanager", region)
@@ -1115,7 +1569,15 @@ fn (region: Str): Str {
 // Bedrock endpoint helper
 bedrock-endpoint
 meta {
-    doc: """Get the Bedrock control plane endpoint URL for a given region"""
+    doc: """
+    Get the Bedrock control plane endpoint URL for a given region
+
+    **Example**
+
+    ```hot
+    ::aws::core/bedrock-endpoint("us-east-1")  // "https://bedrock.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("bedrock", region)
@@ -1124,7 +1586,15 @@ fn (region: Str): Str {
 // Bedrock Runtime endpoint helper
 bedrock-runtime-endpoint
 meta {
-    doc: """Get the Bedrock runtime endpoint URL for model invocation"""
+    doc: """
+    Get the Bedrock runtime endpoint URL for model invocation
+
+    **Example**
+
+    ```hot
+    ::aws::core/bedrock-runtime-endpoint("us-east-1")  // "https://bedrock-runtime.us-east-1.amazonaws.com"
+    ```
+    """
 }
 fn (region: Str): Str {
     regional-url("bedrock-runtime", region)

@@ -43,7 +43,17 @@ LOCAL_KEYS ["seen", "max-pages"]
 
 as-position
 meta {
-    doc: """A stream position as a Str (Box returns it as a number or a string), or null."""
+    doc: """
+    A stream position as a Str (Box returns it as a number or a string), or
+    null.
+
+    **Example**
+
+    ```hot
+    ::box::events/as-position(1152922976252290886)  // "1152922976252290886"
+    ::box::events/as-position("")  // null
+    ```
+    """
 }
 fn (value: Any): Str? {
   cond {
@@ -56,7 +66,18 @@ fn (value: Any): Str? {
 
 event-params
 meta {
-    doc: """The query parameters for `GET /events` (pure): `stream_type` (default `all`), `limit` 500, then your parameters (`stream_position`, `stream_type`, `limit`, `event_type` (a Vec or comma Str), `created_after`, `created_before`). Nulls are dropped."""
+    doc: """
+    The query parameters for `GET /events` (pure): `stream_type` (default
+    `all`), `limit` 500, then your parameters (`stream_position`,
+    `stream_type`, `limit`, `event_type` (a Vec or comma Str),
+    `created_after`, `created_before`). Nulls are dropped.
+
+    **Example**
+
+    ```hot
+    ::box::events/event-params({stream_position: "now", limit: 100})  // {stream_type: "all", limit: 100, stream_position: "now"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::box/query-params({stream_type: "all", limit: MAX_LIMIT}, opts, LOCAL_KEYS)
@@ -70,6 +91,14 @@ meta {
     `admin_logs`, `admin_logs_streaming`), `stream_position` (`"now"` for
     the current position, `"0"` for the oldest retained), `limit` (max
     500), `event_type`, `created_after`, `created_before`.
+
+    **Example**
+
+    ```hot
+    page ::box::events/get-events({stream_position: "0", stream_type: "changes", limit: 100})
+    page.next_stream_position
+    page.entries
+    ```
     """
 }
 fn
@@ -86,7 +115,17 @@ fn
 
 current-position
 meta {
-    doc: """The stream position for "from now on" (`stream_position=now`), as a Str. Store it before the first `sync-events`."""
+    doc: """
+    The stream position for "from now on" (`stream_position=now`), as a Str.
+    Store it before the first `sync-events`.
+
+    **Example**
+
+    ```hot
+    pos ::box::events/current-position()
+    ::hot::store/put(::hot::store/Map({name: "box-sync"}), "position", pos)
+    ```
+    """
 }
 fn
 (): Str {
@@ -99,7 +138,18 @@ fn
 
 dedupe-events
 meta {
-    doc: """Drop repeated events (pure): keep the first event per `event_id`, and drop ids in `seen`. Events without an `event_id` are kept."""
+    doc: """
+    Drop repeated events (pure): keep the first event per `event_id`, and
+    drop ids in `seen`. Events without an `event_id` are kept.
+
+    **Example**
+
+    ```hot
+    events [{event_id: "a"}, {event_id: "a"}, {event_id: "b"}]
+    ::box::events/dedupe-events(events)  // [{event_id: "a"}, {event_id: "b"}]
+    ::box::events/dedupe-events(events, ["a"])  // [{event_id: "b"}]
+    ```
+    """
 }
 fn
 (events: Vec): Vec {
@@ -119,7 +169,16 @@ fn
 
 event-ids
 meta {
-    doc: """The `event_id`s of a Vec of events (pure), e.g. to pass as `seen` next time."""
+    doc: """
+    The `event_id`s of a Vec of events (pure), e.g. to pass as `seen` next
+    time.
+
+    **Example**
+
+    ```hot
+    ::box::events/event-ids([{event_id: "a"}, {event_type: "PING"}])  // ["a"]
+    ```
+    """
 }
 fn (events: Vec): Vec {
   filter(map(events, (e) { if(is-map(e), e.event_id, null) }), is-some)
@@ -146,14 +205,26 @@ type {
 
 is-caught-up
 meta {
-    doc: """True when a chunk means the stream is read to its end (pure): no entries, or the position did not move."""
+    doc: """
+    True when a chunk means the stream is read to its end (pure): no
+    entries, or the position did not move.
+
+    **Example**
+
+    ```hot
+    ::box::events/is-caught-up({entries: [], next_stream_position: "5"}, "4")  // true
+    ::box::events/is-caught-up({entries: [{event_id: "a"}], next_stream_position: "5"}, "4")  // false
+    ```
+    """
 }
 fn (page: Map, position: Str?): Bool {
   next as-position(page.next_stream_position)
   or(is-empty(or(page.entries, [])), is-null(next), eq(next, position))
 }
 
-sync-loop fn (position: Str?, opts: Map, acc: Vec, pages: Int, max-pages: Int): EventSet {
+sync-loop
+meta {no-doc: true}
+fn (position: Str?, opts: Map, acc: Vec, pages: Int, max-pages: Int): EventSet {
   page get-events({...opts, stream_position: position})
   cond {
     is-err(page) => { page }
@@ -189,6 +260,7 @@ meta {
     ```hot
     ::events ::box::events
 
+    saved-position "1152922976252290886"
     set ::events/sync-events(saved-position, {stream_type: "changes"})
     map(set.events, (e) { println(`${e.event_type} ${e.source.id}`) })
     saved-position set.next-stream-position
@@ -229,7 +301,20 @@ fn
 
 admin-events-all
 meta {
-    doc: """Read the enterprise stream for a window until it is exhausted (at most `max-pages` chunks, default 20), returning an `EventSet`. Takes the same `opts` as `admin-events`; continue an incomplete read with `{stream_position: set.next-stream-position}`."""
+    doc: """
+    Read the enterprise stream for a window until it is exhausted (at most
+    `max-pages` chunks, default 20), returning an `EventSet`. Takes the same
+    `opts` as `admin-events`; continue an incomplete read with
+    `{stream_position: set.next-stream-position}`.
+
+    **Example**
+
+    ```hot
+    set ::box::events/admin-events-all({created_after: "2026-10-01T00:00:00Z", created_before: "2026-10-02T00:00:00Z", event_type: ["LOGIN"]})
+    length(set.events)
+    set.complete
+    ```
+    """
 }
 fn (opts: Map): EventSet {
   max-pages or(::box/to-int(get(opts, "max-pages")), DEFAULT_MAX_PAGES)
@@ -242,7 +327,17 @@ fn (opts: Map): EventSet {
 
 realtime-server
 meta {
-    doc: """The `realtime_server` entry of an `OPTIONS /events` response (pure): `{type, url, ttl, max_retries, retry_timeout}`, or null."""
+    doc: """
+    The `realtime_server` entry of an `OPTIONS /events` response (pure):
+    `{type, url, ttl, max_retries, retry_timeout}`, or null.
+
+    **Example**
+
+    ```hot
+    server ::box::events/realtime-server({entries: [{type: "realtime_server", url: "https://2.realtime.services.box.net/subscribe", ttl: "10"}]})
+    server.ttl  // "10"
+    ```
+    """
 }
 fn (response: Map): Map? {
   found filter(or(response.entries, []), (e) { and(is-map(e), eq(e.type, "realtime_server")) })
@@ -255,6 +350,14 @@ meta {
     OPTIONS /events - the realtime server to long-poll: `{url, ttl,
     max_retries, retry_timeout}`. Ask again after `max_retries` polls or
     a `reconnect` message.
+
+    **Example**
+
+    ```hot
+    server ::box::events/long-poll-url()
+    server.url
+    server.max_retries
+    ```
     """
 }
 fn
@@ -274,12 +377,24 @@ fn
 }
 
 long-poll-request-url
-meta {doc: """The long-poll URL with `stream_position` appended (pure)."""}
+meta {
+    doc: """
+    The long-poll URL with `stream_position` appended (pure).
+
+    **Example**
+
+    ```hot
+    ::box::events/long-poll-request-url("https://2.realtime.services.box.net/subscribe?channel=abc", "42")  // "https://2.realtime.services.box.net/subscribe?channel=abc&stream_position=42"
+    ```
+    """
+}
 fn (url: Str, stream-position: Str): Str {
   ::api/with-query(url, {stream_position: stream-position})
 }
 
-is-timeout fn (message: Str): Bool {
+is-timeout
+meta {no-doc: true}
+fn (message: Str): Bool {
   m lowercase(message)
   or(contains(m, "timed out"), contains(m, "timeout"))
 }
@@ -292,6 +407,15 @@ meta {
     Returns `{message}`: `"new_change"` (call `sync-events` now),
     `"reconnect"` (get a new `long-poll-url`), or `"timeout"` (nothing
     yet; poll again). Never retried automatically.
+
+    **Example**
+
+    ```hot
+    server ::box::events/long-poll-url()
+    pos ::box::events/current-position()
+    answer ::box::events/long-poll(server.url, pos)
+    answer.message
+    ```
     """
 }
 fn

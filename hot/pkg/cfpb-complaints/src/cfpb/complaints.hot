@@ -59,14 +59,27 @@ PARAMS {
   sort: "sort"
 }
 
-ccdb-get fn (path: Str, params: Map, opts: Map): Any {
+ccdb-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {})
 }
 
 page-size
 meta {
-    doc: """`opts.size`, capped at 100, or 25 when unset (pure). A `size` of 0 stays 0: it asks for counts and aggregations with no complaints."""
+    doc: """
+    `opts.size`, capped at 100, or 25 when unset (pure). A `size` of 0 stays
+    0: it asks for counts and aggregations with no complaints.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/page-size({})  // 25
+    ::cfpb::complaints/page-size({size: 500})  // 100
+    ::cfpb::complaints/page-size({size: 0})  // 0
+    ```
+    """
 }
 fn (opts: Map): Int {
   min(or(get(opts, "size"), DEFAULT_SIZE), MAX_SIZE)
@@ -74,7 +87,17 @@ fn (opts: Map): Int {
 
 filter-params
 meta {
-    doc: """The API parameters for the filters in `opts` (pure), unset ones left out. See `search-params` for the keys."""
+    doc: """
+    The API parameters for the filters in `opts` (pure), unset ones left
+    out. See `search-params` for the keys.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/filter-params({company: "ACME", zip-code: "94107", state: "", size: 10})
+    // {company: "ACME", zip_code: "94107"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   reduce(keys(PARAMS), (acc, k) {
@@ -102,6 +125,15 @@ meta {
     | `date-received-min`, `date-received-max` | `YYYY-MM-DD`, both ends included |
     | `company-received-min`, `company-received-max` | `YYYY-MM-DD`, both ends included |
     | `sort` | `created_date_desc`, `created_date_asc`, `relevance_desc` (default), `relevance_asc` |
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/search-params({state: ["CA", "NY"], size: 10})
+    // {state: ["CA", "NY"], size: 10, frm: null, search_after: null, no_aggs: true, no_highlight: true}
+
+    ::cfpb::complaints/search-params({aggs: true}).no_aggs  // null
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -152,7 +184,21 @@ fn
 
 get-complaint
 meta {
-    doc: """One complaint by ID, or null when there is none (the API answers 200 with no hits). It carries `date_indexed`, which search results do not. A blank ID is an Err: it would otherwise request the search route."""
+    doc: """
+    One complaint by ID, or null when there is none (the API answers 200
+    with no hits). It carries `date_indexed`, which search results do not. A
+    blank ID is an Err: it would otherwise request the search route.
+
+    **Example**
+
+    ```hot
+    found ::cfpb::complaints/get-complaint("3456789")
+    if(is-some(found), found.issue, "No such complaint")
+
+    // Through a proxy
+    ::cfpb::complaints/get-complaint("3456789", {base-url: "https://ccdb-proxy.example/api/v1"})
+    ```
+    """
 }
 fn
 (id: Any): Map? {
@@ -171,7 +217,17 @@ fn
 
 complaints
 meta {
-    doc: """The complaints in a page: each hit's `_source` (pure)."""
+    doc: """
+    The complaints in a page: each hit's `_source` (pure).
+
+    **Example**
+
+    ```hot
+    page {hits: {hits: [{_source: {complaint_id: "1", issue: "Billing dispute"}}]}}
+    ::cfpb::complaints/complaints(page)  // [{complaint_id: "1", issue: "Billing dispute"}]
+    ::cfpb::complaints/complaints(null)  // []
+    ```
+    """
 }
 fn (page: Any): Vec<Map> {
   map(or(get-in(or(page, {}), ["hits", "hits"]), []), (hit) { get(hit, "_source") })
@@ -179,7 +235,16 @@ fn (page: Any): Vec<Map> {
 
 total
 meta {
-    doc: """How many complaints match the query, across all pages (pure). Exact above 10,000 too."""
+    doc: """
+    How many complaints match the query, across all pages (pure). Exact
+    above 10,000 too.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints/total({hits: {total: {value: 1204}}})  // 1204
+    ```
+    """
 }
 fn (page: Any): Int? {
   get-in(or(page, {}), ["hits", "total", "value"])
@@ -192,6 +257,14 @@ meta {
     `{last-updated, last-indexed, stale, data-issue, record-count}`.
     `stale` means the newest data is over 5 business days old;
     `data-issue` means the latest load had a problem.
+
+    **Example**
+
+    ```hot
+    page {_meta: {is_data_stale: false, has_data_issue: true, total_record_count: 1204}}
+    ::cfpb::complaints/freshness(page).data-issue  // true
+    ::cfpb::complaints/freshness(page).record-count  // 1204
+    ```
     """
 }
 fn (page: Any): Map {
@@ -268,7 +341,9 @@ fn
 
 SUB_LEVELS ["sub_product.raw", "sub_issue.raw"]
 
-bucket-row fn (bucket: Map): Map {
+bucket-row
+meta {no-doc: true}
+fn (bucket: Map): Map {
   level find-first(SUB_LEVELS, (k) { is-some(get(bucket, k)) })
   row {key: get(bucket, "key"), count: get(bucket, "doc_count")}
   if(is-null(level), row, assoc(row, "sub", map(get-in(bucket, [level, "buckets"]), bucket-row)))
@@ -276,7 +351,25 @@ bucket-row fn (bucket: Map): Map {
 
 buckets
 meta {
-    doc: """`[{key, count}]` for one aggregation, largest first (pure). `product` and `issue` rows also carry `sub`, the same shape for the sub-products or sub-issues. `[]` when the aggregation is absent."""
+    doc: """
+    `[{key, count}]` for one aggregation, largest first (pure). `product`
+    and `issue` rows also carry `sub`, the same shape for the sub-products
+    or sub-issues. `[]` when the aggregation is absent.
+
+    **Example**
+
+    ```hot
+    aggs {product: {product: {buckets: [{
+      key: "Mortgage",
+      doc_count: 12,
+      "sub_product.raw": {buckets: [{key: "FHA mortgage", doc_count: 5}]}
+    }]}}}
+    ::cfpb::complaints/buckets(aggs, "product")
+    // [{key: "Mortgage", count: 12, sub: [{key: "FHA mortgage", count: 5}]}]
+
+    ::cfpb::complaints/buckets(aggs, "state")  // []
+    ```
+    """
 }
 fn (aggs: Any, name: Str): Vec<Map> {
   map(or(get-in(or(aggs, {}), [name, name, "buckets"]), []), bucket-row)
@@ -319,6 +412,14 @@ meta {
     (pure). `opts` are the ones that fetched `page`. Returns `{frm,
     search-after}`, built from the `_meta.break_points` entry for the
     next page. The API stops giving break points at 10,000 records.
+
+    **Example**
+
+    ```hot
+    page {_meta: {break_points: {"2": [1767225600000, 4123456]}}}
+    ::cfpb::complaints/next-page(page, {size: 25})  // {frm: 25, search-after: "1767225600000_4123456"}
+    ::cfpb::complaints/next-page({_meta: {break_points: {}}}, {size: 25})  // null
+    ```
     """
 }
 fn (page: Any, opts: Map): Map? {
@@ -333,7 +434,9 @@ fn (page: Any, opts: Map): Map? {
   }
 }
 
-collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
   page fetch(opts)
   cond {
     // Returned, not consumed: consuming an Err would halt the run.

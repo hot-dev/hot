@@ -4,7 +4,18 @@
 
 build-comment-payload
 meta {
-    doc: """Build the create-comment payload. `target` is `{page_id}` to start a new discussion on a page, or `{discussion_id}` to reply to an existing one. Exposed for testing; `create-comment` uses it."""
+    doc: """
+    Build the create-comment payload. `target` is `{page_id}` to start a new
+    discussion on a page, or `{discussion_id}` to reply to an existing one.
+    Exposed for testing; `create-comment` uses it.
+
+    **Example**
+
+    ```hot
+    ::notion::comments/build-comment-payload({page_id: "p1"}, "Hi").parent  // {page_id: "p1"}
+    ::notion::comments/build-comment-payload({discussion_id: "d1"}, "Hi").discussion_id  // "d1"
+    ```
+    """
 }
 fn (target: Map, text: Str): Map {
   base {rich_text: ::notion/rich-text(text)}
@@ -24,7 +35,7 @@ meta {
     **Example**
 
     ```hot
-    ::notion::comments/create-comment({page_id: page.id}, "Looks ready to ship.")
+    ::notion::comments/create-comment({page_id: "59833787-2cf9-4fdf-8782-e53db20768a5"}, "Looks ready to ship.")
     ```
     """
 }
@@ -38,7 +49,19 @@ fn
 
 list-comments
 meta {
-    doc: """GET /comments?block_id= - The unresolved comments on a page or block. `options` (2-arity) supports `page_size` (max 100) and `start_cursor`; returns `{results, has_more, next_cursor}`. Requires the Read comments capability."""
+    doc: """
+    GET /comments?block_id= - The unresolved comments on a page or block.
+    `options` (2-arity) supports `page_size` (max 100) and `start_cursor`;
+    returns `{results, has_more, next_cursor}`. Requires the Read comments
+    capability.
+
+    **Example**
+
+    ```hot
+    comments ::notion::comments/list-comments("59833787-2cf9-4fdf-8782-e53db20768a5", {page_size: 50})
+    map(comments.results, (c) { ::notion/plain-text(c.rich_text) })
+    ```
+    """
 }
 fn
 (block-id: Str): Map {

@@ -2,16 +2,22 @@
 
 ::uri ::hot::uri
 
-encode fn (value: Any): Str {
+encode
+meta {no-doc: true}
+fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
-quote-string fn (value: Str): Str {
+quote-string
+meta {no-doc: true}
+fn (value: Str): Str {
   escaped replace(value, "\"", "\\\"")
   `"${escaped}"`
 }
 
-needs-quote fn (value: Str): Bool {
+needs-quote
+meta {no-doc: true}
+fn (value: Str): Bool {
   or(
     contains(value, " "),
     contains(value, ","),
@@ -23,7 +29,9 @@ needs-quote fn (value: Str): Bool {
   )
 }
 
-format-value fn cond (val: Any): Str {
+format-value
+meta {no-doc: true}
+fn cond (val: Any): Str {
   is-str(val) => {
     s Str(val)
     if(needs-quote(s), quote-string(s), s)
@@ -33,57 +41,143 @@ format-value fn cond (val: Any): Str {
   => { Str(val) }
 }
 
-format-encoded-value fn (val: Any): Str {
+format-encoded-value
+meta {no-doc: true}
+fn (val: Any): Str {
   encode(format-value(val))
 }
 
-filter fn (col: Str, op: Str, val: Any): Str {
+filter
+meta {
+    doc: """
+    Build a filter for any PostgREST operator. Use it for operators without
+    a helper here. The column and value are URL-encoded.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/filter("deleted_at", "isdistinct", "null")  // "deleted_at=isdistinct.null"
+    ```
+    """
+}
+fn (col: Str, op: Str, val: Any): Str {
   `${encode(col)}=${op}.${format-encoded-value(val)}`
 }
 
 eq
 meta {
-    doc: """PostgREST `eq` filter. `eq("status", "active")` => `"status=eq.active"`"""
+    doc: """
+    PostgREST `eq` filter. `eq("status", "active")` => `"status=eq.active"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/eq("status", "active")  // "status=eq.active"
+    ::supabase::filters/eq("active", true)  // "active=eq.true"
+    ```
+    """
 }
 fn (col: Str, val: Any): Str { filter(col, "eq", val) }
 
 neq
 meta {
-    doc: """PostgREST `neq` filter (not equal). `neq("status", "draft")` => `"status=neq.draft"`"""
+    doc: """
+    PostgREST `neq` filter (not equal). `neq("status", "draft")` =>
+    `"status=neq.draft"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/neq("status", "draft")  // "status=neq.draft"
+    ```
+    """
 }
 fn (col: Str, val: Any): Str { filter(col, "neq", val) }
 
 gt
 meta {
-    doc: """PostgREST `gt` filter (greater than). `gt("age", 20)` => `"age=gt.20"`"""
+    doc: """
+    PostgREST `gt` filter (greater than). `gt("age", 20)` => `"age=gt.20"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/gt("age", 20)  // "age=gt.20"
+    ```
+    """
 }
 fn (col: Str, val: Any): Str { filter(col, "gt", val) }
 
 gte
 meta {
-    doc: """PostgREST `gte` filter (greater than or equal). `gte("age", 18)` => `"age=gte.18"`"""
+    doc: """
+    PostgREST `gte` filter (greater than or equal). `gte("age", 18)` =>
+    `"age=gte.18"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/gte("age", 18)  // "age=gte.18"
+    ```
+    """
 }
 fn (col: Str, val: Any): Str { filter(col, "gte", val) }
 
 lt
-meta { doc: """PostgREST `lt` filter (less than). `lt("age", 13)` => `"age=lt.13"`""" }
+meta {
+    doc: """
+    PostgREST `lt` filter (less than). `lt("age", 13)` => `"age=lt.13"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/lt("age", 13)  // "age=lt.13"
+    ```
+    """
+}
 fn (col: Str, val: Any): Str { filter(col, "lt", val) }
 
 lte
 meta {
-    doc: """PostgREST `lte` filter (less than or equal). `lte("age", 65)` => `"age=lte.65"`"""
+    doc: """
+    PostgREST `lte` filter (less than or equal). `lte("age", 65)` =>
+    `"age=lte.65"`
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/lte("age", 65)  // "age=lte.65"
+    ```
+    """
 }
 fn (col: Str, val: Any): Str { filter(col, "lte", val) }
 
 like
 meta {
-    doc: """PostgREST `like` filter (case-sensitive pattern). Use `*` for wildcards. `like("name", "John*")` => `"name=like.John*"`"""
+    doc: """
+    PostgREST `like` filter (case-sensitive pattern). Use `*` for wildcards.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/like("name", "John*")  // "name=like.John%2A"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "like", val) }
 
 ilike
 meta {
-    doc: """PostgREST `ilike` filter (case-insensitive pattern). `ilike("name", "*smith")` => `"name=ilike.*smith"`"""
+    doc: """
+    PostgREST `ilike` filter (case-insensitive pattern). Use `*` for
+    wildcards.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/ilike("name", "*smith")  // "name=ilike.%2Asmith"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "ilike", val) }
 
@@ -108,7 +202,17 @@ fn (col: Str, vals: Vec): Str {
 
 is_
 meta {
-    doc: """PostgREST `is` filter for null/bool checks. `is_("deleted", "null")` => `"deleted=is.null"`. Also: `is_("active", "true")`."""
+    doc: """
+    PostgREST `is` filter for null/bool checks. `is_("deleted", "null")` =>
+    `"deleted=is.null"`. Also: `is_("active", "true")`.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/is_("deleted", "null")  // "deleted=is.null"
+    ::supabase::filters/is_("active", "true")  // "active=is.true"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { `${encode(col)}=is.${encode(val)}` }
 
@@ -130,25 +234,57 @@ fn (col: Str, op: Str): Str { `${encode(col)}=not.${encode(op)}` }
 
 cs
 meta {
-    doc: """PostgREST `cs` (contains) filter for arrays/ranges. `cs("tags", "{a,b}")` => `"tags=cs.{a,b}"`"""
+    doc: """
+    PostgREST `cs` (contains) filter for arrays/ranges.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/cs("tags", "{a,b}")  // "tags=cs.%22%7Ba%2Cb%7D%22"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "cs", val) }
 
 cd
 meta {
-    doc: """PostgREST `cd` (contained by) filter. `cd("tags", "{a,b,c}")` => `"tags=cd.{a,b,c}"`"""
+    doc: """
+    PostgREST `cd` (contained by) filter.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/cd("tags", "{a,b,c}")  // "tags=cd.%22%7Ba%2Cb%2Cc%7D%22"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "cd", val) }
 
 ov
 meta {
-    doc: """PostgREST `ov` (overlap) filter for arrays/ranges. `ov("tags", "{a,b}")` => `"tags=ov.{a,b}"`"""
+    doc: """
+    PostgREST `ov` (overlap) filter for arrays/ranges.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/ov("tags", "{a,b}")  // "tags=ov.%22%7Ba%2Cb%7D%22"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "ov", val) }
 
 fts
 meta {
-    doc: """PostgREST full-text search. `fts("description", "hot language")` => `"description=fts.hot language"`"""
+    doc: """
+    PostgREST full-text search.
+
+    **Example**
+
+    ```hot
+    ::supabase::filters/fts("description", "hot language")  // "description=fts.%22hot%20language%22"
+    ```
+    """
 }
 fn (col: Str, val: Str): Str { filter(col, "fts", val) }
 
@@ -162,7 +298,7 @@ Combine filters with OR logic. Takes raw filter expressions (without the column 
 ```hot
 ::f ::supabase::filters
 
-::f/or_(["age.lt.18", "age.gt.65"])  // => "or=(age.lt.18,age.gt.65)"
+::f/or_(["age.lt.18", "age.gt.65"])  // "or=%28age.lt.18%2Cage.gt.65%29"
 ```
 """
 }
@@ -181,7 +317,7 @@ Combine filters with AND logic (explicit grouping). Takes raw filter expressions
 ```hot
 ::f ::supabase::filters
 
-::f/and_(["age.gte.18", "age.lte.65"])  // => "and=(age.gte.18,age.lte.65)"
+::f/and_(["age.gte.18", "age.lte.65"])  // "and=%28age.gte.18%2Cage.lte.65%29"
 ```
 """
 }

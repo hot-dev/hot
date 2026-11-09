@@ -52,7 +52,25 @@ CreateMeterRequest type {
 
 create-meter
 meta {
-    doc: """POST /v1/billing/meters - Create a meter. `default_aggregation` is `{formula: "sum"}` (or `"count"` / `"last"`). Reference it from a price with `recurring: {interval: "month", usage_type: "metered", meter: meter.id}`."""
+    doc: """
+    POST /v1/billing/meters - Create a meter. `default_aggregation` is
+    `{formula: "sum"}` (or `"count"` / `"last"`). Reference it from a price
+    with `recurring: {interval: "month", usage_type: "metered", meter:
+    meter.id}`.
+
+    **Example**
+
+    ```hot
+    ::meters ::stripe::meters
+
+    meter ::meters/create-meter(::meters/CreateMeterRequest({
+      display_name: "API requests",
+      event_name: "api_requests",
+      default_aggregation: {formula: "sum"}
+    }))
+    meter.id
+    ```
+    """
 }
 fn
 (request: CreateMeterRequest): Map {
@@ -64,7 +82,18 @@ fn
 
 get-meter
 meta {
-    doc: """GET /v1/billing/meters/{id} - Retrieve a meter by ID."""
+    doc: """
+    GET /v1/billing/meters/{id} - Retrieve a meter by ID.
+
+    **Example**
+
+    ```hot
+    ::meters ::stripe::meters
+
+    meter ::meters/get-meter("mtr_123")
+    meter.status
+    ```
+    """
 }
 fn
 (meter: Str): Map {
@@ -76,7 +105,19 @@ fn
 
 list-meters
 meta {
-    doc: """GET /v1/billing/meters - List meters. Optional `params`: `status` ("active" or "inactive"), `limit`, `starting_after`."""
+    doc: """
+    GET /v1/billing/meters - List meters. Optional `params`: `status`
+    ("active" or "inactive"), `limit`, `starting_after`.
+
+    **Example**
+
+    ```hot
+    ::meters ::stripe::meters
+
+    page ::meters/list-meters({status: "active", limit: 20})
+    names map(page.data, %.display_name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -91,7 +132,19 @@ fn
 
 deactivate-meter
 meta {
-    doc: """POST /v1/billing/meters/{id}/deactivate - Deactivate a meter: it stops accepting events and can't be attached to new prices."""
+    doc: """
+    POST /v1/billing/meters/{id}/deactivate - Deactivate a meter: it stops
+    accepting events and can't be attached to new prices.
+
+    **Example**
+
+    ```hot
+    ::meters ::stripe::meters
+
+    meter ::meters/deactivate-meter("mtr_123")
+    meter.status
+    ```
+    """
 }
 fn
 (meter: Str): Map {
@@ -103,7 +156,23 @@ fn
 
 list-meter-event-summaries
 meta {
-    doc: """GET /v1/billing/meters/{id}/event_summaries - Aggregated usage for one customer between `start-time` and `end-time` (Unix seconds, aligned to the minute or, with `value_grouping_window`, the hour/day). Optional `params`: `value_grouping_window` ("day" or "hour"), `limit`, `starting_after`."""
+    doc: """
+    GET /v1/billing/meters/{id}/event_summaries - Aggregated usage for one
+    customer between `start-time` and `end-time` (Unix seconds, aligned to
+    the minute or, with `value_grouping_window`, the hour/day). Optional
+    `params`: `value_grouping_window` ("day" or "hour"), `limit`,
+    `starting_after`.
+
+    **Example**
+
+    ```hot
+    ::meters ::stripe::meters
+
+    // November 2025, one summary per day
+    summaries ::meters/list-meter-event-summaries("mtr_123", "cus_123", 1761955200, 1764547200, {value_grouping_window: "day"})
+    totals map(summaries.data, %.aggregated_value)
+    ```
+    """
 }
 fn
 (meter: Str, customer: Str, start-time: Int, end-time: Int): Map {

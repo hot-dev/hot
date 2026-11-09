@@ -38,7 +38,7 @@ meta {
     **Example**
 
     ```hot
-    models list()
+    models ::qwen::models/list()
     models.data // => [{id: "qwen3.7-plus", object: "model", ...}, ...]
 
     first-model first(models.data)
@@ -69,7 +69,7 @@ meta {
     **Example**
 
     ```hot
-    model get("qwen3.7-plus")
+    model ::qwen::models/get("qwen3.7-plus")
     model.id // => "qwen3.7-plus"
     model.object // => "model"
     ```
@@ -96,7 +96,7 @@ meta {
     **Example**
 
     ```hot
-    model-path("qwen3.8-max")  // => "/models/qwen3.8-max"
+    ::qwen::models/model-path("qwen3.8-max")  // => "/models/qwen3.8-max"
     ```
     """
 }

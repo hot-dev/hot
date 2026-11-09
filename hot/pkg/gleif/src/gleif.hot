@@ -25,19 +25,33 @@ meta {
 ACCEPT "application/vnd.api+json"
 MAX_PAGE_SIZE 200
 
-gleif-get fn (path: Str, params: Map, opts: Map): Any {
+gleif-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {Accept: ACCEPT})
 }
 
-get-or-null fn (path: Str, opts: Map): Any {
+get-or-null
+meta {no-doc: true}
+fn (path: Str, opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json-or-null(`${cfg.base-url}${path}`, {Accept: ACCEPT})
 }
 
 page-params
 meta {
-    doc: """`page[size]` and `page[number]` from `opts.page-size` (capped at 200) and `opts.page`, omitted when unset (pure)."""
+    doc: """
+    `page[size]` and `page[number]` from `opts.page-size` (capped at 200)
+    and `opts.page` (pure). An unset value is null, and
+    `::gleif::api/query-string` drops it.
+
+    **Example**
+
+    ```hot
+    ::gleif/page-params({page-size: 500, page: 3})  // {"page[size]": 200, "page[number]": 3}
+    ```
+    """
 }
 fn (opts: Map): Map {
   size get(opts, "page-size")
@@ -49,7 +63,17 @@ fn (opts: Map): Map {
 
 filter-params
 meta {
-    doc: """`filter[<field>]` parameters from a Map of field → value (pure): `{"entity.status": "ACTIVE"}` → `{"filter[entity.status]": "ACTIVE"}`."""
+    doc: """
+    `filter[<field>]` parameters from a Map of field → value (pure):
+    `{"entity.status": "ACTIVE"}` → `{"filter[entity.status]": "ACTIVE"}`.
+
+    **Example**
+
+    ```hot
+    ::gleif/filter-params({"entity.status": "ACTIVE"})  // {"filter[entity.status]": "ACTIVE"}
+    ::gleif/filter-params(null)  // {}
+    ```
+    """
 }
 fn (filters: Map?): Map {
   m or(filters, {})
@@ -58,7 +82,17 @@ fn (filters: Map?): Map {
 
 search-params
 meta {
-    doc: """Query parameters for a full-text LEI search (pure): `filter[fulltext]`, the extra filters, and paging."""
+    doc: """
+    Query parameters for a full-text LEI search (pure): `filter[fulltext]`,
+    the extra filters, and paging.
+
+    **Example**
+
+    ```hot
+    ::gleif/search-params("apple inc", {page-size: 10, page: 2})
+    // {"filter[fulltext]": "apple inc", "page[size]": 10, "page[number]": 2}
+    ```
+    """
 }
 fn (name: Str, opts: Map): Map {
   {"filter[fulltext]": name, ...filter-params(get(opts, "filters")), ...page-params(opts)}
@@ -66,7 +100,15 @@ fn (name: Str, opts: Map): Map {
 
 lei-path
 meta {
-    doc: """`/lei-records/{lei}` with the LEI upper-cased and encoded (pure)."""
+    doc: """
+    `/lei-records/{lei}` with the LEI upper-cased and encoded (pure).
+
+    **Example**
+
+    ```hot
+    ::gleif/lei-path(" hwupkr0mpou8fgxbt394 ")  // "/lei-records/HWUPKR0MPOU8FGXBT394"
+    ```
+    """
 }
 fn (lei: Str): Str {
   `/lei-records/${::api/path-segment(uppercase(trim(lei)))}`
@@ -74,7 +116,18 @@ fn (lei: Str): Str {
 
 is-lei
 meta {
-    doc: """True for a syntactically valid LEI: 20 characters, 18 alphanumerics and two check digits, with a valid ISO 17442 (MOD 97-10) checksum."""
+    doc: """
+    True for a syntactically valid LEI: 20 characters, 18 alphanumerics and
+    two check digits, with a valid ISO 17442 (MOD 97-10) checksum.
+
+    **Example**
+
+    ```hot
+    ::gleif/is-lei("HWUPKR0MPOU8FGXBT394")  // true
+    ::gleif/is-lei("HWUPKR0MPOU8FGXBT395")  // false
+    ::gleif/is-lei("APPLE")  // false
+    ```
+    """
 }
 fn (lei: Str): Bool {
   s uppercase(trim(lei))
@@ -89,7 +142,9 @@ LETTER_VALUES {
   N: 23, O: 24, P: 25, Q: 26, R: 27, S: 28, T: 29, U: 30, V: 31, W: 32, X: 33, Y: 34, Z: 35
 }
 
-mod97 fn (s: Str): Int {
+mod97
+meta {no-doc: true}
+fn (s: Str): Int {
   digits join(map(::hot::regex/split(s, ""), (c) {
     v get(LETTER_VALUES, c)
     if(is-some(v), Str(v), c)
@@ -128,7 +183,24 @@ fn
 
 search-legal-name
 meta {
-    doc: """Search by legal name only (`filter[entity.legalName]`), which is stricter than full text."""
+    doc: """
+    Search by legal name only (`filter[entity.legalName]`), which is
+    stricter than full text.
+
+    **Example**
+
+    ```hot
+    page ::gleif/search-legal-name("Apple Inc.", {page-size: 5})
+    map(page.data, %.attributes.entity.legalName.name)
+
+    // Active US entities only
+    us ::gleif/search-legal-name("Apple Inc.", {filters: {
+      "entity.legalAddress.country": "US",
+      "entity.status": "ACTIVE"
+    }})
+    us.meta.pagination.total
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -164,7 +236,17 @@ fn
 
 autocompletions
 meta {
-    doc: """Prefix suggestions (`/autocompletions`, `opts.field` default `"fulltext"`). Returns `[{name, lei}]`."""
+    doc: """
+    Prefix suggestions (`/autocompletions`, `opts.field` default
+    `"fulltext"`). Returns `[{name, lei}]`.
+
+    **Example**
+
+    ```hot
+    suggestions ::gleif/autocompletions("apple")
+    map(suggestions, %.name)
+    ```
+    """
 }
 fn
 (q: Str): Vec<Map> {
@@ -177,7 +259,20 @@ fn
 
 completions
 meta {
-    doc: """`[{name, lei}]` from a fuzzy or auto completion response (pure)."""
+    doc: """
+    `[{name, lei}]` from a fuzzy or auto completion response (pure).
+
+    **Example**
+
+    ```hot
+    body {data: [{
+      attributes: {value: "Apple Inc."},
+      relationships: {"lei-records": {data: {id: "HWUPKR0MPOU8FGXBT394"}}}
+    }]}
+    ::gleif/completions(body)  // [{name: "Apple Inc.", lei: "HWUPKR0MPOU8FGXBT394"}]
+    ::gleif/completions(null)  // []
+    ```
+    """
 }
 fn (body: Any): Vec<Map> {
   map(or(get(or(body, {}), "data"), []), (d) {
@@ -187,7 +282,17 @@ fn (body: Any): Vec<Map> {
 
 get-record
 meta {
-    doc: """One LEI record by LEI (the JSON:API `data` object), or null when GLEIF has none."""
+    doc: """
+    One LEI record by LEI (the JSON:API `data` object), or null when GLEIF
+    has none.
+
+    **Example**
+
+    ```hot
+    record ::gleif/get-record("HWUPKR0MPOU8FGXBT394")
+    if(is-some(record), record.attributes.entity.legalName.name, "No such LEI")
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -200,7 +305,16 @@ fn
 
 by-isin
 meta {
-    doc: """The LEI records issuing an ISIN (`filter[isin]`)."""
+    doc: """
+    The LEI records issuing an ISIN (`filter[isin]`).
+
+    **Example**
+
+    ```hot
+    issuers ::gleif/by-isin("US0378331005")
+    map(issuers, %.attributes.entity.legalName.name)
+    ```
+    """
 }
 fn
 (isin: Str): Vec<Map> {
@@ -213,7 +327,19 @@ fn
 
 isins
 meta {
-    doc: """One page of the ISINs mapped to an LEI (GLEIF's daily ISIN-to-LEI file, via the API). Returns the page; `data[].attributes.isin` holds each ISIN."""
+    doc: """
+    One page of the ISINs mapped to an LEI (GLEIF's daily ISIN-to-LEI file,
+    via the API). Returns the page; `data[].attributes.isin` holds each
+    ISIN.
+
+    **Example**
+
+    ```hot
+    page ::gleif/isins("HWUPKR0MPOU8FGXBT394", {page-size: 50})
+    map(page.data, %.attributes.isin)
+    page.meta.pagination.total
+    ```
+    """
 }
 fn
 (lei: Str): Map {
@@ -229,7 +355,17 @@ fn
 
 direct-parent
 meta {
-    doc: """The direct accounting-consolidation parent's LEI record, or null when none is reported (check `direct-parent-exception` for the reason)."""
+    doc: """
+    The direct accounting-consolidation parent's LEI record, or null when
+    none is reported (check `direct-parent-exception` for the reason).
+
+    **Example**
+
+    ```hot
+    parent ::gleif/direct-parent("549300G81RQKP7XW2N18")
+    if(is-some(parent), parent.attributes.entity.legalName.name, "None reported")
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -242,7 +378,17 @@ fn
 
 ultimate-parent
 meta {
-    doc: """The ultimate accounting-consolidation parent's LEI record, or null when none is reported."""
+    doc: """
+    The ultimate accounting-consolidation parent's LEI record, or null when
+    none is reported.
+
+    **Example**
+
+    ```hot
+    parent ::gleif/ultimate-parent("549300G81RQKP7XW2N18")
+    if(is-some(parent), parent.id, "None reported")
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -255,7 +401,17 @@ fn
 
 direct-parent-relationship
 meta {
-    doc: """The direct-parent relationship record (`IS_DIRECTLY_CONSOLIDATED_BY`, with periods and validation), or null."""
+    doc: """
+    The direct-parent relationship record (`IS_DIRECTLY_CONSOLIDATED_BY`,
+    with periods and validation), or null.
+
+    **Example**
+
+    ```hot
+    record ::gleif/direct-parent-relationship("549300G81RQKP7XW2N18")
+    if(is-some(record), record.attributes.relationship.endNode.id, null)
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -268,7 +424,17 @@ fn
 
 ultimate-parent-relationship
 meta {
-    doc: """The ultimate-parent relationship record (`IS_ULTIMATELY_CONSOLIDATED_BY`), or null."""
+    doc: """
+    The ultimate-parent relationship record
+    (`IS_ULTIMATELY_CONSOLIDATED_BY`), or null.
+
+    **Example**
+
+    ```hot
+    record ::gleif/ultimate-parent-relationship("549300G81RQKP7XW2N18")
+    if(is-some(record), record.attributes.relationship.status, null)
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -281,7 +447,17 @@ fn
 
 direct-parent-exception
 meta {
-    doc: """Why no direct parent is reported (`attributes.reason`, e.g. `NATURAL_PERSONS`, `NON_CONSOLIDATING`), or null."""
+    doc: """
+    Why no direct parent is reported (`attributes.reason`, e.g.
+    `NATURAL_PERSONS`, `NON_CONSOLIDATING`), or null.
+
+    **Example**
+
+    ```hot
+    why ::gleif/direct-parent-exception("HWUPKR0MPOU8FGXBT394")
+    if(is-some(why), why.attributes.reason, "A parent is reported")
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -294,7 +470,16 @@ fn
 
 ultimate-parent-exception
 meta {
-    doc: """Why no ultimate parent is reported, or null."""
+    doc: """
+    Why no ultimate parent is reported, or null.
+
+    **Example**
+
+    ```hot
+    why ::gleif/ultimate-parent-exception("HWUPKR0MPOU8FGXBT394")
+    if(is-some(why), why.attributes.reason, "A parent is reported")
+    ```
+    """
 }
 fn
 (lei: Str): Map? {
@@ -307,7 +492,17 @@ fn
 
 direct-children
 meta {
-    doc: """One page of the entities directly consolidated by `lei` (LEI records)."""
+    doc: """
+    One page of the entities directly consolidated by `lei` (LEI records).
+
+    **Example**
+
+    ```hot
+    page ::gleif/direct-children("HWUPKR0MPOU8FGXBT394", {page-size: 50})
+    map(page.data, %.attributes.entity.legalName.name)
+    ::gleif/next-page(page)
+    ```
+    """
 }
 fn
 (lei: Str): Map {
@@ -319,7 +514,16 @@ fn
 
 ultimate-children
 meta {
-    doc: """One page of the entities ultimately consolidated by `lei` (LEI records)."""
+    doc: """
+    One page of the entities ultimately consolidated by `lei` (LEI records).
+
+    **Example**
+
+    ```hot
+    page ::gleif/ultimate-children("HWUPKR0MPOU8FGXBT394", {page-size: 50, page: 2})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (lei: Str): Map {
@@ -335,7 +539,17 @@ fn
 
 next-page
 meta {
-    doc: """The page number after `page` from `meta.pagination` (`currentPage` < `lastPage`), or null on the last page (pure)."""
+    doc: """
+    The page number after `page` from `meta.pagination` (`currentPage` <
+    `lastPage`), or null on the last page (pure).
+
+    **Example**
+
+    ```hot
+    ::gleif/next-page({meta: {pagination: {currentPage: 1, lastPage: 32}}})  // 2
+    ::gleif/next-page({meta: {pagination: {currentPage: 32, lastPage: 32}}})  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   p get-in(or(page, {}), ["meta", "pagination"])
@@ -348,7 +562,9 @@ fn (page: Any): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, page-number: Int?, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, page-number: Int?, limit: Int, acc: Vec): Vec {
   page fetch(page-number)
   cond {
     // Returned, not consumed: consuming an Err would halt the run.

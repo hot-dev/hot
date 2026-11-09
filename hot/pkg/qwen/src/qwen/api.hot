@@ -81,7 +81,17 @@ fn (opts: Map, ctx-region: Str?): Map {
 
 site-opts
 meta {
-    doc: """`site-opts-from` with `qwen.region` from ctx. Also masks a key from `opts` in the run's call records."""
+    doc: """
+    `site-opts-from` with `qwen.region` from ctx. Also masks a key from
+    `opts` in the run's call records.
+
+    **Example**
+
+    ```hot
+    site ::qwen::api/site-opts({api-key: ::hot::ctx/get("tenant.qwen.key"), region: "us"})
+    site.base-url
+    ```
+    """
 }
 fn (opts: Map): Map {
     ::ctx/mark-secret(opts.api-key)
@@ -137,7 +147,7 @@ meta {
     **Example**
 
     ```hot
-    ::qwen::api/resolve({api-key: tenant-key, region: "us", workspace-id: "llm-abc"}).base-url
+    ::qwen::api/resolve({api-key: ::hot::ctx/get("tenant.qwen.key"), region: "us", workspace-id: "llm-abc"}).base-url
     // => "https://llm-abc.us-east-1.maas.aliyuncs.com/compatible-mode/v1"
     ```
     """,
@@ -190,6 +200,13 @@ meta {
     The ctx-configured base URL with the `qwen.api.key` key if there is one,
     for a provider whose calls may bring their own key through `provider-opts`.
     See `::qwen::ai/provider`.
+
+    **Example**
+
+    ```hot
+    ep ::qwen::api/configured-endpoint()
+    ep.base-url
+    ```
     """,
     ctx: {"qwen.api.key": {required: false}}
 }
@@ -239,7 +256,7 @@ meta {
         model: "qwen3.7-plus",
         messages: [{role: "user", content: "Hello"}]
     })
-    response ::qwen::api/request("GET", "/models", {}, "", {api-key: tenant-key, region: "us"})
+    response ::qwen::api/request("GET", "/models", {}, "", {api-key: ::hot::ctx/get("tenant.qwen.key"), region: "us"})
     ```
     """
 }
@@ -263,7 +280,24 @@ fn
 
 request-stream
 meta {
-    doc: """Streaming (SSE) request to the ctx-configured endpoint, or per the call's `opts` (see `resolve`). Returns a `StreamingHttpResponse`."""
+    doc: """
+    Streaming (SSE) request to the ctx-configured endpoint, or per the
+    call's `opts` (see `resolve`). Returns a `StreamingHttpResponse`.
+
+    **Example**
+
+    ```hot
+    response ::qwen::api/request-stream("POST", "/chat/completions", {}, {
+        model: "qwen3.8-flash",
+        stream: true,
+        messages: [{role: "user", content: "Hello"}]
+    })
+
+    for-each(response.body, (event) {
+        print(::qwen::chat/extract-chunk-text(event))
+    })
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {

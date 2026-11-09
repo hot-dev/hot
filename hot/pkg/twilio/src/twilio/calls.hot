@@ -93,7 +93,19 @@ type {
 
 create-call-body
 meta {
-    doc: """The form parameters `create-call` sends: every set field of the request, unset ones omitted. Exposed for testing."""
+    doc: """
+    The form parameters `create-call` sends: every set field of the request,
+    unset ones omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    req ::calls/CreateCallRequest({To: "+15558675310", From: "+15017122661", Url: "https://example.com/voice"})
+    ::calls/create-call-body(req).Url  // "https://example.com/voice"
+    ```
+    """
 }
 fn (request: CreateCallRequest): Map {
   filter-vals(untype(request), is-some)
@@ -229,7 +241,17 @@ ListCallsResponse type {
 
 list-calls-query
 meta {
-    doc: """The query string `list-calls` sends. Exposed for testing."""
+    doc: """
+    The query string `list-calls` sends. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    ::calls/list-calls-query(::calls/ListCallsRequest({Status: "completed", PageSize: 20}))  // "?Status=completed&PageSize=20"
+    ```
+    """
 }
 fn (request: ListCallsRequest): Str {
   ::twilio::api/query-string({
@@ -252,7 +274,23 @@ fn (request: ListCallsRequest): Str {
 list-calls
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """GET /Accounts/{AccountSid}/Calls.json - List calls, newest first. Filter by `To`, `From`, `Status`, parent call, or date range. Returns one page; follow it with `::twilio::api/next-page`, or use `list-all-calls`."""
+    doc: """
+    GET /Accounts/{AccountSid}/Calls.json - List calls, newest first. Filter
+    by `To`, `From`, `Status`, parent call, or date range. Returns one page;
+    follow it with `::twilio::api/next-page`, or use `list-all-calls`.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    page ::calls/list-calls(::calls/ListCallsRequest({Status: "completed", PageSize: 20}))
+    map(page.calls, %.sid)
+
+    // Page two
+    ::twilio::api/next-page(untype(page))
+    ```
+    """
 }
 fn
 (request: ListCallsRequest): ListCallsResponse {
@@ -273,7 +311,19 @@ fn
 list-all-calls
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """Collect up to `limit` calls matching `request`, following Twilio's page links as needed."""
+    doc: """
+    Collect up to `limit` calls matching `request`, following Twilio's page
+    links as needed.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    calls ::calls/list-all-calls(::calls/ListCallsRequest({To: "+15558675310", PageSize: 100}), 250)
+    length(calls)
+    ```
+    """
 }
 fn
 (request: ListCallsRequest, limit: Int): Vec<Map> {
@@ -301,7 +351,18 @@ UpdateCallRequest type {
 
 update-call-body
 meta {
-    doc: """The form parameters `update-call` sends (the request without its path `sid`). Exposed for testing."""
+    doc: """
+    The form parameters `update-call` sends (the request without its path
+    `sid`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    ::calls/update-call-body(::calls/UpdateCallRequest({sid: "CA123", Status: "completed"}))  // {Status: "completed"}
+    ```
+    """
 }
 fn (request: UpdateCallRequest): Map {
   filter-vals(delete(untype(request), "sid"), is-some)
@@ -345,7 +406,19 @@ DeleteCallRequest type {
 delete-call
 meta {
     ctx: {"twilio.account.sid": {required: false, secret: false}},
-    doc: """DELETE /Accounts/{AccountSid}/Calls/{Sid}.json - Delete a call record. The call log is permanently removed."""
+    doc: """
+    DELETE /Accounts/{AccountSid}/Calls/{Sid}.json - Delete a call record.
+    The call log is permanently removed.
+
+    **Example**
+
+    ```hot
+    ::calls ::twilio::calls
+
+    deleted ::calls/delete-call(::calls/DeleteCallRequest({sid: "CA123"}))
+    if(deleted, "Call log removed")
+    ```
+    """
 }
 fn
 (request: DeleteCallRequest): Bool {

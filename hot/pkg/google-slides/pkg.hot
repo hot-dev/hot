@@ -2,7 +2,7 @@
 
 hot.pkg.google-slides {
   name: "hot.dev/google-slides",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Google Slides API v1 bindings for Hot: read presentations as slide text and speaker notes, create decks and text slides, fill templates, fetch page thumbnails, and batchUpdate with builders for slides, shapes, images, tables, text and styles.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.google-slides {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/google-core": "0.1.1"
+    "hot.dev/google-core": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

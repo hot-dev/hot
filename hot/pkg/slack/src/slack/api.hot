@@ -25,7 +25,19 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 sanitize-url
 meta {
-    doc: """Remove legacy token query params and normalize URL separators. Strips any `token=` query parameters to ensure authentication is only sent via the Authorization header."""
+    doc: """
+    Remove legacy token query params and normalize URL separators. Strips
+    any `token=` query parameters to ensure authentication is only sent via
+    the Authorization header.
+
+    **Example**
+
+    ```hot
+    ::slack::api/sanitize-url("https://slack.com/api/users.list?token=abc&limit=5")  // "https://slack.com/api/users.list?limit=5"
+
+    ::slack::api/sanitize-url("https://slack.com/api/auth.test?token=abc")  // "https://slack.com/api/auth.test"
+    ```
+    """
 }
 fn (url: Str): Str {
   // Slack bearer auth is sent in Authorization header. Some endpoints still
@@ -37,7 +49,9 @@ fn (url: Str): Str {
       |> ::regex/replace-all("[?&]$", "")
 }
 
-is-blank fn (value: Any): Bool {
+is-blank
+meta {no-doc: true}
+fn (value: Any): Bool {
   cond {
     is-str(value) => { is-empty(trim(value)) }
     => { true }
@@ -56,6 +70,16 @@ meta {
     stored credential is missing can't silently run on the project's
     credential. Nothing is written to ctx. Exposed for testing; `resolve`
     feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::slack::api/resolve-from({}, {"slack.api.key": "project-key"})  // {api-key: "project-key"}
+    ::slack::api/resolve-from({api-key: "tenant-key"}, {"slack.api.key": "project-key"})  // {api-key: "tenant-key"}
+
+    // A blank key in opts never falls back to context
+    is-err(::slack::api/resolve-from({api-key: ""}, {"slack.api.key": "project-key"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -111,11 +135,15 @@ meta {
     // POST with JSON body
     response ::api/request("POST", "https://slack.com/api/chat.postMessage", {}, {channel: "C1234", text: "Hello"})
 
+    url "https://slack.com/api/chat.postMessage"
+    body {channel: "C1234", text: "Hello"}
+    api-key ::hot::ctx/get("tenant-b.slack.api.key")
+
     // With explicit API key override
-    response ::api/request("POST", url, {}, body, "SLACK_API_KEY_PLACEHOLDER")
+    response ::api/request("POST", url, {}, body, api-key)
 
     // With per-call opts
-    response ::api/request("POST", url, {}, body, {api-key: "SLACK_API_KEY_PLACEHOLDER"})
+    response ::api/request("POST", url, {}, body, {api-key: api-key})
     ```
     """
 }

@@ -16,6 +16,7 @@ meta {
     is-type("hello", Int)  // false
 
     // Works with pipes
+    my-value "hello"
     my-value |> is-type(Str)
     ```
 
@@ -534,7 +535,7 @@ meta {
     ```hot
     is-fn(::hot::math/add)  // true
     is-fn("add")            // false
-    is-fn(%)                 // true (lambda)
+    is-fn((x) { x })        // true
     ```
     """
 }
@@ -570,10 +571,10 @@ meta {
 
     ```hot
     // Given a typed structure
-    user User({"name": "Alice"})
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: "ok"})
 
     // Remove type wrapper
-    untype(user)  // {"name": "Alice"}
+    is-map(untype(response))  // true
     ```
 
     An enum variant keeps its name: one with no payload becomes its name, and
@@ -581,8 +582,9 @@ meta {
     field of an enum type reads that form back. A `Result` becomes its value.
 
     ```hot
-    untype(Outcome.Passed)    // "Passed"
-    untype(Status.Owed(5))    // {Owed: 5}
+    ::store ::hot::store
+    untype(::store/EmbeddingOptions.Off)  // "Off"
+    untype(Result.Ok(5))                  // 5
     ```
     """
 }
@@ -635,7 +637,7 @@ meta {
     ok(42)           // Result.Ok(42)
     ok("success")    // Result.Ok("success")
 
-    result ok(get-user(id))
+    result ok({id: "u-1", name: "Ada"})
     user ok-value(result)
     ```
     """
@@ -663,6 +665,7 @@ meta {
     err("Not found")                          // simple
     err({message: "Not found", code: 404})    // structured
 
+    user {name: "Ada"}
     if(is-null(user), err("User not found"), ok(user))
     ```
     """
@@ -684,7 +687,7 @@ meta {
     is-ok(Result.Ok(42))            // true
     is-ok(Result.Err("failed"))     // false
 
-    result safe-divide(10, 2)
+    result div(10, 2)
     if(is-ok(result), ok-value(result), 0)
     ```
     """
@@ -706,7 +709,7 @@ meta {
     is-err(Result.Err("failed"))    // true
     is-err(Result.Ok(42))           // false
 
-    result fetch-data()
+    result div(1, 0)
     if-err(result, (error) { println(error) })
     ```
     """
@@ -855,8 +858,8 @@ meta {
     err-message(err("connection refused"))              // "connection refused"
     err-message(err({message: "pg: bad", code: "42"}))  // "pg: bad"
 
-    r ::pg/connect(opts)
-    if-err(r, (e) { println(`db down: ${err-message(e)}`) })
+    r div(1, 0)
+    if-err(r, (e) { println(`math failed: ${err-message(e)}`) })
     ```
     """
 }

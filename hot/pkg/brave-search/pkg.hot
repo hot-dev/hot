@@ -2,7 +2,7 @@
 
 hot.pkg.brave-search {
   name: "hot.dev/brave-search",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Brave Search API bindings for Hot: independent-index web search with country, language, safesearch, and freshness filters, and site operators in the query.",
   author: "Hot Dev",

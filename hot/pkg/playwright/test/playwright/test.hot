@@ -165,3 +165,31 @@ meta ["test"] fn () {
     assert-eq("article", opts.selector)
     assert-eq("small", opts.size)
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::playwright/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::playwright/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::playwright/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::playwright/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::playwright/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::playwright/shell-quote("a\nb"))
+    assert-eq("''", ::playwright/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::playwright/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::playwright/shell-quote("x'; id; '"))
+}

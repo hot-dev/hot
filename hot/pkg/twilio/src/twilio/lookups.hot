@@ -64,7 +64,19 @@ PhoneNumberLookup type {
 
 lookup-url
 meta {
-    doc: """The URL `lookup-phone-number` fetches: the number path-encoded (so `+` survives) and the set parameters as a query, `Fields` joined with commas. Exposed for testing."""
+    doc: """
+    The URL `lookup-phone-number` fetches: the number path-encoded (so `+`
+    survives) and the set parameters as a query, `Fields` joined with
+    commas. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::lookups ::twilio::lookups
+
+    ::lookups/lookup-url(::lookups/LookupPhoneNumberRequest({PhoneNumber: "+14159929960", Fields: ["caller_name", "sim_swap"]}))  // "https://lookups.twilio.com/v2/PhoneNumbers/%2B14159929960?Fields=caller_name%2Csim_swap"
+    ```
+    """
 }
 fn (request: LookupPhoneNumberRequest): Str {
   params untype(request) |> delete("PhoneNumber") |> filter-vals(is-some)

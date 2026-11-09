@@ -51,6 +51,14 @@ meta {
     Merge `options` over the transcription defaults (`model: "nova-3"`,
     `smart_format: true`). A Map `extra` becomes Deepgram's repeated
     `extra=key:value` form. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::deepgram/listen-params({language: "es"}).language  // "es"
+    ::deepgram/listen-params({}).model  // "nova-3"
+    ::deepgram/listen-params({extra: {job: "42"}}).extra  // ["job:42"]
+    ```
     """
 }
 fn (options: Map): Map {
@@ -60,7 +68,9 @@ fn (options: Map): Map {
 }
 
 // {job: "42", user: "ada"} => ["job:42", "user:ada"]
-extra-pairs fn (extra: Map): Vec {
+extra-pairs
+meta {no-doc: true}
+fn (extra: Map): Vec {
   reduce(extra, (acc, entry) {
     value entry[1]
     if(is-null(value), acc, concat(acc, [`${first(entry)}:${value}`]))
@@ -69,7 +79,16 @@ extra-pairs fn (extra: Map): Vec {
 
 listen-path
 meta {
-    doc: """The `/v1/listen` path with query string for `options` (defaults applied). Exposed for testing."""
+    doc: """
+    The `/v1/listen` path with query string for `options` (defaults
+    applied). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::deepgram/listen-path({model: "nova-2", smart_format: null})  // "/v1/listen?model=nova-2"
+    ```
+    """
 }
 fn (options: Map): Str {
   `/v1/listen${::api/query-string(listen-params(options))}`
@@ -83,6 +102,12 @@ meta {
     `extra` entry `callback_secret:<secret>` that Deepgram echoes back in
     the callback body's `metadata.extra` for
     `::deepgram::callbacks/verify-callback`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::deepgram/callback-params("https://example.com/hooks/deepgram", null)  // {callback: "https://example.com/hooks/deepgram"}
+    ```
     """
 }
 fn (callback-url: Str, secret: Any): Map {
@@ -91,7 +116,9 @@ fn (callback-url: Str, secret: Any): Map {
 }
 
 // Append callback params to options, keeping any `extra` the caller set.
-with-callback fn
+with-callback
+meta {no-doc: true}
+fn
 (options: Map, callback-url: Str): Map {
   with-callback(options, callback-url, ::hot::ctx/get("deepgram.callback.secret"))
 },
@@ -106,7 +133,9 @@ with-callback fn
 }
 
 // Start an async transcription and return its request id.
-post-async fn (body: Any, content-type: Str, callback-url: Str, options: Map, opts: Map): Str {
+post-async
+meta {no-doc: true}
+fn (body: Any, content-type: Str, callback-url: Str, options: Map, opts: Map): Str {
   resolved ::api/resolve(opts)
   cond {
     is-err(resolved) => { resolved }
@@ -237,7 +266,18 @@ meta {
         "deepgram.api.key": {required: false},
         "deepgram.callback.secret": {required: false}
     },
-    doc: """Asynchronous `transcribe-audio`: uploads the `Bytes`, returns Deepgram's `request_id`, and delivers the result to `callback-url`. See `transcribe-url-async`."""
+    doc: """
+    Asynchronous `transcribe-audio`: uploads the `Bytes`, returns Deepgram's
+    `request_id`, and delivers the result to `callback-url`. See
+    `transcribe-url-async`.
+
+    **Example**
+
+    ```hot
+    audio ::hot::file/read-file-bytes("call.mp3")
+    request-id ::deepgram/transcribe-audio-async(audio, "https://example.com/hooks/deepgram", {diarize_model: "latest"})
+    ```
+    """
 }
 fn
 (audio: Bytes, callback-url: Str): Str {
@@ -254,13 +294,41 @@ fn
 // Response helpers
 // ============================================================================
 
-alternative fn (response: Map, channel: Int): Map {
+alternative
+meta {
+    doc: """
+    The best alternative of `channel` in a `/v1/listen` response, including
+    its `transcript`, `confidence`, and `words`. `{}` when the channel has
+    none. Use it for a channel other than the first, or for fields the other
+    helpers skip.
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [{alternatives: [{transcript: "Hi.", confidence: 0.98}]}]}}
+    ::deepgram/alternative(out, 0).confidence  // 0.98
+    ::deepgram/alternative(out, 1)  // {}
+    ```
+    """
+}
+fn (response: Map, channel: Int): Map {
   or(get-in(response, ["results", "channels", channel, "alternatives", 0]), {})
 }
 
 transcript
 meta {
-    doc: """The best transcript text of the first channel (`""` when the response has none)."""
+    doc: """
+    The best transcript text of the first channel (`""` when the response
+    has none).
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [{alternatives: [{transcript: "Hello there."}]}]}}
+    ::deepgram/transcript(out)  // "Hello there."
+    ::deepgram/transcript({})  // ""
+    ```
+    """
 }
 fn (response: Map): Str {
   or(get(alternative(response, 0), "transcript"), "")
@@ -268,7 +336,20 @@ fn (response: Map): Str {
 
 transcripts
 meta {
-    doc: """The best transcript of every channel, in channel order (for `multichannel: true`)."""
+    doc: """
+    The best transcript of every channel, in channel order (for
+    `multichannel: true`).
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [
+      {alternatives: [{transcript: "Left."}]},
+      {alternatives: [{transcript: "Right."}]}
+    ]}}
+    ::deepgram/transcripts(out)  // ["Left.", "Right."]
+    ```
+    """
 }
 fn (response: Map): Vec {
   channels or(get-in(response, ["results", "channels"]), [])
@@ -277,7 +358,17 @@ fn (response: Map): Vec {
 
 words
 meta {
-    doc: """Word objects of the first channel's best alternative: `{word, start, end, confidence, punctuated_word?, speaker?}`."""
+    doc: """
+    Word objects of the first channel's best alternative: `{word, start,
+    end, confidence, punctuated_word?, speaker?}`.
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [{alternatives: [{words: [{word: "hello"}, {word: "there"}]}]}]}}
+    map(::deepgram/words(out), %.word)  // ["hello", "there"]
+    ```
+    """
 }
 fn (response: Map): Vec {
   or(get(alternative(response, 0), "words"), [])
@@ -285,7 +376,19 @@ fn (response: Map): Vec {
 
 utterances
 meta {
-    doc: """Utterances (`{start, end, confidence, channel, transcript, speaker?, words, id}`), present when the request set `utterances: true`; `[]` otherwise."""
+    doc: """
+    Utterances (`{start, end, confidence, channel, transcript, speaker?,
+    words, id}`), present when the request set `utterances: true`; `[]`
+    otherwise.
+
+    **Example**
+
+    ```hot
+    out {results: {utterances: [{transcript: "Hello.", speaker: 0}]}}
+    map(::deepgram/utterances(out), %.transcript)  // ["Hello."]
+    ::deepgram/utterances({})  // []
+    ```
+    """
 }
 fn (response: Map): Vec {
   or(get-in(response, ["results", "utterances"]), [])
@@ -298,6 +401,16 @@ meta {
     (speaker labels need diarization, e.g. `diarize_model: "latest"`;
     without them lines carry only the text). Falls back to `transcript`
     when the response has no utterances.
+
+    **Example**
+
+    ```hot
+    out {results: {utterances: [
+      {transcript: "Hello.", speaker: 0},
+      {transcript: "Hi.", speaker: 1}
+    ]}}
+    ::deepgram/format-utterances(out)  // "[Speaker 0] Hello.\n[Speaker 1] Hi."
+    ```
     """
 }
 fn (response: Map): Str {
@@ -316,7 +429,19 @@ fn (response: Map): Str {
 
 paragraphs
 meta {
-    doc: """Paragraph objects (`{sentences: [{text, start, end}], speaker?, num_words, start, end}`) of the first channel, present when the request set `paragraphs: true`; `[]` otherwise."""
+    doc: """
+    Paragraph objects (`{sentences: [{text, start, end}], speaker?,
+    num_words, start, end}`) of the first channel, present when the request
+    set `paragraphs: true`; `[]` otherwise.
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [{alternatives: [{paragraphs: {paragraphs: [{num_words: 4, speaker: 0}]}}]}]}}
+    map(::deepgram/paragraphs(out), %.num_words)  // [4]
+    ::deepgram/paragraphs({})  // []
+    ```
+    """
 }
 fn (response: Map): Vec {
   or(get-in(alternative(response, 0), ["paragraphs", "paragraphs"]), [])
@@ -324,7 +449,20 @@ fn (response: Map): Vec {
 
 paragraph-transcript
 meta {
-    doc: """The paragraph-formatted transcript (blank lines between paragraphs) when the request set `paragraphs: true`, otherwise the plain `transcript`."""
+    doc: """
+    The paragraph-formatted transcript (blank lines between paragraphs) when
+    the request set `paragraphs: true`, otherwise the plain `transcript`.
+
+    **Example**
+
+    ```hot
+    out {results: {channels: [{alternatives: [{
+      transcript: "One. Two.",
+      paragraphs: {transcript: "One.\n\nTwo."}
+    }]}]}}
+    ::deepgram/paragraph-transcript(out)  // "One.\n\nTwo."
+    ```
+    """
 }
 fn (response: Map): Str {
   or(get-in(alternative(response, 0), ["paragraphs", "transcript"]), transcript(response))
@@ -332,7 +470,18 @@ fn (response: Map): Str {
 
 request-id
 meta {
-    doc: """The request id of a `/v1/listen` response: `metadata.request_id` for a finished transcription, or the top-level `request_id` of an async acknowledgement."""
+    doc: """
+    The request id of a `/v1/listen` response: `metadata.request_id` for a
+    finished transcription, or the top-level `request_id` of an async
+    acknowledgement.
+
+    **Example**
+
+    ```hot
+    ::deepgram/request-id({metadata: {request_id: "req-1"}})  // "req-1"
+    ::deepgram/request-id({request_id: "req-2"})  // "req-2"
+    ```
+    """
 }
 fn (response: Map): Str? {
   or(get-in(response, ["metadata", "request_id"]), get(response, "request_id"))
@@ -340,7 +489,17 @@ fn (response: Map): Str? {
 
 is-accepted
 meta {
-    doc: """True for the acknowledgement of an async (callback) request: a `request_id` with no `results` yet."""
+    doc: """
+    True for the acknowledgement of an async (callback) request: a
+    `request_id` with no `results` yet.
+
+    **Example**
+
+    ```hot
+    ::deepgram/is-accepted({request_id: "req-2"})  // true
+    ::deepgram/is-accepted({request_id: "req-2", results: {}})  // false
+    ```
+    """
 }
 fn (response: Map): Bool {
   and(is-some(get(response, "request_id")), is-null(get(response, "results")))
@@ -352,7 +511,17 @@ fn (response: Map): Bool {
 
 speak-path
 meta {
-    doc: """The `/v1/speak` path with query string for `options` (default model applied). Exposed for testing."""
+    doc: """
+    The `/v1/speak` path with query string for `options` (default model
+    applied). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::deepgram/speak-path({})  // "/v1/speak?model=aura-2-thalia-en"
+    ::deepgram/speak-path({model: "aura-2-orion-en"})  // "/v1/speak?model=aura-2-orion-en"
+    ```
+    """
 }
 fn (options: Map): Str {
   `/v1/speak${::api/query-string({model: DEFAULT_TTS_MODEL, ...options})}`

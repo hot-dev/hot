@@ -48,7 +48,8 @@ meta {
     ```hot
     ::ctx ::hot::ctx
 
-    token exchange-oauth-code(code)
+    response ::hot::http/post("https://auth.example.com/token", {code: "abc123"})
+    token response.body.access_token
     ::ctx/set-secret("provider.access.token", token)
     // Records of this call and later ones show the value as <secret>
     ```
@@ -83,8 +84,9 @@ meta {
     ```hot
     ::ctx ::hot::ctx
 
+    opts {api-key: ::ctx/get("example.api.key")}
     api-key ::ctx/mark-secret(opts.api-key)
-    ::hot::http/request("GET", url, {"Authorization": `Bearer ${api-key}`})
+    ::hot::http/request("GET", "https://api.example.com/v1/me", {"Authorization": `Bearer ${api-key}`}, null)
     // The records of these calls show `Bearer <secret>`
     ```
     """

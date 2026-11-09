@@ -83,7 +83,18 @@ SENSITIVE_KEYS [
 
 redact-text
 meta {
-    doc: """Mask what could be PII in free text: every run of four or more digits (allowing spaces, dots, slashes and dashes inside, so SSNs, birth dates, phone and id numbers) becomes `[redacted]`, and every email address becomes `[redacted-email]`. Exposed for testing."""
+    doc: """
+    Mask what could be PII in free text: every run of four or more digits
+    (allowing spaces, dots, slashes and dashes inside, so SSNs, birth dates,
+    phone and id numbers) becomes `[redacted]`, and every email address
+    becomes `[redacted-email]`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/redact-text("Call 555-123-4567 or jane@example.com")  // "Call [redacted] or [redacted-email]"
+    ```
+    """
 }
 fn (text: Str): Str {
   text
@@ -93,7 +104,18 @@ fn (text: Str): Str {
 
 is-sensitive-key
 meta {
-    doc: """True when an attribute name is in `SENSITIVE_KEYS`, in any inflection (`social-security-number`, `social_security_number`, `socialSecurityNumber`). Exposed for testing."""
+    doc: """
+    True when an attribute name is in `SENSITIVE_KEYS`, in any inflection
+    (`social-security-number`, `social_security_number`,
+    `socialSecurityNumber`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/is-sensitive-key("social_security_number")  // true
+    ::persona::api/is-sensitive-key("status")  // false
+    ```
+    """
 }
 fn (key: Any): Bool {
   normalized lowercase(Str(key)) |> replace("-", "") |> replace("_", "")
@@ -102,7 +124,19 @@ fn (key: Any): Bool {
 
 redact
 meta {
-    doc: """Remove PII from a decoded body: values under sensitive keys (see `is-sensitive-key`) become `"[redacted]"`, and every other string is masked by `redact-text`. Applied to every `HttpError`, so errors are safe to log. Exposed for testing."""
+    doc: """
+    Remove PII from a decoded body: values under sensitive keys (see
+    `is-sensitive-key`) become `"[redacted]"`, and every other string is
+    masked by `redact-text`. Applied to every `HttpError`, so errors are
+    safe to log. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/redact({ssn: "123-45-6789", note: "Seen 2024-01-31", status: "ok"})
+    // {ssn: "[redacted]", note: "Seen [redacted]", status: "ok"}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -161,7 +195,17 @@ type {
 
 parse-int
 meta {
-    doc: """An Int from an Int or a decimal-digit Str; null for anything else. Never errs on bad input. Exposed for testing."""
+    doc: """
+    An Int from an Int or a decimal-digit Str; null for anything else. Never
+    errs on bad input. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/parse-int("42")  // 42
+    ::persona::api/parse-int("4.2")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -172,7 +216,9 @@ fn (value: Any): Int? {
   }
 }
 
-decode-body fn (body: Any): Any {
+decode-body
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-bytes(body) => {
       parsed from-json(Str(body))
@@ -193,13 +239,26 @@ decode-body fn (body: Any): Any {
   }
 }
 
-str-or-null fn (value: Any): Str? {
+str-or-null
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(and(is-str(value), not(is-empty(or(value, "")))), value, null)
 }
 
 error-entries
 meta {
-    doc: """Persona's `errors` array from a (decoded) error body, each entry as `{title, details, pointer}` with absent parts null. Empty when the body has no `errors`. Exposed for testing."""
+    doc: """
+    Persona's `errors` array from a (decoded) error body, each entry as
+    `{title, details, pointer}` with absent parts null. Empty when the body
+    has no `errors`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/error-entries({errors: [{title: "Not found", source: {pointer: "/data/id"}}]})
+    // [{title: "Not found", details: null, pointer: "/data/id"}]
+    ```
+    """
 }
 fn (body: Any): Vec {
   errors if(is-map(body), get(body, "errors"), null)
@@ -218,7 +277,9 @@ fn (body: Any): Vec {
   }
 }
 
-describe-entry fn (entry: Map): Str {
+describe-entry
+meta {no-doc: true}
+fn (entry: Map): Str {
   parts filter([entry.title, if(eq(entry.details, entry.title), null, entry.details)], is-some)
   text join(parts, ": ")
   if(is-some(entry.pointer), `${text} (${entry.pointer})`, text)
@@ -226,7 +287,19 @@ describe-entry fn (entry: Map): Str {
 
 error-message
 meta {
-    doc: """The readable `message` for an error: `persona: HTTP {status}: {title}: {details} ({pointer}); ... [{request-id}]`. Only Persona's error titles, details and pointers are used (never the request), and they are passed through `redact-text`. Exposed for testing."""
+    doc: """
+    The readable `message` for an error: `persona: HTTP {status}: {title}:
+    {details} ({pointer}); ... [{request-id}]`. Only Persona's error titles,
+    details and pointers are used (never the request), and they are passed
+    through `redact-text`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/error-message(404, {errors: [{title: "Record not found"}]}, "req_abc")
+    // "persona: HTTP 404: Record not found [req_abc]"
+    ```
+    """
 }
 fn (status: Int, body: Any, request-id: Str?): Str {
   entries error-entries(body)
@@ -246,7 +319,18 @@ fn (status: Int, body: Any, request-id: Str?): Str {
 
 retry-after-seconds
 meta {
-    doc: """Seconds to wait from response headers: `Retry-After` when numeric, else `RateLimit-Reset`, else null. Exposed for testing."""
+    doc: """
+    Seconds to wait from response headers: `Retry-After` when numeric, else
+    `RateLimit-Reset`, else null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/retry-after-seconds({retry-after: "30"})  // 30
+    ::persona::api/retry-after-seconds({ratelimit-reset: "12"})  // 12
+    ::persona::api/retry-after-seconds({})  // null
+    ```
+    """
 }
 fn (headers: Map): Int? {
   retry parse-int(get(headers, "retry-after"))
@@ -278,14 +362,27 @@ fn (response: HttpResponse): HttpError {
   })
 }
 
-plain-error fn (error: Result): Any {
+plain-error
+meta {no-doc: true}
+fn (error: Result): Any {
   payload if(is-err(error), err-value(error), error)
   if(or(is-null(payload), is-str(payload)), payload, untype(payload))
 }
 
 error-status
 meta {
-    doc: """The HTTP status of a failed call (an `HttpError` or a `Result.Err` holding one), or null for transport errors."""
+    doc: """
+    The HTTP status of a failed call (an `HttpError` or a `Result.Err`
+    holding one), or null for transport errors.
+
+    **Example**
+
+    ```hot
+    failed err(::persona::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: ""})))
+    ::persona::api/error-status(failed)  // 404
+    ::persona::api/error-status(err("connection refused"))  // null
+    ```
+    """
 }
 fn (error: Result): Int? {
   payload plain-error(error)
@@ -294,7 +391,18 @@ fn (error: Result): Int? {
 
 is-retryable
 meta {
-    doc: """True when a failed call is worth retrying later: HTTP 408, 429, 500, 502, 503 or 504. Let the handler or schedule `retry` policy do the waiting (see `retry-after` on the error)."""
+    doc: """
+    True when a failed call is worth retrying later: HTTP 408, 429, 500,
+    502, 503 or 504. Let the handler or schedule `retry` policy do the
+    waiting (see `retry-after` on the error).
+
+    **Example**
+
+    ```hot
+    ::persona::api/is-retryable(err(::persona::api/HttpError(::hot::http/HttpResponse({status: 429, headers: {}, body: ""}))))  // true
+    ::persona::api/is-retryable(err(::persona::api/HttpError(::hot::http/HttpResponse({status: 422, headers: {}, body: ""}))))  // false
+    ```
+    """
 }
 fn (error: Result): Bool {
   status error-status(error)
@@ -303,7 +411,16 @@ fn (error: Result): Bool {
 
 is-not-found
 meta {
-    doc: """True when a failed call is an HTTP 404."""
+    doc: """
+    True when a failed call is an HTTP 404.
+
+    **Example**
+
+    ```hot
+    ::persona::api/is-not-found(err(::persona::api/HttpError(::hot::http/HttpResponse({status: 404, headers: {}, body: ""}))))  // true
+    ::persona::api/is-not-found(err("connection refused"))  // false
+    ```
+    """
 }
 fn (error: Result): Bool {
   eq(error-status(error), 404)
@@ -352,13 +469,24 @@ REQUEST_OPTION_KEYS ["api-key", "base-url", "persona-version", "key-inflection",
 
 without-request-options
 meta {
-    doc: """`opts` without the keys `resolve` reads, for a function that sends the rest of `opts` as attributes. Exposed for testing."""
+    doc: """
+    `opts` without the keys `resolve` reads, for a function that sends the
+    rest of `opts` as attributes. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/without-request-options({note: "vip", idempotency-key: "signup-42"})  // {note: "vip"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   filter-keys(opts, (k) { not(in(k, REQUEST_OPTION_KEYS)) })
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
@@ -373,6 +501,16 @@ meta {
     when `options` has `base-url` without `api-key`, or when
     `key-inflection` isn't `kebab`, `snake` or `camel`. Nothing is written
     to ctx. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::persona::api/resolve-from({}, {"persona.api.key": "ctx-key"})
+    // {api-key: "ctx-key", base-url: "https://api.withpersona.com/api/v1", persona-version: "2026-09-29"}
+
+    // A blank per-call key never falls back to context
+    is-err(::persona::api/resolve-from({api-key: ""}, {"persona.api.key": "ctx-key"}))  // true
+    ```
     """
 }
 fn (options: Map, ctx-values: Map): Map {
@@ -449,6 +587,14 @@ meta {
     `Authorization: Bearer`, `Accept`, `Persona-Version`, `User-Agent`,
     plus `Key-Inflection` when set, `Idempotency-Key` on POSTs when set,
     and `Content-Type` when there is a body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved {api-key: "tenant-key", idempotency-key: "signup-42"}
+    ::persona::api/build-headers("POST", resolved, true).Idempotency-Key  // "signup-42"
+    ::persona::api/build-headers("GET", resolved, false).Accept  // "application/json"
+    ```
     """
 }
 fn (method: Str, resolved: Map, has-body: Bool): Map {
@@ -473,7 +619,17 @@ fn (method: Str, resolved: Map, has-body: Bool): Map {
 
 compact
 meta {
-    doc: """Drop null values recursively through maps and the maps inside vectors, so unset optionals are omitted rather than sent as JSON `null`. `false`, `0` and `""` are kept. Exposed for testing."""
+    doc: """
+    Drop null values recursively through maps and the maps inside vectors,
+    so unset optionals are omitted rather than sent as JSON `null`. `false`,
+    `0` and `""` are kept. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/compact({a: null, b: [{c: null, d: 0}]})  // {b: [{d: 0}]}
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -520,13 +676,25 @@ fn (type-name: Str?, attributes: Map, meta-block: Map): Map {
 
 meta-document
 meta {
-    doc: """A body with only `meta` (the shape of Persona's action endpoints, e.g. approve or add-tag), nulls dropped; `{}` when nothing is set."""
+    doc: """
+    A body with only `meta` (the shape of Persona's action endpoints, e.g.
+    approve or add-tag), nulls dropped; `{}` when nothing is set.
+
+    **Example**
+
+    ```hot
+    ::persona::api/meta-document({comment: "Looks good", extra: null})  // {meta: {comment: "Looks good"}}
+    ::persona::api/meta-document({})  // {}
+    ```
+    """
 }
 fn (meta-block: Map): Map {
   document(null, {}, meta-block)
 }
 
-query-value fn (value: Any): Str {
+query-value
+meta {no-doc: true}
+fn (value: Any): Str {
   cond {
     is-vec(value) => { join(map(filter(value, is-some), (v) { Str(v) }), ",") }
     => { Str(value) }
@@ -542,6 +710,12 @@ meta {
     `page[size]=10`), vectors become comma-separated, and nulls and empty
     vectors are dropped. Keys and values are percent-encoded. Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/query-pairs({page: {size: 10}}, "")  // ["page%5Bsize%5D=10"]
+    ```
     """
 }
 fn (params: Map, prefix: Str): Vec<Str> {
@@ -559,7 +733,17 @@ fn (params: Map, prefix: Str): Vec<Str> {
 
 query-string
 meta {
-    doc: """`?a=1&filter%5Bstatus%5D=approved` from `params` (see `query-pairs`), or `""` when nothing remains."""
+    doc: """
+    `?a=1&filter%5Bstatus%5D=approved` from `params` (see `query-pairs`), or
+    `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::persona::api/query-string({page: {size: 10}})  // "?page%5Bsize%5D=10"
+    ::persona::api/query-string({})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   pairs query-pairs(untype(params), "")
@@ -568,7 +752,16 @@ fn (params: Map): Str {
 
 seg
 meta {
-    doc: """Percent-encode one path segment (an object id), so an id from user input can't change which endpoint is called."""
+    doc: """
+    Percent-encode one path segment (an object id), so an id from user input
+    can't change which endpoint is called.
+
+    **Example**
+
+    ```hot
+    ::persona::api/seg("inq 1/2")  // "inq%201%2F2"
+    ```
+    """
 }
 fn (id: Any): Str {
   ::uri/encode(Str(id))
@@ -581,6 +774,12 @@ meta {
     comma string of relationship names, e.g. `["verifications",
     "account"]`) and `fields` (sparse fieldsets, e.g. `{inquiry:
     ["status", "reference-id"]}`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/read-query({include: ["account"], page-size: 5})  // {include: ["account"]}
+    ```
     """
 }
 fn (options: Map): Map {
@@ -593,7 +792,20 @@ fn (options: Map): Map {
 
 build-request
 meta {
-    doc: """Build (without sending) the `HttpRequest` for a Persona call. `url` is the full URL including any query string. A non-empty Map `body` is compacted and JSON-encoded; otherwise no body is sent. Exposed for testing."""
+    doc: """
+    Build (without sending) the `HttpRequest` for a Persona call. `url` is
+    the full URL including any query string. A non-empty Map `body` is
+    compacted and JSON-encoded; otherwise no body is sent. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    req ::persona::api/build-request("get", "https://api.withpersona.com/api/v1/inquiries", null, {api-key: "tenant-key"})
+    req.method  // "GET"
+    req.body  // ""
+    ```
+    """
 }
 fn (method: Str, url: Str, body: Any, resolved: Map): HttpRequest {
   payload if(is-map(body), compact(untype(body)), null)
@@ -608,7 +820,17 @@ fn (method: Str, url: Str, body: Any, resolved: Map): HttpRequest {
 
 response-body
 meta {
-    doc: """Normalize a 2xx body: empty text (204) becomes null; anything else passes through. Exposed for testing."""
+    doc: """
+    Normalize a 2xx body: empty text (204) becomes null; anything else
+    passes through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/response-body("")  // null
+    ::persona::api/response-body({data: []})  // {data: []}
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -629,7 +851,7 @@ meta {
     **Example**
 
     ```hot
-    ::persona::api/send("POST", "/inquiries/search", {}, {query: {attribute: "status", operator: "eq", value: "needs_review"}}, ::persona::api/{})
+    ::persona::api/send("POST", "/inquiries/search", {}, {query: {attribute: "status", operator: "eq", value: "needs_review"}}, {})
     ```
     """
 }
@@ -680,7 +902,20 @@ fn
 
 get-bytes
 meta {
-    doc: """GET a binary endpoint (e.g. `/inquiries/{id}/print`) and return the body as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into errors or logs."""
+    doc: """
+    GET a binary endpoint (e.g. `/inquiries/{id}/print`) and return the body
+    as `Bytes`, or an Err carrying `HttpError`. The bytes are never put into
+    errors or logs.
+
+    **Example**
+
+    ```hot
+    pdf ::persona::api/get-bytes("/reports/rep_123/print", {})
+
+    // Bytes on success, or an Err carrying HttpError
+    if(is-err(pdf), ::persona::api/error-status(pdf), length(pdf))
+    ```
+    """
 }
 fn (path: Str, options: Map): Bytes {
   resolved resolve(options)
@@ -710,6 +945,13 @@ meta {
     `after` and `before` (`page[after]`/`page[before]`, object ids from
     the previous page) and `fields` (sparse fieldsets). Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/list-query({status: "approved"}, {page-size: 10, after: "inq_1"})
+    // {filter: {status: "approved"}, page: {size: 10, after: "inq_1"}}
+    ```
     """
 }
 fn (filters: Map, options: Map): Map {
@@ -728,7 +970,19 @@ fn (filters: Map, options: Map): Map {
 
 link-cursor
 meta {
-    doc: """The `page[after]` (or `page[before]`, for `key: "before"`) value inside a Persona `links.next`/`links.prev` URL such as `/api/v1/inquiries?page%5Bafter%5D=inq_123`, or null. Exposed for testing."""
+    doc: """
+    The `page[after]` (or `page[before]`, for `key: "before"`) value inside
+    a Persona `links.next`/`links.prev` URL such as
+    `/api/v1/inquiries?page%5Bafter%5D=inq_123`, or null. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/link-cursor("/api/v1/inquiries?page%5Bafter%5D=inq_123", "after")  // "inq_123"
+    ::persona::api/link-cursor("/api/v1/inquiries", "after")  // null
+    ```
+    """
 }
 fn (link: Any, key: Str): Str? {
   cond {
@@ -744,7 +998,17 @@ fn (link: Any, key: Str): Str? {
 
 next-cursor
 meta {
-    doc: """The cursor for the page after `page` (from `links.next`), or null on the last page."""
+    doc: """
+    The cursor for the page after `page` (from `links.next`), or null on the
+    last page.
+
+    **Example**
+
+    ```hot
+    ::persona::api/next-cursor({links: {next: "/api/v1/inquiries?page%5Bafter%5D=inq_123"}})  // "inq_123"
+    ::persona::api/next-cursor({links: {next: null}})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   links if(is-map(page), get(page, "links"), null)
@@ -776,7 +1040,23 @@ fn
 
 collect-pages
 meta {
-    doc: """Follow cursors, concatenating each page's `data`, until `limit` items, the last page, or `MAX_PAGES`. `fetch` takes the cursor (null first) and returns one page; the first Err is returned. Exposed for testing; `collect` uses it."""
+    doc: """
+    Follow cursors, concatenating each page's `data`, until `limit` items,
+    the last page, or `MAX_PAGES`. `fetch` takes the cursor (null first) and
+    returns one page; the first Err is returned. Exposed for testing;
+    `collect` uses it.
+
+    **Example**
+
+    ```hot
+    fetch (cursor) {
+      if(is-null(cursor),
+        {data: [{id: "inq_1"}], links: {next: "/api/v1/inquiries?page%5Bafter%5D=inq_1"}},
+        {data: [{id: "inq_2"}], links: {next: null}})
+    }
+    map(::persona::api/collect-pages(fetch, null, 10, [], 5), %.id)  // ["inq_1", "inq_2"]
+    ```
+    """
 }
 fn (fetch: Fn, cursor: Str?, limit: Int, acc: Vec, pages-left: Int): Vec {
   page fetch(cursor)
@@ -828,13 +1108,24 @@ fn
 // JSON:API read helpers
 // ---------------------------------------------------------------------------
 
-capitalize fn (s: Str): Str {
+capitalize
+meta {no-doc: true}
+fn (s: Str): Str {
   if(is-empty(s), s, `${uppercase(slice(s, 0, 1))}${slice(s, 1, length(s))}`)
 }
 
 key-variants
 meta {
-    doc: """The kebab, snake and camel spellings of a kebab-case key: `"has-match"` gives `["has-match", "has_match", "hasMatch"]`. Exposed for testing."""
+    doc: """
+    The kebab, snake and camel spellings of a kebab-case key: `"has-match"`
+    gives `["has-match", "has_match", "hasMatch"]`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::api/key-variants("has-match")  // ["has-match", "has_match", "hasMatch"]
+    ```
+    """
 }
 fn (key: Str): Vec<Str> {
   parts split(key, "-")
@@ -844,7 +1135,17 @@ fn (key: Str): Vec<Str> {
 
 resource
 meta {
-    doc: """The primary resource of a JSON:API document (`doc.data`), or `doc` itself when it is already a resource (has `type` and `attributes`)."""
+    doc: """
+    The primary resource of a JSON:API document (`doc.data`), or `doc`
+    itself when it is already a resource (has `type` and `attributes`).
+
+    **Example**
+
+    ```hot
+    ::persona::api/resource({data: {type: "inquiry", id: "inq_1"}}).id  // "inq_1"
+    ::persona::api/resource({type: "inquiry", id: "inq_2"}).id  // "inq_2"
+    ```
+    """
 }
 fn (doc: Any): Map? {
   cond {
@@ -883,7 +1184,21 @@ fn (doc: Any, key: Str): Any {
 
 relationship-ids
 meta {
-    doc: """The ids in a relationship (`relationships.<name>.data`) as a Vec: one id for a to-one relationship, every id for a to-many, `[]` when empty."""
+    doc: """
+    The ids in a relationship (`relationships.<name>.data`) as a Vec: one id
+    for a to-one relationship, every id for a to-many, `[]` when empty.
+
+    **Example**
+
+    ```hot
+    doc {data: {type: "inquiry", relationships: {
+      verifications: {data: [{id: "ver_1"}, {id: "ver_2"}]},
+      account: {data: {id: "act_1"}}
+    }}}
+    ::persona::api/relationship-ids(doc, "verifications")  // ["ver_1", "ver_2"]
+    ::persona::api/relationship-ids(doc, "account")  // ["act_1"]
+    ```
+    """
 }
 fn (doc: Any, name: Str): Vec<Str> {
   r resource(doc)
@@ -922,7 +1237,17 @@ fn (doc: Any, type-name: Str): Vec {
 
 find-included
 meta {
-    doc: """The object in `included` with this `id`, or null."""
+    doc: """
+    The object in `included` with this `id`, or null.
+
+    **Example**
+
+    ```hot
+    doc {included: [{id: "ver_1", type: "verification/selfie"}]}
+    ::persona::api/find-included(doc, "ver_1").type  // "verification/selfie"
+    ::persona::api/find-included(doc, "ver_2")  // null
+    ```
+    """
 }
 fn (doc: Any, id: Str): Map? {
   items if(is-map(doc), or(get(doc, "included"), []), [])
@@ -936,6 +1261,13 @@ meta {
     `{name-first: {type: "string", value: "Jane"}}`, this gives
     `{name-first: "Jane"}`. Field keys keep the template's casing. These
     are the end user's PII; don't log them.
+
+    **Example**
+
+    ```hot
+    doc {data: {type: "inquiry", attributes: {fields: {name-first: {type: "string", value: "Jane"}}}}}
+    ::persona::api/field-values(doc)  // {name-first: "Jane"}
+    ```
     """
 }
 fn (doc: Any): Map {

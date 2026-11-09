@@ -47,7 +47,7 @@ meta {
     **Example**
 
     ```hot
-    bytes load("images/logo.png")
+    bytes ::hot::resource/load("images/logo.png")
     ```
     """
 }
@@ -64,7 +64,7 @@ meta {
     **Example**
 
     ```hot
-    text load-str("prompts/welcome.md")
+    text ::hot::resource/load-str("prompts/welcome.md")
     ```
     """
 }
@@ -78,6 +78,14 @@ meta {
     Return the canonical `hot://res/<rel-path>` URI for a resource.
     Useful for handing references to subsystems (Box mounts, file
     pipelines) that resolve `hot://` URIs themselves.
+
+    **Example**
+
+    ```hot
+    ::res ::hot::resource
+    uri ::res/path("prompts/welcome.md")
+    tap(uri)
+    ```
     """
 }
 fn (rel-path: Str): Str {
@@ -86,7 +94,16 @@ fn (rel-path: Str): Str {
 
 exists
 meta {
-    doc: """Return true when `rel-path` is present in the registry."""
+    doc: """
+    Return true when `rel-path` is present in the registry.
+
+    **Example**
+
+    ```hot
+    ::res ::hot::resource
+    prompt if(::res/exists("prompts/welcome.md"), ::res/load-str("prompts/welcome.md"), "Hello!")
+    ```
+    """
 }
 fn (rel-path: Str): Bool {
     call-lib(::hot::resource/exists, [rel-path])
@@ -98,6 +115,14 @@ meta {
     Return every registered resource as a `Vec<ResourceRef>`. Order
     matches the order in which roots were declared, then alphabetical
     within each root.
+
+    **Example**
+
+    ```hot
+    ::res ::hot::resource
+    paths map(::res/list(), %.path)
+    total reduce(::res/list(), (acc, ref) { add(acc, ref.size) }, 0)
+    ```
     """
 }
 fn (): Vec<ResourceRef> {
@@ -113,7 +138,7 @@ meta {
     **Example**
 
     ```hot
-    docs list-matching("docs/**/*.md")
+    docs ::hot::resource/list-matching("docs/**/*.md")
     ```
     """
 }

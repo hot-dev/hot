@@ -73,7 +73,20 @@ POSTApiKeysResponse type {
 
 create-new-api-key
 meta {
-    doc: """Create a new API key with specified name, permission level, and optional domain restriction. The new key is masked in the run's call records."""
+    doc: """
+    Create a new API key with specified name, permission level, and optional
+    domain restriction. The new key is masked in the run's call records.
+
+    **Example**
+
+    ```hot
+    created ::resend::api::keys/create-new-api-key(::resend::api::keys/POSTApiKeysRequest({
+        name: "Production",
+        permission: "sending_access"
+    }))
+    created.id
+    ```
+    """
 }
 fn
 (request: POSTApiKeysRequest): POSTApiKeysResponse {
@@ -100,7 +113,17 @@ DELETEApiKeysApiKeyIdResponse type Map
 
 
 remove-existing-api-key
-meta {doc: """Permanently delete an API key. This cannot be undone."""}
+meta {
+    doc: """
+    Permanently delete an API key. This cannot be undone.
+
+    **Example**
+
+    ```hot
+    ::resend::api::keys/remove-existing-api-key(::resend::api::keys/DELETEApiKeysApiKeyIdRequest({api-key-id: "b6d24b8e-af0b-4c3c-be0c-359bbd97381e"}))
+    ```
+    """
+}
 fn
 (request: DELETEApiKeysApiKeyIdRequest): DELETEApiKeysApiKeyIdResponse {
   remove-existing-api-key(request, {})

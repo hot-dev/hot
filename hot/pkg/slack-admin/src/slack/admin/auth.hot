@@ -36,6 +36,16 @@ meta {
 
     Scope: `admin.users:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `policy-get-entities-all`.
+
+    **Example**
+
+    ```hot
+    ::auth ::slack::admin::auth
+
+    page ::auth/policy-get-entities(::auth/PolicyGetEntitiesRequest({policy_name: "email_password", entity_type: "USER", limit: 100}))
+    page.entity_total_count
+    page.entities
+    ```
     """
 }
 fn
@@ -49,7 +59,18 @@ fn
 policy-get-entities-all
 meta {
     doc: """
-    Every `entities` entry from `admin.auth.policy.getEntities`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `entities` entry from `admin.auth.policy.getEntities`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::auth ::slack::admin::auth
+
+    entities ::auth/policy-get-entities-all(::auth/PolicyGetEntitiesRequest({policy_name: "email_password"}), 5000)
+    length(entities)
+    ```
     """
 }
 fn
@@ -75,6 +96,14 @@ meta {
     admin.auth.policy.assignEntities - Assign users to a policy.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::auth ::slack::admin::auth
+
+    ::auth/policy-assign-entities(::auth/PolicyAssignEntitiesRequest({policy_name: "email_password", entity_type: "USER", entity_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -97,6 +126,14 @@ meta {
     admin.auth.policy.removeEntities - Remove users from a policy.
 
     Scope: `admin.users:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::auth ::slack::admin::auth
+
+    ::auth/policy-remove-entities(::auth/PolicyRemoveEntitiesRequest({policy_name: "email_password", entity_type: "USER", entity_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn

@@ -51,6 +51,13 @@ meta {
     endpoint (pure): `victim`, `group`, `attackdate`, `claim_url`,
     `domain` and `url` replace `post_title`, `group_name`, `published`,
     `post_url`, `website` and `permalink`. Other fields pass through.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live/normalize-victim({post_title: "Acme Corp", group_name: "lockbit3", country: "US"})
+    // {victim: "Acme Corp", group: "lockbit3", country: "US"}
+    ```
     """
 }
 fn (record: Map): Map {
@@ -68,7 +75,16 @@ fn (record: Map): Map {
 
 normalize-group
 meta {
-    doc: """One group record with its name under `name` (pure). The PRO group list calls it `group`, and calls the victim count `victims`."""
+    doc: """
+    One group record with its name under `name` (pure). The PRO group list
+    calls it `group`, and calls the victim count `victims`.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live/normalize-group({group: "lockbit3", victims: 12})  // {name: "lockbit3", victims: 12}
+    ```
+    """
 }
 fn (record: Map): Map {
   cond {
@@ -84,6 +100,14 @@ meta {
     or the Vec under `key`; `[]` for null, which is how a v2 lookup with
     no match arrives. An Err for any other shape, so a changed response
     is never read as empty.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live/rows([{victim: "Acme Corp"}], "victims")  // [{victim: "Acme Corp"}]
+    ::ransomware-live/rows({victims: []}, "victims")  // []
+    ::ransomware-live/rows(null, "victims")  // []
+    ```
     """
 }
 fn (body: Any, key: Str): Any {
@@ -98,7 +122,16 @@ fn (body: Any, key: Str): Any {
 
 country-code
 meta {
-    doc: """An ISO 3166-1 alpha-2 code, trimmed and upper-cased, or an Err (pure)."""
+    doc: """
+    An ISO 3166-1 alpha-2 code, trimmed and upper-cased, or an Err (pure).
+
+    **Example**
+
+    ```hot
+    ::ransomware-live/country-code(" us ")  // "US"
+    is-err(::ransomware-live/country-code("USA"))  // true
+    ```
+    """
 }
 fn (code: Str): Str {
   s uppercase(trim(code))
@@ -108,7 +141,9 @@ fn (code: Str): Str {
   }
 }
 
-is-pro fn (cfg: Map): Bool {
+is-pro
+meta {no-doc: true}
+fn (cfg: Map): Bool {
   ::api/given(cfg.api-key)
 }
 
@@ -119,6 +154,17 @@ meta {
     API gives when a group, country or keyword has no match. Every other
     Err stays an Err, and so does a PRO 404, whose meaning isn't
     confirmed. `cfg` is the resolved settings.
+
+    **Example**
+
+    ```hot
+    free {api-key: null}
+    ::ransomware-live/lookup-result({name: "lockbit3"}, free)  // {name: "lockbit3"}
+
+    // The free API's 404 means no match
+    missing ::ransomware-live::api/http-error(::hot::http/HttpResponse({status: 404, headers: {}, body: null}), "https://api.ransomware.live/v2/group/x")
+    ::ransomware-live/lookup-result(err(missing), free)  // null
+    ```
     """
 }
 fn (out: Result, cfg: Map): Any {
@@ -130,7 +176,9 @@ fn (out: Result, cfg: Map): Any {
   }
 }
 
-rl-request fn (cfg: Map, free-path: Str, pro-path: Str, pro-params: Map): Any {
+rl-request
+meta {no-doc: true}
+fn (cfg: Map, free-path: Str, pro-path: Str, pro-params: Map): Any {
   cond {
     is-pro(cfg) => {
       ::api/get-json(`${cfg.pro-base-url}${pro-path}${::api/query-string(pro-params)}`, {X-API-KEY: cfg.api-key})
@@ -142,18 +190,24 @@ rl-request fn (cfg: Map, free-path: Str, pro-path: Str, pro-params: Map): Any {
 // A call that always has a list to give, so any 404 is an Err: a moved
 // endpoint or a wrong URL must not read as no victims. Errors are returned,
 // not consumed: consuming an Err would halt the run.
-rl-get fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
+rl-get
+meta {no-doc: true}
+fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   if(is-err(cfg), cfg, rl-request(cfg, free-path, pro-path, pro-params))
 }
 
 // A call that can find nothing. See `lookup-result`.
-rl-lookup fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
+rl-lookup
+meta {no-doc: true}
+fn (free-path: Str, pro-path: Str, pro-params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   if(is-err(cfg), cfg, lookup-result(rl-request(cfg, free-path, pro-path, pro-params), cfg))
 }
 
-victims fn (body: Result): Any {
+victims
+meta {no-doc: true}
+fn (body: Result): Any {
   list if(is-err(body), body, rows(body, "victims"))
   if(is-err(list), list, map(list, normalize-victim))
 }
@@ -182,7 +236,20 @@ fn
 
 group-victims
 meta {
-    doc: """The victims claimed by a group, or `[]` when there are none. Names are as `groups` gives them (`"lockbit3"`)."""
+    doc: """
+    The victims claimed by a group, or `[]` when there are none. Names are
+    as `groups` gives them (`"lockbit3"`).
+
+    **Example**
+
+    ```hot
+    claims ::ransomware-live/group-victims("lockbit3")
+    map(claims, %.victim)
+
+    // Through the PRO API
+    ::ransomware-live/group-victims("lockbit3", {api-key: ::hot::ctx/get("ransomware-live.api-key")})
+    ```
+    """
 }
 fn
 (group: Str): Vec<Map> {
@@ -194,7 +261,17 @@ fn
 
 country-victims
 meta {
-    doc: """The victims claimed in a country, by ISO 3166-1 alpha-2 code, or `[]` when there are none."""
+    doc: """
+    The victims claimed in a country, by ISO 3166-1 alpha-2 code, or `[]`
+    when there are none.
+
+    **Example**
+
+    ```hot
+    claims ::ransomware-live/country-victims("LU")
+    length(claims)
+    ```
+    """
 }
 fn
 (code: Str): Vec<Map> {
@@ -232,7 +309,22 @@ fn
 
 groups
 meta {
-    doc: """All tracked groups. v2 records hold full detail (`name`, `description`, `locations`, `tools`, `ttps`); PRO records hold `name`, `altname` and a `victims` count, with full detail from `group`."""
+    doc: """
+    All tracked groups. v2 records hold full detail (`name`, `description`,
+    `locations`, `tools`, `ttps`); PRO records hold `name`, `altname` and a
+    `victims` count, with full detail from `group`.
+
+    **Example**
+
+    ```hot
+    all ::ransomware-live/groups()
+    map(all, %.name)
+
+    // PRO records carry a `victims` count
+    pro ::ransomware-live/groups({api-key: ::hot::ctx/get("ransomware-live.api-key")})
+    first(pro).victims
+    ```
+    """
 }
 fn
 (): Vec<Map> {
@@ -246,7 +338,17 @@ fn
 
 group
 meta {
-    doc: """One group's profile by name, or null when the free v2 API has none. On PRO a 404 is an Err."""
+    doc: """
+    One group's profile by name, or null when the free v2 API has none. On
+    PRO a 404 is an Err.
+
+    **Example**
+
+    ```hot
+    profile ::ransomware-live/group("lockbit3")
+    profile.description
+    ```
+    """
 }
 fn
 (name: Str): Map? {
@@ -259,7 +361,20 @@ fn
 
 validate-key
 meta {
-    doc: """Check a PRO key (`/validate`). Returns the API's body, or an Err carrying `HttpError` for a bad key. An Err naming the context variable when no key is set."""
+    doc: """
+    Check a PRO key (`/validate`). Returns the API's body, or an Err
+    carrying `HttpError` for a bad key. An Err naming the context variable
+    when no key is set.
+
+    **Example**
+
+    ```hot
+    ::ransomware-live/validate-key()
+
+    // A tenant's key
+    ::ransomware-live/validate-key({api-key: ::hot::ctx/get("ransomware-live.api-key")})
+    ```
+    """
 }
 fn
 (): Map {

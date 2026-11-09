@@ -35,18 +35,108 @@ fn () {
 test-from-body-snake-and-kebab-case
 meta ["test"]
 fn () {
-    snake ::cb/from-body({
-        callback_url: "https://example.com/cb",
-        callback_secret_env: "MY_SECRET",
-    })
-    kebab ::cb/from-body({
-        "callback-url": "https://example.com/cb2",
-        "callback-secret-env": "MY_SECRET",
-    })
+    snake ::cb/from-body({callback_url: "https://example.com/cb", callback_signing_header: "x-a"})
+    kebab ::cb/from-body({"callback-url": "https://example.com/cb2", "callback-signing-header": "x-b"})
     assert-eq("https://example.com/cb", snake.url)
-    assert-eq("MY_SECRET", snake.signing-secret-env)
+    assert-eq("x-a", snake.signing-header)
     assert-eq("https://example.com/cb2", kebab.url)
-    assert-eq("MY_SECRET", kebab.signing-secret-env)
+    assert-eq("x-b", kebab.signing-header)
+}
+
+test-from-body-ignores-secret-env-named-by-the-caller
+meta ["test"]
+fn () {
+    snake ::cb/from-body({callback_url: "https://example.com/cb", callback_secret_env: "ANTHROPIC_API_KEY"})
+    kebab ::cb/from-body({"callback-url": "https://example.com/cb", "callback-secret-env": "ANTHROPIC_API_KEY"})
+    assert(is-null(snake.signing-secret-env))
+    assert(is-null(kebab.signing-secret-env))
+}
+
+test-from-body-signing-env-comes-from-the-caller-of-from-body
+meta ["test"]
+fn () {
+    opts ::cb/from-body({callback_url: "https://example.com/cb", callback_secret_env: "ANTHROPIC_API_KEY"}, "AGENT_CALLBACK_SECRET")
+    assert-eq("AGENT_CALLBACK_SECRET", opts.signing-secret-env)
+}
+
+test-url-filter-refuses-non-public-targets
+meta ["test"]
+fn () {
+    results map([
+        // userinfo, including the parser-differential forms
+        "https://x@127.0.0.1/hook",
+        "https://example.com@127.0.0.1/hook",
+        "https://x:y@10.0.0.1/hook",
+        "https://x@example.com/hook",
+        "https://example.com\\@127.0.0.1/hook",
+        // loopback, private, link-local, reserved
+        "https://localhost/hook",
+        "https://LOCALHOST/hook",
+        "https://127.0.0.1/hook",
+        "https://127.8.8.8:8443/hook",
+        "https://0.0.0.0/hook",
+        "https://10.1.2.3/hook",
+        "https://100.64.0.1/hook",
+        "https://100.100.100.200/hook",
+        "https://169.254.169.254/latest/meta-data",
+        "https://172.16.0.1/hook",
+        "https://172.31.255.255/hook",
+        "https://192.168.1.1/hook",
+        "https://198.18.0.1/hook",
+        "https://224.0.0.1/hook",
+        "https://255.255.255.255/hook",
+        // numeric spellings a URL parser turns into 127.0.0.1
+        "https://2130706433/hook",
+        "https://0x7f000001/hook",
+        "https://0x7f.0.0.1/hook",
+        "https://0177.0.0.1/hook",
+        "https://127.1/hook",
+        "https://127.0.0.1./hook",
+        // encoded and non-ASCII hosts
+        "https://127.0.0.%31/hook",
+        "https://１２７.０.０.１/hook",
+        // IPv6
+        "https://[::1]/hook",
+        "https://[::ffff:127.0.0.1]/hook",
+        // internal names
+        "https://redis/hook",
+        "https://localhost./hook",
+        "https://foo.localhost/hook",
+        "https://metadata.google.internal/hook",
+        "https://printer.local/hook",
+        "https://api.default.svc/hook",
+        "https://api.default.svc.cluster.local/hook",
+        // no host
+        "https:///hook",
+        "https://",
+        "https://\\127.0.0.1/hook",
+    ], (url) {
+        assert(not(::cb/is-url-allowed(url)), `should refuse ${url}`)
+    })
+    assert-eq(40, length(results))
+}
+
+test-url-filter-allows-public-targets
+meta ["test"]
+fn () {
+    results map([
+        "https://example.com/hook",
+        "https://EXAMPLE.com/hook",
+        "https://hooks.example.com:8443/a/b?x=1#y",
+        "https://example.com?x=@y",
+        "https://example.com/a@b",
+        "https://my_app.example.com/hook",
+        "https://example.com./hook",
+        "https://8.8.8.8/hook",
+        "https://172.15.0.1/hook",
+        "https://172.32.0.1/hook",
+        "https://172.217.14.206/hook",
+        "https://100.63.255.255/hook",
+        "https://100.128.0.1/hook",
+    ], (url) {
+        assert(::cb/is-url-allowed(url), `should allow ${url}`)
+    })
+    assert-eq(13, length(results))
 }
 
 test-build-headers-adds-signature

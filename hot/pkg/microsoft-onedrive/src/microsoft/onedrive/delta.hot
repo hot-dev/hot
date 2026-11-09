@@ -50,7 +50,18 @@ DEFAULT_MAX_PAGES 5000
 
 delta-path
 meta {
-    doc: """The first delta URL for a drive (pure): `{drive}/root/delta`, with `token=latest` / a token / a timestamp from `opts.delta-token`, and OData options (`select`, `top`, `expand`)."""
+    doc: """
+    The first delta URL for a drive (pure): `{drive}/root/delta`, with
+    `token=latest` / a token / a timestamp from `opts.delta-token`, and
+    OData options (`select`, `top`, `expand`).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/delta-path({drive: "me"})  // "/me/drive/root/delta"
+    ::microsoft::onedrive::delta/delta-path({drive: "me", delta-token: "latest"})  // "/me/drive/root/delta?token=latest"
+    ```
+    """
 }
 fn (opts: Map): Str {
   token get(opts, "delta-token")
@@ -62,7 +73,9 @@ fn (opts: Map): Str {
   if(is-empty(parts), base, `${base}?${join(parts, "&")}`)
 }
 
-delta-headers fn (opts: Map): Map {
+delta-headers
+meta {no-doc: true}
+fn (opts: Map): Map {
   p get(opts, "prefer")
   cond {
     ::auth/is-blank-value(p) => { {} }
@@ -91,7 +104,22 @@ type {
 
 classify-delta-response
 meta {
-    doc: """Interpret a delta HTTP response (pure): a `DeltaPage`, with `gone` for 410; an Err for other failures."""
+    doc: """
+    Interpret a delta HTTP response (pure): a `DeltaPage`, with `gone` for
+    410; an Err for other failures.
+
+    **Example**
+
+    ```hot
+    page ::microsoft::onedrive::delta/classify-delta-response({
+      status: 200,
+      headers: {},
+      body: {value: [{id: "1"}], "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=abc"}
+    })
+    page.gone  // false
+    length(page.items)  // 1
+    ```
+    """
 }
 fn (response: Result): DeltaPage {
   cond {
@@ -122,6 +150,16 @@ meta {
     Fetch one delta page: GET `link` (a nextLink or deltaLink) when given,
     else the drive's first delta URL (`delta-path`). Returns a
     `DeltaPage`; a 410 is returned as `gone: true` rather than an Err.
+
+    **Example**
+
+    ```hot
+    page ::microsoft::onedrive::delta/delta-page(null, {select: "id,name,deleted"})
+    length(page.items)
+
+    // A 410 is a value, not an Err
+    if(page.gone, page.restart-link, page.next-link)
+    ```
     """
 }
 fn
@@ -135,7 +173,20 @@ fn
 
 latest-delta-link
 meta {
-    doc: """GET {drive}/root/delta?token=latest - a delta link for "changes from now on", without enumerating the drive. Store it and pass it to `sync-changes`."""
+    doc: """
+    GET {drive}/root/delta?token=latest - a delta link for "changes from now
+    on", without enumerating the drive. Store it and pass it to
+    `sync-changes`.
+
+    **Example**
+
+    ```hot
+    link ::microsoft::onedrive::delta/latest-delta-link()
+
+    // For a SharePoint library
+    ::microsoft::onedrive::delta/latest-delta-link({drive: "b!xyz"})
+    ```
+    """
 }
 fn
 (): Str {
@@ -174,14 +225,34 @@ type {
 }
 
 is-deleted
-meta {doc: """True when a delta item carries a `deleted` facet (pure)."""}
+meta {
+    doc: """
+    True when a delta item carries a `deleted` facet (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/is-deleted({id: "1", deleted: {state: "deleted"}})  // true
+    ::microsoft::onedrive::delta/is-deleted({id: "2"})  // false
+    ```
+    """
+}
 fn (item: Map): Bool {
   is-map(get(item, "deleted"))
 }
 
 latest-by-id
 meta {
-    doc: """Keep the last occurrence of each item id, in order of last appearance (pure). Items without an id are dropped."""
+    doc: """
+    Keep the last occurrence of each item id, in order of last appearance
+    (pure). Items without an id are dropped.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/latest-by-id([{id: "a", name: "old"}, {id: "b"}, {id: "a", name: "new"}])  // [{id: "b"}, {id: "a", name: "new"}]
+    ```
+    """
 }
 fn (items: Vec): Vec {
   with-id filter(items, (i) { is-some(get(i, "id")) })
@@ -190,7 +261,20 @@ fn (items: Vec): Vec {
 }
 
 build-delta-set
-meta {doc: """Assemble a `DeltaSet` from collected items (pure)."""}
+meta {
+    doc: """
+    Assemble a `DeltaSet` from collected items (pure).
+
+    **Example**
+
+    ```hot
+    link "https://graph.microsoft.com/v1.0/me/drive/root/delta?token=abc"
+    set ::microsoft::onedrive::delta/build-delta-set([{id: "a"}, {id: "b", deleted: {}}], link, 1, null)
+    set.deleted-ids  // ["b"]
+    set.resync  // false
+    ```
+    """
+}
 fn (items: Vec, delta-link: Str, pages: Int, resync-mode: Str?): DeltaSet {
   latest latest-by-id(items)
   DeltaSet({
@@ -203,7 +287,9 @@ fn (items: Vec, delta-link: Str, pages: Int, resync-mode: Str?): DeltaSet {
   })
 }
 
-sync-loop fn (link: Str?, opts: Map, acc: Vec, pages: Int, resync-mode: Str?, max-pages: Int): DeltaSet {
+sync-loop
+meta {no-doc: true}
+fn (link: Str?, opts: Map, acc: Vec, pages: Int, resync-mode: Str?, max-pages: Int): DeltaSet {
   page delta-page(link, opts)
   cond {
     is-err(page) => { page }
@@ -238,6 +324,7 @@ meta {
     ```hot
     ::delta ::microsoft::onedrive::delta
 
+    saved-link ::delta/latest-delta-link()
     set ::delta/sync-changes(saved-link)
     upserts ::delta/changed-items(set)    // DocFiles to (re)index
     deletes ::delta/deleted-ids(set)      // ids to drop
@@ -255,7 +342,17 @@ fn
 
 changed-items
 meta {
-    doc: """The live (not deleted) items of a `DeltaSet` (or a Vec of driveItems) as `DocFile`s, folders included; filter on `is-folder` for files only (pure)."""
+    doc: """
+    The live (not deleted) items of a `DeltaSet` (or a Vec of driveItems) as
+    `DocFile`s, folders included; filter on `is-folder` for files only
+    (pure).
+
+    **Example**
+
+    ```hot
+    map(::microsoft::onedrive::delta/changed-items([{id: "a", name: "a.txt"}, {id: "b", deleted: {}}]), %.id)  // ["a"]
+    ```
+    """
 }
 fn (set: Any): Vec {
   items if(is-vec(set), latest-by-id(set), set.items)
@@ -263,14 +360,33 @@ fn (set: Any): Vec {
 }
 
 changed-files
-meta {doc: """`changed-items` without folders and packages (pure)."""}
+meta {
+    doc: """
+    `changed-items` without folders and packages (pure).
+
+    **Example**
+
+    ```hot
+    map(::microsoft::onedrive::delta/changed-files([{id: "a", name: "a.txt"}, {id: "f", name: "docs", folder: {}}]), %.name)  // ["a.txt"]
+    ```
+    """
+}
 fn (set: Any): Vec {
   filter(changed-items(set), (f) { not(f.is-folder) })
 }
 
 deleted-ids
 meta {
-    doc: """The ids a `DeltaSet` (or a Vec of driveItems) deleted (pure). Delete a folder locally only once it is empty after applying the set."""
+    doc: """
+    The ids a `DeltaSet` (or a Vec of driveItems) deleted (pure). Delete a
+    folder locally only once it is empty after applying the set.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/deleted-ids([{id: "a"}, {id: "b", deleted: {}}])  // ["b"]
+    ```
+    """
 }
 fn (set: Any): Vec {
   if(is-vec(set), map(filter(latest-by-id(set), is-deleted), (i) { Str(i.id) }), set.deleted-ids)
@@ -282,6 +398,13 @@ meta {
     For a resync set (`resync-mode` `resyncChangesApplyDifferences`): the
     `local-ids` that the full enumeration no longer contains, which you
     should delete locally (pure). Empty for a normal incremental set.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/stale-ids(["a", "b"], {resync: true, items: [{id: "a"}]})  // ["b"]
+    ::microsoft::onedrive::delta/stale-ids(["a", "b"], {resync: false, items: []})  // []
+    ```
     """
 }
 fn (local-ids: Vec, set: Map): Vec {
@@ -300,7 +423,16 @@ fn (local-ids: Vec, set: Map): Vec {
 
 subscription-resource
 meta {
-    doc: """The subscription resource for a drive's root (pure): `me/drive/root`, `drives/{id}/root`, `users/{id}/drive/root`, ..."""
+    doc: """
+    The subscription resource for a drive's root (pure): `me/drive/root`,
+    `drives/{id}/root`, `users/{id}/drive/root`, ...
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::delta/subscription-resource({drive: "me"})  // "me/drive/root"
+    ```
+    """
 }
 fn (opts: Map): Str {
   ::subs/strip-slashes(`${::od/drive-base(opts)}/root`)
@@ -342,7 +474,7 @@ meta {
     renew-onedrive-subscription
     meta {schedule: "0 5 * * 1"}
     fn (event) {
-      sub-id ::hot::store/get(::hot::store/Map({name: "onedrive-sync"}), "subscription-id")
+      sub-id ::hot::ctx/get("onedrive.subscription-id")
       ::microsoft::onedrive::delta/renew-subscription(sub-id)
     }
     ```

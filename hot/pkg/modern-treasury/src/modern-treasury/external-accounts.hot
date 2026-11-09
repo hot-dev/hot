@@ -14,7 +14,27 @@ seg ::modern-treasury::api/seg
 
 create-external-account
 meta {
-    doc: """POST /api/external_accounts: add a bank account to a counterparty. `params` needs `counterparty_id`; usually `account_details: [{account_number}]`, `routing_details: [{routing_number, routing_number_type}]`, `account_type`, `party_name`, `party_type`; optional `name`, `metadata`, `party_address`, `plaid_processor_token`, `ledger_account`."""
+    doc: """
+    POST /api/external_accounts: add a bank account to a counterparty.
+    `params` needs `counterparty_id`; usually `account_details:
+    [{account_number}]`, `routing_details: [{routing_number,
+    routing_number_type}]`, `account_type`, `party_name`, `party_type`;
+    optional `name`, `metadata`, `party_address`, `plaid_processor_token`,
+    `ledger_account`.
+
+    **Example**
+
+    ```hot
+    account ::modern-treasury::external-accounts/create-external-account({
+      counterparty_id: "b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31",
+      account_type: "checking",
+      party_name: "Acme",
+      account_details: [{account_number: "123456789"}],
+      routing_details: [{routing_number: "021000021", routing_number_type: "aba"}]
+    })
+    account.id
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -26,7 +46,17 @@ fn
 
 get-external-account
 meta {
-    doc: """GET /api/external_accounts/{id}: retrieve an external account (its `verification_status` among the fields)."""
+    doc: """
+    GET /api/external_accounts/{id}: retrieve an external account (its
+    `verification_status` among the fields).
+
+    **Example**
+
+    ```hot
+    account ::modern-treasury::external-accounts/get-external-account("5acec2ef-987b-4260-aa97-b719eeb0a8d5")
+    account.verification_status
+    ```
+    """
 }
 fn
 (external-account-id: Str): Map {
@@ -38,7 +68,17 @@ fn
 
 list-external-accounts
 meta {
-    doc: """GET /api/external_accounts: one page. Filters: `counterparty_id`, `party_name`, `external_id`, `metadata`, `per_page`, `after_cursor`."""
+    doc: """
+    GET /api/external_accounts: one page. Filters: `counterparty_id`,
+    `party_name`, `external_id`, `metadata`, `per_page`, `after_cursor`.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::external-accounts/list-external-accounts({counterparty_id: "b7d3a9c2-6f41-4e0a-8a55-1c9e0f2d7b31"})
+    map(page.items, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -53,7 +93,18 @@ fn
 
 update-external-account
 meta {
-    doc: """PATCH /api/external_accounts/{id}: change `name`, `party_name`, `party_type`, `party_address`, `account_type`, `counterparty_id` or `metadata`. Account and routing numbers can't be changed; create a new external account instead."""
+    doc: """
+    PATCH /api/external_accounts/{id}: change `name`, `party_name`,
+    `party_type`, `party_address`, `account_type`, `counterparty_id` or
+    `metadata`. Account and routing numbers can't be changed; create a new
+    external account instead.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::external-accounts/update-external-account("5acec2ef-987b-4260-aa97-b719eeb0a8d5", {name: "Acme operating"})
+    ```
+    """
 }
 fn
 (external-account-id: Str, params: Map): Map {
@@ -65,7 +116,16 @@ fn
 
 delete-external-account
 meta {
-    doc: """DELETE /api/external_accounts/{id}: delete an external account. Returns null (204)."""
+    doc: """
+    DELETE /api/external_accounts/{id}: delete an external account. Returns
+    null (204).
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::external-accounts/delete-external-account("5acec2ef-987b-4260-aa97-b719eeb0a8d5")
+    ```
+    """
 }
 fn
 (external-account-id: Str): Any {
@@ -84,6 +144,15 @@ meta {
     `"rtp"`); optional `currency`, `priority`, `fallback_type`. This
     sends small deposits from your account, so it needs an
     `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::external-accounts/verify-external-account("5acec2ef-987b-4260-aa97-b719eeb0a8d5", {
+      originating_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      payment_type: "ach"
+    }, {idempotency-key: "verify-acme-operating"})
+    ```
     """
 }
 fn (external-account-id: Str, params: Map, opts: Map): Map {
@@ -92,7 +161,18 @@ fn (external-account-id: Str, params: Map, opts: Map): Map {
 
 complete-verification
 meta {
-    doc: """POST /api/external_accounts/{id}/complete_verification: finish micro-deposit verification with the two `amounts` (in cents) the counterparty saw, e.g. `[2, 4]`."""
+    doc: """
+    POST /api/external_accounts/{id}/complete_verification: finish
+    micro-deposit verification with the two `amounts` (in cents) the
+    counterparty saw, e.g. `[2, 4]`.
+
+    **Example**
+
+    ```hot
+    account ::modern-treasury::external-accounts/complete-verification("5acec2ef-987b-4260-aa97-b719eeb0a8d5", [2, 4])
+    account.verification_status
+    ```
+    """
 }
 fn
 (external-account-id: Str, amounts: Vec<Int>): Map {
@@ -104,7 +184,19 @@ fn
 
 validate-routing-number
 meta {
-    doc: """GET /api/validations/routing_numbers: look up a routing number (`routing-number-type` e.g. `"aba"`, `"swift"`), returning the bank name, address and supported payment types, or a 422 `HttpError` when it is invalid."""
+    doc: """
+    GET /api/validations/routing_numbers: look up a routing number
+    (`routing-number-type` e.g. `"aba"`, `"swift"`), returning the bank
+    name, address and supported payment types, or a 422 `HttpError` when it
+    is invalid.
+
+    **Example**
+
+    ```hot
+    bank ::modern-treasury::external-accounts/validate-routing-number("021000021", "aba")
+    bank.bank_name
+    ```
+    """
 }
 fn
 (routing-number: Str, routing-number-type: Str): Map {

@@ -7,7 +7,7 @@ Presets for OpenAI-compatible APIs, built on [`hot.dev/openai`](https://hot.dev/
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/openai-compatible": "0.1.2"
+"hot.dev/openai-compatible": "0.1.3"
 ```
 
 It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.9.0.

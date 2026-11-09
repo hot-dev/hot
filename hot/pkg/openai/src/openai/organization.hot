@@ -355,7 +355,21 @@ AdminApiKeysListResponse type {
 
 list-all-organization-and-project-api-keys
 meta {
-    doc: """GET /organization/admin_api_keys - List all organization and project API keys."""
+    doc: """
+    GET /organization/admin_api_keys - List all organization and project API
+    keys.
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/list-all-organization-and-project-api-keys({
+      limit: "20",
+      order: "desc"
+    }, admin)
+    map(page.data, %.name)
+    ```
+    """
 }
 fn
 (request: AdminApiKeysListRequest): AdminApiKeysListResponse {
@@ -387,7 +401,22 @@ AdminApiKeysCreateResponse type {
 
 
 create-admin-api-key
-meta {doc: """POST /organization/admin_api_keys - Create admin API key"""}
+meta {
+    doc: """
+    POST /organization/admin_api_keys - Create admin API key
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    key ::openai::organization/create-admin-api-key(::openai::organization/AdminApiKeysCreateRequest({
+      name: "CI key"
+    }), admin)
+    // value is returned only here. Store it now.
+    key.id
+    ```
+    """
+}
 fn
 (request: AdminApiKeysCreateRequest): AdminApiKeysCreateResponse {
   create-admin-api-key(request, {})
@@ -418,7 +447,20 @@ AdminApiKeysGetResponse type {
 
 
 retrieve-admin-api-key
-meta {doc: """GET /organization/admin_api_keys/{key_id} - Retrieve admin API key"""}
+meta {
+    doc: """
+    GET /organization/admin_api_keys/{key_id} - Retrieve admin API key
+
+    **Example**
+
+    ```hot
+    key ::openai::organization/retrieve-admin-api-key(::openai::organization/AdminApiKeysGetRequest({
+      key-id: "key_abc123"
+    }))
+    key.redacted_value
+    ```
+    """
+}
 fn
 (request: AdminApiKeysGetRequest): AdminApiKeysGetResponse {
   retrieve-admin-api-key(request, {})
@@ -444,7 +486,20 @@ AdminApiKeysDeleteResponse type {
 
 
 delete-admin-api-key
-meta {doc: """DELETE /organization/admin_api_keys/{key_id} - Delete admin API key"""}
+meta {
+    doc: """
+    DELETE /organization/admin_api_keys/{key_id} - Delete admin API key
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-admin-api-key(::openai::organization/AdminApiKeysDeleteRequest({
+      key-id: "key_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: AdminApiKeysDeleteRequest): AdminApiKeysDeleteResponse {
   delete-admin-api-key(request, {})
@@ -480,7 +535,22 @@ ListAuditLogsResponse type {
 
 
 list-audit-logs
-meta {doc: """GET /organization/audit_logs - List audit logs"""}
+meta {
+    doc: """
+    GET /organization/audit_logs - List audit logs
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/list-audit-logs({
+      event-types: "project.created",
+      limit: "20"
+    }, admin)
+    map(page.data, %.type)
+    ```
+    """
+}
 fn
 (request: ListAuditLogsRequest): ListAuditLogsResponse {
   list-audit-logs(request, {})
@@ -513,7 +583,24 @@ UsageCostsResponse type {
 
 
 costs
-meta {doc: """GET /organization/costs - Costs"""}
+meta {
+    doc: """
+    GET /organization/costs - Costs
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/costs({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    }, admin)
+    map(page.data, %.result)
+    page.next_page
+    ```
+    """
+}
 fn
 (request: UsageCostsRequest): UsageCostsResponse {
   costs(request, {})
@@ -542,7 +629,19 @@ ListInvitesResponse type {
 
 
 list-invites
-meta {doc: """GET /organization/invites - List invites"""}
+meta {
+    doc: """
+    GET /organization/invites - List invites
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/list-invites({limit: "20"}, admin)
+    map(page.data, %.email)
+    ```
+    """
+}
 fn
 (request: ListInvitesRequest): ListInvitesResponse {
   list-invites(request, {})
@@ -574,7 +673,20 @@ RetrieveInviteResponse type {
 
 
 retrieve-invite
-meta {doc: """GET /organization/invites/{invite_id} - Retrieve invite"""}
+meta {
+    doc: """
+    GET /organization/invites/{invite_id} - Retrieve invite
+
+    **Example**
+
+    ```hot
+    invite ::openai::organization/retrieve-invite(::openai::organization/RetrieveInviteRequest({
+      invite-id: "invite-abc123"
+    }))
+    invite.status
+    ```
+    """
+}
 fn
 (request: RetrieveInviteRequest): RetrieveInviteResponse {
   retrieve-invite(request, {})
@@ -600,7 +712,20 @@ DeleteInviteResponse type {
 
 
 delete-invite
-meta {doc: """DELETE /organization/invites/{invite_id} - Delete invite"""}
+meta {
+    doc: """
+    DELETE /organization/invites/{invite_id} - Delete invite
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-invite(::openai::organization/DeleteInviteRequest({
+      invite-id: "invite-abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteInviteRequest): DeleteInviteResponse {
   delete-invite(request, {})
@@ -630,7 +755,19 @@ ListProjectsResponse type {
 
 
 list-projects
-meta {doc: """GET /organization/projects - List projects"""}
+meta {
+    doc: """
+    GET /organization/projects - List projects
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/list-projects({limit: "20", include-archived: "false"}, admin)
+    map(page.data, %.name)
+    ```
+    """
+}
 fn
 (request: ListProjectsRequest): ListProjectsResponse {
   list-projects(request, {})
@@ -659,7 +796,20 @@ CreateProjectResponse type {
 
 
 create-project
-meta {doc: """POST /organization/projects - Create project"""}
+meta {
+    doc: """
+    POST /organization/projects - Create project
+
+    **Example**
+
+    ```hot
+    project ::openai::organization/create-project(::openai::organization/CreateProjectRequest({
+      name: "Support bot"
+    }))
+    project.id
+    ```
+    """
+}
 fn
 (request: CreateProjectRequest): CreateProjectResponse {
   create-project(request, {})
@@ -688,7 +838,20 @@ RetrieveProjectResponse type {
 
 
 retrieve-project
-meta {doc: """GET /organization/projects/{project_id} - Retrieve project"""}
+meta {
+    doc: """
+    GET /organization/projects/{project_id} - Retrieve project
+
+    **Example**
+
+    ```hot
+    project ::openai::organization/retrieve-project(::openai::organization/RetrieveProjectRequest({
+      project-id: "proj_abc123"
+    }))
+    project.status
+    ```
+    """
+}
 fn
 (request: RetrieveProjectRequest): RetrieveProjectResponse {
   retrieve-project(request, {})
@@ -717,7 +880,20 @@ ModifyProjectResponse type {
 
 
 modify-project
-meta {doc: """POST /organization/projects/{project_id} - Modify project"""}
+meta {
+    doc: """
+    POST /organization/projects/{project_id} - Modify project
+
+    **Example**
+
+    ```hot
+    project ::openai::organization/modify-project("proj_abc123", ::openai::organization/ModifyProjectRequest({
+      name: "Support bot v2"
+    }))
+    project.name
+    ```
+    """
+}
 fn
 (project-id: Str, request: ModifyProjectRequest): ModifyProjectResponse {
   modify-project(project-id, request, {})
@@ -748,7 +924,16 @@ ListProjectApiKeysResponse type {
 
 list-project-api-keys
 meta {
-    doc: """GET /organization/projects/{project_id}/api_keys - List project API keys"""
+    doc: """
+    GET /organization/projects/{project_id}/api_keys - List project API keys
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/list-project-api-keys({project-id: "proj_abc123", limit: "20"})
+    map(page.data, %.redacted_value)
+    ```
+    """
 }
 fn
 (request: ListProjectApiKeysRequest): ListProjectApiKeysResponse {
@@ -781,7 +966,20 @@ RetrieveProjectApiKeyResponse type {
 
 retrieve-project-api-key
 meta {
-    doc: """GET /organization/projects/{project_id}/api_keys/{key_id} - Retrieve project API key"""
+    doc: """
+    GET /organization/projects/{project_id}/api_keys/{key_id} - Retrieve
+    project API key
+
+    **Example**
+
+    ```hot
+    key ::openai::organization/retrieve-project-api-key(::openai::organization/RetrieveProjectApiKeyRequest({
+      project-id: "proj_abc123",
+      key-id: "key_abc123"
+    }))
+    key.last_used_at
+    ```
+    """
 }
 fn
 (request: RetrieveProjectApiKeyRequest): RetrieveProjectApiKeyResponse {
@@ -810,7 +1008,20 @@ DeleteProjectApiKeyResponse type {
 
 delete-project-api-key
 meta {
-    doc: """DELETE /organization/projects/{project_id}/api_keys/{key_id} - Delete project API key"""
+    doc: """
+    DELETE /organization/projects/{project_id}/api_keys/{key_id} - Delete
+    project API key
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-project-api-key(::openai::organization/DeleteProjectApiKeyRequest({
+      project-id: "proj_abc123",
+      key-id: "key_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteProjectApiKeyRequest): DeleteProjectApiKeyResponse {
@@ -840,7 +1051,20 @@ ArchiveProjectResponse type {
 
 
 archive-project
-meta {doc: """POST /organization/projects/{project_id}/archive - Archive project"""}
+meta {
+    doc: """
+    POST /organization/projects/{project_id}/archive - Archive project
+
+    **Example**
+
+    ```hot
+    project ::openai::organization/archive-project(::openai::organization/ArchiveProjectRequest({
+      project-id: "proj_abc123"
+    }))
+    project.status
+    ```
+    """
+}
 fn
 (request: ArchiveProjectRequest): ArchiveProjectResponse {
   archive-project(request, {})
@@ -872,7 +1096,20 @@ ListProjectRateLimitsResponse type {
 
 list-project-rate-limits
 meta {
-    doc: """GET /organization/projects/{project_id}/rate_limits - List project rate limits"""
+    doc: """
+    GET /organization/projects/{project_id}/rate_limits - List project rate
+    limits
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/list-project-rate-limits({
+      project-id: "proj_abc123",
+      limit: "100"
+    })
+    map(page.data, %.model)
+    ```
+    """
 }
 fn
 (request: ListProjectRateLimitsRequest): ListProjectRateLimitsResponse {
@@ -911,7 +1148,19 @@ UpdateProjectRateLimitsResponse type {
 
 modify-project-rate-limit
 meta {
-    doc: """POST /organization/projects/{project_id}/rate_limits/{rate_limit_id} - Modify project rate limit"""
+    doc: """
+    POST /organization/projects/{project_id}/rate_limits/{rate_limit_id} -
+    Modify project rate limit
+
+    **Example**
+
+    ```hot
+    limit ::openai::organization/modify-project-rate-limit("proj_abc123", "rl-gpt-4o-mini", ::openai::organization/UpdateProjectRateLimitsRequest({
+      max_requests_per_1_minute: 500
+    }))
+    limit.max_requests_per_1_minute
+    ```
+    """
 }
 fn
 (project-id: Str, rate-limit-id: Str, request: UpdateProjectRateLimitsRequest): UpdateProjectRateLimitsResponse {
@@ -943,7 +1192,20 @@ ListProjectServiceAccountsResponse type {
 
 list-project-service-accounts
 meta {
-    doc: """GET /organization/projects/{project_id}/service_accounts - List project service accounts"""
+    doc: """
+    GET /organization/projects/{project_id}/service_accounts - List project
+    service accounts
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/list-project-service-accounts({
+      project-id: "proj_abc123",
+      limit: "20"
+    })
+    map(page.data, %.name)
+    ```
+    """
 }
 fn
 (request: ListProjectServiceAccountsRequest): ListProjectServiceAccountsResponse {
@@ -974,7 +1236,20 @@ CreateProjectServiceAccountResponse type {
 
 create-project-service-account
 meta {
-    doc: """POST /organization/projects/{project_id}/service_accounts - Create project service account"""
+    doc: """
+    POST /organization/projects/{project_id}/service_accounts - Create
+    project service account
+
+    **Example**
+
+    ```hot
+    account ::openai::organization/create-project-service-account("proj_abc123", ::openai::organization/CreateProjectServiceAccountRequest({
+      name: "Deploy bot"
+    }))
+    // api_key.value is returned only here. Store it now.
+    account.id
+    ```
+    """
 }
 fn
 (project-id: Str, request: CreateProjectServiceAccountRequest): CreateProjectServiceAccountResponse {
@@ -1005,7 +1280,21 @@ RetrieveProjectServiceAccountResponse type {
 
 retrieve-project-service-account
 meta {
-    doc: """GET /organization/projects/{project_id}/service_accounts/{service_account_id} - Retrieve project service account"""
+    doc: """
+    GET
+    /organization/projects/{project_id}/service_accounts/{service_account_id}
+    - Retrieve project service account
+
+    **Example**
+
+    ```hot
+    account ::openai::organization/retrieve-project-service-account(::openai::organization/RetrieveProjectServiceAccountRequest({
+      project-id: "proj_abc123",
+      service-account-id: "svc_acct_abc123"
+    }))
+    account.role
+    ```
+    """
 }
 fn
 (request: RetrieveProjectServiceAccountRequest): RetrieveProjectServiceAccountResponse {
@@ -1034,7 +1323,21 @@ DeleteProjectServiceAccountResponse type {
 
 delete-project-service-account
 meta {
-    doc: """DELETE /organization/projects/{project_id}/service_accounts/{service_account_id} - Delete project service account"""
+    doc: """
+    DELETE
+    /organization/projects/{project_id}/service_accounts/{service_account_id}
+    - Delete project service account
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-project-service-account(::openai::organization/DeleteProjectServiceAccountRequest({
+      project-id: "proj_abc123",
+      service-account-id: "svc_acct_abc123"
+    }))
+    is-err(result)
+    ```
+    """
 }
 fn
 (request: DeleteProjectServiceAccountRequest): DeleteProjectServiceAccountResponse {
@@ -1065,7 +1368,18 @@ ListProjectUsersResponse type {
 
 
 list-project-users
-meta {doc: """GET /organization/projects/{project_id}/users - List project users"""}
+meta {
+    doc: """
+    GET /organization/projects/{project_id}/users - List project users
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/list-project-users({project-id: "proj_abc123", limit: "20"})
+    map(page.data, %.email)
+    ```
+    """
+}
 fn
 (request: ListProjectUsersRequest): ListProjectUsersResponse {
   list-project-users(request, {})
@@ -1095,7 +1409,21 @@ CreateProjectUserResponse type {
 
 
 create-project-user
-meta {doc: """POST /organization/projects/{project_id}/users - Create project user"""}
+meta {
+    doc: """
+    POST /organization/projects/{project_id}/users - Create project user
+
+    **Example**
+
+    ```hot
+    member ::openai::organization/create-project-user("proj_abc123", ::openai::organization/CreateProjectUserRequest({
+      user_id: "user_abc123",
+      role: "member"
+    }))
+    member.role
+    ```
+    """
+}
 fn
 (project-id: Str, request: CreateProjectUserRequest): CreateProjectUserResponse {
   create-project-user(project-id, request, {})
@@ -1126,7 +1454,20 @@ RetrieveProjectUserResponse type {
 
 retrieve-project-user
 meta {
-    doc: """GET /organization/projects/{project_id}/users/{user_id} - Retrieve project user"""
+    doc: """
+    GET /organization/projects/{project_id}/users/{user_id} - Retrieve
+    project user
+
+    **Example**
+
+    ```hot
+    member ::openai::organization/retrieve-project-user(::openai::organization/RetrieveProjectUserRequest({
+      project-id: "proj_abc123",
+      user-id: "user_abc123"
+    }))
+    member.email
+    ```
+    """
 }
 fn
 (request: RetrieveProjectUserRequest): RetrieveProjectUserResponse {
@@ -1157,7 +1498,19 @@ ModifyProjectUserResponse type {
 
 modify-project-user
 meta {
-    doc: """POST /organization/projects/{project_id}/users/{user_id} - Modify project user"""
+    doc: """
+    POST /organization/projects/{project_id}/users/{user_id} - Modify
+    project user
+
+    **Example**
+
+    ```hot
+    member ::openai::organization/modify-project-user("proj_abc123", "user_abc123", ::openai::organization/ModifyProjectUserRequest({
+      role: "owner"
+    }))
+    member.role
+    ```
+    """
 }
 fn
 (project-id: Str, user-id: Str, request: ModifyProjectUserRequest): ModifyProjectUserResponse {
@@ -1186,7 +1539,20 @@ DeleteProjectUserResponse type {
 
 delete-project-user
 meta {
-    doc: """DELETE /organization/projects/{project_id}/users/{user_id} - Delete project user"""
+    doc: """
+    DELETE /organization/projects/{project_id}/users/{user_id} - Delete
+    project user
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-project-user(::openai::organization/DeleteProjectUserRequest({
+      project-id: "proj_abc123",
+      user-id: "user_abc123"
+    }))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DeleteProjectUserRequest): DeleteProjectUserResponse {
@@ -1223,7 +1589,23 @@ UsageAudioSpeechesResponse type {
 
 
 audio-speeches
-meta {doc: """GET /organization/usage/audio_speeches - Audio speeches"""}
+meta {
+    doc: """
+    GET /organization/usage/audio_speeches - Audio speeches
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/audio-speeches({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    }, admin)
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageAudioSpeechesRequest): UsageAudioSpeechesResponse {
   audio-speeches(request, {})
@@ -1259,7 +1641,22 @@ UsageAudioTranscriptionsResponse type {
 
 
 audio-transcriptions
-meta {doc: """GET /organization/usage/audio_transcriptions - Audio transcriptions"""}
+meta {
+    doc: """
+    GET /organization/usage/audio_transcriptions - Audio transcriptions
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/audio-transcriptions({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageAudioTranscriptionsRequest): UsageAudioTranscriptionsResponse {
   audio-transcriptions(request, {})
@@ -1293,7 +1690,21 @@ UsageCodeInterpreterSessionsResponse type {
 
 code-interpreter-sessions
 meta {
-    doc: """GET /organization/usage/code_interpreter_sessions - Code interpreter sessions"""
+    doc: """
+    GET /organization/usage/code_interpreter_sessions - Code interpreter
+    sessions
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/code-interpreter-sessions({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
 }
 fn
 (request: UsageCodeInterpreterSessionsRequest): UsageCodeInterpreterSessionsResponse {
@@ -1331,7 +1742,23 @@ UsageCompletionsResponse type {
 
 
 completions
-meta {doc: """GET /organization/usage/completions - Completions"""}
+meta {
+    doc: """
+    GET /organization/usage/completions - Completions
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/completions({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7",
+      group-by: "model"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageCompletionsRequest): UsageCompletionsResponse {
   completions(request, {})
@@ -1367,7 +1794,22 @@ UsageEmbeddingsResponse type {
 
 
 embeddings
-meta {doc: """GET /organization/usage/embeddings - Embeddings"""}
+meta {
+    doc: """
+    GET /organization/usage/embeddings - Embeddings
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/embeddings({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageEmbeddingsRequest): UsageEmbeddingsResponse {
   embeddings(request, {})
@@ -1405,7 +1847,22 @@ UsageImagesResponse type {
 
 
 images
-meta {doc: """GET /organization/usage/images - Images"""}
+meta {
+    doc: """
+    GET /organization/usage/images - Images
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/images({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageImagesRequest): UsageImagesResponse {
   images(request, {})
@@ -1441,7 +1898,22 @@ UsageModerationsResponse type {
 
 
 moderations
-meta {doc: """GET /organization/usage/moderations - Moderations"""}
+meta {
+    doc: """
+    GET /organization/usage/moderations - Moderations
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/moderations({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageModerationsRequest): UsageModerationsResponse {
   moderations(request, {})
@@ -1474,7 +1946,22 @@ UsageVectorStoresResponse type {
 
 
 vector-stores
-meta {doc: """GET /organization/usage/vector_stores - Vector stores"""}
+meta {
+    doc: """
+    GET /organization/usage/vector_stores - Vector stores
+
+    **Example**
+
+    ```hot
+    page ::openai::organization/vector-stores({
+      start-time: "1730419200",
+      bucket-width: "1d",
+      limit: "7"
+    })
+    map(page.data, %.result)
+    ```
+    """
+}
 fn
 (request: UsageVectorStoresRequest): UsageVectorStoresResponse {
   vector-stores(request, {})
@@ -1504,7 +1991,19 @@ ListUsersResponse type {
 
 
 list-users
-meta {doc: """GET /organization/users - List users"""}
+meta {
+    doc: """
+    GET /organization/users - List users
+
+    **Example**
+
+    ```hot
+    admin {api-key: ::hot::ctx/get("openai.admin.key")}
+    page ::openai::organization/list-users({limit: "20"}, admin)
+    map(page.data, %.email)
+    ```
+    """
+}
 fn
 (request: ListUsersRequest): ListUsersResponse {
   list-users(request, {})
@@ -1533,7 +2032,20 @@ RetrieveUserResponse type {
 
 
 retrieve-user
-meta {doc: """GET /organization/users/{user_id} - Retrieve user"""}
+meta {
+    doc: """
+    GET /organization/users/{user_id} - Retrieve user
+
+    **Example**
+
+    ```hot
+    member ::openai::organization/retrieve-user(::openai::organization/RetrieveUserRequest({
+      user-id: "user_abc123"
+    }))
+    member.role
+    ```
+    """
+}
 fn
 (request: RetrieveUserRequest): RetrieveUserResponse {
   retrieve-user(request, {})
@@ -1562,7 +2074,20 @@ ModifyUserResponse type {
 
 
 modify-user
-meta {doc: """POST /organization/users/{user_id} - Modify user"""}
+meta {
+    doc: """
+    POST /organization/users/{user_id} - Modify user
+
+    **Example**
+
+    ```hot
+    member ::openai::organization/modify-user("user_abc123", ::openai::organization/ModifyUserRequest({
+      role: "reader"
+    }))
+    member.role
+    ```
+    """
+}
 fn
 (user-id: Str, request: ModifyUserRequest): ModifyUserResponse {
   modify-user(user-id, request, {})
@@ -1588,7 +2113,20 @@ DeleteUserResponse type {
 
 
 delete-user
-meta {doc: """DELETE /organization/users/{user_id} - Delete user"""}
+meta {
+    doc: """
+    DELETE /organization/users/{user_id} - Delete user
+
+    **Example**
+
+    ```hot
+    result ::openai::organization/delete-user(::openai::organization/DeleteUserRequest({
+      user-id: "user_abc123"
+    }))
+    result.deleted
+    ```
+    """
+}
 fn
 (request: DeleteUserRequest): DeleteUserResponse {
   delete-user(request, {})

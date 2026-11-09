@@ -7,7 +7,7 @@ Slack Admin API (`admin.*`) bindings for Hot, for Enterprise organizations: mana
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/slack-admin": "0.11.1"
+"hot.dev/slack-admin": "0.11.2"
 ```
 
 It depends on `hot.dev/slack` (1.1.0), which is installed with it.

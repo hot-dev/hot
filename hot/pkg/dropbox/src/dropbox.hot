@@ -68,7 +68,17 @@ PAPER_MIME "application/vnd.dropbox.paper"
 
 is-blank
 meta {
-    doc: """True for null, `""`, and whitespace-only strings (context placeholders wire `""` for unset env vars)."""
+    doc: """
+    True for null, `""`, and whitespace-only strings (context placeholders
+    wire `""` for unset env vars).
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-blank("  ")  // true
+    ::dropbox/is-blank("report")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
@@ -76,7 +86,16 @@ fn (value: Any): Bool {
 
 compact
 meta {
-    doc: """Drop null values from an argument Map (Dropbox arguments never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from an argument Map (Dropbox arguments never carry
+    JSON null for unset fields).
+
+    **Example**
+
+    ```hot
+    ::dropbox/compact({path: "/a.txt", rev: null})  // {path: "/a.txt"}
+    ```
+    """
 }
 fn (arg: Map): Map {
   filter-vals(untype(arg), is-some)
@@ -112,7 +131,18 @@ fn (path: Str?): Str {
 
 parent-path
 meta {
-    doc: """The parent folder of a display path (pure): `"/a/b/c.txt"` gives `"/a/b"`, `"/c.txt"` gives `""` (root). Null for ids and the root."""
+    doc: """
+    The parent folder of a display path (pure): `"/a/b/c.txt"` gives
+    `"/a/b"`, `"/c.txt"` gives `""` (root). Null for ids and the root.
+
+    **Example**
+
+    ```hot
+    ::dropbox/parent-path("/a/b/c.txt")  // "/a/b"
+    ::dropbox/parent-path("/c.txt")  // ""
+    ::dropbox/parent-path("id:a4ayc_80")  // null
+    ```
+    """
 }
 fn (path: Str?): Str? {
   p or(path, "")
@@ -127,7 +157,17 @@ fn (path: Str?): Str? {
 
 file-extension
 meta {
-    doc: """The lowercased extension of a file name without the dot (`"Q3.Plan.PDF"` gives `"pdf"`), or null."""
+    doc: """
+    The lowercased extension of a file name without the dot (`"Q3.Plan.PDF"`
+    gives `"pdf"`), or null.
+
+    **Example**
+
+    ```hot
+    ::dropbox/file-extension("Q3.Plan.PDF")  // "pdf"
+    ::dropbox/file-extension(".bashrc")  // null
+    ```
+    """
 }
 fn (name: Str?): Str? {
   n or(name, "")
@@ -141,27 +181,65 @@ fn (name: Str?): Str? {
 
 entry-tag
 meta {
-    doc: """The `.tag` of a metadata entry: `"file"`, `"folder"` or `"deleted"` (null when absent)."""
+    doc: """
+    The `.tag` of a metadata entry: `"file"`, `"folder"` or `"deleted"`
+    (null when absent).
+
+    **Example**
+
+    ```hot
+    ::dropbox/entry-tag({".tag": "file", name: "a.txt"})  // "file"
+    ```
+    """
 }
 fn (entry: Map): Str? {
   get(entry, ".tag")
 }
 
 is-folder
-meta {doc: """True for a folder metadata entry."""}
+meta {
+    doc: """
+    True for a folder metadata entry.
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-folder({".tag": "folder", name: "Reports"})  // true
+    ```
+    """
+}
 fn (entry: Map): Bool {
   eq(entry-tag(entry), "folder")
 }
 
 is-file
-meta {doc: """True for a file metadata entry."""}
+meta {
+    doc: """
+    True for a file metadata entry.
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-file({".tag": "file", name: "a.txt"})  // true
+    ```
+    """
+}
 fn (entry: Map): Bool {
   eq(entry-tag(entry), "file")
 }
 
 is-deleted
 meta {
-    doc: """True for a deleted metadata entry (from `list_folder` with `include_deleted`, or a sync delta)."""
+    doc: """
+    True for a deleted metadata entry (from `list_folder` with
+    `include_deleted`, or a sync delta).
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-deleted({".tag": "deleted", name: "a.txt"})  // true
+    ```
+    """
 }
 fn (entry: Map): Bool {
   eq(entry-tag(entry), "deleted")
@@ -169,7 +247,18 @@ fn (entry: Map): Bool {
 
 is-exportable
 meta {
-    doc: """True for a file Dropbox cannot download directly but can export (`is_downloadable: false` with `export_info.export_as` set): Paper docs and cloud docs such as Google Docs stored in Dropbox."""
+    doc: """
+    True for a file Dropbox cannot download directly but can export
+    (`is_downloadable: false` with `export_info.export_as` set): Paper docs
+    and cloud docs such as Google Docs stored in Dropbox.
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-exportable({is_downloadable: false, export_info: {export_as: "markdown"}})  // true
+    ::dropbox/is-exportable({is_downloadable: true})  // false
+    ```
+    """
 }
 fn (entry: Map): Bool {
   info get(entry, "export_info")
@@ -178,7 +267,19 @@ fn (entry: Map): Bool {
 
 mime-type-of
 meta {
-    doc: """The MIME type for a metadata entry (pure): `FOLDER_MIME` for folders, `PAPER_MIME` for `.paper` docs, else from the file extension (`application/octet-stream` when unknown). Dropbox does not store MIME types."""
+    doc: """
+    The MIME type for a metadata entry (pure): `FOLDER_MIME` for folders,
+    `PAPER_MIME` for `.paper` docs, else from the file extension
+    (`application/octet-stream` when unknown). Dropbox does not store MIME
+    types.
+
+    **Example**
+
+    ```hot
+    ::dropbox/mime-type-of({".tag": "file", name: "Q3.pdf"})  // "application/pdf"
+    ::dropbox/mime-type-of({".tag": "folder", name: "Reports"})  // "inode/directory"
+    ```
+    """
 }
 fn (entry: Map): Str {
   ext file-extension(get(entry, "name"))
@@ -249,7 +350,9 @@ type {
     raw: Map
 }
 
-shared-folder-id fn (entry: Map): Str? {
+shared-folder-id
+meta {no-doc: true}
+fn (entry: Map): Str? {
   sharing get(entry, "sharing_info")
   cond {
     not(is-map(sharing)) => { or(get(entry, "parent_shared_folder_id"), get(entry, "shared_folder_id")) }
@@ -264,6 +367,16 @@ meta {
     `list_folder`, search, sync deltas, or the `metadata` of a write
     result) into a `DocFile`. A `{metadata: {...}}` wrapper is unwrapped.
     Missing fields become null/false.
+
+    **Example**
+
+    ```hot
+    entry {".tag": "file", id: "id:a4ayc_80", name: "Q3.pdf", path_display: "/Reports/Q3.pdf", size: 1024, rev: "a1c10ce0dd78"}
+    file ::dropbox/to-doc-file(entry)
+    file.mime-type  // "application/pdf"
+    file.parents  // ["/Reports"]
+    file.version  // "a1c10ce0dd78"
+    ```
     """
 }
 fn (entry: Map): DocFile {
@@ -302,7 +415,18 @@ fn (entry: Map): DocFile {
 }
 
 to-doc-files
-meta {doc: """`to-doc-file` over a Vec of metadata entries."""}
+meta {
+    doc: """
+    `to-doc-file` over a Vec of metadata entries.
+
+    **Example**
+
+    ```hot
+    files ::dropbox/to-doc-files([{".tag": "file", name: "a.txt"}, {".tag": "folder", name: "Reports"}])
+    map(files, %.name)  // ["a.txt", "Reports"]
+    ```
+    """
+}
 fn (entries: Vec): Vec {
   map(entries, to-doc-file)
 }
@@ -344,7 +468,16 @@ type {
 
 base-mime
 meta {
-    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+    doc: """
+    A Content-Type without parameters, lowercased: `"text/plain;
+    charset=utf-8"` becomes `"text/plain"`.
+
+    **Example**
+
+    ```hot
+    ::dropbox/base-mime("text/plain; charset=utf-8")  // "text/plain"
+    ```
+    """
 }
 fn (content-type: Str?): Str? {
   cond {
@@ -355,7 +488,17 @@ fn (content-type: Str?): Str? {
 
 is-textual-mime
 meta {
-    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, YAML, SQL, and `+json`/`+xml` types."""
+    doc: """
+    True when content of this MIME type is text: `text/*`, JSON, XML, SVG,
+    JavaScript, YAML, SQL, and `+json`/`+xml` types.
+
+    **Example**
+
+    ```hot
+    ::dropbox/is-textual-mime("application/json")  // true
+    ::dropbox/is-textual-mime("application/pdf")  // false
+    ```
+    """
 }
 fn (mime-type: Str?): Bool {
   m or(base-mime(mime-type), "")
@@ -369,7 +512,17 @@ fn (mime-type: Str?): Bool {
 
 content-text
 meta {
-    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+    doc: """
+    The text of a `FileContent`: its `text`, or the UTF-8 decoding of
+    `bytes` (invalid sequences become U+FFFD).
+
+    **Example**
+
+    ```hot
+    ::dropbox/content-text({text: "hello", bytes: Bytes("hello")})  // "hello"
+    ::dropbox/content-text({text: null, bytes: Bytes("hi")})  // "hi"
+    ```
+    """
 }
 fn (content: Map): Str {
   if(is-some(content.text), content.text, Str(content.bytes))

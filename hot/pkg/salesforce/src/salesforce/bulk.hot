@@ -41,6 +41,15 @@ meta {
     `CARET`, `BACKQUOTE`), `assignment-rule-id`. Unset options are
     omitted. Returns an Err for an unknown operation or an upsert
     without an external id field.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/build-ingest-job-body("Contact", "insert", {})
+    // {object: "Contact", operation: "insert", contentType: "CSV"}
+
+    is-err(::salesforce::bulk/build-ingest-job-body("Contact", "upsert", {}))  // true
+    ```
     """
 }
 fn (object: Str, operation: Str, options: Map): Map {
@@ -69,7 +78,18 @@ fn (object: Str, operation: Str, options: Map): Map {
 
 build-query-job-body
 meta {
-    doc: """The create-query-job body. `options`: `include-deleted` (operation `queryAll`), `line-ending`, `column-delimiter`. Unset options are omitted."""
+    doc: """
+    The create-query-job body. `options`: `include-deleted` (operation
+    `queryAll`), `line-ending`, `column-delimiter`. Unset options are
+    omitted.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/build-query-job-body("SELECT Id FROM Contact", {include-deleted: true})
+    // {operation: "queryAll", query: "SELECT Id FROM Contact"}
+    ```
+    """
 }
 fn (soql: Str, options: Map): Map {
   filter-vals({
@@ -82,7 +102,17 @@ fn (soql: Str, options: Map): Map {
 
 is-job-finished
 meta {
-    doc: """True when a job's `state` is terminal: `JobComplete`, `Failed`, or `Aborted`."""
+    doc: """
+    True when a job's `state` is terminal: `JobComplete`, `Failed`, or
+    `Aborted`.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/is-job-finished({state: "JobComplete"})  // true
+    ::salesforce::bulk/is-job-finished({state: "InProgress"})  // false
+    ```
+    """
 }
 fn (job: Map): Bool {
   in(get(job, "state"), FINISHED_STATES)
@@ -90,7 +120,19 @@ fn (job: Map): Bool {
 
 csv-cell
 meta {
-    doc: """Render one CSV cell: null → empty, Bool/number → text, and quote (doubling inner quotes) when the value holds a comma, quote, or line break. Exposed for testing."""
+    doc: """
+    Render one CSV cell: null → empty, Bool/number → text, and quote
+    (doubling inner quotes) when the value holds a comma, quote, or line
+    break. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/csv-cell("a,b")  // "\"a,b\""
+    ::salesforce::bulk/csv-cell(null)  // ""
+    ::salesforce::bulk/csv-cell(true)  // "true"
+    ```
+    """
 }
 fn (value: Any): Str {
   text cond {
@@ -130,7 +172,16 @@ fn (records: Vec, columns: Vec): Str {
 
 results-path
 meta {
-    doc: """The query-results path with optional `locator` and `max-records` parameters. Exposed for testing."""
+    doc: """
+    The query-results path with optional `locator` and `max-records`
+    parameters. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/results-path("750R", {max-records: 100})  // "/jobs/query/750R/results?maxRecords=100"
+    ```
+    """
 }
 fn (job-id: Str, options: Map): Str {
   `/jobs/query/${::api/segment(job-id)}/results${::api/query-string({locator: get(options, "locator"), maxRecords: get(options, "max-records")})}`
@@ -138,7 +189,17 @@ fn (job-id: Str, options: Map): Str {
 
 parse-locator
 meta {
-    doc: """The `Sforce-Locator` header as a cursor: null when absent or the literal "null" Salesforce sends on the last page. Exposed for testing."""
+    doc: """
+    The `Sforce-Locator` header as a cursor: null when absent or the literal
+    "null" Salesforce sends on the last page. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/parse-locator({Sforce-Locator: "abc"})  // "abc"
+    ::salesforce::bulk/parse-locator({Sforce-Locator: "null"})  // null
+    ```
+    """
 }
 fn (headers: Any): Any {
   raw cond {
@@ -152,7 +213,9 @@ fn (headers: Any): Any {
   }
 }
 
-body-text fn (response: Any): Str {
+body-text
+meta {no-doc: true}
+fn (response: Any): Str {
   bytes get(response, "body-bytes")
   cond {
     is-bytes(bytes) => { Str(bytes) }
@@ -162,7 +225,9 @@ body-text fn (response: Any): Str {
   }
 }
 
-send-csv fn (method: Str, path: Str, opts: Map): Any {
+send-csv
+meta {no-doc: true}
+fn (method: Str, path: Str, opts: Map): Any {
   response ::api/send(method, path, null, {accept: "text/csv"}, opts)
   cond {
     is-err(response) => { response }
@@ -171,7 +236,9 @@ send-csv fn (method: Str, path: Str, opts: Map): Any {
   }
 }
 
-csv-result fn (method: Str, path: Str, opts: Map): Str {
+csv-result
+meta {no-doc: true}
+fn (method: Str, path: Str, opts: Map): Str {
   response send-csv(method, path, opts)
   cond {
     is-err(response) => { response }
@@ -179,11 +246,15 @@ csv-result fn (method: Str, path: Str, opts: Map): Str {
   }
 }
 
-job-path fn (kind: Str, job-id: Str): Str {
+job-path
+meta {no-doc: true}
+fn (kind: Str, job-id: Str): Str {
   `/jobs/${kind}/${::api/segment(job-id)}`
 }
 
-poll fn (job: Result): Map {
+poll
+meta {no-doc: true}
+fn (job: Result): Map {
   cond {
     is-err(job) => { job }
     is-job-finished(job) => { job }
@@ -197,7 +268,17 @@ poll fn (job: Result): Map {
 
 create-ingest-job
 meta {
-    doc: """POST /jobs/ingest - Open an ingest job. See `build-ingest-job-body` for the options. Returns the job (`id`, `state: "Open"`, ...)."""
+    doc: """
+    POST /jobs/ingest - Open an ingest job. See `build-ingest-job-body` for
+    the options. Returns the job (`id`, `state: "Open"`, ...).
+
+    **Example**
+
+    ```hot
+    job ::salesforce::bulk/create-ingest-job("Contact", "upsert", {external-id-field: "External_Id__c"})
+    job.id
+    ```
+    """
 }
 fn
 (object: Str, operation: Str): Map {
@@ -216,7 +297,18 @@ fn
 
 upload-job-data
 meta {
-    doc: """PUT /jobs/ingest/{id}/batches - Upload the job's CSV (header row of field API names first; see `to-csv`). One upload per job. Returns null on success."""
+    doc: """
+    PUT /jobs/ingest/{id}/batches - Upload the job's CSV (header row of
+    field API names first; see `to-csv`). One upload per job. Returns null
+    on success.
+
+    **Example**
+
+    ```hot
+    csv ::salesforce::bulk/to-csv([{LastName: "Lovelace"}], ["LastName"])
+    ::salesforce::bulk/upload-job-data("750R0000000000A", csv)
+    ```
+    """
 }
 fn
 (job-id: Str, csv: Str): Any {
@@ -228,7 +320,17 @@ fn
 
 close-job
 meta {
-    doc: """PATCH /jobs/ingest/{id} with `state: UploadComplete` - Tell Salesforce the data is in so processing starts. Returns the job."""
+    doc: """
+    PATCH /jobs/ingest/{id} with `state: UploadComplete` - Tell Salesforce
+    the data is in so processing starts. Returns the job.
+
+    **Example**
+
+    ```hot
+    job ::salesforce::bulk/close-job("750R0000000000A")
+    job.state
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -240,7 +342,16 @@ fn
 
 abort-ingest-job
 meta {
-    doc: """PATCH /jobs/ingest/{id} with `state: Aborted` - Abort an open or in-progress ingest job."""
+    doc: """
+    PATCH /jobs/ingest/{id} with `state: Aborted` - Abort an open or
+    in-progress ingest job.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/abort-ingest-job("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -252,7 +363,18 @@ fn
 
 get-ingest-job
 meta {
-    doc: """GET /jobs/ingest/{id} - Job status: `state` (`Open`, `UploadComplete`, `InProgress`, `JobComplete`, `Failed`, `Aborted`), `numberRecordsProcessed`, `numberRecordsFailed`, `errorMessage`."""
+    doc: """
+    GET /jobs/ingest/{id} - Job status: `state` (`Open`, `UploadComplete`,
+    `InProgress`, `JobComplete`, `Failed`, `Aborted`),
+    `numberRecordsProcessed`, `numberRecordsFailed`, `errorMessage`.
+
+    **Example**
+
+    ```hot
+    job ::salesforce::bulk/get-ingest-job("750R0000000000A")
+    job.numberRecordsFailed
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -273,6 +395,7 @@ meta {
     ```hot
     check-job fn (job-id: Str): Map { ::salesforce::bulk/poll-ingest-job(job-id) }
 
+    csv ::salesforce::bulk/to-csv([{LastName: "Lovelace"}], ["LastName"])
     job ::salesforce::bulk/ingest("Contact", "insert", csv)
     ::hot::task/start(check-job, job.id, ::hot::task/TaskOptions({retry: {attempts: 20, delay: 5000, backoff: "exponential"}}))
     ```
@@ -288,7 +411,16 @@ fn
 
 delete-ingest-job
 meta {
-    doc: """DELETE /jobs/ingest/{id} - Delete a finished job and its data. Returns null."""
+    doc: """
+    DELETE /jobs/ingest/{id} - Delete a finished job and its data. Returns
+    null.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/delete-ingest-job("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Any {
@@ -300,7 +432,17 @@ fn
 
 successful-results
 meta {
-    doc: """GET /jobs/ingest/{id}/successfulResults - CSV of the processed records, with `sf__Id` and `sf__Created` columns first."""
+    doc: """
+    GET /jobs/ingest/{id}/successfulResults - CSV of the processed records,
+    with `sf__Id` and `sf__Created` columns first.
+
+    **Example**
+
+    ```hot
+    // CSV text, one row per record
+    ::salesforce::bulk/successful-results("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Str {
@@ -312,7 +454,17 @@ fn
 
 failed-results
 meta {
-    doc: """GET /jobs/ingest/{id}/failedResults - CSV of the failed records, with `sf__Id` and `sf__Error` columns first."""
+    doc: """
+    GET /jobs/ingest/{id}/failedResults - CSV of the failed records, with
+    `sf__Id` and `sf__Error` columns first.
+
+    **Example**
+
+    ```hot
+    // Read sf__Error to see why each row failed
+    ::salesforce::bulk/failed-results("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Str {
@@ -324,7 +476,16 @@ fn
 
 unprocessed-records
 meta {
-    doc: """GET /jobs/ingest/{id}/unprocessedrecords - CSV of the records never processed (e.g. after an abort)."""
+    doc: """
+    GET /jobs/ingest/{id}/unprocessedrecords - CSV of the records never
+    processed (e.g. after an abort).
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/unprocessed-records("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Str {
@@ -346,6 +507,7 @@ meta {
     **Example**
 
     ```hot
+    rows [{External_Id__c: "u-42", LastName: "Lovelace", Email: "ada@example.com"}]
     csv ::salesforce::bulk/to-csv(rows, ["External_Id__c", "LastName", "Email"])
     job ::salesforce::bulk/ingest("Contact", "upsert", csv, {external-id-field: "External_Id__c"})
     job.id
@@ -407,7 +569,17 @@ fn
 
 get-query-job
 meta {
-    doc: """GET /jobs/query/{id} - Query job status (`state`, `numberRecordsProcessed`, ...)."""
+    doc: """
+    GET /jobs/query/{id} - Query job status (`state`,
+    `numberRecordsProcessed`, ...).
+
+    **Example**
+
+    ```hot
+    job ::salesforce::bulk/get-query-job("750R0000000000A")
+    job.state
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -419,7 +591,18 @@ fn
 
 poll-query-job
 meta {
-    doc: """Fetch a query job and return it once finished, or an Err while it is still running (see `poll-ingest-job`)."""
+    doc: """
+    Fetch a query job and return it once finished, or an Err while it is
+    still running (see `poll-ingest-job`).
+
+    **Example**
+
+    ```hot
+    // An Err until the job finishes
+    job ::salesforce::bulk/poll-query-job("750R0000000000A")
+    if-err(job, (e) { println(`still running: ${e}`) })
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -431,7 +614,16 @@ fn
 
 abort-query-job
 meta {
-    doc: """PATCH /jobs/query/{id} with `state: Aborted` - Abort a running query job."""
+    doc: """
+    PATCH /jobs/query/{id} with `state: Aborted` - Abort a running query
+    job.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/abort-query-job("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Map {
@@ -443,7 +635,16 @@ fn
 
 delete-query-job
 meta {
-    doc: """DELETE /jobs/query/{id} - Delete a finished query job and its results. Returns null."""
+    doc: """
+    DELETE /jobs/query/{id} - Delete a finished query job and its results.
+    Returns null.
+
+    **Example**
+
+    ```hot
+    ::salesforce::bulk/delete-query-job("750R0000000000A")
+    ```
+    """
 }
 fn
 (job-id: Str): Any {
@@ -464,8 +665,9 @@ meta {
     **Example**
 
     ```hot
-    page ::salesforce::bulk/query-results(job.id, {max-records: 50000})
-    more if(is-null(page.locator), null, ::salesforce::bulk/query-results(job.id, {locator: page.locator}))
+    job-id "750R0000000000A"
+    page ::salesforce::bulk/query-results(job-id, {max-records: 50000})
+    more if(is-null(page.locator), null, ::salesforce::bulk/query-results(job-id, {locator: page.locator}))
     ```
     """
 }

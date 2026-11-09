@@ -9,12 +9,9 @@ meta {
     **Example**
 
     ```hot
-    // Given a function with metadata:
-    // greet meta {"doc": "Say hello", "core": true}
-    // fn (name) { ... }
-
-    ::hot::meta/get(greet)
-    // {"doc": "Say hello", "core": true}
+    // A function's meta map, here with its doc and core keys
+    info ::hot::meta/get(::hot::str/split)
+    info.core
     ```
     """
 }
@@ -55,7 +52,7 @@ meta {
     **Example**
 
     ```hot
-    src source(my-function)
+    src source(::hot::str/split)
     // src.file = "src/myapp/handlers.hot"
     // src.line = 42
     // src.column = 1

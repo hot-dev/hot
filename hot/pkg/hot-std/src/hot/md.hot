@@ -18,15 +18,8 @@ meta {
     **Example**
 
     ```hot
-    raw \"\"\"---
-    title: Welcome
-    tags: [intro, agent]
-    ---
-
-    Hello, world!
-    \"\"\"
-
-    parsed parse-frontmatter(raw)
+    raw "---\ntitle: Welcome\ntags: [intro, agent]\n---\nHello, world!\n"
+    parsed ::hot::md/parse-frontmatter(raw)
     parsed.frontmatter.title  // "Welcome"
     parsed.body               // "Hello, world!\n"
     ```

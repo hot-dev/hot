@@ -34,7 +34,23 @@ fn
 
 get-balance-transaction
 meta {
-    doc: """GET /v1/balance_transactions/{id} - Retrieve a balance transaction (charge, refund, payout, fee, ...) by ID."""
+    doc: """
+    GET /v1/balance_transactions/{id} - Retrieve a balance transaction
+    (charge, refund, payout, fee, ...) by ID.
+
+    **Example**
+
+    ```hot
+    ::balance ::stripe::balance
+
+    txn ::balance/get-balance-transaction("txn_123")
+    // Amounts are in the smallest currency unit
+    net-cents txn.net
+
+    // For a connected account
+    ::balance/get-balance-transaction("txn_123", {stripe-account: "acct_123"})
+    ```
+    """
 }
 fn
 (transaction: Str): Map {
@@ -58,7 +74,21 @@ ListBalanceTransactionsRequest type {
 
 list-balance-transactions
 meta {
-    doc: """GET /v1/balance_transactions - List balance transactions, most recent first. Filter by `type` (e.g. "charge", "refund", "payout"), `payout` (the transactions a payout settled), or `source`."""
+    doc: """
+    GET /v1/balance_transactions - List balance transactions, most recent
+    first. Filter by `type` (e.g. "charge", "refund", "payout"), `payout`
+    (the transactions a payout settled), or `source`.
+
+    **Example**
+
+    ```hot
+    ::balance ::stripe::balance
+
+    // What a payout settled
+    page ::balance/list-balance-transactions(::balance/ListBalanceTransactionsRequest({payout: "po_123", limit: 100}))
+    nets map(page.data, %.net)
+    ```
+    """
 }
 fn
 (): Map {

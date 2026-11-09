@@ -28,7 +28,18 @@ HttpResponse ::hot::http/HttpResponse
 
 auth-header
 meta {
-    doc: """Build the Authorization header value: personal API keys (`lin_api_...`) go raw; OAuth tokens (`lin_oauth_...`) get the `Bearer ` prefix, per Linear's docs."""
+    doc: """
+    Build the Authorization header value: personal API keys (`lin_api_...`)
+    go raw; OAuth tokens (`lin_oauth_...`) get the `Bearer ` prefix, per
+    Linear's docs.
+
+    **Example**
+
+    ```hot
+    ::linear::api/auth-header("lin_api_x")  // "lin_api_x"
+    ::linear::api/auth-header("lin_oauth_x")  // "Bearer lin_oauth_x"
+    ```
+    """
 }
 fn (key: Str): Str {
   cond {
@@ -39,7 +50,18 @@ fn (key: Str): Str {
 
 parse-graphql-response
 meta {
-    doc: """Unwrap a GraphQL response body: returns `data` when there are no errors, otherwise an Err carrying `{errors, data}`. Exposed for testing; `graphql` applies it."""
+    doc: """
+    Unwrap a GraphQL response body: returns `data` when there are no errors,
+    otherwise an Err carrying `{errors, data}`. Exposed for testing;
+    `graphql` applies it.
+
+    **Example**
+
+    ```hot
+    ::linear::api/parse-graphql-response({data: {viewer: {id: "u1"}}})  // {viewer: {id: "u1"}}
+    is-err(::linear::api/parse-graphql-response({errors: [{message: "Bad query"}]}))  // true
+    ```
+    """
 }
 fn (body: Map): Any {
   errors get(body, "errors", [])
@@ -49,13 +71,26 @@ fn (body: Map): Any {
   }
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::linear::api/blank-credential({api-key: " "}, ["api-key"])  // "api-key"
+    ::linear::api/blank-credential({}, ["api-key"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -63,7 +98,20 @@ fn (opts: Map, names: Vec): Str? {
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key, base-url}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults. An
+    Err when no API key is set, when `api-key` is in `opts` but blank or
+    null (that never falls back to context), or when `opts` has `base-url`
+    without `api-key`. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::linear::api/resolve-from({}, {"linear.api.key": "lin_api_x"})  // {api-key: "lin_api_x", base-url: "https://api.linear.app/graphql"}
+    is-err(::linear::api/resolve-from({api-key: ""}, {"linear.api.key": "lin_api_x"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   api-key or(non-blank(get(opts, "api-key")), non-blank(get(ctx-values, "linear.api.key")))
@@ -93,7 +141,7 @@ meta {
     **Example**
 
     ```hot
-    ::linear::api/resolve({api-key: "lin_api_tenant_b"}).base-url  // "https://api.linear.app/graphql"
+    ::linear::api/resolve({api-key: ::hot::ctx/get("tenant-b.linear.api.key")}).base-url
     ```
     """
 }
@@ -104,7 +152,18 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure;
+    exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::linear::api/build-request("query { viewer { id } }", {}, {api-key: "lin_api_x", base-url: "https://api.linear.app/graphql"})
+    req.method  // "POST"
+    req.headers.Authorization  // "lin_api_x"
+    ```
+    """
 }
 fn (query: Str, variables: Map, resolved: Map): HttpRequest {
   HttpRequest({
@@ -118,7 +177,9 @@ fn (query: Str, variables: Map, resolved: Map): HttpRequest {
   })
 }
 
-send-graphql fn (req: HttpRequest): Any {
+send-graphql
+meta {no-doc: true}
+fn (req: HttpRequest): Any {
   response ::hot::http/request(req)
   cond {
     is-err(response) => { response }
@@ -141,7 +202,7 @@ meta {
     me.viewer.name
 
     // Per-call credentials
-    other ::linear::api/graphql("query { viewer { id } }", {}, {api-key: "lin_api_tenant_b"})
+    other ::linear::api/graphql("query { viewer { id } }", {}, {api-key: ::hot::ctx/get("tenant-b.linear.api.key")})
     ```
     """
 }

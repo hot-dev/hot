@@ -2,7 +2,7 @@
 
 hot.pkg.redis {
   name: "hot.dev/redis",
-  version: "0.3.1",
+  version: "0.3.2",
   hot-min-version: "3.0.2",
   description: "Redis client for Hot, speaking the RESP protocol in pure Hot over ::hot::tcp / ::hot::tls.",
   author: "Hot Dev",

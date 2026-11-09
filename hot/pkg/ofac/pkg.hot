@@ -2,7 +2,7 @@
 
 hot.pkg.ofac {
   name: "hot.dev/ofac",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The US Treasury OFAC SDN and Consolidated (non-SDN) lists for Hot: downloads the free Sanctions List Service files and parses them into Entry records, with a cheap SHA-256 version check. Only fetches and parses: it does not screen names and stores nothing.",
   author: "Hot Dev",

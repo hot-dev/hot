@@ -97,7 +97,7 @@ meta {
     **Example - URL response (default)**
 
     ```hot
-    response ::openai::images/generate(CreateImageRequest({
+    response ::openai::images/generate(::openai::images/CreateImageRequest({
         prompt: "A simple red circle on a white background",
         model: "dall-e-2",
         size: "256x256",
@@ -111,7 +111,7 @@ meta {
     **Example - Base64 response**
 
     ```hot
-    response ::openai::images/generate(CreateImageRequest({
+    response ::openai::images/generate(::openai::images/CreateImageRequest({
         prompt: "A cat wearing a spacesuit",
         model: "dall-e-3",
         response_format: "b64_json"
@@ -147,7 +147,7 @@ meta {
 
     **Example**
     ```hot
-    response edit({
+    response ::openai::images/edit({
         image: "path/to/image.png",
         prompt: "Add a red hat to the person",
         mask: "path/to/mask.png"
@@ -175,7 +175,7 @@ meta {
 
     **Example**
     ```hot
-    response variation({
+    response ::openai::images/variation({
         image: "path/to/image.png",
         n: 3
     })
@@ -208,10 +208,10 @@ meta {
 
     **Example**
     ```hot
-    result generate-to-file("uploads/city.png", "A futuristic city at sunset")
+    result ::openai::images/generate-to-file("uploads/city.png", "A futuristic city at sunset")
 
     match result {
-        AIMedia.Image => {
+        ::ai::media/AIMedia.Image => {
             result.media.file.path  // => "uploads/city.png"
             result.media.file.size  // => 123456
             result.prompt           // => "A futuristic city at sunset"
@@ -223,7 +223,7 @@ meta {
 
     **With options**
     ```hot
-    result generate-to-file("output/cat.png", {
+    result ::openai::images/generate-to-file("output/cat.png", {
         prompt: "A cat wearing a spacesuit",
         model: "dall-e-3",
         quality: "hd",
@@ -306,7 +306,7 @@ meta {
 
     **Example**
     ```hot
-    batch generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
+    batch ::openai::images/generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
     // Generates: uploads/image-0.png, uploads/image-1.png, uploads/image-2.png
 
     batch.succeeded // => 3
@@ -362,7 +362,7 @@ meta {
 
     **Example**
     ```hot
-    url create-image("A sunset over mountains")
+    url ::openai::images/create-image("A sunset over mountains")
     // "https://..."
     ```
     """
@@ -407,7 +407,18 @@ fn
 // ============================================================================
 
 parse-size
-meta {doc: """Parse size string like '1024x1024' into width/height."""}
+meta {
+    doc: """
+    Parse size string like '1024x1024' into width/height.
+
+    **Example**
+
+    ```hot
+    ::openai::images/parse-size("1024x1536")  // {width: 1024, height: 1536}
+    ::openai::images/parse-size(null)  // {width: null, height: null}
+    ```
+    """
+}
 fn (size: Str?): Map {
     cond {
         is-null(size) => { {width: null, height: null} }
@@ -427,7 +438,17 @@ fn (size: Str?): Map {
 }
 
 detect-format
-meta {doc: """Detect image format from file path extension."""}
+meta {
+    doc: """
+    Detect image format from file path extension.
+
+    **Example**
+
+    ```hot
+    ::openai::images/detect-format("output/cat.png")  // "png"
+    ```
+    """
+}
 fn (path: Str): Str? {
     // Use ::hot::mime to get the minor type (e.g., "png" from "image/png")
     mime ::hot::mime/from-path(path)

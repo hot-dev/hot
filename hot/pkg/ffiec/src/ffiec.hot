@@ -35,7 +35,9 @@ FACSIMILE_FORMATS ["PDF", "XBRL", "SDF"]
 CALL_SERIES "Call"
 
 // Errors are returned, not consumed: consuming an Err would halt the run.
-with-auth fn (opts: Map, f: Fn): Any {
+with-auth
+meta {no-doc: true}
+fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -46,7 +48,9 @@ with-auth fn (opts: Map, f: Fn): Any {
   }
 }
 
-ffiec-list fn (method: Str, params: Map, opts: Map): Any {
+ffiec-list
+meta {no-doc: true}
+fn (method: Str, params: Map, opts: Map): Any {
   with-auth(opts, (cfg, auth) {
     ::api/get-list(`${cfg.base-url}/${method}`, {...auth, ...params})
   })
@@ -84,7 +88,9 @@ fn (value: Any): Str {
   }
 }
 
-one-of fn (label: Str, value: Str, allowed: Vec): Str {
+one-of
+meta {no-doc: true}
+fn (label: Str, value: Str, allowed: Vec): Str {
   cond {
     in(value, allowed) => { value }
     => { err(`ffiec: invalid ${label} '${value}'; expected one of ${join(allowed, ", ")}`) }
@@ -97,6 +103,14 @@ meta {
     The headers that pick one institution in one period (pure):
     `reportingPeriodEndDate`, `fiIdType` from `opts.fi-id-type` (default
     `"ID_RSSD"`) and `fiId`. An Err for a bad period or type.
+
+    **Example**
+
+    ```hot
+    ::ffiec/filer-headers("2025-03-31", 480228, {})
+    // {reportingPeriodEndDate: "03/31/2025", fiIdType: "ID_RSSD", fiId: "480228"}
+    ::ffiec/filer-headers("2025-03-31", 3510, {fi-id-type: "FDICCertNumber"}).fiIdType  // "FDICCertNumber"
+    ```
     """
 }
 fn (period: Any, fi-id: Any, opts: Map): Map {
@@ -137,7 +151,17 @@ fn
 
 ubpr-reporting-periods
 meta {
-    doc: """RetrieveUBPRReportingPeriods: every UBPR period end date, as `MM/DD/YYYY` strings."""
+    doc: """
+    RetrieveUBPRReportingPeriods: every UBPR period end date, as
+    `MM/DD/YYYY` strings.
+
+    **Example**
+
+    ```hot
+    periods ::ffiec/ubpr-reporting-periods()
+    last(periods)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -176,7 +200,9 @@ fn
   }
 }
 
-filers fn (method: Str, period: Any, since: Str, opts: Map): Any {
+filers
+meta {no-doc: true}
+fn (method: Str, period: Any, since: Str, opts: Map): Any {
   date period-date(period)
   cond {
     is-err(date) => { date }
@@ -209,7 +235,19 @@ fn
 
 filers-submission-date-time
 meta {
-    doc: """RetrieveFilersSubmissionDateTime: `{ID_RSSD, DateTime}` for each institution that filed for `period` after `since`. Takes `since` as `filers-since-date` does; the spec shows only the `MM/DD/YYYY` forms here."""
+    doc: """
+    RetrieveFilersSubmissionDateTime: `{ID_RSSD, DateTime}` for each
+    institution that filed for `period` after `since`. Takes `since` as
+    `filers-since-date` does; the spec shows only the `MM/DD/YYYY` forms
+    here.
+
+    **Example**
+
+    ```hot
+    rows ::ffiec/filers-submission-date-time("2025-03-31", "04/15/2025")
+    map(rows, %.DateTime)
+    ```
+    """
 }
 fn
 (period: Any, since: Str): Vec {
@@ -230,6 +268,13 @@ meta {
     body "a byte stream array" and doesn't say how it is encoded. A JSON
     string is read as base64, a JSON list as byte values, and any other
     content type as the raw file. An Err for any other JSON.
+
+    **Example**
+
+    ```hot
+    ::hot::bytes/to-str(::ffiec/facsimile-bytes({headers: {content-type: "application/json"}, body: "aGk="}))  // "hi"
+    ::hot::bytes/to-vec(::ffiec/facsimile-bytes({headers: {content-type: "application/json"}, body: [104, 105]}))  // [104, 105]
+    ```
     """
 }
 fn (response: Map): Bytes {
@@ -253,7 +298,17 @@ fn (response: Map): Bytes {
 
 is-missing-facsimile
 meta {
-    doc: """True when `e` is the `HttpError` the service gives for a facsimile it doesn't have (pure)."""
+    doc: """
+    True when `e` is the `HttpError` the service gives for a facsimile it
+    doesn't have (pure). Pass it untyped: `untype(err-value(result))`.
+
+    **Example**
+
+    ```hot
+    ::ffiec/is-missing-facsimile({status: 400, message: "ffiec: HTTP 400: Facsimile not found or unavailable"})  // true
+    ::ffiec/is-missing-facsimile({status: 403, message: "ffiec: HTTP 403: Forbidden"})                           // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   and(
@@ -263,7 +318,9 @@ fn (e: Any): Bool {
   )
 }
 
-fetch-file fn (method: Str, headers: Map, format: Str, opts: Map): Any {
+fetch-file
+meta {no-doc: true}
+fn (method: Str, headers: Map, format: Str, opts: Map): Any {
   with-auth(opts, (cfg, auth) {
     response ::api/request(`${cfg.base-url}/${method}`, {...auth, ...headers})
     cond {
@@ -314,7 +371,18 @@ fn
 
 ubpr-xbrl-facsimile
 meta {
-    doc: """RetrieveUBPRXBRLFacsimile: one institution's UBPR XBRL instance document for a period, as `{format, content-type, bytes}`, or null when the service has none. `opts`: `fi-id-type`, plus `user-id` and `token`."""
+    doc: """
+    RetrieveUBPRXBRLFacsimile: one institution's UBPR XBRL instance document
+    for a period, as `{format, content-type, bytes}`, or null when the
+    service has none. `opts`: `fi-id-type`, plus `user-id` and `token`.
+
+    **Example**
+
+    ```hot
+    report ::ffiec/ubpr-xbrl-facsimile("2025-03-31", 3510, {fi-id-type: "FDICCertNumber"})
+    if(is-null(report), "not available", report.bytes)
+    ```
+    """
 }
 fn
 (period: Any, fi-id: Any): Map? {

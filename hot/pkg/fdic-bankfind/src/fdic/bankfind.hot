@@ -47,7 +47,9 @@ PARAMS {
   agg-limit: "agg_limit"
 }
 
-fdic-get fn (path: Str, opts: Map): Any {
+fdic-get
+meta {no-doc: true}
+fn (path: Str, opts: Map): Any {
   cfg ::api/resolve(opts)
   // Returned, not consumed: consuming an Err would halt the run.
   cond {
@@ -65,14 +67,26 @@ fdic-get fn (path: Str, opts: Map): Any {
 
 phrase
 meta {
-    doc: """`value` as a quoted filter phrase, with backslashes and double quotes escaped (pure), so outside text can't change the query."""
+    doc: """
+    `value` as a quoted filter phrase, with backslashes and double quotes
+    escaped (pure), so outside text can't change the query.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind/phrase("Iowa")  // "\"Iowa\""
+    ::fdic::bankfind/phrase("Bank \"A\"")  // "\"Bank \\\"A\\\"\""
+    ```
+    """
 }
 fn (value: Str): Str {
   escaped ::hot::str/replace(::hot::str/replace(value, "\\", "\\\\"), "\"", "\\\"")
   `"${escaped}"`
 }
 
-filter-value fn (value: Any): Str {
+filter-value
+meta {no-doc: true}
+fn (value: Any): Str {
   cond {
     is-vec(value) => { `(${join(map(value, filter-value), ",")})` }
     is-str(value) => { phrase(value) }
@@ -101,7 +115,9 @@ fn (filters: Map): Str {
   join(map(keys(filters), (k) { `${k}:${filter-value(get(filters, k))}` }), " AND ")
 }
 
-filter-text fn (filters: Any): Str? {
+filter-text
+meta {no-doc: true}
+fn (filters: Any): Str? {
   cond {
     is-map(filters) => { if(is-empty(filters), null, filter-string(filters)) }
     => { filters }
@@ -110,7 +126,17 @@ filter-text fn (filters: Any): Str? {
 
 and-filters
 meta {
-    doc: """Combine two `filters` values, each a Str, Map or null, with `AND` (pure). A Str goes in parentheses so its own `OR` stays inside."""
+    doc: """
+    Combine two `filters` values, each a Str, Map or null, with `AND`
+    (pure). A Str goes in parentheses so its own `OR` stays inside.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind/and-filters({ACTIVE: 1}, "STALP:\"IA\" OR STALP:\"NE\"")  // "(ACTIVE:1) AND (STALP:\"IA\" OR STALP:\"NE\")"
+    ::fdic::bankfind/and-filters("ACTIVE:1", null)  // "ACTIVE:1"
+    ```
+    """
 }
 fn (a: Any, b: Any): Str? {
   parts filter(map([a, b], filter-text), ::api/given)
@@ -123,7 +149,20 @@ fn (a: Any, b: Any): Str? {
 
 list-params
 meta {
-    doc: """The API parameters from `opts` (pure): `filters`, `fields` and `limit` (capped at 10,000) with the rest as given. See the namespace doc for the keys."""
+    doc: """
+    The API parameters from `opts` (pure): `filters`, `fields` and `limit`
+    (capped at 10,000) with the rest as given. See the namespace doc for the
+    keys.
+
+    **Example**
+
+    ```hot
+    params ::fdic::bankfind/list-params({fields: ["CERT", "NAME"], limit: 50000, sort-by: "ASSET"})
+    params.fields  // "CERT,NAME"
+    params.limit  // 10000
+    params.sort_by  // "ASSET"
+    ```
+    """
 }
 fn (opts: Map): Map {
   fields get(opts, "fields")
@@ -140,7 +179,9 @@ fn (opts: Map): Map {
   }
 }
 
-with-cert fn (cert: Any, defaults: Map, opts: Map): Map {
+with-cert
+meta {no-doc: true}
+fn (cert: Any, defaults: Map, opts: Map): Map {
   {...defaults, ...opts, filters: and-filters({CERT: cert}, get(opts, "filters"))}
 }
 
@@ -178,7 +219,19 @@ fn
 
 institution
 meta {
-    doc: """One institution by FDIC certificate number, or null when there is none."""
+    doc: """
+    One institution by FDIC certificate number, or null when there is none.
+
+    **Example**
+
+    ```hot
+    bank ::fdic::bankfind/institution(628)
+    bank.NAME
+
+    // Only the fields you need
+    ::fdic::bankfind/institution(628, {fields: ["NAME", "ASSET"]})
+    ```
+    """
 }
 fn
 (cert: Any): Map? {
@@ -190,7 +243,18 @@ fn
 
 locations
 meta {
-    doc: """One page of branches and other offices. `MAINOFF` is 1 for the main office."""
+    doc: """
+    One page of branches and other offices. `MAINOFF` is 1 for the main
+    office.
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/locations({filters: {STALP: "IA", MAINOFF: 1}, fields: "NAME,OFFNAME,CITY", limit: 25})
+    map(::b/rows(page), (r) { r.CITY })
+    ```
+    """
 }
 fn
 (): Map {
@@ -202,7 +266,18 @@ fn
 
 branches
 meta {
-    doc: """One page of an institution's offices by certificate number, sorted by office number."""
+    doc: """
+    One page of an institution's offices by certificate number, sorted by
+    office number.
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/branches(628, {fields: "OFFNAME,CITY,STALP", limit: 50})
+    ::b/total(page)
+    ```
+    """
 }
 fn
 (cert: Any): Map {
@@ -248,6 +323,14 @@ meta {
     One page of an institution's own events by certificate number, newest
     first: mergers, name and charter changes. It leaves out branch
     events, which are most of the rows for a large bank.
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/institution-history(628, {limit: 20})
+    map(::b/rows(page), (r) { r.CHANGECODE_DESC })
+    ```
     """
 }
 fn
@@ -265,7 +348,19 @@ fn
 
 failures
 meta {
-    doc: """One page of bank failures since 1934. `COST` is the estimated loss to the insurance fund, and `RESTYPE1` the resolution type. Filter by year with `FAILYR`, e.g. `{FAILYR: 2023}`."""
+    doc: """
+    One page of bank failures since 1934. `COST` is the estimated loss to
+    the insurance fund, and `RESTYPE1` the resolution type. Filter by year
+    with `FAILYR`, e.g. `{FAILYR: 2023}`.
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/failures({filters: {FAILYR: 2023}, fields: ["NAME", "COST"], sort-by: "COST", sort-order: "DESC"})
+    first(::b/rows(page)).NAME
+    ```
+    """
 }
 fn
 (): Map {
@@ -277,7 +372,17 @@ fn
 
 failure
 meta {
-    doc: """An institution's failure record by certificate number, or null when it has none."""
+    doc: """
+    An institution's failure record by certificate number, or null when it
+    has none.
+
+    **Example**
+
+    ```hot
+    f ::fdic::bankfind/failure(59017)
+    if(is-null(f), "never failed", f.COST)
+    ```
+    """
 }
 fn
 (cert: Any): Map? {
@@ -311,7 +416,18 @@ fn
 
 institution-financials
 meta {
-    doc: """One page of an institution's quarters by certificate number, newest first."""
+    doc: """
+    One page of an institution's quarters by certificate number, newest
+    first.
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/institution-financials(628, {fields: "REPDTE,ASSET,DEP", limit: 8})
+    first(::b/rows(page)).ASSET
+    ```
+    """
 }
 fn
 (cert: Any): Map {
@@ -323,7 +439,19 @@ fn
 
 summary
 meta {
-    doc: """One page of aggregate financial and structure data by year, from 1934. Each row covers a state and year, split by `CB_SI` into commercial banks (`CB`) and savings institutions (`SI`)."""
+    doc: """
+    One page of aggregate financial and structure data by year, from 1934.
+    Each row covers a state and year, split by `CB_SI` into commercial banks
+    (`CB`) and savings institutions (`SI`).
+
+    **Example**
+
+    ```hot
+    ::b ::fdic::bankfind
+    page ::b/summary({filters: "STNAME:\"Iowa\" AND YEAR:2023", fields: "STNAME,YEAR,CB_SI,ASSET"})
+    map(::b/rows(page), (r) { r.ASSET })
+    ```
+    """
 }
 fn
 (): Map {
@@ -339,7 +467,17 @@ fn
 
 rows
 meta {
-    doc: """The records in a page, unwrapped from the API's `{data: {...}, score}` (pure)."""
+    doc: """
+    The records in a page, unwrapped from the API's `{data: {...}, score}`
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind/rows({data: [{data: {CERT: 628}, score: 1}]})  // [{CERT: 628}]
+    ::fdic::bankfind/rows(null)  // []
+    ```
+    """
 }
 fn (page: Any): Vec<Map> {
   map(or(get(or(page, {}), "data"), []), (row) { get(row, "data") })
@@ -347,13 +485,24 @@ fn (page: Any): Vec<Map> {
 
 total
 meta {
-    doc: """How many records match the query, across all pages (pure). With `agg-by` it counts the records aggregated, not the rows returned."""
+    doc: """
+    How many records match the query, across all pages (pure). With `agg-by`
+    it counts the records aggregated, not the rows returned.
+
+    **Example**
+
+    ```hot
+    ::fdic::bankfind/total({meta: {total: 4}})  // 4
+    ```
+    """
 }
 fn (page: Any): Int? {
   get-in(or(page, {}), ["meta", "total"])
 }
 
-first-row fn (page: Result): Map? {
+first-row
+meta {no-doc: true}
+fn (page: Result): Map? {
   // A Result parameter, so an Err arrives intact and is returned, not consumed.
   cond {
     is-err(page) => { page }
@@ -370,7 +519,21 @@ first-row fn (page: Result): Map? {
 
 next-page
 meta {
-    doc: """The offset after `page`, from the offset the API echoes in `meta.parameters`, the rows returned and `meta.total`; null on the last page (pure). Not for `agg-by` pages."""
+    doc: """
+    The offset after `page`, from the offset the API echoes in
+    `meta.parameters`, the rows returned and `meta.total`; null on the last
+    page (pure). Not for `agg-by` pages.
+
+    **Example**
+
+    ```hot
+    first-page {meta: {total: 3, parameters: {offset: 0}}, data: [{data: {}}, {data: {}}]}
+    ::fdic::bankfind/next-page(first-page)  // 2
+
+    last-page {meta: {total: 3, parameters: {offset: 2}}, data: [{data: {}}]}
+    ::fdic::bankfind/next-page(last-page)  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   offset Int(or(get-in(or(page, {}), ["meta", "parameters", "offset"]), 0))
@@ -383,7 +546,9 @@ fn (page: Any): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
   page fetch(opts)
   cond {
     // Returned, not consumed: consuming an Err would halt the run.

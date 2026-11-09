@@ -20,6 +20,19 @@ meta {
     plus optional `compareDigest` (write only if the stored value still
     matches). Non-string values are JSON-encoded, as Shopify expects for
     `json`, list and number types. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    input ::shopify::metafields/build-metafield-input({
+      ownerId: "gid://shopify/Product/1",
+      namespace: "custom",
+      key: "specs",
+      type: "json",
+      value: {size: "M"}
+    })
+    input.value  // "{\"size\":\"M\"}"
+    ```
     """
 }
 fn (metafield: Map): Map {
@@ -52,7 +65,7 @@ meta {
 
     ```hot
     ::shopify::metafields/set-metafields([
-      {ownerId: product.id, namespace: "custom", key: "care_guide", type: "multi_line_text_field", value: "Hand wash cold."}
+      {ownerId: "gid://shopify/Product/1", namespace: "custom", key: "care_guide", type: "multi_line_text_field", value: "Hand wash cold."}
     ])
     ```
     """
@@ -83,7 +96,16 @@ fn
 
 set-metafield
 meta {
-    doc: """Set one metafield on an owner. Returns the saved metafield."""
+    doc: """
+    Set one metafield on an owner. Returns the saved metafield.
+
+    **Example**
+
+    ```hot
+    saved ::shopify::metafields/set-metafield("gid://shopify/Product/1", "custom", "care_guide", "multi_line_text_field", "Hand wash cold.")
+    saved.id
+    ```
+    """
 }
 fn
 (owner-id: Str, namespace: Str, key: Str, value-type: Str, value: Any): Map {
@@ -96,7 +118,17 @@ fn
 
 get-metafield
 meta {
-    doc: """One metafield on an owner by namespace and key, or null when unset (or the owner doesn't exist)."""
+    doc: """
+    One metafield on an owner by namespace and key, or null when unset (or
+    the owner doesn't exist).
+
+    **Example**
+
+    ```hot
+    field ::shopify::metafields/get-metafield("gid://shopify/Product/1", "custom", "care_guide")
+    if(is-null(field), "unset", field.value)
+    ```
+    """
 }
 fn
 (owner-id: Str, namespace: Str, key: Str): Map? {
@@ -118,7 +150,18 @@ fn
 
 list-metafields
 meta {
-    doc: """One page of an owner's metafields. Options: `namespace`, `first`, `after`. Returns `{nodes, pageInfo}` (empty when the owner doesn't exist)."""
+    doc: """
+    One page of an owner's metafields. Options: `namespace`, `first`,
+    `after`. Returns `{nodes, pageInfo}` (empty when the owner doesn't
+    exist).
+
+    **Example**
+
+    ```hot
+    page ::shopify::metafields/list-metafields("gid://shopify/Product/1", {namespace: "custom", first: 25})
+    map(page.nodes, %.key)
+    ```
+    """
 }
 fn
 (owner-id: Str): Map {
@@ -147,7 +190,19 @@ fn
 
 delete-metafields
 meta {
-    doc: """Delete metafields by `{ownerId, namespace, key}` (`metafieldsDelete`). Returns the deleted identifiers (null entries for ones that didn't exist)."""
+    doc: """
+    Delete metafields by `{ownerId, namespace, key}` (`metafieldsDelete`).
+    Returns the deleted identifiers (null entries for ones that didn't
+    exist).
+
+    **Example**
+
+    ```hot
+    ::shopify::metafields/delete-metafields([
+      {ownerId: "gid://shopify/Product/1", namespace: "custom", key: "care_guide"}
+    ])
+    ```
+    """
 }
 fn
 (identifiers: Vec): Vec {

@@ -3,17 +3,32 @@
 ::api ::github::api
 query-string ::hot::uri/query-string
 
-pull-path fn (owner: Str, repo: Str, number: Int): Str {
+pull-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, number: Int): Str {
   `/repos/${owner}/${repo}/pulls/${number}`
 }
 
-review-path fn (owner: Str, repo: Str, number: Int, review-id: Any): Str {
+review-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, number: Int, review-id: Any): Str {
   `${pull-path(owner, repo, number)}/reviews/${review-id}`
 }
 
 list-pulls
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls - List pull requests. `params` supports `state`, `head`, `base`, `sort`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/pulls - List pull requests. `params` supports
+    `state`, `head`, `base`, `sort`, `per_page`, `page`. Returns a single
+    page (GitHub default 30, max 100); pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    pulls ::github::pulls/list-pulls("acme", "api", {state: "open", base: "main"})
+    map(pulls, %.number)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str): Vec {
@@ -28,7 +43,17 @@ fn
 
 get-pull
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls/{number} - One pull request (mergeability, head/base, diff stats)."""
+    doc: """
+    GET /repos/{owner}/{repo}/pulls/{number} - One pull request
+    (mergeability, head/base, diff stats).
+
+    **Example**
+
+    ```hot
+    pr ::github::pulls/get-pull("acme", "api", 68)
+    pr.mergeable
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Map {
@@ -72,6 +97,12 @@ meta {
     PATCH /repos/{owner}/{repo}/pulls/{number} - Update a pull request.
     `changes` supports `title`, `body`, `state`, `base`, and
     `maintainer_can_modify`.
+
+    **Example**
+
+    ```hot
+    ::github::pulls/update-pull("acme", "api", 68, {title: "Add rate limiting", state: "open"})
+    ```
     """
 }
 fn
@@ -84,7 +115,19 @@ fn
 
 list-files
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls/{number}/files - The files changed by a pull request (filename, status, additions/deletions, patch). `params` supports `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """
+    GET /repos/{owner}/{repo}/pulls/{number}/files - The files changed by a
+    pull request (filename, status, additions/deletions, patch). `params`
+    supports `per_page`, `page`. Returns a single page (GitHub default 30,
+    max 100); pass `page` to paginate.
+
+    **Example**
+
+    ```hot
+    changed ::github::pulls/list-files("acme", "api", 68, {per_page: 100})
+    map(changed, %.filename)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Vec {
@@ -103,6 +146,13 @@ meta {
     GET /repos/{owner}/{repo}/pulls/{number}/commits - Commits in a pull
     request, in chronological order. `params` supports `per_page` and `page`.
     GitHub caps this endpoint at 250 commits.
+
+    **Example**
+
+    ```hot
+    commits ::github::pulls/list-pull-commits("acme", "api", 68)
+    map(commits, %.sha)
+    ```
     """
 }
 fn
@@ -121,6 +171,13 @@ meta {
     doc: """
     GET /repos/{owner}/{repo}/pulls/{number}/reviews - Submitted and pending
     reviews in chronological order. `params` supports `per_page` and `page`.
+
+    **Example**
+
+    ```hot
+    reviews ::github::pulls/list-reviews("acme", "api", 68)
+    map(reviews, %.state)
+    ```
     """
 }
 fn
@@ -136,7 +193,17 @@ fn
 
 get-review
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id} - One pull-request review."""
+    doc: """
+    GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id} - One
+    pull-request review.
+
+    **Example**
+
+    ```hot
+    review ::github::pulls/get-review("acme", "api", 68, 9001)
+    review.body
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int, review-id: Any): Map {
@@ -152,6 +219,13 @@ meta {
     GET /repos/{owner}/{repo}/pulls/{number}/comments - Inline review
     comments across all reviews. `params` supports `sort`, `direction`,
     `since`, `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    comments ::github::pulls/list-review-comments("acme", "api", 68, {sort: "created", direction: "desc"})
+    map(comments, %.path)
+    ```
     """
 }
 fn
@@ -171,6 +245,13 @@ meta {
     GET /repos/{owner}/{repo}/pulls/{number}/reviews/{review_id}/comments -
     Inline comments belonging to one review. `params` supports `per_page`
     and `page`.
+
+    **Example**
+
+    ```hot
+    comments ::github::pulls/list-review-comments-for-review("acme", "api", 68, 9001)
+    map(comments, %.body)
+    ```
     """
 }
 fn
@@ -195,6 +276,19 @@ meta {
     The Map form supports `commit_id`, `body`, `event` ("APPROVE",
     "REQUEST_CHANGES", or "COMMENT"), and an inline `comments` Vec. The
     event/body form remains as a concise summary-review convenience.
+
+    **Example**
+
+    ```hot
+    ::github::pulls/create-review("acme", "api", 68, "APPROVE", "Looks good.")
+
+    // Map form, with an inline comment
+    ::github::pulls/create-review("acme", "api", 68, {
+      event: "COMMENT",
+      body: "One question.",
+      comments: [{path: "src/limit.hot", line: 12, side: "RIGHT", body: "Why 60?"}]
+    })
+    ```
     """
 }
 fn
@@ -216,6 +310,13 @@ meta {
     doc: """
     GET /repos/{owner}/{repo}/pulls/{number}/requested_reviewers - Users and
     teams whose review is still requested.
+
+    **Example**
+
+    ```hot
+    pending ::github::pulls/list-requested-reviewers("acme", "api", 68)
+    map(pending.users, %.login)
+    ```
     """
 }
 fn
@@ -228,7 +329,16 @@ fn
 
 request-reviewers
 meta {
-    doc: """POST /repos/{owner}/{repo}/pulls/{number}/requested_reviewers - Request reviews from users."""
+    doc: """
+    POST /repos/{owner}/{repo}/pulls/{number}/requested_reviewers - Request
+    reviews from users.
+
+    **Example**
+
+    ```hot
+    ::github::pulls/request-reviewers("acme", "api", 68, ["octocat"])
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int, reviewers: Vec): Map {
@@ -240,7 +350,18 @@ fn
 
 merge-pull
 meta {
-    doc: """PUT /repos/{owner}/{repo}/pulls/{number}/merge - Merge a PR. `options`: `merge_method` ("merge"/"squash"/"rebase"), `commit_title`, `commit_message`."""
+    doc: """
+    PUT /repos/{owner}/{repo}/pulls/{number}/merge - Merge a PR. `options`:
+    `merge_method` ("merge"/"squash"/"rebase"), `commit_title`,
+    `commit_message`.
+
+    **Example**
+
+    ```hot
+    merged ::github::pulls/merge-pull("acme", "api", 68, {merge_method: "squash"})
+    merged.sha
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, number: Int): Map {
