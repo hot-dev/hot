@@ -142,7 +142,16 @@ type {
 
 build-convert-args
 meta {
-    doc: "Build `sox` CLI arguments for format conversion (no effects)."
+    doc: """
+    Build `sox` CLI arguments for format conversion (no effects).
+
+    **Example**
+
+    ```hot
+    ::sox/build-convert-args("/data/in.wav", "/data/out.mp3", ::sox/ConvertOpts({format: "mp3", sample-rate: 44100, channels: 2}))
+    // ["/data/in.wav", "-r", "44100", "-c", "2", "/data/out.mp3"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
     sr-args if(is-some(opts.sample-rate), ["-r", Str(opts.sample-rate)], [])
@@ -155,7 +164,16 @@ fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
 
 build-effect-args
 meta {
-    doc: "Build `sox` CLI arguments for effects processing."
+    doc: """
+    Build `sox` CLI arguments for effects processing.
+
+    **Example**
+
+    ```hot
+    ::sox/build-effect-args("/data/in.wav", "/data/out.wav", ::sox/EffectOpts({effects: ["reverb", "50", "50"]}))
+    // ["/data/in.wav", "/data/out.wav", "reverb", "50", "50"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: EffectOpts): Vec<Str> {
     fx opts.effects
@@ -165,7 +183,16 @@ fn (input-path: Str, output-path: Str, opts: EffectOpts): Vec<Str> {
 
 build-normalize-args
 meta {
-    doc: "Build `sox` CLI arguments for normalization using `gain -n`."
+    doc: """
+    Build `sox` CLI arguments for normalization using `gain -n`.
+
+    **Example**
+
+    ```hot
+    ::sox/build-normalize-args("/data/in.wav", "/data/out.wav", "-3", null)
+    // ["/data/in.wav", "/data/out.wav", "gain", "-n", "-3"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, level: Str?, extra-args: Vec<Str>?): Vec<Str> {
     gain-args if(is-some(level), ["gain", "-n", level], ["gain", "-n"])
@@ -176,7 +203,16 @@ fn (input-path: Str, output-path: Str, level: Str?, extra-args: Vec<Str>?): Vec<
 
 build-audio-trim-args
 meta {
-    doc: "Build `sox` CLI arguments for trimming with the `trim` effect."
+    doc: """
+    Build `sox` CLI arguments for trimming with the `trim` effect.
+
+    **Example**
+
+    ```hot
+    ::sox/build-audio-trim-args("/data/in.wav", "/data/out.wav", ::sox/TrimOpts({start: "0:05", end: "0:30"}))
+    // ["/data/in.wav", "/data/out.wav", "trim", "0:05", "=0:30"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: TrimOpts): Vec<Str> {
     end-arg `=${opts.end}`
@@ -187,7 +223,15 @@ fn (input-path: Str, output-path: Str, opts: TrimOpts): Vec<Str> {
 
 build-info-args
 meta {
-    doc: "Build `soxi` CLI arguments for info extraction."
+    doc: """
+    Build `soxi` CLI arguments for info extraction.
+
+    **Example**
+
+    ```hot
+    ::sox/build-info-args("/data/in.wav")  // ["/data/in.wav"]
+    ```
+    """
 }
 fn (input-path: Str): Vec<Str> {
     [input-path]
@@ -197,7 +241,9 @@ fn (input-path: Str): Vec<Str> {
 // Output parsers
 // ============================================================================
 
-strip-soxi-quotes fn (s: Str): Str {
+strip-soxi-quotes
+meta {no-doc: true}
+fn (s: Str): Str {
     t trim(s)
     cond {
         and(ends-with(t, "'"), starts-with(t, "'")) => {
@@ -213,7 +259,16 @@ strip-soxi-quotes fn (s: Str): Str {
 
 parse-info-output
 meta {
-    doc: "Parse `soxi` human-readable output into a Map of field names to values."
+    doc: """
+    Parse `soxi` human-readable output into a Map of field names to values.
+
+    **Example**
+
+    ```hot
+    ::sox/parse-info-output("Channels       : 2\nSample Rate    : 44100\nDuration       : 00:00:03.00")
+    // {Channels: "2", "Sample Rate": "44100", Duration: "00:00:03.00"}
+    ```
+    """
 }
 fn (stdout: Str?): Map {
     lines or(stdout, "") |> split("\n")
@@ -230,7 +285,9 @@ fn (stdout: Str?): Map {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -240,16 +297,35 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
 }
 
-run-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
+}
+
+run-sox-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     info ::box/start({
@@ -263,7 +339,9 @@ run-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     ::task/await(info.id)
 }
 
-start-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+start-sox-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     ::box/start({
@@ -276,7 +354,9 @@ start-sox-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -312,6 +392,14 @@ meta {
 
     Returns a Map with string keys matching SoX field names (e.g. `Channels`,
     `Sample Rate`, `Duration`).
+
+    **Example**
+
+    ```hot
+    details ::sox/info("hot://uploads/track.wav")
+    details.Channels
+    get(details, "Sample Rate")
+    ```
     """,
     box: {min-size: "nano"}
 }
@@ -320,7 +408,7 @@ fn (input: Str): Map {
     in-path `/data/input.${ext}`
 
     soxi-args join-args(build-info-args(in-path))
-    script `hotbox cp '${input}' ${in-path} && soxi ${soxi-args}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && soxi ${soxi-args}`
 
     result run-sox-box(script, "nano", null, 300)
     checked check-box-result(result, "soxi")
@@ -333,6 +421,16 @@ meta {
     Convert audio to another format (and optional rate / channels).
 
     Returns `{url: Str, format: Str}` pointing at Hot storage.
+
+    **Example**
+
+    ```hot
+    out ::sox/convert("hot://uploads/track.wav", {format: "mp3", sample-rate: 44100, channels: 2})
+    out.url
+
+    // With no options the output is WAV
+    ::sox/convert("hot://uploads/track.flac")
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -353,7 +451,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-convert-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -370,6 +468,16 @@ meta {
     Optional `level` sets headroom (e.g. `"-3"` for −3 dB relative to full scale).
 
     Returns `{url: Str, format: Str}`.
+
+    **Example**
+
+    ```hot
+    out ::sox/normalize("hot://uploads/track.wav")
+    out.url
+
+    // Leave 3 dB of headroom and choose the destination
+    ::sox/normalize("hot://uploads/track.wav", {level: "-3", output: "hot://audio/normalized.wav"})
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -389,7 +497,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-normalize-args(in-path, out-path, opts.level, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -404,6 +512,13 @@ meta {
     Trim audio between `start` and absolute `end` times (SoX `trim` effect).
 
     Returns `{url: Str, format: Str}`.
+
+    **Example**
+
+    ```hot
+    clip ::sox/audio-trim("hot://uploads/track.wav", {start: "0:05", end: "0:30"})
+    clip.url
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -417,7 +532,7 @@ fn (input: Str, opts: TrimOpts): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-audio-trim-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -434,6 +549,16 @@ meta {
     `effects` is a flat list of tokens, e.g. `["reverb", "50", "50"]`.
 
     Returns `{url: Str, format: Str}`.
+
+    **Example**
+
+    ```hot
+    out ::sox/effect("hot://uploads/track.wav", {effects: ["reverb", "50", "50"], format: "flac"})
+    out.url
+
+    // Tokens chain, so this applies two effects
+    ::sox/effect("hot://uploads/track.wav", {effects: ["highpass", "80", "fade", "t", "1"]})
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -447,7 +572,7 @@ fn (input: Str, opts: EffectOpts): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-effect-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -462,7 +587,18 @@ fn (input: Str, opts: EffectOpts): Map {
 
 start-info
 meta {
-    doc: "Start an info task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start an info task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    task ::sox/start-info("hot://uploads/track.wav")
+    done ::hot::task/await(task.id)
+    ::sox/parse-info-output(done.stdout)
+    ```
+    """,
     box: {min-size: "nano"}
 }
 fn (input: Str): Map {
@@ -470,14 +606,27 @@ fn (input: Str): Map {
     in-path `/data/input.${ext}`
 
     soxi-args join-args(build-info-args(in-path))
-    script `hotbox cp '${input}' ${in-path} && soxi ${soxi-args}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && soxi ${soxi-args}`
 
     start-sox-box(script, "nano", null, 300)
 }
 
 start-convert
 meta {
-    doc: "Start a convert task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start a convert task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    task ::sox/start-convert("hot://uploads/track.wav", {format: "flac"})
+    task.data.output
+
+    done ::hot::task/await(task.id)
+    done.status
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str): Map {
@@ -497,7 +646,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-convert-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -506,7 +655,18 @@ fn (input: Str): Map {
 
 start-normalize
 meta {
-    doc: "Start a normalize task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start a normalize task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    task ::sox/start-normalize("hot://uploads/track.wav", {level: "-3"})
+    ::hot::task/await(task.id)
+    task.data.output
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str): Map {
@@ -525,7 +685,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-normalize-args(in-path, out-path, opts.level, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -534,7 +694,18 @@ fn (input: Str): Map {
 
 start-audio-trim
 meta {
-    doc: "Start an audio trim task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start an audio trim task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    task ::sox/start-audio-trim("hot://uploads/track.wav", {start: "0:05", end: "0:30"})
+    ::hot::task/await(task.id)
+    task.data.output
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str, opts: TrimOpts): Map {
@@ -547,7 +718,7 @@ fn (input: Str, opts: TrimOpts): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-audio-trim-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -556,7 +727,18 @@ fn (input: Str, opts: TrimOpts): Map {
 
 start-effect
 meta {
-    doc: "Start an effect task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start an effect task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    task ::sox/start-effect("hot://uploads/track.wav", {effects: ["reverb", "50", "50"]})
+    ::hot::task/await(task.id)
+    task.data.output
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str, opts: EffectOpts): Map {
@@ -569,7 +751,7 @@ fn (input: Str, opts: EffectOpts): Map {
     out-path `/data/output.${format}`
 
     sox-args join-args(build-effect-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && sox ${sox-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && sox ${sox-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-sox-box(script, box-size, opts.image, or(opts.timeout, 300))

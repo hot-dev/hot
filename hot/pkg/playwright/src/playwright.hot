@@ -55,7 +55,7 @@ meta {
     - `delay` — Extra milliseconds to wait after navigation (default: `0`)
     - `output` — Output `hot://` URL (default: auto-generated)
     - `image` — Override Playwright Docker image
-    - `size` — Box size preset override (default: `"medium"`)
+    - `size` — Box size preset override (default: `"large"`)
     """
 }
 type {
@@ -88,7 +88,7 @@ meta {
     - `delay` — Extra milliseconds after navigation (default: `0`)
     - `output` — Output `hot://` URL (default: auto-generated)
     - `image` — Override Playwright Docker image
-    - `size` — Box size preset override (default: `"medium"`)
+    - `size` — Box size preset override (default: `"large"`)
     """
 }
 type {
@@ -116,7 +116,7 @@ meta {
     - `delay` — Extra milliseconds after navigation (default: `0`)
     - `selector` — CSS selector; when set, inner text of the first match is returned instead of the body
     - `image` — Override Playwright Docker image
-    - `size` — Box size preset override (default: `"medium"`)
+    - `size` — Box size preset override (default: `"large"`)
     """
 }
 type {
@@ -134,7 +134,15 @@ type {
 
 escape-sh-double
 meta {
-    doc: "Escape a string for safe inclusion inside double quotes in `sh -c`."
+    doc: """
+    Escape a string for safe inclusion inside double quotes in `sh -c`.
+
+    **Example**
+
+    ```hot
+    ::playwright/escape-sh-double("say \"hi\" to $HOME")  // "say \\\"hi\\\" to \\$HOME"
+    ```
+    """
 }
 fn (s: Str): Str {
     s |> replace("\\", "\\\\")
@@ -145,7 +153,18 @@ fn (s: Str): Str {
 
 build-screenshot-script
 meta {
-    doc: "Build a one-line Node.js script that captures a screenshot with Playwright Chromium."
+    doc: """
+    Build a one-line Node.js script that captures a screenshot with
+    Playwright Chromium.
+
+    **Example**
+
+    ```hot
+    js ::playwright/build-screenshot-script("https://example.com", "/data/shot.png", 1280, 720, true, "png", null, "load", 0)
+    contains(js, "fullPage:true")  // true
+    contains(js, "width:1280,height:720")  // true
+    ```
+    """
 }
 fn (url: Str, output-path: Str, width: Int, height: Int, full-page: Bool, format: Str, quality: Int?, wait-until: Str, delay: Int): Str {
     fp if(full-page, "true", "false")
@@ -175,7 +194,18 @@ fn (url: Str, output-path: Str, width: Int, height: Int, full-page: Bool, format
 
 build-pdf-script
 meta {
-    doc: "Build a one-line Node.js script that prints the page to PDF with Playwright Chromium."
+    doc: """
+    Build a one-line Node.js script that prints the page to PDF with
+    Playwright Chromium.
+
+    **Example**
+
+    ```hot
+    js ::playwright/build-pdf-script("https://example.com", "/data/page.pdf", null, null, "Letter", true, false, "1cm", "load", 0)
+    contains(js, "format:\"Letter\"")  // true
+    contains(js, "landscape:true")  // true
+    ```
+    """
 }
 fn (url: Str, output-path: Str, width: Str?, height: Str?, format: Str?, landscape: Bool, print-background: Bool, margin: Str?, wait-until: Str, delay: Int): Str {
     delay-js if(gt(delay, 0), `await new Promise(function(r){setTimeout(r,${Str(delay)});});`, "")
@@ -207,7 +237,18 @@ fn (url: Str, output-path: Str, width: Str?, height: Str?, format: Str?, landsca
 
 build-scrape-script
 meta {
-    doc: "Build a one-line Node.js script that prints `{title, text}` as JSON to stdout."
+    doc: """
+    Build a one-line Node.js script that prints `{title, text}` as JSON to
+    stdout.
+
+    **Example**
+
+    ```hot
+    js ::playwright/build-scrape-script("https://example.com", "load", 0, "h1")
+    contains(js, "page.$eval(\"h1\"")  // true
+    contains(js, "JSON.stringify({title:title,text:text})")  // true
+    ```
+    """
 }
 fn (url: Str, wait-until: Str, delay: Int, selector: Str?): Str {
     delay-js if(gt(delay, 0), `await new Promise(function(r){setTimeout(r,${Str(delay)});});`, "")
@@ -234,7 +275,22 @@ fn (url: Str, wait-until: Str, delay: Int, selector: Str?): Str {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
+}
+
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -246,7 +302,18 @@ resolve-output fn (user-output: Str?, default: Str): Str {
 
 run-playwright-box
 meta {
-    doc: "Run a one-line Node script in the Playwright image with internet access, then run optional shell suffix (e.g. hotbox copy)."
+    doc: """
+    Run a one-line Node script in the Playwright image with internet access,
+    then run optional shell suffix (e.g. hotbox copy).
+
+    **Example**
+
+    ```hot
+    js ::playwright/build-scrape-script("https://example.com", "load", 0, null)
+    result ::playwright/run-playwright-box(js, "large", null, "", 300)
+    result.stdout
+    ```
+    """
 }
 fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
@@ -263,7 +330,19 @@ fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
 
 start-playwright-box
 meta {
-    doc: "Start a one-line Node script in the Playwright image with internet access, returning TaskInfo without awaiting."
+    doc: """
+    Start a one-line Node script in the Playwright image with internet
+    access, returning TaskInfo without awaiting.
+
+    **Example**
+
+    ```hot
+    js ::playwright/build-scrape-script("https://example.com", "load", 0, null)
+    info ::playwright/start-playwright-box(js, "large", null, "", 300)
+    result ::hot::task/await(info.id)
+    result.status
+    ```
+    """
 }
 fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
@@ -279,7 +358,15 @@ fn (js: Str, box-size: Str, image: Str?, sh-suffix: Str, timeout: Int): Map {
 
 check-box-result
 meta {
-    doc: "Fail when the box task did not complete successfully."
+    doc: """
+    Fail when the box task did not complete successfully.
+
+    **Example**
+
+    ```hot
+    ::playwright/check-box-result({status: "completed", exit-code: 0}, "playwright").status  // "completed"
+    ```
+    """
 }
 fn (result: Map, tool-name: Str): Map {
     cond {
@@ -350,7 +437,7 @@ fn (url: Str): Map {
     hot-output resolve-output(opts.output, `hot://playwright/${uuid}/screenshot.${ext}`)
     out-path `/data/screenshot.${ext}`
     js build-screenshot-script(url, out-path, width, height, full-p, format, opts.quality, wait-u, delay)
-    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    suffix ` && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
     box-size or(opts.size, "large")
     result run-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
     check-box-result(result, "playwright")
@@ -389,7 +476,7 @@ fn (url: Str): Map {
     hot-output resolve-output(opts.output, `hot://playwright/${uuid}/page.pdf`)
     out-path "/data/page.pdf"
     js build-pdf-script(url, out-path, opts.width, opts.height, opts.format, land, pb, opts.margin, wait-u, delay)
-    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    suffix ` && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
     box-size or(opts.size, "large")
     result run-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
     check-box-result(result, "playwright")
@@ -440,6 +527,16 @@ meta {
     Start a screenshot task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    info ::playwright/start-screenshot("https://example.com", {full-page: true})
+    result ::hot::task/await(info.id)
+
+    // Where the image lands once the task completes
+    info.data.output
+    ```
     """,
     box: {min-size: "large", network: true}
 }
@@ -462,7 +559,7 @@ fn (url: Str): Map {
     hot-output resolve-output(opts.output, `hot://playwright/${uuid}/screenshot.${ext}`)
     out-path `/data/screenshot.${ext}`
     js build-screenshot-script(url, out-path, width, height, full-p, format, opts.quality, wait-u, delay)
-    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    suffix ` && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
     box-size or(opts.size, "large")
     info start-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
     assoc(info, "data", {output: hot-output})
@@ -474,6 +571,16 @@ meta {
     Start a PDF-rendering task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    info ::playwright/start-pdf("https://example.com", {format: "Letter"})
+    result ::hot::task/await(info.id)
+
+    // Where the PDF lands once the task completes
+    info.data.output
+    ```
     """,
     box: {min-size: "large", network: true}
 }
@@ -493,7 +600,7 @@ fn (url: Str): Map {
     hot-output resolve-output(opts.output, `hot://playwright/${uuid}/page.pdf`)
     out-path "/data/page.pdf"
     js build-pdf-script(url, out-path, opts.width, opts.height, opts.format, land, pb, opts.margin, wait-u, delay)
-    suffix ` && hotbox cp ${out-path} '${hot-output}'`
+    suffix ` && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
     box-size or(opts.size, "large")
     info start-playwright-box(js, box-size, opts.image, suffix, or(opts.timeout, 300))
     assoc(info, "data", {output: hot-output})
@@ -505,6 +612,17 @@ meta {
     Start a scrape task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    info ::playwright/start-scrape("https://example.com", {selector: "h1"})
+    result ::hot::task/await(info.id)
+
+    // The script prints {title, text} as JSON
+    page from-json(trim(result.stdout))
+    page.title
+    ```
     """,
     box: {min-size: "large", network: true}
 }

@@ -48,7 +48,7 @@ meta {
     - `filter` — Optional LibreOffice filter name, e.g. `"writer_pdf_Export"`; combined as `format:filter`
     - `output` — Output `hot://` URL (default: auto-generated)
     - `image` — Override Docker image (must have `libreoffice` in PATH)
-    - `size` — Box size override (default: `"medium"`)
+    - `size` — Box size override (default: `"large"`)
     """
 }
 type {
@@ -67,7 +67,19 @@ type {
 
 build-convert-args
 meta {
-    doc: "Build LibreOffice headless CLI arguments: --convert-to, --outdir, input path."
+    doc: """
+    Build LibreOffice headless CLI arguments: --convert-to, --outdir, input
+    path.
+
+    **Example**
+
+    ```hot
+    ::libreoffice/build-convert-args("/data/input.docx", "/data/out", "pdf", null, null)
+    // ["--headless", "--convert-to", "pdf", "--outdir", "/data/out", "/data/input.docx"]
+    ::libreoffice/build-convert-args("/data/input.odt", "/data/out", "pdf", "writer_pdf_Export", ["--norestore"])
+    // ["--headless", "--convert-to", "pdf:writer_pdf_Export", "--outdir", "/data/out", "--norestore", "/data/input.odt"]
+    ```
+    """
 }
 fn (input-path: Str, out-dir: Str, format: Str, filter: Str?, extra-args: Vec<Str>?): Vec<Str> {
     convert-spec if(is-some(filter), `${format}:${filter}`, format)
@@ -84,7 +96,15 @@ fn (input-path: Str, out-dir: Str, format: Str, filter: Str?, extra-args: Vec<St
 
 build-version-args
 meta {
-    doc: "Build `libreoffice --version` arguments."
+    doc: """
+    Build `libreoffice --version` arguments.
+
+    **Example**
+
+    ```hot
+    ::libreoffice/build-version-args()  // ["--version"]
+    ```
+    """
 }
 fn (): Vec<Str> {
     ["--version"]
@@ -96,7 +116,17 @@ fn (): Vec<Str> {
 
 parse-version-output
 meta {
-    doc: "Parse LibreOffice version from `libreoffice --version` stdout (first line)."
+    doc: """
+    Parse LibreOffice version from `libreoffice --version` stdout (first
+    line).
+
+    **Example**
+
+    ```hot
+    ::libreoffice/parse-version-output("LibreOffice 24.2.7.2 420(Build:2)\n").version  // "24.2.7.2"
+    ::libreoffice/parse-version-output("unknown").version  // "unknown"
+    ```
+    """
 }
 fn (stdout: Str?): Map {
     raw or(stdout, "") |> trim()
@@ -114,7 +144,9 @@ fn (stdout: Str?): Map {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -124,18 +156,45 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
+}
+
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
 }
 
 expected-output-name
 meta {
-    doc: "LibreOffice keeps the input basename and replaces the extension with the output format."
+    doc: """
+    LibreOffice keeps the input basename and replaces the extension with the
+    output format.
+
+    **Example**
+
+    ```hot
+    ::libreoffice/expected-output-name("/data/input.docx", "pdf")  // "input.pdf"
+    ::libreoffice/expected-output-name("/data/q3.final.xlsx", "csv")  // "q3.final.csv"
+    ```
+    """
 }
 fn (input-path: Str, out-format: Str): Str {
     segs split(input-path, "/")
@@ -148,7 +207,9 @@ fn (input-path: Str, out-format: Str): Str {
     `${stem}.${out-format}`
 }
 
-run-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+run-libreoffice-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script concat(FONT_INSTALL, "\n", script)
     info ::box/start({
@@ -162,7 +223,9 @@ run-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): 
     ::task/await(info.id)
 }
 
-start-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+start-libreoffice-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script concat(FONT_INSTALL, "\n", script)
     ::box/start({
@@ -175,7 +238,9 @@ start-libreoffice-box fn (script: Str, box-size: Str, image: Str?, timeout: Int)
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -239,7 +304,7 @@ fn (input: Str, opts: ConvertOpts): Map {
     out-name expected-output-name(in-path, opts.format)
     out-path `/data/lo-out/${out-name}`
 
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && libreoffice ${lo-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `mkdir -p ${out-dir} && hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && libreoffice ${lo-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "large")
     result run-libreoffice-box(script, box-size, opts.image, or(opts.timeout, 900))
@@ -304,7 +369,7 @@ fn (input: Str, opts: ConvertOpts): Map {
     out-name expected-output-name(in-path, opts.format)
     out-path `/data/lo-out/${out-name}`
 
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && libreoffice ${lo-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `mkdir -p ${out-dir} && hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && libreoffice ${lo-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "large")
     info start-libreoffice-box(script, box-size, opts.image, or(opts.timeout, 900))

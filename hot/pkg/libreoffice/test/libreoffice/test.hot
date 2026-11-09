@@ -138,3 +138,51 @@ meta ["test"] fn () {
     assert-eq("myregistry/libreoffice:slim", opts.image)
     assert-eq("large", opts.size)
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::libreoffice/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::libreoffice/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::libreoffice/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::libreoffice/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::libreoffice/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::libreoffice/shell-quote("a\nb"))
+    assert-eq("''", ::libreoffice/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::libreoffice/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::libreoffice/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::libreoffice/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::libreoffice/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::libreoffice/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::libreoffice/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::libreoffice/file-ext("hot://uploads/a.x y"))
+}
