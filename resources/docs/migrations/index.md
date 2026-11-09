@@ -36,6 +36,14 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.6 to 3.0.7 {#upgrading-from-3-0-6-to-3-0-7}
+
+**Migration 035.** Run `hot db migrate` with the 3.0.7 CLI. It adds a nullable `revoked_at` column to `api_key`, a check that a revoked key is inactive, and a trigger that refuses any write undoing a revocation. Existing rows keep NULL.
+
+**What to check in your keys:** environment keys revoked before this migration can't be told apart from disabled ones. They report `disabled` and can be re-enabled, so revoke any of them again if you need the revocation to be permanent.
+
+**What to check in your packages:** `::ai::agent::callbacks/from-body` no longer reads `callback_secret_env` from the body, so pass the env var name as the second argument. Callback URLs must be `https` on a dotted public DNS name or a public IPv4 address. In the box packages, each `extra-args` element is now one argument, so `["-c:v libx264"]` becomes `["-c:v", "libx264"]`.
+
 ## Upgrading from Hot 3.0.5 to 3.0.6 {#upgrading-from-3-0-5-to-3-0-6}
 
 **No migrations.** 3.0.6 doesn't change the database schema, so `hot db migrate` has nothing to apply.
