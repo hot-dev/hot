@@ -710,12 +710,14 @@ pub struct ApiKeyResponse {
     pub env_id: Option<Uuid>,
     pub description: String,
     pub permissions: serde_json::Value,
-    /// False once the key, or an org key in its issuer chain, is revoked or
-    /// expired. A suspension leaves it true.
+    /// False once the key is disabled, or it or an org key in its issuer chain
+    /// is revoked or expired. A suspension leaves it true.
     pub active: bool,
-    /// `active`, `revoked`, `expired`, `issuer_inactive` (a key in its issuer
-    /// chain is revoked or expired) or `suspended` (its organization or
-    /// environment is suspended; the key works again on reactivation).
+    /// `active`, `revoked`, `disabled` (an administrator turned an environment
+    /// key off; it can be turned back on), `expired`, `issuer_inactive` (a key
+    /// in its issuer chain is revoked or expired) or `suspended` (its
+    /// organization or environment is suspended; the key works again on
+    /// reactivation).
     pub status: &'static str,
     pub expires_at: Option<DateTime<Utc>>,
     /// The org key that minted this key; null when a person created it.
@@ -974,10 +976,16 @@ async fn resolve_target(
     }
     let key = ApiKey::get_api_key(&lookup, &key_id)
         .await
-        .map_err(|_| not_found("API key"))?;
+        .map_err(|error| match error {
+            ApiKeyError::NotFound => not_found("API key"),
+            error => internal(format!("{error:?}")),
+        })?;
     let env = Env::get_env_uncached(&lookup, &key.env_id)
         .await
-        .map_err(|_| not_found("API key"))?;
+        .map_err(|error| match error {
+            hot::db::env::EnvError::NotFound => not_found("API key"),
+            error => internal(format!("{error:?}")),
+        })?;
     principal
         .key
         .resolve_org(&lookup, env.org_id, false)
@@ -1122,14 +1130,9 @@ pub async fn revoke_api_key(
                 org_id: env.org_id,
                 env_id: env.env_id,
             });
-            ApiKey::toggle_active(
-                &scoped,
-                &key.api_key_id,
-                false,
-                &principal.key.created_by_user_id,
-            )
-            .await
-            .map_err(|e| internal(format!("{e:?}")))?;
+            ApiKey::revoke(&scoped, &key.api_key_id, &principal.key.created_by_user_id)
+                .await
+                .map_err(|e| internal(format!("{e:?}")))?;
         }
     }
     tracing::info!(org_api_key_id = %principal.key.org_api_key_id, api_key_id = %key_id, action = "api-key.revoke", "org API mutation");
@@ -1188,7 +1191,8 @@ pub async fn rotate_api_key(
             .await
             .map_err(|error| match error {
                 ApiKeyError::OverlapRunning(until) => overlap_running(until),
-                _ => not_found("API key"),
+                ApiKeyError::NotFound => not_found("API key"),
+                error => internal(format!("{error:?}")),
             })?;
             (env_key_response(&db, env, key).await?, rotated)
         }

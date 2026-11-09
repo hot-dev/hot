@@ -82,15 +82,15 @@ scope errors), `crates/hot_app/src/handlers/sub_orgs.rs` (App issuance).
 | Q10 | Audit on the key's own org for every request (not the target org, as recommended); the target is in the path |
 | Q11 | Not built: key minting has no idempotency key |
 | Q12 | IDs only in routes and grants |
-| Q13 | Environment keys an org key minted rotate through `/v1/api-keys/{id}/rotate`; root admins rotate org keys in the App, and environment keys have no App rotate button yet |
-| Q14 | Org keys revoke irreversibly (`revoked_at`); environment keys still use the reversible `active` toggle |
+| Q13 | Environment keys an org key minted rotate through `/v1/api-keys/{id}/rotate`; administrators rotate both kinds of key on the App's API Keys page |
+| Q14 | Both kinds of key revoke irreversibly (`revoked_at`); environment keys keep `active` as a reversible disable (migration 035) |
 | Q15 | Projects, context, builds, schedules and event-handler reads |
 | Q16 | At most two org keys in a chain; environment keys below either |
 
 **Not built yet:** child-org usage (`/v1/orgs/{org}/usage` serves the root's
 account aggregate only), `PATCH /v1/orgs/{org}/envs/{env}`, closing an open
 stream when a rotation's overlap ends (it closes at reconnect), the SDK
-changes (§8), and an App view of minted keys.
+changes (§8).
 
 ## Summary
 

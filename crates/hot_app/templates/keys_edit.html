@@ -18,8 +18,8 @@
                         <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Key ID</dt>
                         <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100 break-all">
                     <div class="uuid-container inline-flex items-center gap-1">
-                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ api_key.api_key_id }}" title="{{ api_key.api_key_id }}">{{ api_key.api_key_id|shortuuid }}</span>
-                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ api_key.api_key_id }}" title="Copy {{ api_key.api_key_id }} to clipboard">
+                        <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ row.key.api_key_id }}" title="{{ row.key.api_key_id }}">{{ row.key.api_key_id|shortuuid }}</span>
+                        <button class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ row.key.api_key_id }}" title="Copy {{ row.key.api_key_id }} to clipboard">
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
                             </svg>
@@ -30,30 +30,44 @@
                     <div>
                         <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Current Status</dt>
                         <dd class="mt-1">
-                            {% if api_key.active %}
-                            <span class="badge badge-success">
-                                Active
-                            </span>
-                            {% else %}
-                            <span class="badge badge-failure">
-                                Inactive
-                            </span>
-                            {% endif %}
+                            <span class="badge {{ row.status_badge }}">{{ row.status_label }}</span>
                         </dd>
                     </div>
                     <div>
                         <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Created</dt>
-                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ api_key.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ row.key.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
                     </div>
                     <div>
                         <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Last Updated</dt>
-                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ api_key.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
+                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ row.key.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}</dd>
                     </div>
+                    {% match row.expires_at %}{% when Some with (at) %}
+                    <div>
+                        <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Expires</dt>
+                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ at }}</dd>
+                    </div>
+                    {% when None %}{% endmatch %}
+                    {% match row.issuer %}{% when Some with (issuer) %}
+                    <div>
+                        <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Created by org key</dt>
+                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100 font-mono break-all">{{ issuer }}</dd>
+                    </div>
+                    {% when None %}{% endmatch %}
+                    {% match row.previous_secret_expires_at %}{% when Some with (at) %}
+                    <div>
+                        <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Previous secret works until</dt>
+                        <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ at }}</dd>
+                    </div>
+                    {% when None %}{% endmatch %}
                 </dl>
             </div>
 
+            {% if row.revoked %}
+            <p class="text-sm text-gray-700 dark:text-gray-300">This API key is revoked. Revoking is permanent, so it can no longer be changed. Create a new key to restore access.</p>
+            <div class="mt-4"><a href="/keys" class="btn btn-secondary">Back to API Keys</a></div>
+            {% else %}
             <!-- Edit Form -->
-            <form method="POST" action="/keys/{{ api_key.api_key_id }}/edit">
+            <form method="POST" action="/keys/{{ row.key.api_key_id }}/edit">
                 <div class="space-y-4 sm:space-y-6">
                     <div>
                         <label for="description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -77,7 +91,7 @@
                         <fieldset>
                             <legend class="text-sm font-medium text-gray-700 dark:text-gray-300">Status</legend>
                             <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 sm:mb-4">
-                                Inactive API keys cannot be used for authentication.
+                                Disabled API keys cannot be used for authentication. You can turn them back on.
                             </p>
                             <div class="space-y-3 sm:space-y-4">
                                 <div class="flex items-center">
@@ -86,7 +100,7 @@
                                         name="active"
                                         type="radio"
                                         value="true"
-                                        {% if api_key.active %}checked{% endif %}
+                                        {% if row.key.active %}checked{% endif %}
                                         class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
                                     <label for="active-true" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -100,11 +114,11 @@
                                         name="active"
                                         type="radio"
                                         value="false"
-                                        {% if !api_key.active %}checked{% endif %}
+                                        {% if !row.key.active %}checked{% endif %}
                                         class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
                                     <label for="active-false" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
-                                        Inactive
+                                        Disabled
                                         <span class="block text-xs text-gray-500 dark:text-gray-400">API key cannot be used for authentication</span>
                                     </label>
                                 </div>
@@ -260,7 +274,7 @@
                         </div>
                     </div>
 
-                    {% if !api_key.active %}
+                    {% if !row.key.active %}
                     <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
                         <div class="flex">
                             <div class="flex-shrink-0">
@@ -269,9 +283,9 @@
                                 </svg>
                             </div>
                             <div class="ml-3">
-                                <h3 class="text-xs sm:text-sm font-medium text-yellow-800 dark:text-yellow-200">Inactive API Key</h3>
+                                <h3 class="text-xs sm:text-sm font-medium text-yellow-800 dark:text-yellow-200">Disabled API Key</h3>
                                 <div class="mt-2 text-xs sm:text-sm text-yellow-700 dark:text-yellow-300">
-                                    <p>This API key is currently inactive and cannot be used for authentication. Activate it to restore access.</p>
+                                    <p>This API key is disabled and cannot be used for authentication. Set its status to Active to restore access.</p>
                                 </div>
                             </div>
                         </div>
@@ -291,7 +305,29 @@
                     </div>
                 </div>
             </form>
+            {% endif %}
         </div>
+
+        {% if !row.revoked %}
+        <!-- Rotate and Revoke -->
+        <div class="mt-6 sm:mt-8 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 space-y-6">
+            {% if row.rotatable %}
+            <form method="post" action="/keys/{{ row.key.api_key_id }}/rotate">
+                <h3 class="text-base font-medium text-gray-900 dark:text-white">Rotate secret</h3>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Issue a new secret for this key. Its ID, permissions and expiry stay the same.</p>
+                <div class="mt-3 flex flex-wrap items-end gap-2">
+                    <label class="form-label">Keep the previous secret working for <select class="form-input block mt-1" name="overlap_seconds"><option value="3600">1 hour</option><option value="86400" selected>1 day</option><option value="604800">7 days</option><option value="0">No overlap: stop it now</option></select></label>
+                    <button class="btn btn-secondary" type="submit">Rotate</button>
+                </div>
+            </form>
+            {% endif %}
+            <form method="post" action="/keys/{{ row.key.api_key_id }}/revoke">
+                <h3 class="text-base font-medium text-gray-900 dark:text-white">Revoke key</h3>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">The key stops working at once, along with its service keys and sessions. This is permanent. To pause a key instead, set its status to Disabled.</p>
+                <button class="btn btn-secondary mt-3" type="submit">Revoke permanently</button>
+            </form>
+        </div>
+        {% endif %}
 
         <!-- Security Notice -->
         <div class="mt-6 sm:mt-8 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-4 sm:p-6">
@@ -305,9 +341,9 @@
                     <h3 class="text-base sm:text-lg font-medium text-red-900 dark:text-red-100 mb-2">Security Considerations</h3>
                     <div class="text-xs sm:text-sm text-red-700 dark:text-red-300">
                         <ul class="list-disc pl-4 sm:pl-5 space-y-1">
-                            <li><strong>Deactivating an API key</strong> will immediately revoke all access using that key</li>
-                            <li><strong>Applications using inactive keys</strong> will receive authentication errors</li>
-                            <li><strong>Consider the impact</strong> on any automated systems before deactivating</li>
+                            <li><strong>Disabling an API key</strong> stops all access using that key until you turn it back on</li>
+                            <li><strong>Applications using disabled keys</strong> will receive authentication errors</li>
+                            <li><strong>Consider the impact</strong> on any automated systems before disabling or revoking</li>
                             <li><strong>API key values cannot be viewed</strong> after creation - only descriptions can be updated</li>
                         </ul>
                     </div>

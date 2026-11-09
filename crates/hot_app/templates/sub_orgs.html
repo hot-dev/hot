@@ -45,34 +45,7 @@
             <button class="btn btn-primary" type="submit">Create sub-organization</button>
         </form>
     </section>
-    {% match issued_token %}{% when Some with (token) %}
-    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4"><h2 class="font-semibold">Save this org API key now</h2><p class="text-sm">It will not be shown again. Revoking it also stops every key it created.</p><code class="block break-all mt-2">{{ token }}</code></section>
-    {% when None %}{% endmatch %}
-    <details class="rounded-lg border border-gray-200 dark:border-gray-700 p-4" {% if form.key_permissions.is_some() %}open{% endif %}>
-        <summary class="font-semibold cursor-pointer">Org API keys</summary>
-        <p class="my-3 text-sm text-gray-500 dark:text-gray-400">An org API key manages sub-organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's sub-organizations, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
-        <form method="post" action="/@{{ root.slug }}/org-api-keys" class="space-y-3 max-w-3xl">
-            <label class="form-label">Description <input class="form-input block w-full mt-1" name="description" value="{{ form.key_description }}" required maxlength="200"></label>
-            <label class="form-label">Permissions (JSON) <textarea class="form-input block w-full mt-1 font-mono" name="permissions" rows="8" required>{{ org_key_example }}</textarea></label>
-            <p class="text-xs text-gray-500 dark:text-gray-400">Grants inside an environment, such as <code>org:*/env:*/event:*</code>, only set the ceiling for environment keys this key creates. Creating more org keys needs <code>org:{{ root.org_id }}/api-key:*</code> with <code>create</code>.</p>
-            <label class="form-label">Expires in days (optional) <input class="form-input block mt-1 w-40" type="number" name="expires_in_days" value="{{ form.key_expires_in_days }}" min="1" max="3650"></label>
-            <button class="btn btn-primary" type="submit">Create org API key</button>
-        </form>
-        {% for row in org_api_keys %}
-        <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3"><p>{{ row.key.description }} · {{ row.key.org_api_key_id }}{% match row.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match row.key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
-            <pre class="text-xs text-gray-500 dark:text-gray-400 whitespace-pre-wrap">{{ row.key.permissions }}</pre>
-            {% match row.status_label %}{% when Some with (label) %}<span class="badge badge-neutral">{{ label }}</span>{% when None %}{% endmatch %}
-            {% match row.previous_secret_expires_at %}{% when Some with (at) %}<p class="text-sm">Rotated: the previous secret works until {{ at }}.</p>{% when None %}{% endmatch %}
-            {% if row.revocable %}<div class="flex flex-wrap items-end gap-2 mt-2">
-                <form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/rotate" class="flex flex-wrap items-end gap-2">
-                    <label class="form-label">Keep the previous secret working for <select class="form-input block mt-1" name="overlap_seconds"><option value="3600">1 hour</option><option value="86400" selected>1 day</option><option value="604800">7 days</option><option value="0">No overlap: stop it now</option></select></label>
-                    <button class="btn btn-secondary" type="submit">Rotate</button>
-                </form>
-                <form method="post" action="/@{{ root.slug }}/org-api-keys/{{ row.key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>
-            </div>{% endif %}
-        </div>
-        {% endfor %}
-    </details>
+    <p class="text-sm text-gray-500 dark:text-gray-400">Provision sub-organizations from your own systems with an org API key. Manage them on the <a class="link" href="/keys?org_id={{ root.org_id }}">API Keys</a> page.</p>
     {% for child in children %}
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
         <div class="flex flex-wrap items-center justify-between gap-2">

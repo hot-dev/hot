@@ -263,6 +263,10 @@ The [hot-std](https://hot.dev/pkg/hot.dev/hot-std) standard library documentatio
 
 **Service Keys** are customer-facing credentials with granular permissions, designed for external integrations and white-label use.
 
+Administrators can give a key an expiry when they create it, and rotate, disable, or revoke it later. Rotating issues a new secret and can keep the previous one working for up to 7 days. Disabling can be undone. Revoking is permanent.
+
+Administrators of a parent organization also manage **org API keys** on this page. An org API key lets your own systems create and manage sub-organizations, their environments, and their API keys through [`/v1/orgs`](/docs/api/management). Give it a description, its permissions as `org:` URNs, and an optional expiry. The key is shown once. Revoking it also stops every key it created.
+
 See [Authentication](/docs/authentication) for full documentation on API keys, service keys, sessions, and the permissions model.
 
 ## Custom Domains
@@ -314,11 +318,6 @@ Administrators of the parent organization manage sub-organizations from its
   Suspending a sub-organization holds its new work. Restore an archived
   sub-organization to suspended before you activate it. Suspending the account
   itself holds new work in every sub-organization.
-- **Create org API keys.** An org API key lets your own systems create and
-  manage sub-organizations, their environments, and their API keys through
-  [`/v1/orgs`](/docs/api/management). Give it a description, its permissions
-  as `org:` URNs, and an optional expiry. The key is shown once. Revoking it
-  also stops every key it created.
 
 The tab also shows an account overview: runs, failures, file bytes, and
 environments for the parent organization and each sub-organization.

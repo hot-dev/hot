@@ -152,8 +152,8 @@ ID, its lineage, and the keys it issued do not change. Rotating, narrowing, or
 revoking needs more than a grant: the caller must have issued the key, directly
 or through keys it issued. Rotation returns the new secret, so a grant alone
 would hand over another key's secret. No key rotates or revokes itself; an
-administrator of the parent organization can rotate or revoke any org key on its
-**Sub-orgs** page in the app. That's the way to rotate an org key a person made,
+administrator of the parent organization can rotate or revoke any org key on the
+**API Keys** page in the app. That's the way to rotate an org key a person made,
 since no key issued it.
 
 While an overlap runs, key responses report when it ends in
@@ -164,17 +164,18 @@ nothing: both secrets keep working. Wait for the overlap to end, or rotate with
 `"overlap_seconds": 0`, which is always accepted and stops every older secret at
 once.
 
-Revoking an org key is permanent. `DELETE /v1/api-keys/{id}` on an environment
-key deactivates it, and an administrator can re-enable it in the app. If a
+Revoking is permanent for both kinds of key. If a
 secret leaks, revoke the key rather than rotating it: the leaked secret keeps
 working for the whole overlap after a rotation, unless you pass
 `"overlap_seconds": 0`.
 
 Key responses report `active` and `status`. `status` is `active`, `revoked`,
-`expired`, `issuer_inactive` (an org key in its issuer chain is revoked or
-expired), or `suspended` (its organization or environment is suspended).
-`active` is `false` for `revoked`, `expired`, and `issuer_inactive`; a
-suspended key stays `active` because it works again on reactivation.
+`disabled` (an administrator turned an environment key off in the app and can
+turn it back on), `expired`, `issuer_inactive` (an org key in its issuer chain
+is revoked or expired), or `suspended` (its organization or environment is
+suspended). `active` is `false` for `revoked`, `disabled`, `expired`, and
+`issuer_inactive`; a suspended key stays `active` because it works again on
+reactivation. Revoking is permanent for both kinds of key.
 
 **Projects, context, and builds.** Every `/v1/projects…` route and
 `/v1/builds` is also served under `/v1/orgs/{org}/envs/{env}`. The handler is

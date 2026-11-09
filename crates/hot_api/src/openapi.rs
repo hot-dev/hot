@@ -1346,7 +1346,7 @@ fn api_keys_get_doc() {}
 fn api_keys_update_doc() {}
 
 #[utoipa::path(delete, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
-    description = "Revoke a key the caller issued (`delete`). Keys it issued stop working too. Revoking an org key is permanent; an environment key can be re-enabled in the app.",
+    description = "Revoke a key the caller issued (`delete`). Keys it issued stop working too. Revoking is permanent.",
     params(("key_id" = Uuid, Path, description = "Org or environment API key UUID")),
     responses((status = 204, description = "Revoked"), (status = "default", description = "Error", body = ApiErrorResponse)))]
 fn api_keys_revoke_doc() {}

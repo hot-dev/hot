@@ -34,8 +34,11 @@ curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects
 **API Keys** are your primary credentials for accessing the Hot API. Create and manage them from the [Hot App](/docs/app) dashboard.
 
 - Create keys with descriptive names
-- Enable or disable keys without deleting them
 - Keys are scoped to environments
+- Set an optional expiry when you create a key
+- Disable a key and enable it again later
+- Rotate a key to issue a new secret, keeping the previous secret working for up to 7 days
+- Revoke a key to stop it permanently
 
 ### Access Levels
 
