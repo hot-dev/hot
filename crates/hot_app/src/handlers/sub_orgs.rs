@@ -9,9 +9,6 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use hot::db::org::{CreateChild, Org, OrgLifecycle, OrgUser};
-use hot::db::org_api_key::{
-    CreateOrgApiKey, KeyStatus, MAX_ROTATION_OVERLAP_SECONDS, OrgApiKey, OrgApiKeyError,
-};
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
@@ -26,7 +23,11 @@ fn page_error(session: &Session, (status, message): PageError) -> Response {
     super::error_page(session, status, message)
 }
 
-async fn root_for_admin(db: &DatabasePool, session: &Session, slug: &str) -> Result<Org, Response> {
+pub(super) async fn root_for_admin(
+    db: &DatabasePool,
+    session: &Session,
+    slug: &str,
+) -> Result<Org, Response> {
     let root = Org::get_org_by_slug(db, slug)
         .await
         .map_err(|_| page_error(session, (StatusCode::NOT_FOUND, "Organization not found")))?;
@@ -58,9 +59,6 @@ struct FormState {
     child_name: String,
     child_slug: String,
     child_external_id: String,
-    key_description: String,
-    key_permissions: Option<String>,
-    key_expires_in_days: String,
 }
 
 impl FormState {
@@ -113,31 +111,7 @@ struct SubOrgsPage {
     overview: Vec<OrgOverview>,
     members: Vec<hot::db::org::OrgUserWithRole>,
     idempotency_key: Uuid,
-    org_api_keys: Vec<OrgApiKeyRow>,
-    org_key_example: String,
-    issued_token: Option<String>,
     form: FormState,
-}
-
-struct OrgApiKeyRow {
-    key: OrgApiKey,
-    expires_at: Option<String>,
-    /// When the previous secret stops working, during a rotation's overlap.
-    previous_secret_expires_at: Option<String>,
-    /// Whether the key still authenticates, following its issuer chain: a
-    /// key whose issuing key was revoked is dead though its own row is not.
-    revocable: bool,
-    status_label: Option<&'static str>,
-}
-
-fn status_label(status: KeyStatus) -> Option<&'static str> {
-    match status {
-        KeyStatus::Active => None,
-        KeyStatus::Revoked => Some("Revoked"),
-        KeyStatus::Expired => Some("Expired"),
-        KeyStatus::IssuerInactive => Some("Issuer inactive"),
-        KeyStatus::Suspended => Some("Suspended"),
-    }
 }
 
 struct OrgOverview {
@@ -300,7 +274,7 @@ async fn account_overview(
 }
 
 /// A timestamp in the user's display timezone, like the rest of the App.
-fn display_time(session: &Session, time: &DateTime<Utc>) -> String {
+pub(super) fn display_time(session: &Session, time: &DateTime<Utc>) -> String {
     format!(
         "{} {}",
         crate::timezone::format_in_timezone(time, &session.display_timezone, "%Y-%m-%d %H:%M"),
@@ -314,7 +288,7 @@ pub async fn list(
     axum::Extension(session): axum::Extension<Session>,
 ) -> Result<Response, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    render_page(&db, &session, root, None, FormState::default()).await
+    render_page(&db, &session, root, FormState::default()).await
 }
 
 /// Render the page; a [`FormState`] with an error renders with status 400.
@@ -322,10 +296,9 @@ async fn render_page(
     db: &DatabasePool,
     session: &Session,
     root: Org,
-    issued_token: Option<String>,
     form: FormState,
 ) -> Result<Response, Response> {
-    render_page_inner(db, session, root, issued_token, form)
+    render_page_inner(db, session, root, form)
         .await
         .map_err(|error| page_error(session, error))
 }
@@ -334,40 +307,8 @@ async fn render_page_inner(
     db: &DatabasePool,
     session: &Session,
     root: Org,
-    issued_token: Option<String>,
     form: FormState,
 ) -> Result<Response, PageError> {
-    let load_failed = |_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to load org API keys",
-        )
-    };
-    let keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
-        .await
-        .map_err(load_failed)?;
-    let mut org_api_keys = Vec::with_capacity(keys.len());
-    for key in keys {
-        let status = key.status(db).await.map_err(load_failed)?;
-        org_api_keys.push(OrgApiKeyRow {
-            expires_at: key.expires_at.map(|at| display_time(session, &at)),
-            previous_secret_expires_at: key
-                .previous_secret_expires_at()
-                .filter(|_| status.is_active())
-                .map(|at| display_time(session, &at)),
-            revocable: status.is_active(),
-            status_label: status_label(status),
-            key,
-        });
-    }
-    let org_key_example = serde_json::to_string_pretty(&serde_json::json!({
-        "org:*": ["create", "read", "update"],
-        "org:*/env:*": ["create", "read"],
-        "org:*/env:*/api-key:*": ["create", "read", "update", "delete"],
-        "org:*/env:*/event:*": ["create"],
-        "org:*/env:*/run:*": ["read"],
-    }))
-    .unwrap_or_default();
     let children = Org::list_children(db, &root.org_id).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -403,9 +344,6 @@ async fn render_page_inner(
         overview,
         members,
         idempotency_key: Uuid::now_v7(),
-        org_key_example: form.key_permissions.clone().unwrap_or(org_key_example),
-        org_api_keys,
-        issued_token,
         form,
     };
     let html = template.render().map_err(|_| {
@@ -447,11 +385,10 @@ pub async fn create(
         child_name: form.name.clone(),
         child_slug: form.slug.clone(),
         child_external_id: form.external_id.clone().unwrap_or_default(),
-        ..FormState::default()
     };
     let reserved = crate::slug::extra_reserved_from_conf(&conf);
     if let Err(error) = crate::slug::validate_format_with_extra(&slug, &reserved) {
-        let page = render_page(&db, &session, root, None, submitted(error.message().into()));
+        let page = render_page(&db, &session, root, submitted(error.message().into()));
         return Err(page.await.unwrap_or_else(|page| page));
     }
     let child = CreateChild {
@@ -469,7 +406,7 @@ pub async fn create(
     {
         tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
         let message = org_error_message(&error, "Unable to create the sub-organization.");
-        let page = render_page(&db, &session, root, None, submitted(message));
+        let page = render_page(&db, &session, root, submitted(message));
         return Err(page.await.unwrap_or_else(|page| page));
     }
     Ok(Redirect::to(&format!("/@{}/children", root.slug)))
@@ -485,7 +422,7 @@ async fn back_to_page(
     match error {
         None => Ok(Redirect::to(&format!("/@{}/children", root.slug))),
         Some(error) => {
-            let page = render_page(db, session, root, None, FormState::error(error));
+            let page = render_page(db, session, root, FormState::error(error));
             Err(page.await.unwrap_or_else(|page| page))
         }
     }
@@ -553,120 +490,6 @@ pub async fn grant(
     .await
     .err()
     .map(|error| org_error_message(&error, "Unable to change access."));
-    back_to_page(&db, &session, root, error).await
-}
-
-#[derive(Deserialize)]
-pub struct OrgApiKeyForm {
-    description: String,
-    permissions: String,
-    expires_in_days: Option<String>,
-}
-
-pub async fn create_org_api_key(
-    Path(slug): Path<String>,
-    State(db): State<Arc<DatabasePool>>,
-    axum::Extension(session): axum::Extension<Session>,
-    Form(form): Form<OrgApiKeyForm>,
-) -> Result<Response, Response> {
-    let root = root_for_admin(&db, &session, &slug).await?;
-    let submitted = |error: &str| FormState {
-        error: Some(error.to_string()),
-        key_description: form.description.clone(),
-        key_permissions: Some(form.permissions.clone()),
-        key_expires_in_days: form.expires_in_days.clone().unwrap_or_default(),
-        ..FormState::default()
-    };
-    let expires_at = match form.expires_in_days.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(days) => match days.parse().ok().filter(|days| (1..=3650).contains(days)) {
-            Some(days) => Some(Utc::now() + chrono::Duration::days(days)),
-            None => {
-                let form = submitted("Expiry must be 1–3650 days.");
-                return render_page(&db, &session, root, None, form).await;
-            }
-        },
-    };
-    let permissions = match serde_json::from_str(&form.permissions) {
-        Ok(permissions) => permissions,
-        Err(_) => {
-            let form = submitted("Permissions must be a JSON object.");
-            return render_page(&db, &session, root, None, form).await;
-        }
-    };
-    let request = CreateOrgApiKey {
-        description: form.description.clone(),
-        permissions,
-        expires_at,
-    };
-    match OrgApiKey::create_for_user(&db, root.org_id, session.current_user_id(), &request).await {
-        Ok((_, token)) => render_page(&db, &session, root, Some(token), FormState::default()).await,
-        Err(error) => {
-            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rejected");
-            let form = submitted(
-                "Unable to create the org API key. Permissions must use org: URNs such as org:* or org:{org}/env:*/project:*.",
-            );
-            render_page(&db, &session, root, None, form).await
-        }
-    }
-}
-
-#[derive(Deserialize)]
-pub struct RotateOrgApiKeyForm {
-    overlap_seconds: i64,
-}
-
-/// Issue a new secret for an org key. The page shows it once, as it does for a
-/// new key.
-pub async fn rotate_org_api_key(
-    Path((slug, key_id)): Path<(String, Uuid)>,
-    State(db): State<Arc<DatabasePool>>,
-    axum::Extension(session): axum::Extension<Session>,
-    Form(form): Form<RotateOrgApiKeyForm>,
-) -> Result<Response, Response> {
-    let root = root_for_admin(&db, &session, &slug).await?;
-    if !(0..=MAX_ROTATION_OVERLAP_SECONDS).contains(&form.overlap_seconds) {
-        let form = FormState::error("Overlap must be between 0 seconds and 7 days.");
-        return render_page(&db, &session, root, None, form).await;
-    }
-    let overlap = chrono::Duration::seconds(form.overlap_seconds);
-    let user_id = session.current_user_id();
-    match OrgApiKey::rotate_for_user(&db, root.org_id, user_id, key_id, overlap).await {
-        Ok(rotated) => {
-            render_page(
-                &db,
-                &session,
-                root,
-                Some(rotated.token),
-                FormState::default(),
-            )
-            .await
-        }
-        Err(OrgApiKeyError::OverlapRunning(until)) => {
-            let until = display_time(&session, &until);
-            let form = FormState::error(format!(
-                "This key's previous secret works until {until}. Rotate after that, or choose no overlap, which stops it now."
-            ));
-            render_page(&db, &session, root, None, form).await
-        }
-        Err(error) => {
-            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rotation rejected");
-            let form = FormState::error("Unable to rotate the org API key.");
-            render_page(&db, &session, root, None, form).await
-        }
-    }
-}
-
-pub async fn revoke_org_api_key(
-    Path((slug, key_id)): Path<(String, Uuid)>,
-    State(db): State<Arc<DatabasePool>>,
-    axum::Extension(session): axum::Extension<Session>,
-) -> Result<Redirect, Response> {
-    let root = root_for_admin(&db, &session, &slug).await?;
-    let error = OrgApiKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id)
-        .await
-        .err()
-        .map(|_| "Unable to revoke the org API key.".to_string());
     back_to_page(&db, &session, root, error).await
 }
 

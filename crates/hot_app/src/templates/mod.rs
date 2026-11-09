@@ -2615,12 +2615,64 @@ pub struct TeamUsersEdit<'a> {
     pub error_message: &'a str,
 }
 
+/// An environment API key as the key pages show it.
+pub struct ApiKeyRow {
+    pub key: hot::db::api_key::ApiKey,
+    pub status_label: &'static str,
+    pub status_badge: &'static str,
+    pub expires_at: Option<String>,
+    /// When the previous secret stops working, during a rotation's overlap.
+    pub previous_secret_expires_at: Option<String>,
+    /// The org key that minted this key; none when a person created it.
+    pub issuer: Option<Uuid>,
+    pub revoked: bool,
+    /// Whether the key can be rotated: it isn't off, revoked or expired, and
+    /// neither is any key in its issuer chain.
+    pub rotatable: bool,
+}
+
+/// An org API key as the API Keys page shows it.
+pub struct OrgApiKeyRow {
+    pub key: hot::db::org_api_key::OrgApiKey,
+    pub status_label: &'static str,
+    pub status_badge: &'static str,
+    pub expires_at: Option<String>,
+    /// When the previous secret stops working, during a rotation's overlap.
+    pub previous_secret_expires_at: Option<String>,
+    /// Whether the key still authenticates, following its issuer chain: a
+    /// key whose issuing key was revoked is dead though its own row is not.
+    pub revocable: bool,
+}
+
+/// The API Keys page's org key section, for administrators of a parent
+/// organization.
+pub struct OrgKeysSection {
+    pub root: hot::db::org::Org,
+    pub rows: Vec<OrgApiKeyRow>,
+    /// The create form's values: an example, or what a rejected form submitted.
+    pub permissions: String,
+    pub description: String,
+    pub expires_in_days: String,
+    /// Keep the create form open, so a rejected submission stays in view.
+    pub form_open: bool,
+}
+
+/// A secret the page shows once, after a key is created or rotated.
+pub struct IssuedSecret {
+    pub heading: &'static str,
+    pub note: &'static str,
+    pub token: String,
+}
+
 #[derive(Template)]
 #[template(path = "keys_list.html")]
 pub struct ApiKeysList<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
-    pub api_keys: Vec<hot::db::api_key::ApiKey>,
+    pub api_keys: Vec<ApiKeyRow>,
+    pub org_keys: Option<OrgKeysSection>,
+    pub issued_secret: Option<IssuedSecret>,
+    pub error_message: Option<String>,
     pub is_admin: bool,
     pub current_page_num: i64,
     pub total_pages: i64,
@@ -2641,6 +2693,7 @@ pub struct ApiKeysNew<'a> {
     pub handoff_token: String,
     pub error_message: &'a str,
     pub description: &'a str,
+    pub expires_in_days: &'a str,
     pub access_level: &'a str,
     /// Initial rules for a Restricted key (an error re-render keeps the submitted ones).
     pub permissions: serde_json::Value,
@@ -2667,7 +2720,7 @@ pub struct ErrorPage {
 pub struct ApiKeysEdit<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
-    pub api_key: hot::db::api_key::ApiKey,
+    pub row: ApiKeyRow,
     pub error_message: &'a str,
     pub description: &'a str,
     pub access_level: &'a str,

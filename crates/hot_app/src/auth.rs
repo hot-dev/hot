@@ -1042,9 +1042,13 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
     if read && (path == "/" || path == "/orgs" || path == "/account/billing") {
         return true;
     }
+    // A held workspace can still find its keys, to revoke them.
+    if read && (path == "/keys" || (path.starts_with("/keys/") && path.ends_with("/edit"))) {
+        return true;
+    }
     // Revoking a credential only removes access.
     if *method == axum::http::Method::POST
-        && path.starts_with("/service-keys/")
+        && (path.starts_with("/service-keys/") || path.starts_with("/keys/"))
         && path.ends_with("/revoke")
     {
         return true;
@@ -1737,6 +1741,16 @@ mod scope_contract_tests {
             "/service-keys/new",
             &axum::http::Method::POST
         ));
+        assert!(is_recovery_path("/keys", &axum::http::Method::GET));
+        assert!(is_recovery_path(
+            &format!("/keys/{}/revoke", Uuid::now_v7()),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path(
+            &format!("/keys/{}/rotate", Uuid::now_v7()),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path("/keys/new", &axum::http::Method::GET));
         assert!(is_recovery_path("/", &axum::http::Method::GET));
     }
 

@@ -62,6 +62,24 @@
                         </p>
                     </div>
 
+                    <div>
+                        <label for="expires_in_days" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Expires in days
+                        </label>
+                        <input
+                            type="number"
+                            name="expires_in_days"
+                            id="expires_in_days"
+                            value="{{ expires_in_days }}"
+                            min="1"
+                            max="3650"
+                            class="w-40 px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm text-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white"
+                        >
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Optional. Leave empty for a key that doesn't expire.
+                        </p>
+                    </div>
+
                     <!-- Access Level -->
                     <div x-data="permissionBuilder()">
                         <fieldset>

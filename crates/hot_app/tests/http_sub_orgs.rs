@@ -787,7 +787,7 @@ async fn org_keys_show_their_issuer_chain_status() {
         .unwrap();
     client.login_as(&td.user_id);
 
-    let page = client.get(&format!("/@{}/children", root.slug)).await;
+    let page = client.get(&format!("/keys?org_id={}", root.org_id)).await;
     page.assert_status(StatusCode::OK);
     assert!(page.body.contains(">Revoked<"), "{}", page.body);
     // The minted key's own row is active, but it no longer authenticates.
@@ -828,7 +828,7 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
     .unwrap();
     let id = key.org_api_key_id;
     client.login_as(&td.user_id);
-    let page_path = format!("/@{}/children", root.slug);
+    let page_path = format!("/keys?org_id={}", root.org_id);
     let rotate = format!("/@{}/org-api-keys/{id}/rotate", root.slug);
 
     let page = client.get(&page_path).await;
@@ -841,8 +841,9 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
     page.assert_status(StatusCode::OK);
     let token = page
         .body
-        .split("<code class=\"block break-all mt-2\">")
+        .split("<code data-issued-secret")
         .nth(1)
+        .and_then(|rest| rest.split('>').nth(1))
         .and_then(|rest| rest.split('<').next())
         .expect("the new secret is shown once")
         .to_string();

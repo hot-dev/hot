@@ -47,11 +47,15 @@ pub enum OrgApiKeyError {
 
 /// Whether a key works right now, following its issuer chain. `Revoked`,
 /// `Expired` and `IssuerInactive` org keys never work again; `Suspended` keys
-/// work again when their organization or environment is reactivated.
+/// work again when their organization or environment is reactivated, and
+/// `Disabled` environment keys when an administrator turns them back on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStatus {
     Active,
     Revoked,
+    /// An environment key an administrator turned off. Org keys have no such
+    /// state: turning one off revokes it.
+    Disabled,
     Expired,
     /// A key in its issuer chain is revoked or expired.
     IssuerInactive,
@@ -63,14 +67,16 @@ impl KeyStatus {
         match self {
             Self::Active => "active",
             Self::Revoked => "revoked",
+            Self::Disabled => "disabled",
             Self::Expired => "expired",
             Self::IssuerInactive => "issuer_inactive",
             Self::Suspended => "suspended",
         }
     }
 
-    /// False once the key or one of its issuers is revoked or expired. A
-    /// suspension does not count: it ends when the organization is reactivated.
+    /// False once the key is turned off or it or one of its issuers is revoked
+    /// or expired. A suspension does not count: it ends when the organization
+    /// is reactivated.
     pub fn is_active(self) -> bool {
         matches!(self, Self::Active | Self::Suspended)
     }
@@ -314,8 +320,11 @@ impl OrgApiKey {
         issuer: Option<Uuid>,
         env: &Env,
     ) -> Result<KeyStatus, OrgApiKeyError> {
-        if !key.active {
+        if state.revoked_at.is_some() {
             return Ok(KeyStatus::Revoked);
+        }
+        if !key.active {
+            return Ok(KeyStatus::Disabled);
         }
         if state.is_expired() {
             return Ok(KeyStatus::Expired);

@@ -297,15 +297,15 @@ pub fn routes(
         )
         .route(
             "/@{org_slug}/org-api-keys",
-            axum::routing::post(crate::handlers::sub_orgs::create_org_api_key),
+            axum::routing::post(create_org_api_key),
         )
         .route(
             "/@{org_slug}/org-api-keys/{key_id}/revoke",
-            axum::routing::post(crate::handlers::sub_orgs::revoke_org_api_key),
+            axum::routing::post(revoke_org_api_key),
         )
         .route(
             "/@{org_slug}/org-api-keys/{key_id}/rotate",
-            axum::routing::post(crate::handlers::sub_orgs::rotate_org_api_key),
+            axum::routing::post(rotate_org_api_key),
         )
         .route(
             "/@{org_slug}/edit",
@@ -366,6 +366,14 @@ pub fn routes(
         .route(
             "/keys/{key_id}/edit",
             get(keys_edit_handler).post(keys_update_handler),
+        )
+        .route(
+            "/keys/{key_id}/rotate",
+            axum::routing::post(keys_rotate_handler),
+        )
+        .route(
+            "/keys/{key_id}/revoke",
+            axum::routing::post(keys_revoke_handler),
         )
         .route(
             "/service-keys",

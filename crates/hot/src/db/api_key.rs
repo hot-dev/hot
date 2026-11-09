@@ -15,6 +15,8 @@ pub enum ApiKeyError {
     /// A rotation's overlap is running, and the previous secret works until
     /// this time. Only a rotation with no overlap may end it early.
     OverlapRunning(DateTime<Utc>),
+    /// The key is revoked, which is permanent.
+    Revoked,
 }
 
 impl fmt::Display for ApiKeyError {
@@ -28,6 +30,7 @@ impl fmt::Display for ApiKeyError {
             ApiKeyError::OverlapRunning(until) => {
                 write!(f, "The previous secret works until {until}")
             }
+            ApiKeyError::Revoked => write!(f, "API key is revoked"),
         }
     }
 }
@@ -364,6 +367,31 @@ impl ApiKey {
         created_by_user_id: &Uuid,
         permissions: &serde_json::Value,
     ) -> Result<(), ApiKeyError> {
+        Self::insert_expiring_api_key(
+            db,
+            api_key_id,
+            env_id,
+            description,
+            key_data,
+            created_by_user_id,
+            permissions,
+            None,
+        )
+        .await
+    }
+
+    /// Insert a new API key that stops working at `expires_at`, if given.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_expiring_api_key(
+        db: &crate::db::DatabasePool,
+        api_key_id: &Uuid,
+        env_id: &Uuid,
+        description: &str,
+        key_data: &serde_json::Value,
+        created_by_user_id: &Uuid,
+        permissions: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(), ApiKeyError> {
         match db {
             crate::db::DatabasePool::Sqlite(db) => {
                 Self::insert_api_key_sqlite(
@@ -374,6 +402,7 @@ impl ApiKey {
                     key_data,
                     created_by_user_id,
                     permissions,
+                    expires_at,
                 )
                 .await
             }
@@ -386,6 +415,7 @@ impl ApiKey {
                     key_data,
                     created_by_user_id,
                     permissions,
+                    expires_at,
                 )
                 .await
             }
@@ -401,6 +431,7 @@ impl ApiKey {
         key_data: &serde_json::Value,
         created_by_user_id: &Uuid,
         permissions: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), ApiKeyError> {
         let key_data_str =
             serde_json::to_string(key_data).map_err(|_| ApiKeyError::SerializationError)?;
@@ -409,8 +440,8 @@ impl ApiKey {
 
         sqlx::query(
             r#"
-            INSERT INTO api_key (api_key_id, env_id, description, key_data, created_by_user_id, permissions)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO api_key (api_key_id, env_id, description, key_data, created_by_user_id, permissions, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(api_key_id)
@@ -419,6 +450,7 @@ impl ApiKey {
         .bind(key_data_str)
         .bind(created_by_user_id)
         .bind(permissions_str)
+        .bind(expires_at)
         .execute(db)
         .await?;
 
@@ -434,11 +466,12 @@ impl ApiKey {
         key_data: &serde_json::Value,
         created_by_user_id: &Uuid,
         permissions: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), ApiKeyError> {
         sqlx::query(
             r#"
-            INSERT INTO api_key (api_key_id, env_id, description, key_data, created_by_user_id, permissions)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO api_key (api_key_id, env_id, description, key_data, created_by_user_id, permissions, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(api_key_id)
@@ -447,6 +480,7 @@ impl ApiKey {
         .bind(key_data)
         .bind(created_by_user_id)
         .bind(permissions)
+        .bind(expires_at)
         .execute(db)
         .await?;
 
@@ -559,21 +593,59 @@ impl ApiKey {
         Ok(())
     }
 
-    /// Toggle API key active status
+    /// Turn a key on or off. A revoked key fails with [`ApiKeyError::Revoked`]:
+    /// only an unrevoked key has this switch.
     pub async fn toggle_active(
         db: &crate::db::DatabasePool,
         api_key_id: &Uuid,
         active: bool,
         updated_by_user_id: &Uuid,
     ) -> Result<(), ApiKeyError> {
-        match db {
-            crate::db::DatabasePool::Sqlite(db) => {
-                Self::toggle_active_sqlite(db, api_key_id, active, updated_by_user_id).await
+        let updated = match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                Self::toggle_active_sqlite(pool, api_key_id, active, updated_by_user_id).await?
             }
-            crate::db::DatabasePool::Postgres(db) => {
-                Self::toggle_active_postgres(db, api_key_id, active, updated_by_user_id).await
+            crate::db::DatabasePool::Postgres(pool) => {
+                Self::toggle_active_postgres(pool, api_key_id, active, updated_by_user_id).await?
             }
+        };
+        if updated == 0 {
+            // Fails with NotFound when the key doesn't exist.
+            Self::get_credential_state(db, api_key_id).await?;
+            return Err(ApiKeyError::Revoked);
         }
+        Ok(())
+    }
+
+    /// Revoke a key for good. Revoking it again changes nothing. Everything
+    /// that depends on the key stops on its next request.
+    pub async fn revoke(
+        db: &crate::db::DatabasePool,
+        api_key_id: &Uuid,
+        updated_by_user_id: &Uuid,
+    ) -> Result<(), ApiKeyError> {
+        let sql = "UPDATE api_key SET active = $1, revoked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = $2, active_toggle_at = CURRENT_TIMESTAMP, active_toggle_by_user_id = $2 WHERE api_key_id = $3 AND revoked_at IS NULL";
+        let updated = match db {
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query(sql)
+                .bind(false)
+                .bind(updated_by_user_id)
+                .bind(api_key_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query(sql)
+                .bind(false)
+                .bind(updated_by_user_id)
+                .bind(api_key_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+        };
+        if updated == 0 {
+            // Fails with NotFound when the key doesn't exist.
+            Self::get_credential_state(db, api_key_id).await?;
+        }
+        Ok(())
     }
 
     async fn toggle_active_sqlite(
@@ -581,15 +653,15 @@ impl ApiKey {
         api_key_id: &Uuid,
         active: bool,
         updated_by_user_id: &Uuid,
-    ) -> Result<(), ApiKeyError> {
+    ) -> Result<u64, ApiKeyError> {
         let active_int = if active { 1 } else { 0 };
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE api_key
             SET active = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ?,
                 active_toggle_at = CURRENT_TIMESTAMP, active_toggle_by_user_id = ?
-            WHERE api_key_id = ?
+            WHERE api_key_id = ? AND revoked_at IS NULL
             "#,
         )
         .bind(active_int)
@@ -599,7 +671,7 @@ impl ApiKey {
         .execute(db)
         .await?;
 
-        Ok(())
+        Ok(result.rows_affected())
     }
 
     async fn toggle_active_postgres(
@@ -607,13 +679,13 @@ impl ApiKey {
         api_key_id: &Uuid,
         active: bool,
         updated_by_user_id: &Uuid,
-    ) -> Result<(), ApiKeyError> {
-        sqlx::query(
+    ) -> Result<u64, ApiKeyError> {
+        let result = sqlx::query(
             r#"
             UPDATE api_key
             SET active = $1, updated_at = now(), updated_by_user_id = $2,
                 active_toggle_at = now(), active_toggle_by_user_id = $2
-            WHERE api_key_id = $3
+            WHERE api_key_id = $3 AND revoked_at IS NULL
             "#,
         )
         .bind(active)
@@ -622,7 +694,7 @@ impl ApiKey {
         .execute(db)
         .await?;
 
-        Ok(())
+        Ok(result.rows_affected())
     }
 
     /// Generate a new API key and return both the key and its hash.
@@ -770,14 +842,19 @@ impl ApiKey {
             .map_err(|_| ApiKeyError::HashingError)
     }
 
-    /// Expiry and rotation state. Kept out of `ApiKey` so existing queries and
+    /// Expiry, rotation and revocation state. Kept out of `ApiKey` so existing queries and
     /// constructors do not change.
     pub async fn get_credential_state(
         db: &crate::db::DatabasePool,
         api_key_id: &Uuid,
     ) -> Result<ApiKeyCredentialState, ApiKeyError> {
-        type Row = (Option<DateTime<Utc>>, Option<String>, Option<DateTime<Utc>>);
-        let sql = "SELECT expires_at, CAST(previous_key_data AS TEXT), previous_key_expires_at FROM api_key WHERE api_key_id = $1";
+        type Row = (
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        );
+        let sql = "SELECT expires_at, CAST(previous_key_data AS TEXT), previous_key_expires_at, revoked_at FROM api_key WHERE api_key_id = $1";
         let row: Row = match db {
             crate::db::DatabasePool::Sqlite(pool) => {
                 sqlx::query_as(sql).bind(api_key_id).fetch_one(pool).await
@@ -798,6 +875,7 @@ impl ApiKey {
                 .transpose()
                 .map_err(|_| ApiKeyError::SerializationError)?,
             previous_key_expires_at: row.2,
+            revoked_at: row.3,
         })
     }
 
@@ -883,12 +961,13 @@ pub(crate) fn previous_secret_expiry(
     Some(key_expires_at.map_or(until, |at| at.min(until)))
 }
 
-/// Expiry and rotation state of an environment API key.
+/// Expiry, rotation and revocation state of an environment API key.
 #[derive(Debug, Clone, Default)]
 pub struct ApiKeyCredentialState {
     pub expires_at: Option<DateTime<Utc>>,
     pub previous_key_data: Option<serde_json::Value>,
     pub previous_key_expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 impl ApiKeyCredentialState {
@@ -905,6 +984,98 @@ impl ApiKeyCredentialState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn revoking_is_permanent_and_disabling_is_not() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &id,
+            &data.env_id,
+            "to revoke",
+            &serde_json::from_str(&hash).unwrap(),
+            &data.user_id,
+            &serde_json::json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+
+        ApiKey::toggle_active(&db, &id, false, &data.user_id)
+            .await
+            .unwrap();
+        assert!(ApiKey::verify_api_key(&db, &token).await.unwrap().is_none());
+        ApiKey::toggle_active(&db, &id, true, &data.user_id)
+            .await
+            .unwrap();
+        assert!(ApiKey::verify_api_key(&db, &token).await.unwrap().is_some());
+
+        ApiKey::revoke(&db, &id, &data.user_id).await.unwrap();
+        let revoked_at = ApiKey::get_credential_state(&db, &id)
+            .await
+            .unwrap()
+            .revoked_at;
+        assert!(revoked_at.is_some());
+        assert!(ApiKey::verify_api_key(&db, &token).await.unwrap().is_none());
+        assert!(matches!(
+            ApiKey::toggle_active(&db, &id, true, &data.user_id).await,
+            Err(ApiKeyError::Revoked)
+        ));
+        ApiKey::revoke(&db, &id, &data.user_id).await.unwrap();
+        assert_eq!(
+            ApiKey::get_credential_state(&db, &id)
+                .await
+                .unwrap()
+                .revoked_at,
+            revoked_at,
+            "revoking again changes nothing"
+        );
+        assert!(matches!(
+            ApiKey::toggle_active(&db, &Uuid::now_v7(), true, &data.user_id).await,
+            Err(ApiKeyError::NotFound)
+        ));
+        assert!(matches!(
+            ApiKey::revoke(&db, &Uuid::now_v7(), &data.user_id).await,
+            Err(ApiKeyError::NotFound)
+        ));
+
+        // The database holds the line against any other writer.
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        for sql in [
+            "UPDATE api_key SET active = 1 WHERE api_key_id = ?",
+            "UPDATE api_key SET revoked_at = NULL WHERE api_key_id = ?",
+        ] {
+            assert!(
+                sqlx::query(sql).bind(id).execute(pool).await.is_err(),
+                "{sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_key_can_carry_an_expiry() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&id).unwrap();
+        ApiKey::insert_expiring_api_key(
+            &db,
+            &id,
+            &data.env_id,
+            "short-lived",
+            &serde_json::from_str(&hash).unwrap(),
+            &data.user_id,
+            &serde_json::json!({"*:*": ["*"]}),
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert!(ApiKey::verify_api_key(&db, &token).await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn default_environment_key_skips_org_key_issued_keys() {
