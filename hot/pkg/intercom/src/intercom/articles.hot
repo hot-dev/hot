@@ -8,7 +8,17 @@ meta {
 
 list-articles
 meta {
-    doc: """GET /articles - Articles by page number, most recently updated first: `{data, pages, total_count}`. `options`: `page`, `per_page`."""
+    doc: """
+    GET /articles - Articles by page number, most recently updated first:
+    `{data, pages, total_count}`. `options`: `page`, `per_page`.
+
+    **Example**
+
+    ```hot
+    page ::intercom::articles/list-articles({page: 1, per_page: 25})
+    map(page.data, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -23,7 +33,17 @@ fn
 
 get-article
 meta {
-    doc: """GET /articles/{id} - One article with its `body` (HTML), `url`, `state` and translations."""
+    doc: """
+    GET /articles/{id} - One article with its `body` (HTML), `url`, `state`
+    and translations.
+
+    **Example**
+
+    ```hot
+    article ::intercom::articles/get-article("4128790")
+    article.url
+    ```
+    """
 }
 fn
 (id: Any): Any {

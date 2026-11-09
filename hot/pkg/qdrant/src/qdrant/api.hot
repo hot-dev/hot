@@ -8,7 +8,9 @@ meta {
 
 DEFAULT_URL "http://localhost:6333"
 
-is-blank fn (value: Any): Bool {
+is-blank
+meta {no-doc: true}
+fn (value: Any): Bool {
   cond {
     is-str(value) => { is-empty(trim(value)) }
     => { true }
@@ -29,6 +31,15 @@ meta {
     both mean "no auth". An `api-key` in `opts` always replaces the context
     key. Nothing is written to ctx. Exposed for testing; `resolve` feeds it
     the context.
+
+    **Example**
+
+    ```hot
+    ::qdrant::api/resolve-from({}, {"qdrant.url": "http://qdrant:6333"})  // {url: "http://qdrant:6333", api-key: ""}
+
+    // A per-call URL never borrows the context key
+    ::qdrant::api/resolve-from({url: "https://b.example"}, {"qdrant.api.key": "ctx-key"})  // {url: "https://b.example", api-key: ""}
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {

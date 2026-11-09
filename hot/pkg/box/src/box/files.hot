@@ -18,7 +18,9 @@ DocFile ::box/DocFile
 MAX_LIMIT 1000
 LOCAL_KEYS ["if-match", "if-none-match", "boxapi", "rep-hints", "name", "parent-id", "version"]
 
-file-path fn (file-id: Str): Str {
+file-path
+meta {no-doc: true}
+fn (file-id: Str): Str {
   `/files/${::box/encode-id(file-id)}`
 }
 
@@ -28,7 +30,17 @@ file-path fn (file-id: Str): Str {
 
 file-headers
 meta {
-    doc: """The headers `get-file` sends (pure): `if-match` / `if-none-match` / `boxapi` from `opts`, plus `x-rep-hints` from `opts.rep-hints` (e.g. `"[extracted_text]"`, `"[jpg?dimensions=320x320]"`)."""
+    doc: """
+    The headers `get-file` sends (pure): `if-match` / `if-none-match` /
+    `boxapi` from `opts`, plus `x-rep-hints` from `opts.rep-hints` (e.g.
+    `"[extracted_text]"`, `"[jpg?dimensions=320x320]"`).
+
+    **Example**
+
+    ```hot
+    ::box::files/file-headers({rep-hints: "[extracted_text]", if-match: "3"})  // {if-match: "3", x-rep-hints: "[extracted_text]"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   hints get(opts, "rep-hints")
@@ -61,7 +73,22 @@ fn
 }
 
 get-doc-file
-meta {doc: """`get-file` normalised to a `::box/DocFile`."""}
+meta {
+    doc: """
+    `get-file` normalised to a `::box/DocFile`.
+
+    **Example**
+
+    ```hot
+    file ::box::files/get-doc-file("12345")
+    file.sha1
+
+    // Fewer fields, on behalf of a managed user
+    named ::box::files/get-doc-file("12345", {fields: "id,type,name", as-user: "123"})
+    named.name
+    ```
+    """
+}
 fn
 (file-id: Str): DocFile {
   get-doc-file(file-id, {})
@@ -83,6 +110,17 @@ meta {
     `disposition_at`, ... Null values in `changes` are dropped.
     `opts.if-match` (an etag) makes the write fail with 412 when the file
     changed. Content updates go through `::box::upload/upload-version`.
+
+    **Example**
+
+    ```hot
+    file ::box::files/update-file("12345", {description: "Q4 numbers"})
+    file.description
+
+    // Fails with 412 if the file changed
+    safe ::box::files/update-file("12345", {tags: ["q4"]}, {if-match: file.etag})
+    safe.etag
+    ```
     """
 }
 fn
@@ -96,7 +134,17 @@ fn
 
 rename-file
 meta {
-    doc: """Rename a file. Box fails with 409 `item_name_in_use` when the folder already has that name."""
+    doc: """
+    Rename a file. Box fails with 409 `item_name_in_use` when the folder
+    already has that name.
+
+    **Example**
+
+    ```hot
+    file ::box::files/rename-file("12345", "Q4 report.pdf")
+    file.name
+    ```
+    """
 }
 fn
 (file-id: Str, name: Str): Map {
@@ -107,7 +155,18 @@ fn
 }
 
 move-file
-meta {doc: """Move a file into `parent-id` (a Box item has exactly one parent)."""}
+meta {
+    doc: """
+    Move a file into `parent-id` (a Box item has exactly one parent).
+
+    **Example**
+
+    ```hot
+    file ::box::files/move-file("12345", "67890")
+    file.parent.id
+    ```
+    """
+}
 fn
 (file-id: Str, parent-id: Str): Map {
   move-file(file-id, parent-id, {})
@@ -118,7 +177,16 @@ fn
 
 copy-body
 meta {
-    doc: """The copy body (pure): `parent: {id}`, an optional new `name`, and an optional `version` (a file version id to copy)."""
+    doc: """
+    The copy body (pure): `parent: {id}`, an optional new `name`, and an
+    optional `version` (a file version id to copy).
+
+    **Example**
+
+    ```hot
+    ::box::files/copy-body("67890", {name: "Copy.pdf"})  // {parent: {id: "67890"}, name: "Copy.pdf"}
+    ```
+    """
 }
 fn (parent-id: Str, opts: Map): Map {
   ::box/compact({parent: ::box/parent-ref(parent-id), name: get(opts, "name"), version: get(opts, "version")})
@@ -126,7 +194,17 @@ fn (parent-id: Str, opts: Map): Map {
 
 copy-file
 meta {
-    doc: """POST /files/{id}/copy - copy a file into `parent-id`. `opts.name` renames the copy; `opts.version` copies an older version."""
+    doc: """
+    POST /files/{id}/copy - copy a file into `parent-id`. `opts.name`
+    renames the copy; `opts.version` copies an older version.
+
+    **Example**
+
+    ```hot
+    copy ::box::files/copy-file("12345", "67890", {name: "Q4 copy.pdf"})
+    copy.id
+    ```
+    """
 }
 fn
 (file-id: Str, parent-id: Str): Map {
@@ -143,7 +221,20 @@ fn
 
 trash-file
 meta {
-    doc: """DELETE /files/{id} - move a file to the trash (recoverable until the enterprise's trash retention, 30 days by default). `opts.if-match` guards against concurrent changes. Returns true."""
+    doc: """
+    DELETE /files/{id} - move a file to the trash (recoverable until the
+    enterprise's trash retention, 30 days by default). `opts.if-match`
+    guards against concurrent changes. Returns true.
+
+    **Example**
+
+    ```hot
+    ::box::files/trash-file("12345")
+
+    // Only if nobody changed it
+    ::box::files/trash-file("67890", {if-match: "3"})
+    ```
+    """
 }
 fn
 (file-id: Str): Bool {
@@ -155,14 +246,36 @@ fn
 }
 
 restore-body
-meta {doc: """The restore body (pure): an optional new `name` and `parent: {id}`."""}
+meta {
+    doc: """
+    The restore body (pure): an optional new `name` and `parent: {id}`.
+
+    **Example**
+
+    ```hot
+    ::box::files/restore-body({name: "Restored.pdf", parent-id: "67890"})  // {name: "Restored.pdf", parent: {id: "67890"}}
+    ::box::files/restore-body({})  // {}
+    ```
+    """
+}
 fn (opts: Map): Map {
   ::box/compact({name: get(opts, "name"), parent: ::box/parent-ref(get(opts, "parent-id"))})
 }
 
 restore-file
 meta {
-    doc: """POST /files/{id} - restore a trashed file. `opts.name` / `opts.parent-id` restore it under a new name or into another folder when the original is taken or gone."""
+    doc: """
+    POST /files/{id} - restore a trashed file. `opts.name` /
+    `opts.parent-id` restore it under a new name or into another folder when
+    the original is taken or gone.
+
+    **Example**
+
+    ```hot
+    file ::box::files/restore-file("12345", {name: "Restored.pdf", parent-id: "67890"})
+    file.item_status
+    ```
+    """
 }
 fn
 (file-id: Str): Map {
@@ -175,7 +288,17 @@ fn
 
 get-trashed-file
 meta {
-    doc: """GET /files/{id}/trash - a trashed file's information (404 when it is not in the trash)."""
+    doc: """
+    GET /files/{id}/trash - a trashed file's information (404 when it is not
+    in the trash).
+
+    **Example**
+
+    ```hot
+    file ::box::files/get-trashed-file("12345")
+    file.trashed_at
+    ```
+    """
 }
 fn
 (file-id: Str): Map {
@@ -198,6 +321,14 @@ meta {
     file's `file_version`). Offset paging (`offset`, `limit` up to 1000).
     Version history needs a paid plan with versioning; the free developer
     plan keeps one version.
+
+    **Example**
+
+    ```hot
+    page ::box::files/list-versions("12345", {limit: 100})
+    page.total_count
+    page.entries
+    ```
     """
 }
 fn
@@ -210,7 +341,18 @@ fn
 }
 
 list-all-versions
-meta {doc: """Every previous version of a file (all offset pages)."""}
+meta {
+    doc: """
+    Every previous version of a file (all offset pages).
+
+    **Example**
+
+    ```hot
+    versions ::box::files/list-all-versions("12345")
+    map(versions, %.id)
+    ```
+    """
+}
 fn
 (file-id: Str): Vec {
   list-all-versions(file-id, {})
@@ -221,14 +363,35 @@ fn
 }
 
 promote-body
-meta {doc: """The promote body (pure): `{type: "file_version", id}`."""}
+meta {
+    doc: """
+    The promote body (pure): `{type: "file_version", id}`.
+
+    **Example**
+
+    ```hot
+    ::box::files/promote-body("99")  // {type: "file_version", id: "99"}
+    ```
+    """
+}
 fn (version-id: Str): Map {
   {type: "file_version", id: version-id}
 }
 
 promote-version
 meta {
-    doc: """POST /files/{id}/versions/current - make an older version current (Box copies it to a new version; history is kept). Returns the new current `file_version`."""
+    doc: """
+    POST /files/{id}/versions/current - make an older version current (Box
+    copies it to a new version; history is kept). Returns the new current
+    `file_version`.
+
+    **Example**
+
+    ```hot
+    version ::box::files/promote-version("12345", "99")
+    version.id
+    ```
+    """
 }
 fn
 (file-id: Str, version-id: Str): Map {

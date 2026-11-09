@@ -51,7 +51,17 @@ fn (params: Map, opts: Map): Map {
 
 get-check-transfer
 meta {
-    doc: """GET /check_transfers/{id}: retrieve a Check Transfer."""
+    doc: """
+    GET /check_transfers/{id}: retrieve a Check Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::check-transfers/get-check-transfer("check_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -63,7 +73,19 @@ fn
 
 list-check-transfers
 meta {
-    doc: """GET /check_transfers: one page of Check Transfers (`{data, next_cursor}`). Filters: `account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+    doc: """
+    GET /check_transfers: one page of Check Transfers (`{data,
+    next_cursor}`). Filters: `account_id`, `"status.in"`, `idempotency_key`,
+    `created_at: {after, before, on_or_after, on_or_before}`, `limit`,
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::check-transfers/list-check-transfers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["pending_approval"], limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -78,7 +100,20 @@ fn
 
 approve-check-transfer
 meta {
-    doc: """POST /check_transfers/{id}/approve: approve a Check Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+    doc: """
+    POST /check_transfers/{id}/approve: approve a Check Transfer in
+    `pending_approval`. Approving releases the transfer to be sent: agents
+    must not approve on their own; leave it to a person (in the Increase
+    dashboard, or through your own approval step that calls this).
+
+    **Example**
+
+    ```hot
+    // Call this from a person's approval step, never from an agent.
+    transfer ::increase::check-transfers/approve-check-transfer("check_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -90,7 +125,17 @@ fn
 
 cancel-check-transfer
 meta {
-    doc: """POST /check_transfers/{id}/cancel: cancel a Check Transfer that is still `pending_approval`."""
+    doc: """
+    POST /check_transfers/{id}/cancel: cancel a Check Transfer that is still
+    `pending_approval`.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::check-transfers/cancel-check-transfer("check_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -102,7 +147,19 @@ fn
 
 stop-payment
 meta {
-    doc: """POST /check_transfers/{id}/stop_payment: stop payment on a mailed check that hasn't been deposited. `reason` is `"mail_delivery_failed"`, `"not_authorized"`, `"valid_until_date_passed"` or `"unknown"` (null leaves it unset)."""
+    doc: """
+    POST /check_transfers/{id}/stop_payment: stop payment on a mailed check
+    that hasn't been deposited. `reason` is `"mail_delivery_failed"`,
+    `"not_authorized"`, `"valid_until_date_passed"` or `"unknown"` (null
+    leaves it unset).
+
+    **Example**
+
+    ```hot
+    transfer ::increase::check-transfers/stop-payment("check_transfer_uoxatyh3lt5evrsdvo7q", "mail_delivery_failed")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str, reason: Str?): Map {

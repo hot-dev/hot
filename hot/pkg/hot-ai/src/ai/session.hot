@@ -22,7 +22,17 @@ type {
 
 session-key
 meta {
-    doc: "Build a session-scoped store name: `agent:{agent}:session:{sid}:{suffix}`."
+    doc: """
+    Build a session-scoped store name:
+    `agent:{agent}:session:{sid}:{suffix}`.
+
+    **Example**
+
+    ```hot
+    session ::ai::session/Session({id: "C123"})
+    ::ai::session/session-key("support-bot", session, "memory")  // "agent:support-bot:session:C123:memory"
+    ```
+    """
 }
 fn (agent-name: Str, session: Session, suffix: Str): Str {
     `agent:${agent-name}:session:${session.id}:${suffix}`
@@ -38,6 +48,13 @@ meta {
     anything tied to a specific conversation (per-chat conversation
     threads, per-channel role / tone), use `session-user-key` instead
     so the same person in two different sessions doesn't collide.
+
+    **Example**
+
+    ```hot
+    identity ::ai::session/Identity({id: "U456"})
+    ::ai::session/user-key("support-bot", identity, "prefs")  // "agent:support-bot:user:U456:prefs"
+    ```
     """
 }
 fn (agent-name: Str, identity: Identity, suffix: Str): Str {
@@ -55,6 +72,15 @@ meta {
     and per-(session, user) profile data. Without this scoping, a
     person who's in a Telegram group AND a Slack channel would have
     their `/ask` follow-ups bleed across the two.
+
+    **Example**
+
+    ```hot
+    session ::ai::session/Session({id: "C123"})
+    identity ::ai::session/Identity({id: "U456"})
+    ::ai::session/session-user-key("support-bot", session, identity, "thread")
+    // "agent:support-bot:session:C123:user:U456:thread"
+    ```
     """
 }
 fn (agent-name: Str, session: Session, identity: Identity, suffix: Str): Str {
@@ -62,7 +88,17 @@ fn (agent-name: Str, session: Session, identity: Identity, suffix: Str): Str {
 }
 
 agent-key
-meta { doc: "Build an agent-scoped store name: `agent:{agent}:{suffix}`." }
+meta {
+    doc: """
+    Build an agent-scoped store name: `agent:{agent}:{suffix}`.
+
+    **Example**
+
+    ```hot
+    ::ai::session/agent-key("support-bot", "kb")  // "agent:support-bot:kb"
+    ```
+    """
+}
 fn (agent-name: Str, suffix: Str): Str {
     `agent:${agent-name}:${suffix}`
 }

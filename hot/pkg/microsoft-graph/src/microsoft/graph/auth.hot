@@ -121,7 +121,9 @@ type {
     body: Any?
 }
 
-first-line fn (text: Any): Str? {
+first-line
+meta {no-doc: true}
+fn (text: Any): Str? {
   cond {
     not(is-str(text)) => { null }
     => { trim(first(split(replace(text, "\r", ""), "\n"))) }
@@ -130,7 +132,18 @@ first-line fn (text: Any): Str? {
 
 token-error
 meta {
-    doc: """Build a `TokenError`. The 1-arity form wraps a plain message; the 2-arity form prefixes the payload of a failed `::oauth2` call (`{status, body}` or a transport error)."""
+    doc: """
+    Build a `TokenError`. The 1-arity form wraps a plain message; the
+    2-arity form prefixes the payload of a failed `::oauth2` call (`{status,
+    body}` or a transport error).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/token-error("microsoft-graph: bad tenant").message  // "microsoft-graph: bad tenant"
+    ::microsoft::graph::auth/token-error("token request failed", {status: 400, body: {error: "invalid_grant", error_description: "Expired"}}).message  // "token request failed: invalid_grant (Expired)"
+    ```
+    """
 }
 fn
 (message: Str): TokenError {
@@ -167,25 +180,58 @@ fn
 
 is-blank-value
 meta {
-    doc: """True for null, `""`, and whitespace-only strings (context placeholders wire `""` for unset env vars)."""
+    doc: """
+    True for null, `""`, and whitespace-only strings (context placeholders
+    wire `""` for unset env vars).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/is-blank-value("  ")  // true
+    ::microsoft::graph::auth/is-blank-value(null)  // true
+    ::microsoft::graph::auth/is-blank-value("common")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
 compact
-meta {doc: """Drop null and blank-string values from a Map."""}
+meta {
+    doc: """
+    Drop null and blank-string values from a Map.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/compact({id: "1", name: "", note: null})  // {id: "1"}
+    ```
+    """
+}
 fn (m: Map): Map {
   filter-vals(m, (v) { not(is-blank-value(v)) })
 }
 
-pick fn (m: Map, ks: Vec): Map {
+pick
+meta {no-doc: true}
+fn (m: Map, ks: Vec): Map {
   filter-keys(m, (k) { in(k, ks) })
 }
 
 mark-values
 meta {
-    doc: """Register the non-blank `values` as secrets for this run's call records (`::hot::ctx/mark-secret`)."""
+    doc: """
+    Register the non-blank `values` as secrets for this run's call records
+    (`::hot::ctx/mark-secret`).
+
+    **Example**
+
+    ```hot
+    // Call records now mask this value
+    ::microsoft::graph::auth/mark-values([::hot::ctx/get("microsoft.client.secret")])
+    ```
+    """
 }
 fn (values: Vec): Vec {
   ::ctx/mark-secret(filter(values, (v) { not(is-blank-value(v)) }))
@@ -193,7 +239,17 @@ fn (values: Vec): Vec {
 
 mark-secrets
 meta {
-    doc: """Mark the values of `keys-to-mark` in `m` as secrets and return `m` unchanged."""
+    doc: """
+    Mark the values of `keys-to-mark` in `m` as secrets and return `m`
+    unchanged.
+
+    **Example**
+
+    ```hot
+    opts {client-secret: ::hot::ctx/get("microsoft.client.secret"), tenant-id: "contoso.onmicrosoft.com"}
+    ::microsoft::graph::auth/mark-secrets(opts, ["client-secret"]).tenant-id
+    ```
+    """
 }
 fn (m: Map, keys-to-mark: Vec): Map {
   mark-values(map(keys-to-mark, (k) { get(m, k) }))
@@ -202,7 +258,22 @@ fn (m: Map, keys-to-mark: Vec): Map {
 
 mark-tokens
 meta {
-    doc: """Mark the access, refresh and id tokens of a token response as secrets and return the response unchanged."""
+    doc: """
+    Mark the access, refresh and id tokens of a token response as secrets
+    and return the response unchanged.
+
+    **Example**
+
+    ```hot
+    // A token you fetched yourself, outside this package
+    tokens ::oauth2/token-request("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+      grant_type: "refresh_token",
+      client_id: "11111111-2222-3333-4444-555555555555",
+      refresh_token: ::hot::ctx/get("microsoft.oauth.refresh-token")
+    })
+    ::microsoft::graph::auth/mark-tokens(tokens).expires_in
+    ```
+    """
 }
 fn (tokens: Map): Map {
   mark-secrets(tokens, TOKEN_RESPONSE_SECRETS)
@@ -210,7 +281,18 @@ fn (tokens: Map): Map {
 
 parse-int
 meta {
-    doc: """Parse an Int from an Int or a decimal-digit Str (surrounding whitespace allowed); null for anything else. Never halts on bad input."""
+    doc: """
+    Parse an Int from an Int or a decimal-digit Str (surrounding whitespace
+    allowed); null for anything else. Never halts on bad input.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/parse-int("42")  // 42
+    ::microsoft::graph::auth/parse-int(" 7 ")  // 7
+    ::microsoft::graph::auth/parse-int("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -224,11 +306,15 @@ fn (value: Any): Int? {
   }
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
-trim-slash fn (url: Str): Str {
+trim-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   u trim(url)
   if(ends-with(u, "/"), trim-slash(slice(u, 0, sub(length(u), 1))), u)
 }
@@ -273,7 +359,16 @@ fn (source: Map): Map {
 
 token-url
 meta {
-    doc: """The v2 token endpoint for a tenant: `{login}/{tenant}/oauth2/v2.0/token`."""
+    doc: """
+    The v2 token endpoint for a tenant:
+    `{login}/{tenant}/oauth2/v2.0/token`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/token-url("https://login.microsoftonline.com", "contoso.onmicrosoft.com")  // "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token"
+    ```
+    """
 }
 fn (login: Str, tenant: Str): Str {
   `${login}/${::uri/encode(tenant)}/oauth2/v2.0/token`
@@ -281,7 +376,16 @@ fn (login: Str, tenant: Str): Str {
 
 authorize-endpoint
 meta {
-    doc: """The v2 authorization endpoint for a tenant: `{login}/{tenant}/oauth2/v2.0/authorize`."""
+    doc: """
+    The v2 authorization endpoint for a tenant:
+    `{login}/{tenant}/oauth2/v2.0/authorize`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/authorize-endpoint("https://login.microsoftonline.com", "common")  // "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    ```
+    """
 }
 fn (login: Str, tenant: Str): Str {
   `${login}/${::uri/encode(tenant)}/oauth2/v2.0/authorize`
@@ -289,7 +393,17 @@ fn (login: Str, tenant: Str): Str {
 
 is-multi-tenant-segment
 meta {
-    doc: """True for `common`, `organizations` and `consumers` (audiences, not tenants)."""
+    doc: """
+    True for `common`, `organizations` and `consumers` (audiences, not
+    tenants).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/is-multi-tenant-segment("common")  // true
+    ::microsoft::graph::auth/is-multi-tenant-segment("contoso.onmicrosoft.com")  // false
+    ```
+    """
 }
 fn (tenant: Str?): Bool {
   in(lowercase(trim(or(tenant, ""))), ::graph/MULTI_TENANT_SEGMENTS)
@@ -308,6 +422,14 @@ meta {
     (`Files.Read.All`) stays short in the global cloud (Entra reads it
     as a Graph permission) and is prefixed with the Graph root
     elsewhere, as national clouds require.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/expand-scope("Files.Read.All", "https://graph.microsoft.com")  // "Files.Read.All"
+    ::microsoft::graph::auth/expand-scope("Files.Read.All", "https://graph.microsoft.us")  // "https://graph.microsoft.us/Files.Read.All"
+    ::microsoft::graph::auth/expand-scope(".default", "https://graph.microsoft.com")  // "https://graph.microsoft.com/.default"
+    ```
     """
 }
 fn (scope: Str, graph: Str): Str {
@@ -330,8 +452,7 @@ meta {
     `expand-scope` for the forms.
 
     ```hot
-    ::microsoft::graph::auth/normalize-scopes("Files.Read, Sites.Read.All offline_access", "https://graph.microsoft.com")
-    // ["Files.Read", "Sites.Read.All", "offline_access"]
+    ::microsoft::graph::auth/normalize-scopes("Files.Read, Sites.Read.All offline_access", "https://graph.microsoft.com")  // ["Files.Read", "Sites.Read.All", "offline_access"]
     ```
     """
 }
@@ -350,7 +471,17 @@ fn
 }
 
 app-scopes
-meta {doc: """The scope app-only tokens are minted for: `["{graph}/.default"]`."""}
+meta {
+    doc: """
+    The scope app-only tokens are minted for: `["{graph}/.default"]`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/app-scopes("https://graph.microsoft.us")  // ["https://graph.microsoft.us/.default"]
+    ```
+    """
+}
 fn (graph: Str): Vec {
   [`${graph}/.default`]
 }
@@ -363,6 +494,13 @@ meta {
     from reading `microsoft.scopes`): `opts.scopes`, else the
     `microsoft.scopes` context variable, else `{graph}/.default`, always
     with `offline_access` so a new refresh token comes back.
+
+    **Example**
+
+    ```hot
+    scopes ::microsoft::graph::auth/delegated-scopes({scopes: "Files.Read User.Read"}, "https://graph.microsoft.com")
+    join(scopes, " ")
+    ```
     """
 }
 fn (opts: Map, graph: Str): Vec {
@@ -383,7 +521,17 @@ fn (opts: Map, graph: Str): Vec {
 
 pem-body
 meta {
-    doc: """The base64 body of the first PEM block with the given label (e.g. `"CERTIFICATE"`), whitespace removed; null when absent (pure)."""
+    doc: """
+    The base64 body of the first PEM block with the given label (e.g.
+    `"CERTIFICATE"`), whitespace removed; null when absent (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/pem-body("-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----", "CERTIFICATE")  // "QUJD"
+    ::microsoft::graph::auth/pem-body("not a pem", "CERTIFICATE")  // null
+    ```
+    """
 }
 fn (pem: Str, label: Str): Str? {
   begin `-----BEGIN ${label}-----`
@@ -401,7 +549,17 @@ fn (pem: Str, label: Str): Str? {
 
 normalize-thumbprint
 meta {
-    doc: """A hex thumbprint as the Entra portal shows it (upper case, maybe with `:` or spaces) in lower-case hex, or null for blank input."""
+    doc: """
+    A hex thumbprint as the Entra portal shows it (upper case, maybe with
+    `:` or spaces) in lower-case hex, or null for blank input.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/normalize-thumbprint("AB:CD EF")  // "abcdef"
+    ::microsoft::graph::auth/normalize-thumbprint("")  // null
+    ```
+    """
 }
 fn (thumbprint: Any): Str? {
   cond {
@@ -416,6 +574,14 @@ meta {
     The SHA-1 and SHA-256 thumbprints (lower-case hex) of a PEM
     certificate's DER encoding: `{sha1, sha256}` (pure). Returns a
     `TokenError` when the PEM has no `CERTIFICATE` block.
+
+    **Example**
+
+    ```hot
+    pem "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----"
+    ::microsoft::graph::auth/certificate-thumbprints(pem).sha1  // "3c01bdbb26f358bab27f267924aa2c9a03fcfdb8"
+    is-err(::microsoft::graph::auth/certificate-thumbprints("not a pem"))  // true
+    ```
     """
 }
 fn (certificate-pem: Str): Map {
@@ -435,6 +601,13 @@ meta {
     doc: """
     Base64url-encode a hex thumbprint for the JWT `x5t` (SHA-1) or
     `x5t#S256` (SHA-256) header (pure). Returns an Err for malformed hex.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/thumbprint-header("3c01bdbb26f358bab27f267924aa2c9a03fcfdb8", 40)  // "PAG9uybzWLqyfyZ5JKosmgP8_bg"
+    is-err(::microsoft::graph::auth/thumbprint-header("abc", 40))  // true
+    ```
     """
 }
 fn (hex-thumbprint: Str, expected-length: Int): Str {
@@ -454,6 +627,13 @@ meta {
     `{alg: "RS256", typ: "JWT", x5t?, "x5t#S256"?}`. `thumbprints` is
     `{sha1?, sha256?}` in hex; `x5t` is set from SHA-1 and `x5t#S256`
     from SHA-256. Entra identifies the certificate by either.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/assertion-header({sha1: "3c01bdbb26f358bab27f267924aa2c9a03fcfdb8"})  // {alg: "RS256", typ: "JWT", x5t: "PAG9uybzWLqyfyZ5JKosmgP8_bg"}
+    is-err(::microsoft::graph::auth/assertion-header({}))  // true
+    ```
     """
 }
 fn (thumbprints: Map): Map {
@@ -473,7 +653,19 @@ fn (thumbprints: Map): Map {
 
 assertion-claims
 meta {
-    doc: """The RFC 7523 claims of a client assertion (pure): `aud` (the token endpoint), `iss` = `sub` = the client id, a fresh `jti`, `nbf` = `iat` = `now`, `exp` 10 minutes later."""
+    doc: """
+    The RFC 7523 claims of a client assertion (pure): `aud` (the token
+    endpoint), `iss` = `sub` = the client id, a fresh `jti`, `nbf` = `iat` =
+    `now`, `exp` 10 minutes later.
+
+    **Example**
+
+    ```hot
+    claims ::microsoft::graph::auth/assertion-claims("app-1", "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token", 1800000000)
+    claims.iss  // "app-1"
+    claims.exp  // 1800000600
+    ```
+    """
 }
 fn (client-id: Str, audience: Str, now: Int): Map {
   {
@@ -487,7 +679,9 @@ fn (client-id: Str, audience: Str, now: Int): Map {
   }
 }
 
-encode-segment fn (value: Map): Str {
+encode-segment
+meta {no-doc: true}
+fn (value: Map): Str {
   ::b64/encode-url(to-json(value))
 }
 
@@ -498,6 +692,16 @@ meta {
     is not available in Hot; RS256 is accepted, and is what MSAL sends
     with a SHA-1 thumbprint). `header` and `claims` are Maps; returns the
     compact JWT or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    header ::auth/assertion-header({sha1: "3c01bdbb26f358bab27f267924aa2c9a03fcfdb8"})
+    claims ::auth/assertion-claims("11111111-2222-3333-4444-555555555555", "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token", ::jwt/now-seconds())
+    assertion ::auth/sign-assertion(header, claims, ::hot::ctx/get("microsoft.client.private-key"))
+    length(split(assertion, "."))
+    ```
     """
 }
 fn (header: Map, claims: Map, private-key-pem: Str): Str {
@@ -520,8 +724,8 @@ meta {
     ::auth ::microsoft::graph::auth
     assertion ::auth/client-assertion({
       client-id: "11111111-2222-3333-4444-555555555555",
-      private-key: private-key-pem,
-      thumbprints: ::auth/certificate-thumbprints(certificate-pem)
+      private-key: ::hot::ctx/get("microsoft.client.private-key"),
+      thumbprints: ::auth/certificate-thumbprints(::hot::ctx/get("microsoft.client.certificate"))
     }, "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token")
     ```
     """
@@ -544,7 +748,17 @@ fn (creds: Map, audience: Str): Str {
 
 has-primary-credential
 meta {
-    doc: """True when `source` carries a primary credential: `token`, `refresh-token`, `client-secret` or `private-key`."""
+    doc: """
+    True when `source` carries a primary credential: `token`,
+    `refresh-token`, `client-secret` or `private-key`.
+
+    **Example**
+
+    ```hot
+    source ::microsoft::graph::auth/ctx-source()
+    if(::microsoft::graph::auth/has-primary-credential(source), "configured", "no credentials set")
+    ```
+    """
 }
 fn (source: Map): Bool {
   gt(length(filter(PRIMARY_KEYS, (k) { not(is-blank-value(get(source, k))) })), 0)
@@ -565,7 +779,17 @@ meta {
         "microsoft.graph.url": {required: false, secret: false},
         "microsoft.login.url": {required: false, secret: false}
     },
-    doc: """The credential source read from context, in the same shape as `opts`, with blank values dropped."""
+    doc: """
+    The credential source read from context, in the same shape as `opts`,
+    with blank values dropped.
+
+    **Example**
+
+    ```hot
+    source ::microsoft::graph::auth/ctx-source()
+    source.tenant-id
+    ```
+    """
 }
 fn (): Map {
   compact({
@@ -597,6 +821,12 @@ meta {
       with no client credential or URL of its own also borrows the
       context's client secret or certificate when the client id is the
       same
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/merge-sources({tenant-id: "contoso.onmicrosoft.com"}, {client-id: "app-1", tenant-id: "common"})  // {client-id: "app-1", tenant-id: "contoso.onmicrosoft.com"}
+    ```
     """
 }
 fn (opts: Map, ctx: Map): Map {
@@ -614,13 +844,25 @@ fn (opts: Map, ctx: Map): Map {
   }
 }
 
-missing-client-id fn (what: Str): TokenError {
+missing-client-id
+meta {no-doc: true}
+fn (what: Str): TokenError {
   err(token-error(`microsoft-graph: ${what} needs the app's client id. Set microsoft.client.id or pass client-id in opts.`))
 }
 
 certificate-thumbprints-from
 meta {
-    doc: """The `{sha1?, sha256?}` thumbprints for a credential source: computed from `certificate` (PEM) when set, else `thumbprint` (SHA-1 hex) and `thumbprint-sha256`. Pure."""
+    doc: """
+    The `{sha1?, sha256?}` thumbprints for a credential source: computed
+    from `certificate` (PEM) when set, else `thumbprint` (SHA-1 hex) and
+    `thumbprint-sha256`. Pure.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/certificate-thumbprints-from({thumbprint: "AB:CD"})  // {sha1: "abcd"}
+    ```
+    """
 }
 fn (source: Map): Map {
   cert get(source, "certificate")
@@ -637,7 +879,18 @@ fn (source: Map): Map {
 
 client-auth-from
 meta {
-    doc: """How a confidential client proves itself at the token endpoint (pure): `{method: "certificate", private-key, thumbprints}`, `{method: "secret", client-secret}`, or null for a public client. A certificate wins over a secret."""
+    doc: """
+    How a confidential client proves itself at the token endpoint (pure):
+    `{method: "certificate", private-key, thumbprints}`, `{method: "secret",
+    client-secret}`, or null for a public client. A certificate wins over a
+    secret.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/client-auth-from({tenant-id: "contoso.onmicrosoft.com"})  // null
+    ```
+    """
 }
 fn (source: Map): Map? {
   key get(source, "private-key")
@@ -662,6 +915,13 @@ meta {
     `TokenError` when nothing usable is set, the client id is missing, or
     an app-only credential names `common`/`organizations`/`consumers`
     instead of a tenant.
+
+    **Example**
+
+    ```hot
+    is-err(::microsoft::graph::auth/credentials-from({tenant-id: "contoso.onmicrosoft.com"}))  // true
+    is-err(::microsoft::graph::auth/credentials-from({cloud: "mars"}))  // true
+    ```
     """
 }
 fn (source: Map): Map {
@@ -716,7 +976,17 @@ fn (source: Map): Map {
 
 blank-credential
 meta {
-    doc: """The first credential key `opts` has with a blank or null value, else null (pure)."""
+    doc: """
+    The first credential key `opts` has with a blank or null value, else
+    null (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/blank-credential({token: ""})  // "token"
+    ::microsoft::graph::auth/blank-credential({tenant-id: "contoso.onmicrosoft.com"})  // null
+    ```
+    """
 }
 fn (opts: Map): Str? {
   find-first(BLANK_CHECKED_KEYS, (k) { and(in(k, keys(opts)), is-blank-value(get(opts, k))) })
@@ -724,7 +994,17 @@ fn (opts: Map): Str? {
 
 url-without-credential
 meta {
-    doc: """The first of `graph-url` / `login-url` that `opts` sets without a primary credential in the same `opts`, else null (pure)."""
+    doc: """
+    The first of `graph-url` / `login-url` that `opts` sets without a
+    primary credential in the same `opts`, else null (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/url-without-credential({graph-url: "https://proxy.example.com"})  // "graph-url"
+    ::microsoft::graph::auth/url-without-credential({tenant-id: "contoso.onmicrosoft.com"})  // null
+    ```
+    """
 }
 fn (opts: Map): Str? {
   find-first(URL_KEYS, (k) { and(not(is-blank-value(get(opts, k))), not(has-primary-credential(opts))) })
@@ -739,6 +1019,13 @@ meta {
     is in `opts` without a primary credential; otherwise as
     `credentials-from(merge-sources(opts, ctx))`. Exposed for testing;
     `resolve-credentials` feeds it the context.
+
+    **Example**
+
+    ```hot
+    is-err(::microsoft::graph::auth/resolve-from({token: ""}, {}))  // true
+    is-err(::microsoft::graph::auth/resolve-from({graph-url: "https://proxy.example.com"}, {}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx: Map): Map {
@@ -758,7 +1045,19 @@ fn (opts: Map, ctx: Map): Map {
 
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context (see the namespace doc for precedence and the per-call rules). Credentials from `opts` are marked as secrets first, and never written to context."""
+    doc: """
+    Resolve the credentials for a call from `opts` and context (see the
+    namespace doc for precedence and the per-call rules). Credentials from
+    `opts` are marked as secrets first, and never written to context.
+
+    **Example**
+
+    ```hot
+    creds ::microsoft::graph::auth/resolve-credentials({tenant-id: "contoso.onmicrosoft.com"})
+    creds.kind
+    creds.cloud.login
+    ```
+    """
 }
 fn
 (): Map {
@@ -771,7 +1070,19 @@ fn
 
 token-scopes
 meta {
-    doc: """The scopes a token for resolved credentials is requested with: `.default` for app-only, `delegated-scopes` for refresh tokens, `[]` for explicit tokens."""
+    doc: """
+    The scopes a token for resolved credentials is requested with:
+    `.default` for app-only, `delegated-scopes` for refresh tokens, `[]` for
+    explicit tokens.
+
+    **Example**
+
+    ```hot
+    creds {kind: "client-secret", cloud: {graph: "https://graph.microsoft.com"}}
+    ::microsoft::graph::auth/token-scopes(creds, {})  // ["https://graph.microsoft.com/.default"]
+    ::microsoft::graph::auth/token-scopes({kind: "token"}, {})  // []
+    ```
+    """
 }
 fn (creds: Map, opts: Map): Vec {
   cond {
@@ -787,7 +1098,18 @@ fn (creds: Map, opts: Map): Vec {
 
 client-auth-params
 meta {
-    doc: """The client-authentication form fields for `client-auth` (pure apart from signing): `client_secret`, or `client_assertion_type` + `client_assertion` for a certificate, or `{}` for a public client. `audience` is the token endpoint."""
+    doc: """
+    The client-authentication form fields for `client-auth` (pure apart from
+    signing): `client_secret`, or `client_assertion_type` +
+    `client_assertion` for a certificate, or `{}` for a public client.
+    `audience` is the token endpoint.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/client-auth-params(null, "app-1", "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token")  // {}
+    ```
+    """
 }
 fn (client-auth: Map?, client-id: Str, audience: Str): Map {
   cond {
@@ -802,7 +1124,20 @@ fn (client-auth: Map?, client-id: Str, audience: Str): Map {
 
 build-refresh-body
 meta {
-    doc: """The `refresh_token` grant form body (pure apart from signing a certificate assertion)."""
+    doc: """
+    The `refresh_token` grant form body (pure apart from signing a
+    certificate assertion).
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials({client-id: "11111111-2222-3333-4444-555555555555", refresh-token: ::hot::ctx/get("microsoft.oauth.refresh-token")})
+    url ::auth/token-url(creds.cloud.login, creds.tenant)
+    form ::auth/build-refresh-body(creds, creds.refresh-token, ["User.Read", "offline_access"], url)
+    form.grant_type
+    ```
+    """
 }
 fn (creds: Map, refresh-token: Str, scopes: Vec, audience: Str): Map {
   auth client-auth-params(creds.client-auth, creds.client-id, audience)
@@ -822,7 +1157,20 @@ fn (creds: Map, refresh-token: Str, scopes: Vec, audience: Str): Map {
 
 build-client-credentials-body
 meta {
-    doc: """The `client_credentials` grant form body (pure apart from signing a certificate assertion)."""
+    doc: """
+    The `client_credentials` grant form body (pure apart from signing a
+    certificate assertion).
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials({tenant-id: "contoso.onmicrosoft.com"})
+    url ::auth/token-url(creds.cloud.login, creds.tenant)
+    form ::auth/build-client-credentials-body(creds, ::auth/app-scopes(creds.cloud.graph), url)
+    form.grant_type
+    ```
+    """
 }
 fn (creds: Map, scopes: Vec, audience: Str): Map {
   auth client-auth-params(creds.client-auth, creds.client-id, audience)
@@ -845,13 +1193,26 @@ fn (creds: Map, scopes: Vec, audience: Str): Map {
 
 rotation-key
 meta {
-    doc: """The context key under which the newest refresh token for an original refresh token is kept for the run."""
+    doc: """
+    The context key under which the newest refresh token for an original
+    refresh token is kept for the run.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials({client-id: "11111111-2222-3333-4444-555555555555", refresh-token: ::hot::ctx/get("microsoft.oauth.refresh-token")})
+    ::hot::ctx/get(::auth/rotation-key(creds))
+    ```
+    """
 }
 fn (creds: Map): Str {
   concat(ROTATION_PREFIX, ::hash/sha256(join(["rotation", creds.cloud.login, creds.tenant, creds.client-id, get(creds, "refresh-token")], "|")))
 }
 
-client-auth-identity fn (auth: Map?): Str {
+client-auth-identity
+meta {no-doc: true}
+fn (auth: Map?): Str {
   cond {
     is-null(auth) => { "public" }
     eq(auth.method, "secret") => { concat("secret:", ::hash/sha256(get(auth, "client-secret"))) }
@@ -867,6 +1228,14 @@ meta {
     client id, the client credential's fingerprint (a hash, never the
     secret), the refresh token's hash for delegated tokens, and the
     sorted scope set.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/token-cache-key({kind: "token"}, [])  // null
+    creds {kind: "client-secret", cloud: {login: "https://login.microsoftonline.com"}, tenant: "contoso.onmicrosoft.com", client-id: "app-1", client-auth: null}
+    starts-with(::microsoft::graph::auth/token-cache-key(creds, ["User.Read"]), "microsoft.token-cache.")  // true
+    ```
     """
 }
 fn (creds: Map, scopes: Vec): Str? {
@@ -882,7 +1251,16 @@ fn (creds: Map, scopes: Vec): Str? {
 
 cache-entry
 meta {
-    doc: """The cached form of a token response: `{access-token, expires-at}` (epoch ms), expiring `EXPIRY_MARGIN_SECONDS` (5 minutes) early."""
+    doc: """
+    The cached form of a token response: `{access-token, expires-at}` (epoch
+    ms), expiring `EXPIRY_MARGIN_SECONDS` (5 minutes) early.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/cache-entry({expires_in: 3600}, 1000).expires-at  // 3301000
+    ```
+    """
 }
 fn (tokens: Map, now: Int): Map {
   expires-in or(parse-int(tokens.expires_in), 3600)
@@ -894,14 +1272,35 @@ fn (tokens: Map, now: Int): Map {
 
 is-fresh
 meta {
-    doc: """True when a cache entry exists and has not reached its (margin-adjusted) expiry."""
+    doc: """
+    True when a cache entry exists and has not reached its (margin-adjusted)
+    expiry.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::auth/is-fresh(null, 1000)  // false
+    ```
+    """
 }
 fn (entry: Any, now: Int): Bool {
   and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
 }
 
 evict-token
-meta {doc: """Drop a cached token (e.g. after a 401). No-op for a null key."""}
+meta {
+    doc: """
+    Drop a cached token (e.g. after a 401). No-op for a null key.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials()
+    ::auth/evict-token(::auth/token-cache-key(creds, ::auth/token-scopes(creds, {})))
+    ```
+    """
+}
 fn (cache-key: Str?): Bool {
   cond {
     is-null(cache-key) => { false }
@@ -921,9 +1320,11 @@ meta {
     after a run that used a refresh token.
 
     ```hot
-    ::microsoft::graph::users/me({refresh-token: stored, client-id: app-id})
-    newest ::microsoft::graph::auth/latest-refresh-token({refresh-token: stored, client-id: app-id})
-    ::hot::store/put(tokens, user-id, newest)
+    opts {refresh-token: ::hot::ctx/get("microsoft.oauth.refresh-token"), client-id: "11111111-2222-3333-4444-555555555555"}
+    ::microsoft::graph::users/me(opts)
+    newest ::microsoft::graph::auth/latest-refresh-token(opts)
+    store ::hot::store/Map({name: "microsoft-tokens"})
+    ::hot::store/put(store, "user-42", newest)
     ```
     """
 }
@@ -944,7 +1345,9 @@ fn
 // Minting
 // ---------------------------------------------------------------------------
 
-token-request fn (url: Str, body: Any, prefix: Str): Map {
+token-request
+meta {no-doc: true}
+fn (url: Str, body: Any, prefix: Str): Map {
   cond {
     is-err(body) => { body }
     => {
@@ -956,7 +1359,20 @@ token-request fn (url: Str, body: Any, prefix: Str): Map {
 
 redeem-refresh-token
 meta {
-    doc: """Redeem a refresh token for resolved `refresh` credentials and scopes (no cache). Returns Entra's token response, including the rotated `refresh_token`, or a `TokenError`."""
+    doc: """
+    Redeem a refresh token for resolved `refresh` credentials and scopes (no
+    cache). Returns Entra's token response, including the rotated
+    `refresh_token`, or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials({client-id: "11111111-2222-3333-4444-555555555555", refresh-token: ::hot::ctx/get("microsoft.oauth.refresh-token")})
+    tokens ::auth/redeem-refresh-token(creds, creds.refresh-token, ["User.Read", "offline_access"])
+    tokens.expires_in
+    ```
+    """
 }
 fn (creds: Map, refresh-token: Str, scopes: Vec): Map {
   url token-url(creds.cloud.login, creds.tenant)
@@ -965,7 +1381,19 @@ fn (creds: Map, refresh-token: Str, scopes: Vec): Map {
 
 client-credentials-token
 meta {
-    doc: """Mint an app-only token for resolved `certificate` / `client-secret` credentials (no cache). Returns the token response or a `TokenError`."""
+    doc: """
+    Mint an app-only token for resolved `certificate` / `client-secret`
+    credentials (no cache). Returns the token response or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials({tenant-id: "contoso.onmicrosoft.com"})
+    tokens ::auth/client-credentials-token(creds, ::auth/app-scopes(creds.cloud.graph))
+    tokens.expires_in
+    ```
+    """
 }
 fn (creds: Map, scopes: Vec): Map {
   url token-url(creds.cloud.login, creds.tenant)
@@ -974,7 +1402,19 @@ fn (creds: Map, scopes: Vec): Map {
 
 mint-token
 meta {
-    doc: """Mint a fresh token response for resolved credentials (no cache). A delegated refresh records the rotated refresh token for the run."""
+    doc: """
+    Mint a fresh token response for resolved credentials (no cache). A
+    delegated refresh records the rotated refresh token for the run.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials()
+    tokens ::auth/mint-token(creds, ::auth/token-scopes(creds, {}))
+    tokens.expires_in
+    ```
+    """
 }
 fn (creds: Map, scopes: Vec): Map {
   cond {
@@ -1003,6 +1443,15 @@ meta {
     per-run cache. Returns `{token, cache-key, cached}` (`cached` is true
     when the token came from the cache, so a 401 should evict and retry),
     or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    ::auth ::microsoft::graph::auth
+    creds ::auth/resolve-credentials()
+    minted ::auth/bearer(creds, ::auth/token-scopes(creds, {}))
+    minted.cached
+    ```
     """
 }
 fn (creds: Map, scopes: Vec): Map {

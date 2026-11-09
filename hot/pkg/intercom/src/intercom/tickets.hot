@@ -13,7 +13,17 @@ meta {
 
 list-ticket-types
 meta {
-    doc: """GET /ticket_types - The workspace's ticket types (including archived ones) with their attributes: `{type: "list", data: [...]}`."""
+    doc: """
+    GET /ticket_types - The workspace's ticket types (including archived
+    ones) with their attributes: `{type: "list", data: [...]}`.
+
+    **Example**
+
+    ```hot
+    types ::intercom::tickets/list-ticket-types()
+    map(types.data, %.name)
+    ```
+    """
 }
 fn
 (): Any {
@@ -25,7 +35,16 @@ fn
 
 get-ticket-type
 meta {
-    doc: """GET /ticket_types/{id} - One ticket type with its attribute definitions."""
+    doc: """
+    GET /ticket_types/{id} - One ticket type with its attribute definitions.
+
+    **Example**
+
+    ```hot
+    type-info ::intercom::tickets/get-ticket-type("1234")
+    type-info.name
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -37,7 +56,20 @@ fn
 
 build-create-body
 meta {
-    doc: """Build the create body: `ticket_type_id`, `contacts` (`[{id}]`, `[{external_id}]` or `[{email}]`), plus `options` (`ticket_attributes`, `company_id`, `conversation_to_link_id`, `assignment: {admin_assignee_id, team_assignee_id}`, `created_at`). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Build the create body: `ticket_type_id`, `contacts` (`[{id}]`,
+    `[{external_id}]` or `[{email}]`), plus `options` (`ticket_attributes`,
+    `company_id`, `conversation_to_link_id`, `assignment:
+    {admin_assignee_id, team_assignee_id}`, `created_at`). Unset options are
+    omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::intercom::tickets/build-create-body("1234", [{email: "ada@example.com"}], {company_id: "acme-42"})
+    // {company_id: "acme-42", ticket_type_id: "1234", contacts: [{email: "ada@example.com"}]}
+    ```
+    """
 }
 fn (ticket-type-id: Str, contacts: Vec, options: Map): Map {
   ::api/compact({...options, ticket_type_id: ticket-type-id, contacts: contacts})
@@ -70,7 +102,16 @@ fn
 
 get-ticket
 meta {
-    doc: """GET /tickets/{id} - One ticket."""
+    doc: """
+    GET /tickets/{id} - One ticket.
+
+    **Example**
+
+    ```hot
+    ticket ::intercom::tickets/get-ticket("6031")
+    ticket.ticket_attributes
+    ```
+    """
 }
 fn
 (id: Str): Any {
@@ -82,7 +123,20 @@ fn
 
 update-ticket
 meta {
-    doc: """PUT /tickets/{id} - Update `ticket_attributes`, `ticket_state_id`, `open`, `is_shared`, `snoozed_until`, `company_id`, or assignment (`admin_id` performing it plus `assignee_id`). Unset fields are omitted."""
+    doc: """
+    PUT /tickets/{id} - Update `ticket_attributes`, `ticket_state_id`,
+    `open`, `is_shared`, `snoozed_until`, `company_id`, or assignment
+    (`admin_id` performing it plus `assignee_id`). Unset fields are omitted.
+
+    **Example**
+
+    ```hot
+    ::intercom::tickets/update-ticket("6031", {
+      ticket_attributes: {_default_title_: "Export fails on large files"},
+      open: true
+    })
+    ```
+    """
 }
 fn
 (id: Str, changes: Map): Any {
@@ -94,7 +148,17 @@ fn
 
 list-ticket-states
 meta {
-    doc: """GET /ticket_states - The workspace's ticket states (ids for `update-ticket`'s `ticket_state_id`)."""
+    doc: """
+    GET /ticket_states - The workspace's ticket states (ids for
+    `update-ticket`'s `ticket_state_id`).
+
+    **Example**
+
+    ```hot
+    states ::intercom::tickets/list-ticket-states()
+    map(states.data, %.id)
+    ```
+    """
 }
 fn
 (): Any {
@@ -106,7 +170,19 @@ fn
 
 search-tickets
 meta {
-    doc: """POST /tickets/search - One page of tickets matching a query (`{field, operator, value}` or an `AND`/`OR` combinator over fields like `state`, `ticket_type_id`, `admin_assignee_id`, `created_at`). `options`: `per_page`, `starting_after`. Returns `{tickets, pages, total_count}`."""
+    doc: """
+    POST /tickets/search - One page of tickets matching a query (`{field,
+    operator, value}` or an `AND`/`OR` combinator over fields like `state`,
+    `ticket_type_id`, `admin_assignee_id`, `created_at`). `options`:
+    `per_page`, `starting_after`. Returns `{tickets, pages, total_count}`.
+
+    **Example**
+
+    ```hot
+    page ::intercom::tickets/search-tickets({field: "ticket_type_id", operator: "=", value: "1234"}, {per_page: 50})
+    length(page.tickets)
+    ```
+    """
 }
 fn
 (query: Map): Any {
@@ -121,7 +197,17 @@ fn
 
 search-all-tickets
 meta {
-    doc: """Run `search-tickets` across pages until `limit` tickets or the last page. Returns a Vec."""
+    doc: """
+    Run `search-tickets` across pages until `limit` tickets or the last
+    page. Returns a Vec.
+
+    **Example**
+
+    ```hot
+    tickets ::intercom::tickets/search-all-tickets({field: "ticket_type_id", operator: "=", value: "1234"}, 500)
+    length(tickets)
+    ```
+    """
 }
 fn
 (query: Map, limit: Int): Vec {

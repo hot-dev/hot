@@ -43,7 +43,17 @@ PACKAGE_AGENT "hot-dev-regulations-gov-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::regulations-gov::api/given("EPA")  // true
+    ::regulations-gov::api/given("  ")  // false
+    ::regulations-gov::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -53,7 +63,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -63,7 +75,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -78,7 +92,8 @@ meta {
     **Example**
 
     ```hot
-    cfg ::regulations-gov::api/resolve({api-key: tenant.regulations-key})
+    cfg ::regulations-gov::api/resolve({api-key: ::hot::ctx/get("regulations-gov.api-key")})
+    cfg.base-url
     ```
     """
 }
@@ -104,7 +119,16 @@ fn (opts: Map): Map {
 
 require-api-key
 meta {
-    doc: """The API key from resolved settings, or an Err naming where to set it."""
+    doc: """
+    The API key from resolved settings, or an Err naming where to set it.
+
+    **Example**
+
+    ```hot
+    cfg ::regulations-gov::api/resolve({})
+    key ::regulations-gov::api/require-api-key(cfg)
+    ```
+    """
 }
 fn (cfg: Map): Str {
   cond {
@@ -138,7 +162,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -157,7 +183,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -168,7 +196,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 429, headers: {retry-after: "60"}, body: {error: {code: "OVER_RATE_LIMIT"}}})
+    e ::regulations-gov::api/http-error(response, "https://api.regulations.gov/v4/documents")
+    e.retry-after  // 60
+    e.message  // "regulations-gov: HTTP 429: OVER_RATE_LIMIT"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -186,7 +226,20 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 not-json-error
 meta {
-    doc: """An `HttpError` for a 2xx response that is not JSON, such as a maintenance page, which would otherwise read as an empty page. Exposed for testing."""
+    doc: """
+    An `HttpError` for a 2xx response that is not JSON, such as a
+    maintenance page, which would otherwise read as an empty page. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: "<html></html>"})
+    e ::regulations-gov::api/not-json-error(response, "https://api.regulations.gov/v4/documents")
+    e.status  // 200
+    e.message  // "regulations-gov: expected JSON from https://api.regulations.gov/v4/documents, got something else (usually an HTML page)"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   HttpError({
@@ -202,7 +255,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::regulations-gov::api/is-not-found({status: 404})  // true
+    ::regulations-gov::api/is-not-found({status: 500})  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   and(is-map(e), eq(get(e, "status"), 404))
@@ -214,7 +276,17 @@ fn (e: Any): Bool {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::regulations-gov::api/query-string({"filter[docketId]": "FAA-2018-1084", sort: null})  // "?filter%5BdocketId%5D=FAA-2018-1084"
+    ::regulations-gov::api/query-string({sort: ""})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -222,7 +294,15 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::regulations-gov::api/path-segment("EPA HQ")  // "EPA%20HQ"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -234,6 +314,14 @@ meta {
     GET (or another method) a Regulations.gov URL with `headers`, returning
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
     transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("regulations-gov.api-key")
+    response ::regulations-gov::api/request("GET", "https://api.regulations.gov/v4/documents", {X-Api-Key: key})
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -252,7 +340,21 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 decode-body
 meta {
-    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+    doc: """
+    The decoded JSON of a 2xx response, or an Err carrying `HttpError` when
+    the body is not JSON (pure). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    url "https://api.regulations.gov/v4/documents"
+    ok-page ::hot::http/HttpResponse({status: 200, headers: {}, body: "{\"data\": []}"})
+    ::regulations-gov::api/decode-body(ok-page, url)  // {data: []}
+
+    html ::hot::http/HttpResponse({status: 200, headers: {}, body: "<html></html>"})
+    is-err(::regulations-gov::api/decode-body(html, url))  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): Any {
   body response.body
@@ -267,7 +369,18 @@ fn (response: HttpResponse, url: Str): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("regulations-gov.api-key")
+    page ::regulations-gov::api/get-json("https://api.regulations.gov/v4/documents?page%5Bsize%5D=5", {X-Api-Key: key})
+    length(page.data)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})
@@ -276,7 +389,17 @@ fn (url: Str, headers: Map): Any {
 
 get-json-or-null
 meta {
-    doc: """`get-json`, but a 404 gives null (no such record) instead of an Err."""
+    doc: """
+    `get-json`, but a 404 gives null (no such record) instead of an Err.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("regulations-gov.api-key")
+    doc ::regulations-gov::api/get-json-or-null("https://api.regulations.gov/v4/documents/FAA-2018-1084-0001", {X-Api-Key: key})
+    is-null(doc)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   out get-json(url, headers)

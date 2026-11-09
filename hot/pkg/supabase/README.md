@@ -7,7 +7,7 @@ Supabase client SDK for Hot. Query your database (PostgREST), authenticate users
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/supabase": "1.1.0"
+"hot.dev/supabase": "1.1.1"
 ```
 
 ## Configuration

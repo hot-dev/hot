@@ -663,7 +663,7 @@ meta {
 
     ```hot
 
-    chicago ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    chicago ::hot::time/ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
     tokyo ::hot::time/with-timezone(chicago, "Asia/Tokyo")
     tokyo.hour      // 1 (next day)
     tokyo.timezone  // "Asia/Tokyo"
@@ -685,7 +685,7 @@ meta {
 
     ```hot
 
-    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    zdt ::hot::time/ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
     dt ::hot::time/to-plain-date-time(zdt)
     Str(dt)  // "2026-02-17T10:30:00"
     ```
@@ -706,7 +706,7 @@ meta {
 
     ```hot
 
-    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    zdt ::hot::time/ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
     d ::hot::time/to-plain-date(zdt)
     Str(d)  // "2026-02-17"
     ```
@@ -727,7 +727,7 @@ meta {
 
     ```hot
 
-    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    zdt ::hot::time/ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
     t ::hot::time/to-plain-time(zdt)
     Str(t)  // "10:30:00"
     ```
@@ -748,7 +748,7 @@ meta {
 
     ```hot
 
-    zdt ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
+    zdt ::hot::time/ZonedDateTime("2026-02-17T10:30:00-06:00[America/Chicago]")
     inst ::hot::time/to-instant(zdt)
     ::hot::time/epoch-millis(inst)  // epoch millis for that moment
     ```
@@ -1023,6 +1023,7 @@ meta {
     **Example**
 
     ```hot
+    request {headers: {x-timestamp: "2026-10-14T09:00:00Z"}}
     ::hot::time/within-seconds-of-now(request.headers.x-timestamp, 300)
     ```
     """

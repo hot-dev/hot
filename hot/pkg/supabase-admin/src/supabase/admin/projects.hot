@@ -25,16 +25,22 @@ ProjectHealth type {
   info: Map?
 }
 
-postgrest-path fn (project-ref: Str): Str {
+postgrest-path
+meta {no-doc: true}
+fn (project-ref: Str): Str {
   `/projects/${project-ref}/postgrest`
 }
 
-database-openapi-path fn (project-ref: Str, schema: Str?): Str {
+database-openapi-path
+meta {no-doc: true}
+fn (project-ref: Str, schema: Str?): Str {
   suffix if(is-some(schema), `?schema=${::uri/encode(schema)}`, "")
   `/projects/${project-ref}/database/openapi${suffix}`
 }
 
-health-path fn (project-ref: Str, services: Vec<Str>): Str {
+health-path
+meta {no-doc: true}
+fn (project-ref: Str, services: Vec<Str>): Str {
   encoded-services ::uri/encode(join(services, ","))
   `/projects/${project-ref}/health?services=${encoded-services}`
 }
@@ -68,7 +74,21 @@ fn
 
 get-project
 meta {
-    doc: """Get details for a specific project by its reference ID."""
+    doc: """
+    Get details for a specific project by its reference ID.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    project ::projects/get-project("my-project-ref")
+    project.status
+
+    // Per-call credentials
+    other ::projects/get-project("my-project-ref", {access-token: ::hot::ctx/get("tenant_b.supabase.token")})
+    ```
+    """
 }
 fn
 (project-ref: Str): Project {
@@ -126,7 +146,17 @@ fn
 
 delete-project
 meta {
-    doc: """Delete a Supabase project. This is permanent and cannot be undone."""
+    doc: """
+    Delete a Supabase project. This is permanent and cannot be undone.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    ::projects/delete-project("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -142,7 +172,18 @@ fn
 
 pause-project
 meta {
-    doc: """Pause a project (free tier only). Paused projects stop all services but retain data."""
+    doc: """
+    Pause a project (free tier only). Paused projects stop all services but
+    retain data.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    ::projects/pause-project("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -154,7 +195,17 @@ fn
 
 restore-project
 meta {
-    doc: """Restore a paused project."""
+    doc: """
+    Restore a paused project.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    ::projects/restore-project("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -204,7 +255,19 @@ fn
 
 get-postgrest-config
 meta {
-    doc: """Get the PostgREST configuration for a project (exposed schemas, max rows, pool size)."""
+    doc: """
+    Get the PostgREST configuration for a project (exposed schemas, max
+    rows, pool size).
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    config ::projects/get-postgrest-config("my-project-ref")
+    config.max_rows
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -224,7 +287,21 @@ UpdatePostgrestConfigRequest type {
 
 update-postgrest-config
 meta {
-    doc: """Update PostgREST configuration."""
+    doc: """
+    Update PostgREST configuration.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    ::projects/update-postgrest-config(::projects/UpdatePostgrestConfigRequest({
+      project_ref: "my-project-ref",
+      db_schema: "public,api",
+      max_rows: 500
+    }))
+    ```
+    """
 }
 fn
 (request: UpdatePostgrestConfigRequest): Map {
@@ -242,7 +319,22 @@ fn
 
 get-database-openapi
 meta {
-    doc: """Get the PostgREST OpenAPI spec for a project. Optionally pass a database schema."""
+    doc: """
+    Get the PostgREST OpenAPI spec for a project. Optionally pass a database
+    schema.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    spec ::projects/get-database-openapi("my-project-ref")
+    spec.paths
+
+    // One schema
+    api-spec ::projects/get-database-openapi("my-project-ref", "api")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -257,7 +349,18 @@ fn
 
 get-auth-config
 meta {
-    doc: """Get the authentication (GoTrue) configuration for a project."""
+    doc: """
+    Get the authentication (GoTrue) configuration for a project.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    config ::projects/get-auth-config("my-project-ref")
+    config.site_url
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {
@@ -269,7 +372,21 @@ fn
 
 update-auth-config
 meta {
-    doc: """Update authentication configuration. Pass a Map of auth config fields to update."""
+    doc: """
+    Update authentication configuration. Pass a Map of auth config fields to
+    update.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    ::projects/update-auth-config("my-project-ref", {
+      site_url: "https://myapp.com",
+      disable_signup: true
+    })
+    ```
+    """
 }
 fn
 (project-ref: Str, config: Map): Map {
@@ -285,7 +402,22 @@ fn
 
 get-project-health
 meta {
-    doc: """Get health status for project services. Defaults to db, auth, storage, rest, and realtime."""
+    doc: """
+    Get health status for project services. Defaults to db, auth, storage,
+    rest, and realtime.
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    health ::projects/get-project-health("my-project-ref")
+    filter(health, not(%.healthy))
+
+    // Selected services
+    db-only ::projects/get-project-health("my-project-ref", ["db"])
+    ```
+    """
 }
 fn
 (project-ref: Str): Vec<ProjectHealth> {
@@ -300,7 +432,18 @@ fn
 
 get-project-usage
 meta {
-    doc: """Get usage metrics for a project (database size, storage, bandwidth, etc.)."""
+    doc: """
+    Get usage metrics for a project (database size, storage, bandwidth,
+    etc.).
+
+    **Example**
+
+    ```hot
+    ::projects ::supabase::admin::projects
+
+    usage ::projects/get-project-usage("my-project-ref")
+    ```
+    """
 }
 fn
 (project-ref: Str): Map {

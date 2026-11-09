@@ -42,7 +42,19 @@ DeactivateOrganizationCertificatesResponse type {
 
 deactivate-certificates-organization
 meta {
-    doc: """POST /organization/certificates/deactivate - Deactivate certificates for organization"""
+    doc: """
+    POST /organization/certificates/deactivate - Deactivate certificates for
+    organization
+
+    **Example**
+
+    ```hot
+    result ::openai::deactivate/deactivate-certificates-organization(::openai::deactivate/DeactivateOrganizationCertificatesRequest({
+      certificate_ids: ["cert_abc123"]
+    }))
+    map(result.data, %.active)
+    ```
+    """
 }
 fn
 (request: DeactivateOrganizationCertificatesRequest): DeactivateOrganizationCertificatesResponse {
@@ -72,7 +84,19 @@ DeactivateProjectCertificatesResponse type {
 
 deactivate-certificates-project
 meta {
-    doc: """POST /organization/projects/{project_id}/certificates/deactivate - Deactivate certificates for project"""
+    doc: """
+    POST /organization/projects/{project_id}/certificates/deactivate -
+    Deactivate certificates for project
+
+    **Example**
+
+    ```hot
+    result ::openai::deactivate/deactivate-certificates-project("proj_abc123", ::openai::deactivate/DeactivateProjectCertificatesRequest({
+      certificate_ids: ["cert_abc123"]
+    }))
+    map(result.data, %.id)
+    ```
+    """
 }
 fn
 (project-id: Str, request: DeactivateProjectCertificatesRequest): DeactivateProjectCertificatesResponse {

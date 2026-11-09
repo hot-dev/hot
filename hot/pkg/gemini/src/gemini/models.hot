@@ -323,7 +323,7 @@ meta {
     **Example**
 
     ```hot
-    models ::gemini::models/list(ModelsListRequest({
+    models ::gemini::models/list(::gemini::models/ModelsListRequest({
         page-size: "10",
         page-token: ""
     }))
@@ -373,7 +373,7 @@ meta {
     **Example**
 
     ```hot
-    model ::gemini::models/get(ModelsGetRequest({
+    model ::gemini::models/get(::gemini::models/ModelsGetRequest({
         model: "gemini-2.0-flash"
     }))
 
@@ -422,12 +422,14 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::models/generate-content("gemini-2.0-flash", ModelsGenerateContentRequest({
-        contents: [Content({
+    ::models ::gemini::models
+
+    response ::models/generate-content("gemini-2.0-flash", ::models/ModelsGenerateContentRequest({
+        contents: [::models/Content({
             role: "user",
-            parts: [Part({text: "What is the capital of France?"})]
+            parts: [::models/Part({text: "What is the capital of France?"})]
         })],
-        generationConfig: GenerationConfig({maxOutputTokens: 100})
+        generationConfig: ::models/GenerationConfig({maxOutputTokens: 100})
     }))
 
     text first(response.candidates).content.parts[0].text
@@ -472,12 +474,14 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::models/stream-generate-content("gemini-2.0-flash", "sse", ModelsStreamGenerateContentRequest({
-        contents: [Content({
+    ::models ::gemini::models
+
+    response ::models/stream-generate-content("gemini-2.0-flash", "sse", ::models/ModelsStreamGenerateContentRequest({
+        contents: [::models/Content({
             role: "user",
-            parts: [Part({text: "Count from 1 to 5."})]
+            parts: [::models/Part({text: "Count from 1 to 5."})]
         })],
-        generationConfig: GenerationConfig({maxOutputTokens: 100})
+        generationConfig: ::models/GenerationConfig({maxOutputTokens: 100})
     }))
     ```
     """
@@ -513,10 +517,12 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::models/count-tokens("gemini-2.0-flash", ModelsCountTokensRequest({
-        contents: [Content({
+    ::models ::gemini::models
+
+    response ::models/count-tokens("gemini-2.0-flash", ::models/ModelsCountTokensRequest({
+        contents: [::models/Content({
             role: "user",
-            parts: [Part({text: "Hello, world!"})]
+            parts: [::models/Part({text: "Hello, world!"})]
         })]
     }))
 
@@ -556,10 +562,12 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::models/embed-content("text-embedding-004", ModelsEmbedContentRequest({
-        content: Content({
+    ::models ::gemini::models
+
+    response ::models/embed-content("text-embedding-004", ::models/ModelsEmbedContentRequest({
+        content: ::models/Content({
             role: "user",
-            parts: [Part({text: "The quick brown fox jumps over the lazy dog"})]
+            parts: [::models/Part({text: "The quick brown fox jumps over the lazy dog"})]
         })
     }))
 
@@ -569,10 +577,12 @@ meta {
     **With task type**
 
     ```hot
-    response ::gemini::models/embed-content("text-embedding-004", ModelsEmbedContentRequest({
-        content: Content({
+    ::models ::gemini::models
+
+    response ::models/embed-content("text-embedding-004", ::models/ModelsEmbedContentRequest({
+        content: ::models/Content({
             role: "user",
-            parts: [Part({text: "What is the meaning of life?"})]
+            parts: [::models/Part({text: "What is the meaning of life?"})]
         }),
         taskType: "RETRIEVAL_QUERY"
     }))
@@ -608,14 +618,16 @@ meta {
     **Example**
 
     ```hot
-    response ::gemini::models/batch-embed-contents("text-embedding-004", ModelsBatchEmbedContentsRequest({
+    ::models ::gemini::models
+
+    response ::models/batch-embed-contents("text-embedding-004", ::models/ModelsBatchEmbedContentsRequest({
         requests: [
-            EmbedContentRequest({
-                content: Content({role: "user", parts: [Part({text: "Hello world"})]}),
+            ::models/EmbedContentRequest({
+                content: ::models/Content({role: "user", parts: [::models/Part({text: "Hello world"})]}),
                 model: "models/text-embedding-004"
             }),
-            EmbedContentRequest({
-                content: Content({role: "user", parts: [Part({text: "Goodbye world"})]}),
+            ::models/EmbedContentRequest({
+                content: ::models/Content({role: "user", parts: [::models/Part({text: "Goodbye world"})]}),
                 model: "models/text-embedding-004"
             })
         ]

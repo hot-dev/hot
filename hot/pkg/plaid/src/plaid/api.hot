@@ -64,7 +64,9 @@ type {
     suggested_action: Str?
 }
 
-plaid-field fn (body: Any, key: Str): Any {
+plaid-field
+meta {no-doc: true}
+fn (body: Any, key: Str): Any {
   if(is-map(body), get(body, key), null)
 }
 
@@ -90,7 +92,18 @@ fn (response: HttpResponse): HttpError {
 
 is-error-code
 meta {
-    doc: """True when `e` is a Plaid `HttpError` with this `error_code` (e.g. `"ITEM_LOGIN_REQUIRED"`, `"TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"`)."""
+    doc: """
+    True when `e` is a Plaid `HttpError` with this `error_code` (e.g.
+    `"ITEM_LOGIN_REQUIRED"`,
+    `"TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"`).
+
+    **Example**
+
+    ```hot
+    ::plaid::api/is-error-code({error_code: "ITEM_LOGIN_REQUIRED"}, "ITEM_LOGIN_REQUIRED")  // true
+    ::plaid::api/is-error-code("timeout", "ITEM_LOGIN_REQUIRED")  // false
+    ```
+    """
 }
 fn (e: Any, code: Str): Bool {
   cond {
@@ -105,7 +118,18 @@ fn (e: Any, code: Str): Bool {
 
 env-base-url
 meta {
-    doc: """The base URL for a Plaid environment: `"sandbox"` or `"production"`. Anything else errs (including the decommissioned `"development"`). Exposed for testing."""
+    doc: """
+    The base URL for a Plaid environment: `"sandbox"` or `"production"`.
+    Anything else errs (including the decommissioned `"development"`).
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/env-base-url("production")  // "https://production.plaid.com"
+    is-err(::plaid::api/env-base-url("development"))  // true
+    ```
+    """
 }
 fn (env: Str): Str {
   name lowercase(trim(env))
@@ -121,7 +145,17 @@ fn (env: Str): Str {
 
 current-env
 meta {
-    doc: """The configured environment name: `plaid.env`, or `"sandbox"` when unset or empty."""
+    doc: """
+    The configured environment name: `plaid.env`, or `"sandbox"` when unset
+    or empty.
+
+    **Example**
+
+    ```hot
+    // sandbox, unless plaid.env is set
+    ::plaid::api/current-env()
+    ```
+    """
 }
 fn (): Str {
   configured or(::ctx/get("plaid.env"), "")
@@ -130,7 +164,17 @@ fn (): Str {
 
 plaid-version
 meta {
-    doc: """The `Plaid-Version` header value: `plaid.version`, or `::plaid/PLAID_VERSION`."""
+    doc: """
+    The `Plaid-Version` header value: `plaid.version`, or
+    `::plaid/PLAID_VERSION`.
+
+    **Example**
+
+    ```hot
+    // ::plaid/PLAID_VERSION, unless plaid.version is set
+    ::plaid::api/plaid-version()
+    ```
+    """
 }
 fn (): Str {
   configured or(::ctx/get("plaid.version"), "")
@@ -143,7 +187,17 @@ fn (): Str {
 
 compact
 meta {
-    doc: """Drop null-valued keys from a request body. An `options` sub-object that is null or empty is dropped too, so Plaid never sees `"options": null`. Exposed for testing."""
+    doc: """
+    Drop null-valued keys from a request body. An `options` sub-object that
+    is null or empty is dropped too, so Plaid never sees `"options": null`.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/compact({count: 1, cursor: null, options: {}})  // {count: 1}
+    ```
+    """
 }
 fn (body: Map): Map {
   kept filter-vals(body, is-some)
@@ -156,7 +210,16 @@ fn (body: Map): Map {
 
 with-credentials
 meta {
-    doc: """The full request body: `client_id` and `secret` first, then the (compacted) body. Exposed for testing."""
+    doc: """
+    The full request body: `client_id` and `secret` first, then the
+    (compacted) body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/with-credentials({count: 1, cursor: null}, "test-id", "test-secret")  // {client_id: "test-id", secret: "test-secret", count: 1}
+    ```
+    """
 }
 fn (body: Map, client-id: Str, secret: Str): Map {
   {client_id: client-id, secret: secret, ...compact(body)}
@@ -174,13 +237,25 @@ REQUIRED_WHEN_PRESENT ["client-id", "secret", "environment"]
 // Plaid mints.
 TOKEN_FIELDS ["access_token", "public_token", "link_token"]
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+    doc: """
+    The first of `names` that `opts` has with a blank or null value, else
+    null.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/blank-option({secret: ""}, ["client-id", "secret"])  // "secret"
+    ::plaid::api/blank-option({}, ["client-id", "secret"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -196,6 +271,15 @@ meta {
     when `opts` has only one of `client-id` and `secret` (a tenant's id
     must not go out with the project's secret), or when the environment
     is unknown. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    vars {"plaid.client-id": "test-id", "plaid.secret": "test-secret"}
+    ::plaid::api/resolve-from({}, vars).base-url  // "https://sandbox.plaid.com"
+    ::plaid::api/resolve-from({environment: "production"}, vars).base-url  // "https://production.plaid.com"
+    is-err(::plaid::api/resolve-from({}, {}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -245,7 +329,7 @@ meta {
     **Example**
 
     ```hot
-    ::plaid::api/resolve({client-id: "tenant-id", secret: "tenant-secret", environment: "production"}).base-url
+    ::plaid::api/resolve({client-id: ::hot::ctx/get("tenant.plaid.client-id"), secret: ::hot::ctx/get("tenant.plaid.secret"), environment: "production"}).base-url
     // "https://production.plaid.com"
     ```
     """
@@ -272,7 +356,20 @@ fn (opts: Map): Map {
 
 mark-credentials
 meta {
-    doc: """Mask the credentials in `opts` in this run's call records. Called first wherever `opts` arrives, so the records of the calls after it are masked too. Returns null."""
+    doc: """
+    Mask the credentials in `opts` in this run's call records. Called first
+    wherever `opts` arrives, so the records of the calls after it are masked
+    too. Returns null.
+
+    **Example**
+
+    ```hot
+    ::plaid::api/mark-credentials({
+      client-id: ::hot::ctx/get("tenant.plaid.client-id"),
+      secret: ::hot::ctx/get("tenant.plaid.secret")
+    })
+    ```
+    """
 }
 fn (opts: Map): Any {
   ::ctx/mark-secret([opts.client-id, opts.secret])
@@ -281,7 +378,17 @@ fn (opts: Map): Any {
 
 mark-tokens
 meta {
-    doc: """Mask a request or response body's `access_token`, `public_token` and `link_token` in this run's call records. Returns the body unchanged."""
+    doc: """
+    Mask a request or response body's `access_token`, `public_token` and
+    `link_token` in this run's call records. Returns the body unchanged.
+
+    **Example**
+
+    ```hot
+    body {access_token: ::hot::ctx/get("plaid.access-token"), count: 10}
+    ::plaid::api/mark-tokens(body).count
+    ```
+    """
 }
 fn (body: Any): Any {
   if(is-map(body), ::ctx/mark-secret(filter-keys(body, in(%, TOKEN_FIELDS))))
@@ -294,7 +401,19 @@ fn (body: Any): Any {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`), with the credentials in the JSON body. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`), with
+    the credentials in the JSON body. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved {client-id: "test-id", secret: "test-secret", base-url: "https://sandbox.plaid.com", plaid-version: "2020-09-14"}
+    req ::plaid::api/build-request("/categories/get", {}, resolved)
+    req.url  // "https://sandbox.plaid.com/categories/get"
+    req.headers.Plaid-Version  // "2020-09-14"
+    ```
+    """
 }
 fn (path: Str, body: Map, resolved: Map): HttpRequest {
   HttpRequest({
@@ -323,7 +442,7 @@ meta {
     out ::plaid::api/post("/categories/get", {})
 
     // For another Plaid client
-    out ::plaid::api/post("/categories/get", {}, {client-id: "tenant-id", secret: "tenant-secret"})
+    out ::plaid::api/post("/categories/get", {}, {client-id: ::hot::ctx/get("tenant.plaid.client-id"), secret: ::hot::ctx/get("tenant.plaid.secret")})
     ```
     """
 }

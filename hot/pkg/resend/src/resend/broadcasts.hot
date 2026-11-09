@@ -64,7 +64,17 @@ GETBroadcastsResponse type {
 
 retrieve-list-broadcasts
 meta {
-    doc: """Retrieve all broadcasts in your Resend account, including draft, scheduled, and sent."""
+    doc: """
+    Retrieve all broadcasts in your Resend account, including draft,
+    scheduled, and sent.
+
+    **Example**
+
+    ```hot
+    broadcasts ::resend::broadcasts/retrieve-list-broadcasts(::resend::broadcasts/GETBroadcastsRequest({}))
+    map(broadcasts.data, %.status)
+    ```
+    """
 }
 fn
 (request: GETBroadcastsRequest): GETBroadcastsResponse {
@@ -98,7 +108,23 @@ POSTBroadcastsResponse type {
 
 create-broadcast
 meta {
-    doc: """Create a new broadcast draft targeting a specific audience. Must be sent separately via send-or-schedule-broadcast."""
+    doc: """
+    Create a new broadcast draft targeting a specific audience. Must be sent
+    separately via send-or-schedule-broadcast.
+
+    **Example**
+
+    ```hot
+    draft ::resend::broadcasts/create-broadcast(::resend::broadcasts/POSTBroadcastsRequest({
+        name: "November update",
+        audience_id: "78261eea-8f8b-4381-83c6-79fa7120f1cf",
+        from: "news@example.com",
+        subject: "What shipped in November",
+        html: "<p>Hello.</p>"
+    }))
+    draft.id
+    ```
+    """
 }
 fn
 (request: POSTBroadcastsRequest): POSTBroadcastsResponse {
@@ -134,7 +160,17 @@ GETBroadcastsIdResponse type {
 
 retrieve-single-broadcast
 meta {
-    doc: """Retrieve a single broadcast by its ID, including status, schedule, and content details."""
+    doc: """
+    Retrieve a single broadcast by its ID, including status, schedule, and
+    content details.
+
+    **Example**
+
+    ```hot
+    broadcast ::resend::broadcasts/retrieve-single-broadcast(::resend::broadcasts/GETBroadcastsIdRequest({id: "49a3999c-0ce1-4ea6-ab68-afcd6dc2e794"}))
+    broadcast.status
+    ```
+    """
 }
 fn
 (request: GETBroadcastsIdRequest): GETBroadcastsIdResponse {
@@ -162,7 +198,17 @@ DELETEBroadcastsIdResponse type {
 
 remove-existing-broadcast-that-is-draft-status
 meta {
-    doc: """Remove an existing broadcast. Only broadcasts in draft status can be deleted."""
+    doc: """
+    Remove an existing broadcast. Only broadcasts in draft status can be
+    deleted.
+
+    **Example**
+
+    ```hot
+    result ::resend::broadcasts/remove-existing-broadcast-that-is-draft-status(::resend::broadcasts/DELETEBroadcastsIdRequest({id: "49a3999c-0ce1-4ea6-ab68-afcd6dc2e794"}))
+    result.deleted
+    ```
+    """
 }
 fn
 (request: DELETEBroadcastsIdRequest): DELETEBroadcastsIdResponse {
@@ -188,7 +234,23 @@ POSTBroadcastsIdSendResponse type {
 
 send-or-schedule-broadcast
 meta {
-    doc: """Send a broadcast immediately or schedule it for later delivery via scheduled_at."""
+    doc: """
+    Send a broadcast immediately or schedule it for later delivery via
+    scheduled_at.
+
+    **Example**
+
+    ```hot
+    // Send now
+    ::resend::broadcasts/send-or-schedule-broadcast("49a3999c-0ce1-4ea6-ab68-afcd6dc2e794", ::resend::broadcasts/POSTBroadcastsIdSendRequest({}))
+
+    // Or schedule it
+    scheduled ::resend::broadcasts/send-or-schedule-broadcast("49a3999c-0ce1-4ea6-ab68-afcd6dc2e794", ::resend::broadcasts/POSTBroadcastsIdSendRequest({
+        scheduled_at: "2026-12-01T09:00:00Z"
+    }))
+    scheduled.id
+    ```
+    """
 }
 fn
 (id: Str, request: POSTBroadcastsIdSendRequest): POSTBroadcastsIdSendResponse {

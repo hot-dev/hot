@@ -2,7 +2,7 @@
 
 hot.pkg.exa {
   name: "hot.dev/exa",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Exa API bindings for Hot: neural web search with inline page contents, find-similar pages, and clean page text for URLs.",
   author: "Hot Dev",

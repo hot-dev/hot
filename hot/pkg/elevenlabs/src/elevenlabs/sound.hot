@@ -9,7 +9,17 @@ BODY_FIELDS ["duration_seconds", "prompt_influence", "loop", "model_id"]
 
 sound-effect-body
 meta {
-    doc: """The JSON body for `sound-effect`: `text` plus the body fields present in `options` (nulls omitted). Exposed for testing."""
+    doc: """
+    The JSON body for `sound-effect`: `text` plus the body fields present in
+    `options` (nulls omitted). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::sound/sound-effect-body("Rain", {duration_seconds: 2.5, output_format: "pcm_16000"})
+    // {text: "Rain", duration_seconds: 2.5}
+    ```
+    """
 }
 fn (text: Str, options: Map): Map {
   reduce(BODY_FIELDS, (acc, field) { assoc-some(acc, field, get(options, field)) }, {text: text})
@@ -17,7 +27,17 @@ fn (text: Str, options: Map): Map {
 
 sound-effect-path
 meta {
-    doc: """`/v1/sound-generation` plus the query params (`output_format`, `enable_logging`) present in `options`. Exposed for testing."""
+    doc: """
+    `/v1/sound-generation` plus the query params (`output_format`,
+    `enable_logging`) present in `options`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::sound/sound-effect-path({output_format: "pcm_16000"})  // "/v1/sound-generation?output_format=pcm_16000"
+    ::elevenlabs::sound/sound-effect-path({})  // "/v1/sound-generation"
+    ```
+    """
 }
 fn (options: Map): Str {
   `/v1/sound-generation${::api/query-string({

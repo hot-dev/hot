@@ -70,7 +70,15 @@ fn (item: Any, opts: Map): Str {
 
 worksheet-path
 meta {
-    doc: """The Graph path of a worksheet, by name or id."""
+    doc: """
+    The Graph path of a worksheet, by name or id.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/worksheet-path("/Reports/Q3.xlsx", "Q3 Plan", {})  // "/me/drive/root:/Reports/Q3.xlsx:/workbook/worksheets/Q3%20Plan"
+    ```
+    """
 }
 fn (item: Any, sheet: Str, opts: Map): Str {
   `${workbook-path(item, opts)}/worksheets/${::api/encode-segment(sheet)}`
@@ -78,7 +86,15 @@ fn (item: Any, sheet: Str, opts: Map): Str {
 
 table-path
 meta {
-    doc: """The Graph path of a table, by name or id, at the workbook level."""
+    doc: """
+    The Graph path of a table, by name or id, at the workbook level.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/table-path("01ABC", "Leads", {drive: "b1"})  // "/drives/b1/items/01ABC/workbook/tables/Leads"
+    ```
+    """
 }
 fn (item: Any, table: Str, opts: Map): Str {
   `${workbook-path(item, opts)}/tables/${::api/encode-segment(table)}`
@@ -86,7 +102,17 @@ fn (item: Any, table: Str, opts: Map): Str {
 
 odata-string
 meta {
-    doc: """A value as an encoded OData string literal: quotes doubled, then percent-encoded, wrapped in single quotes."""
+    doc: """
+    A value as an encoded OData string literal: quotes doubled, then
+    percent-encoded, wrapped in single quotes.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/odata-string("A1:B2")  // "'A1%3AB2'"
+    ::microsoft::excel/odata-string("it's")  // "'it%27%27s'"
+    ```
+    """
 }
 fn (value: Str): Str {
   doubled ::hot::str/replace(value, "'", "''")
@@ -114,7 +140,18 @@ fn (item: Any, sheet: Str, address: Str, opts: Map): Str {
 
 session-id
 meta {
-    doc: """The workbook session in `opts.session`, given as an id or a session Map from `create-session`; null when unset (pure)."""
+    doc: """
+    The workbook session in `opts.session`, given as an id or a session Map
+    from `create-session`; null when unset (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/session-id({session: "s1"})  // "s1"
+    ::microsoft::excel/session-id({session: {id: "s2", persistChanges: true}})  // "s2"
+    ::microsoft::excel/session-id({})  // null
+    ```
+    """
 }
 fn (opts: Map): Str? {
   session get(opts, "session")
@@ -127,7 +164,16 @@ fn (opts: Map): Str? {
 
 session-headers
 meta {
-    doc: """The `workbook-session-id` header for `opts.session`, or `{}` (pure)."""
+    doc: """
+    The `workbook-session-id` header for `opts.session`, or `{}` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/session-headers({session: "s1"})  // {"workbook-session-id": "s1"}
+    ::microsoft::excel/session-headers({})  // {}
+    ```
+    """
 }
 fn (opts: Map): Map {
   id session-id(opts)
@@ -136,16 +182,55 @@ fn (opts: Map): Map {
 
 query-opts
 meta {
-    doc: """The OData parameters of `opts` (pure): `defaults`, overridden by `opts` minus credential keys and this package's local keys, nulls dropped."""
+    doc: """
+    The OData parameters of `opts` (pure): `defaults`, overridden by `opts`
+    minus credential keys and this package's local keys, nulls dropped.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/query-opts({select: "values"}, {top: 5, drive: "b1", session: "s1"})  // {select: "values", top: 5}
+    ```
+    """
 }
 fn (defaults: Map, opts: Map): Map {
   params filter-keys(::api/api-params(opts), (k) { not(in(k, LOCAL_KEYS)) })
   filter-vals({...defaults, ...params}, is-some)
 }
 
+without-query
+meta {
+    doc: """
+    `opts` without its query parameters, keeping credentials and this
+    package's own keys. For reads whose query the package has to control:
+    a caller's `select` or `top` would otherwise replace it.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/without-query({drive: "b1", select: "address", top: 5})  // {drive: "b1"}
+    ```
+    """
+}
+fn (opts: Map): Map {
+  query keys(filter-keys(::api/api-params(opts), (k) { not(in(k, LOCAL_KEYS)) }))
+  filter-keys(opts, (k) { not(in(k, query)) })
+}
+
 call
 meta {
-    doc: """A Graph call with this package's conventions: the session header, credential opts and a JSON (or empty) body."""
+    doc: """
+    A Graph call with this package's conventions: the session header,
+    credential opts and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    // A workbook endpoint this package does not wrap
+    book ::microsoft::excel/workbook-path("/Reports/Q3.xlsx", {})
+    ::microsoft::excel/call("POST", `${book}/names/add`, {name: "Rate", reference: "=Data!$B$1"}, {session: "s1"})
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, opts: Map): Any {
   ::api/json(method, path, session-headers(opts), body, ::api/credential-opts(opts))
@@ -153,7 +238,18 @@ fn (method: Str, path: Str, body: Any, opts: Map): Any {
 
 fetch
 meta {
-    doc: """GET `path` with OData parameters from `defaults` and `opts`."""
+    doc: """
+    GET `path` with OData parameters from `defaults` and `opts`.
+
+    **Example**
+
+    ```hot
+    // A workbook endpoint this package does not wrap
+    book ::microsoft::excel/workbook-path("/Reports/Q3.xlsx", {})
+    result ::microsoft::excel/fetch(`${book}/names`, {}, {top: 10})
+    map(::microsoft::excel/collection(result), %.name)
+    ```
+    """
 }
 fn (path: Str, defaults: Map, opts: Map): Any {
   call("GET", ::api/with-query(path, query-opts(defaults, opts)), "", opts)
@@ -161,7 +257,16 @@ fn (path: Str, defaults: Map, opts: Map): Any {
 
 collection
 meta {
-    doc: """The items of a collection response, or the Err it holds."""
+    doc: """
+    The items of a collection response, or the Err it holds.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/collection({value: [{name: "Data"}]})  // [{name: "Data"}]
+    ::microsoft::excel/collection({})  // []
+    ```
+    """
 }
 fn (result: Result): Vec {
   if(is-err(result), result, or(get(result, "value"), []))
@@ -169,7 +274,15 @@ fn (result: Result): Vec {
 
 compact
 meta {
-    doc: """Drop null values from a request body."""
+    doc: """
+    Drop null values from a request body.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel/compact({name: "Leads", style: null})  // {name: "Leads"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)

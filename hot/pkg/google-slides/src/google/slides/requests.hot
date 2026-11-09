@@ -15,7 +15,7 @@ meta {
 
     slide ::req/new-object-id()
     box ::req/new-object-id()
-    ::google::slides::presentations/batch-update(id, [
+    ::google::slides::presentations/batch-update("1AbCdEf", [
       ::req/create-slide("BLANK", {objectId: slide}),
       ::req/create-text-box(box, slide, {x: 40, y: 40, width: 400, height: 80}),
       ::req/insert-text(box, "Hello"),
@@ -36,7 +36,16 @@ NUMBERED "NUMBERED_DIGIT_ALPHA_ROMAN"
 
 new-object-id
 meta {
-    doc: """A fresh object id for `objectId` fields."""
+    doc: """
+    A fresh object id for `objectId` fields.
+
+    **Example**
+
+    ```hot
+    starts-with(::google::slides::requests/new-object-id(), "hot_")  // true
+    length(::google::slides::requests/new-object-id())  // 36
+    ```
+    """
 }
 fn (): Str {
   `hot_${::hot::str/replace(Uuid(), "-", "")}`
@@ -44,7 +53,15 @@ fn (): Str {
 
 points
 meta {
-    doc: """A `Dimension` in points."""
+    doc: """
+    A `Dimension` in points.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/points(18)  // {magnitude: 18, unit: "PT"}
+    ```
+    """
 }
 fn (value: Int | Dec): Map {
   {magnitude: value, unit: "PT"}
@@ -52,7 +69,20 @@ fn (value: Int | Dec): Map {
 
 element-properties
 meta {
-    doc: """`PageElementProperties` placing an element on `page-id` at a `frame`, `{x, y, width, height}` in points."""
+    doc: """
+    `PageElementProperties` placing an element on `page-id` at a `frame`,
+    `{x, y, width, height}` in points.
+
+    **Example**
+
+    ```hot
+    frame {x: 10, y: 20, width: 300, height: 40}
+
+    props ::google::slides::requests/element-properties("p1", frame)
+    props.size.width  // {magnitude: 300, unit: "PT"}
+    props.transform  // {scaleX: 1, scaleY: 1, translateX: 10, translateY: 20, unit: "PT"}
+    ```
+    """
 }
 fn (page-id: Str, frame: Map): Map {
   {
@@ -64,7 +94,15 @@ fn (page-id: Str, frame: Map): Map {
 
 rgb
 meta {
-    doc: """A Slides `RgbColor` from 0-255 channels."""
+    doc: """
+    A Slides `RgbColor` from 0-255 channels.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/rgb(255, 0, 0)  // {red: 1.0, green: 0.0, blue: 0.0}
+    ```
+    """
 }
 fn (red: Int, green: Int, blue: Int): Map {
   {red: div(Dec(red), 255), green: div(Dec(green), 255), blue: div(Dec(blue), 255)}
@@ -72,10 +110,21 @@ fn (red: Int, green: Int, blue: Int): Map {
 
 hex-color
 meta {
-    doc: """A Slides `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an Err for anything else."""
+    doc: """
+    A Slides `RgbColor` from a hex string (`"#1a73e8"` or `"1a73e8"`); an
+    Err for anything else.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/hex-color("#ff0000")  // {red: 1.0, green: 0.0, blue: 0.0}
+    is-err(::google::slides::requests/hex-color("red"))  // true
+    ```
+    """
 }
 fn (hex: Str): Map {
-  h lowercase(::hot::str/replace(trim(hex), "#", ""))
+  trimmed trim(hex)
+  h lowercase(if(starts-with(trimmed, "#"), slice(trimmed, 1), trimmed))
   cond {
     not(::hot::regex/is-match(h, "^[0-9a-f]{6}$")) => { err(`google-slides: invalid hex color ${to-json(hex)}`) }
     => {
@@ -87,7 +136,17 @@ fn (hex: Str): Map {
 
 optional-color
 meta {
-    doc: """An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and `backgroundColor`."""
+    doc: """
+    An `OptionalColor` wrapping an `RgbColor`, for `foregroundColor` and
+    `backgroundColor`.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/optional-color(::google::slides::requests/rgb(0, 0, 255))
+    // {opaqueColor: {rgbColor: {red: 0.0, green: 0.0, blue: 1.0}}}
+    ```
+    """
 }
 fn (color: Map): Map {
   {opaqueColor: {rgbColor: color}}
@@ -95,7 +154,16 @@ fn (color: Map): Map {
 
 field-mask
 meta {
-    doc: """A style's top-level keys as a field mask, so only the fields you pass change."""
+    doc: """
+    A style's top-level keys as a field mask, so only the fields you pass
+    change.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/field-mask({bold: true, italic: false})  // "bold,italic"
+    ```
+    """
 }
 fn (style: Map): Str {
   join(map(keys(style), Str), ",")
@@ -103,7 +171,17 @@ fn (style: Map): Str {
 
 text-range
 meta {
-    doc: """A text `Range`: `ALL` by default, or `start` inclusive to `end` exclusive."""
+    doc: """
+    A text `Range`: `ALL` by default, or `start` inclusive to `end`
+    exclusive.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/text-range()  // {type: "ALL"}
+    ::google::slides::requests/text-range(0, 5)  // {type: "FIXED_RANGE", startIndex: 0, endIndex: 5}
+    ```
+    """
 }
 fn
 (): Map {
@@ -115,20 +193,32 @@ fn
 
 cell-location
 meta {
-    doc: """A `TableCellLocation`, 0-based."""
+    doc: """
+    A `TableCellLocation`, 0-based.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/cell-location(1, 2)  // {rowIndex: 1, columnIndex: 2}
+    ```
+    """
 }
 fn (row: Int, column: Int): Map {
   {rowIndex: row, columnIndex: column}
 }
 
 // The cell a text request addresses, from opts.rowIndex and opts.columnIndex.
-opts-cell fn (opts: Map): Map? {
+opts-cell
+meta {no-doc: true}
+fn (opts: Map): Map? {
   row get(opts, "rowIndex")
   column get(opts, "columnIndex")
   if(and(is-some(row), is-some(column)), cell-location(row, column), null)
 }
 
-opts-range fn (opts: Map): Map {
+opts-range
+meta {no-doc: true}
+fn (opts: Map): Map {
   or(get(opts, "textRange"), text-range())
 }
 
@@ -138,7 +228,17 @@ opts-range fn (opts: Map): Map {
 
 placeholder
 meta {
-    doc: """A `LayoutPlaceholderIdMapping` for `create-slide`: give the layout's placeholder of `kind` and `index` the id `object-id`."""
+    doc: """
+    A `LayoutPlaceholderIdMapping` for `create-slide`: give the layout's
+    placeholder of `kind` and `index` the id `object-id`.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/placeholder("TITLE", 0, "title1")
+    // {layoutPlaceholder: {type: "TITLE", index: 0}, objectId: "title1"}
+    ```
+    """
 }
 fn (kind: Str, index: Int, object-id: Str): Map {
   {layoutPlaceholder: {type: kind, index: index}, objectId: object-id}
@@ -153,6 +253,18 @@ meta {
     Options: `objectId`, `insertionIndex`, `placeholders` (from
     `placeholder`) and `layoutId` (a layout in this deck, used instead of
     `layout`).
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/create-slide()  // {createSlide: {slideLayoutReference: {predefinedLayout: "BLANK"}}}
+
+    req ::google::slides::requests/create-slide("TITLE", {objectId: "slide1", insertionIndex: 1})
+    req.createSlide.insertionIndex  // 1
+
+    // A layout from this deck
+    ::google::slides::requests/create-slide("BLANK", {layoutId: "L1"}).createSlide.slideLayoutReference  // {layoutId: "L1"}
+    ```
     """
 }
 fn
@@ -174,7 +286,21 @@ fn
 
 create-shape
 meta {
-    doc: """`createShape` of `shape-type` (`TEXT_BOX`, `RECTANGLE`, `ROUND_RECTANGLE`, `ELLIPSE`, `ARROW_EAST`, ...) on `page-id` at a `frame`."""
+    doc: """
+    `createShape` of `shape-type` (`TEXT_BOX`, `RECTANGLE`,
+    `ROUND_RECTANGLE`, `ELLIPSE`, `ARROW_EAST`, ...) on `page-id` at a
+    `frame`.
+
+    **Example**
+
+    ```hot
+    frame {x: 10, y: 20, width: 300, height: 40}
+
+    req ::google::slides::requests/create-shape("shape1", "RECTANGLE", "p1", frame)
+    req.createShape.shapeType  // "RECTANGLE"
+    req.createShape.elementProperties.pageObjectId  // "p1"
+    ```
+    """
 }
 fn (object-id: Str, shape-type: Str, page-id: Str, frame: Map): Map {
   {createShape: {objectId: object-id, shapeType: shape-type, elementProperties: element-properties(page-id, frame)}}
@@ -182,7 +308,17 @@ fn (object-id: Str, shape-type: Str, page-id: Str, frame: Map): Map {
 
 create-text-box
 meta {
-    doc: """`createShape` of a `TEXT_BOX`."""
+    doc: """
+    `createShape` of a `TEXT_BOX`.
+
+    **Example**
+
+    ```hot
+    frame {x: 10, y: 20, width: 300, height: 40}
+
+    ::google::slides::requests/create-text-box("box1", "p1", frame).createShape.shapeType  // "TEXT_BOX"
+    ```
+    """
 }
 fn (object-id: Str, page-id: Str, frame: Map): Map {
   create-shape(object-id, "TEXT_BOX", page-id, frame)
@@ -190,7 +326,19 @@ fn (object-id: Str, page-id: Str, frame: Map): Map {
 
 create-image
 meta {
-    doc: """`createImage` from a public URL (PNG, JPEG or GIF under 50 MB, at most 25 megapixels) on `page-id` at a `frame`."""
+    doc: """
+    `createImage` from a public URL (PNG, JPEG or GIF under 50 MB, at most
+    25 megapixels) on `page-id` at a `frame`.
+
+    **Example**
+
+    ```hot
+    frame {x: 10, y: 20, width: 300, height: 40}
+
+    req ::google::slides::requests/create-image("img1", "https://example.com/logo.png", "p1", frame)
+    req.createImage.url  // "https://example.com/logo.png"
+    ```
+    """
 }
 fn (object-id: Str, url: Str, page-id: Str, frame: Map): Map {
   {createImage: {objectId: object-id, url: url, elementProperties: element-properties(page-id, frame)}}
@@ -198,7 +346,21 @@ fn (object-id: Str, url: Str, page-id: Str, frame: Map): Map {
 
 create-table
 meta {
-    doc: """`createTable` on `page-id`, centered at the default size unless a `frame` is given."""
+    doc: """
+    `createTable` on `page-id`, centered at the default size unless a
+    `frame` is given.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/create-table("t1", "p1", 2, 3)
+    // {createTable: {objectId: "t1", elementProperties: {pageObjectId: "p1"}, rows: 2, columns: 3}}
+
+    // Placed at a frame
+    sized ::google::slides::requests/create-table("t1", "p1", 2, 3, {x: 10, y: 20, width: 300, height: 90})
+    sized.createTable.elementProperties.transform.translateY  // 20
+    ```
+    """
 }
 fn
 (object-id: Str, page-id: Str, rows: Int, columns: Int): Map {
@@ -210,7 +372,15 @@ fn
 
 delete-object
 meta {
-    doc: """`deleteObject`: a slide or a page element."""
+    doc: """
+    `deleteObject`: a slide or a page element.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/delete-object("s1")  // {deleteObject: {objectId: "s1"}}
+    ```
+    """
 }
 fn (object-id: Str): Map {
   {deleteObject: {objectId: object-id}}
@@ -218,7 +388,17 @@ fn (object-id: Str): Map {
 
 duplicate-object
 meta {
-    doc: """`duplicateObject`: a slide or a page element. `id-map` chooses ids for the copies, keyed by original id."""
+    doc: """
+    `duplicateObject`: a slide or a page element. `id-map` chooses ids for
+    the copies, keyed by original id.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/duplicate-object("s1")  // {duplicateObject: {objectId: "s1"}}
+    ::google::slides::requests/duplicate-object("s1", {s1: "copy1"})  // {duplicateObject: {objectId: "s1", objectIds: {s1: "copy1"}}}
+    ```
+    """
 }
 fn
 (object-id: Str): Map {
@@ -230,7 +410,17 @@ fn
 
 move-slides
 meta {
-    doc: """`updateSlidesPosition`: move slides, keeping their relative order, to before the slide at `insertion-index`."""
+    doc: """
+    `updateSlidesPosition`: move slides, keeping their relative order, to
+    before the slide at `insertion-index`.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/move-slides(["s2", "s3"], 0)
+    // {updateSlidesPosition: {slideObjectIds: ["s2", "s3"], insertionIndex: 0}}
+    ```
+    """
 }
 fn (slide-ids: Vec, insertion-index: Int): Map {
   {updateSlidesPosition: {slideObjectIds: slide-ids, insertionIndex: insertion-index}}
@@ -242,7 +432,21 @@ fn (slide-ids: Vec, insertion-index: Int): Map {
 
 insert-text
 meta {
-    doc: """`insertText` into a shape, or a table cell with `opts.rowIndex` and `opts.columnIndex`. `opts.insertionIndex` picks the position (default 0)."""
+    doc: """
+    `insertText` into a shape, or a table cell with `opts.rowIndex` and
+    `opts.columnIndex`. `opts.insertionIndex` picks the position (default
+    0).
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/insert-text("box1", "Hello")  // {insertText: {objectId: "box1", text: "Hello"}}
+
+    // Into a table cell, at position 3
+    cell ::google::slides::requests/insert-text("t1", "Hello", {insertionIndex: 3, rowIndex: 1, columnIndex: 2})
+    cell.insertText.cellLocation  // {rowIndex: 1, columnIndex: 2}
+    ```
+    """
 }
 fn
 (object-id: Str, text: Str): Map {
@@ -259,7 +463,19 @@ fn
 
 delete-text
 meta {
-    doc: """`deleteText`: all of it, or `opts.textRange` (from `text-range`). `opts.rowIndex` and `opts.columnIndex` address a table cell."""
+    doc: """
+    `deleteText`: all of it, or `opts.textRange` (from `text-range`).
+    `opts.rowIndex` and `opts.columnIndex` address a table cell.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/delete-text("box1")  // {deleteText: {objectId: "box1", textRange: {type: "ALL"}}}
+
+    req ::google::slides::requests/delete-text("box1", {textRange: ::google::slides::requests/text-range(0, 5)})
+    req.deleteText.textRange.endIndex  // 5
+    ```
+    """
 }
 fn
 (object-id: Str): Map {
@@ -269,13 +485,28 @@ fn
   {deleteText: ::slides/compact({objectId: object-id, textRange: opts-range(opts), cellLocation: opts-cell(opts)})}
 }
 
-contains-text fn (search: Str, opts: Map): Map {
+contains-text
+meta {no-doc: true}
+fn (search: Str, opts: Map): Map {
   {text: search, matchCase: get(opts, "matchCase", true)}
 }
 
 replace-all-text
 meta {
-    doc: """`replaceAllText`: every occurrence, on every page unless `opts.pageObjectIds`. Case-sensitive unless `opts.matchCase` is false."""
+    doc: """
+    `replaceAllText`: every occurrence, on every page unless
+    `opts.pageObjectIds`. Case-sensitive unless `opts.matchCase` is false.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/replace-all-text("2025", "2026")
+    // {replaceAllText: {replaceText: "2026", containsText: {text: "2025", matchCase: true}}}
+
+    req ::google::slides::requests/replace-all-text("acme", "Hot", {matchCase: false, pageObjectIds: ["p1"]})
+    req.replaceAllText.pageObjectIds  // ["p1"]
+    ```
+    """
 }
 fn
 (search: Str, replacement: Str): Map {
@@ -291,7 +522,21 @@ fn
 
 replace-shapes-with-image
 meta {
-    doc: """`replaceAllShapesWithImage`: swap every shape containing `search` for the image at a public URL, on every page unless `opts.pageObjectIds`. `opts.imageReplaceMethod` is `CENTER_INSIDE` (default) or `CENTER_CROP`."""
+    doc: """
+    `replaceAllShapesWithImage`: swap every shape containing `search` for
+    the image at a public URL, on every page unless `opts.pageObjectIds`.
+    `opts.imageReplaceMethod` is `CENTER_INSIDE` (default) or `CENTER_CROP`.
+
+    **Example**
+
+    ```hot
+    req ::google::slides::requests/replace-shapes-with-image("{{logo}}", "https://example.com/logo.png")
+    req.replaceAllShapesWithImage.imageReplaceMethod  // "CENTER_INSIDE"
+
+    crop ::google::slides::requests/replace-shapes-with-image("{{logo}}", "https://example.com/logo.png", {imageReplaceMethod: "CENTER_CROP"})
+    crop.replaceAllShapesWithImage.imageReplaceMethod  // "CENTER_CROP"
+    ```
+    """
 }
 fn
 (search: Str, image-url: Str): Map {
@@ -308,7 +553,19 @@ fn
 
 fill-template
 meta {
-    doc: """One `replaceAllText` per entry of `values`, replacing `{{key}}` with the value as text. Null values are skipped."""
+    doc: """
+    One `replaceAllText` per entry of `values`, replacing `{{key}}` with the
+    value as text. Null values are skipped.
+
+    **Example**
+
+    ```hot
+    requests ::google::slides::requests/fill-template({name: "Ada", skip: null})
+    length(requests)  // 1
+    requests[0].replaceAllText.containsText.text  // "{{name}}"
+    requests[0].replaceAllText.replaceText  // "Ada"
+    ```
+    """
 }
 fn
 (values: Map): Vec {
@@ -325,7 +582,24 @@ fn
 
 text-style
 meta {
-    doc: """`updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`, `fontSize`, `fontFamily`, `foregroundColor`, `link`, ...). The field mask is the keys you pass. Applies to all the text unless `opts.textRange`; `opts.rowIndex` and `opts.columnIndex` address a table cell."""
+    doc: """
+    `updateTextStyle` with any `TextStyle` (`bold`, `italic`, `underline`,
+    `fontSize`, `fontFamily`, `foregroundColor`, `link`, ...). The field
+    mask is the keys you pass. Applies to all the text unless
+    `opts.textRange`; `opts.rowIndex` and `opts.columnIndex` address a table
+    cell.
+
+    **Example**
+
+    ```hot
+    req ::google::slides::requests/text-style("box1", {italic: true, underline: true})
+    req.updateTextStyle.fields  // "italic,underline"
+
+    // Only the first five characters
+    part ::google::slides::requests/text-style("box1", {italic: true}, {textRange: ::google::slides::requests/text-range(0, 5)})
+    part.updateTextStyle.textRange.endIndex  // 5
+    ```
+    """
 }
 fn
 (object-id: Str, style: Map): Map {
@@ -342,7 +616,20 @@ fn
 }
 
 bold
-meta {doc: """Make a shape's text bold."""}
+meta {
+    doc: """
+    Make a shape's text bold.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/bold("box1").updateTextStyle.style  // {bold: true}
+
+    // One table cell
+    ::google::slides::requests/bold("t1", {rowIndex: 0, columnIndex: 1}).updateTextStyle.cellLocation  // {rowIndex: 0, columnIndex: 1}
+    ```
+    """
+}
 fn
 (object-id: Str): Map {
   text-style(object-id, {bold: true})
@@ -352,7 +639,18 @@ fn
 }
 
 font-size
-meta {doc: """Set a shape's font size in points."""}
+meta {
+    doc: """
+    Set a shape's font size in points.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/font-size("box1", 18).updateTextStyle.style.fontSize  // {magnitude: 18, unit: "PT"}
+    ::google::slides::requests/font-size("box1", 18).updateTextStyle.fields  // "fontSize"
+    ```
+    """
+}
 fn
 (object-id: Str, size: Int | Dec): Map {
   text-style(object-id, {fontSize: points(size)})
@@ -362,7 +660,18 @@ fn
 }
 
 text-color
-meta {doc: """Set a shape's text color from an `RgbColor` (`rgb` or `hex-color`)."""}
+meta {
+    doc: """
+    Set a shape's text color from an `RgbColor` (`rgb` or `hex-color`).
+
+    **Example**
+
+    ```hot
+    req ::google::slides::requests/text-color("box1", ::google::slides::requests/hex-color("#ff0000"))
+    req.updateTextStyle.style.foregroundColor.opaqueColor.rgbColor  // {red: 1.0, green: 0.0, blue: 0.0}
+    ```
+    """
+}
 fn
 (object-id: Str, color: Map): Map {
   text-style(object-id, {foregroundColor: optional-color(color)})
@@ -373,7 +682,18 @@ fn
 
 paragraph-style
 meta {
-    doc: """`updateParagraphStyle` with any `ParagraphStyle` (`alignment`, `lineSpacing`, `spaceAbove`, ...). The field mask is the keys you pass."""
+    doc: """
+    `updateParagraphStyle` with any `ParagraphStyle` (`alignment`,
+    `lineSpacing`, `spaceAbove`, ...). The field mask is the keys you pass.
+
+    **Example**
+
+    ```hot
+    req ::google::slides::requests/paragraph-style("box1", {alignment: "CENTER"})
+    req.updateParagraphStyle.style  // {alignment: "CENTER"}
+    req.updateParagraphStyle.fields  // "alignment"
+    ```
+    """
 }
 fn
 (object-id: Str, style: Map): Map {
@@ -391,7 +711,18 @@ fn
 
 bullets
 meta {
-    doc: """`createParagraphBullets` on a shape's paragraphs. `preset` defaults to `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered preset."""
+    doc: """
+    `createParagraphBullets` on a shape's paragraphs. `preset` defaults to
+    `BULLET_DISC_CIRCLE_SQUARE`; `NUMBERED` holds the usual numbered preset.
+
+    **Example**
+
+    ```hot
+    ::google::slides::requests/bullets("box1").createParagraphBullets.bulletPreset  // "BULLET_DISC_CIRCLE_SQUARE"
+
+    ::google::slides::requests/bullets("box1", ::google::slides::requests/NUMBERED).createParagraphBullets.bulletPreset  // "NUMBERED_DIGIT_ALPHA_ROMAN"
+    ```
+    """
 }
 fn
 (object-id: Str): Map {
@@ -411,7 +742,16 @@ fn
 
 background
 meta {
-    doc: """`updatePageProperties`: a solid page background from an `RgbColor`."""
+    doc: """
+    `updatePageProperties`: a solid page background from an `RgbColor`.
+
+    **Example**
+
+    ```hot
+    req ::google::slides::requests/background("p1", ::google::slides::requests/rgb(255, 255, 255))
+    req.updatePageProperties.fields  // "pageBackgroundFill.solidFill.color"
+    ```
+    """
 }
 fn (page-id: Str, color: Map): Map {
   {updatePageProperties: {

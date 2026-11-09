@@ -22,7 +22,20 @@ service-url ::aws::core/service-url
 // The one way into an S3 call that names a bucket
 resolve
 meta {
-    doc: """`::aws::core/resolve(opts)`, or an Err when a bucket isn't a valid name. Credentials in `opts` are masked first, whatever else is wrong."""
+    doc: """
+    `::aws::core/resolve(opts)`, or an Err when a bucket isn't a valid name.
+    Credentials in `opts` are masked first, whatever else is wrong.
+
+    **Example**
+
+    ```hot
+    resolved ::aws::s3::api/resolve({region: "eu-west-1"}, "my-bucket")
+    resolved.region
+
+    // A bad bucket name is an Err before anything is signed
+    is-err(::aws::s3::api/resolve({}, "a..b"))
+    ```
+    """
 }
 fn
 (opts: Map, bucket: Str): Map {
@@ -39,21 +52,42 @@ fn
 // Base URL of the service itself, for requests that aren't about one bucket
 base-url
 meta {
-    doc: """The S3 service URL (no trailing slash): `resolved.endpoint`, else `https://s3.<region>.amazonaws.com`."""
+    doc: """
+    The S3 service URL (no trailing slash): `resolved.endpoint`, else
+    `https://s3.<region>.amazonaws.com`.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::api/base-url({region: "eu-west-1"})  // "https://s3.eu-west-1.amazonaws.com"
+    ```
+    """
 }
 fn (resolved: Map): Str {
     service-url(resolved, "s3")
 }
 
 // Put the bucket at the front of the endpoint's host
-virtual-host-url fn (endpoint: Str, bucket: Str): Str {
+virtual-host-url
+meta {no-doc: true}
+fn (endpoint: Str, bucket: Str): Str {
     scheme if(starts-with(endpoint, "http://"), "http://", "https://")
     `${scheme}${bucket}.${slice(endpoint, length(scheme), length(endpoint))}`
 }
 
 bucket-url
 meta {
-    doc: """The URL of a bucket (no trailing slash) for resolved settings: see the namespace doc for the forms."""
+    doc: """
+    The URL of a bucket (no trailing slash) for resolved settings: see the
+    namespace doc for the forms.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::api/bucket-url("my-bucket", {region: "us-east-1"})  // "https://my-bucket.s3.us-east-1.amazonaws.com"
+    ::aws::s3::api/bucket-url("my-bucket", {region: "auto", endpoint: "https://abc.r2.cloudflarestorage.com"})  // "https://abc.r2.cloudflarestorage.com/my-bucket"
+    ```
+    """
 }
 fn (bucket: Str, resolved: Map): Str {
     endpoint get(resolved, "endpoint")
@@ -73,7 +107,16 @@ fn (bucket: Str, resolved: Map): Str {
 
 object-url
 meta {
-    doc: """The URL of an object: `bucket-url` plus the key with each path segment encoded. `/` in the key stays a path separator."""
+    doc: """
+    The URL of an object: `bucket-url` plus the key with each path segment
+    encoded. `/` in the key stays a path separator.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::api/object-url("my-bucket", "a b/c.txt", {region: "us-east-1"})  // "https://my-bucket.s3.us-east-1.amazonaws.com/a%20b/c.txt"
+    ```
+    """
 }
 fn (bucket: Str, key: Str, resolved: Map): Str {
     if-ok(bucket-url(bucket, resolved), (base) { `${base}/${uri-encode-path(key)}` })
@@ -82,7 +125,17 @@ fn (bucket: Str, key: Str, resolved: Map): Str {
 // S3 lists keys URL-encoded on request, with spaces as "+"
 decode-listed
 meta {
-    doc: """Decode a value from a listing made with `encoding-type=url`: `+` is a space and `%XX` an escape. Null stays null."""
+    doc: """
+    Decode a value from a listing made with `encoding-type=url`: `+` is a
+    space and `%XX` an escape. Null stays null.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::api/decode-listed("a+b%2Fc")  // "a b/c"
+    ::aws::s3::api/decode-listed(null)  // null
+    ```
+    """
 }
 fn (value: Str?): Str? {
     cond {
@@ -94,7 +147,15 @@ fn (value: Str?): Str? {
 // Text of a response body. XML is textual, but a store may label it otherwise.
 body-text
 meta {
-    doc: """A response body as a Str, decoding Bytes."""
+    doc: """
+    A response body as a Str, decoding Bytes.
+
+    **Example**
+
+    ```hot
+    ::aws::s3::api/body-text(Bytes("<Name>my-bucket</Name>"))  // "<Name>my-bucket</Name>"
+    ```
+    """
 }
 fn (body: Any): Str {
     if(is-bytes(body), Str(body), body)

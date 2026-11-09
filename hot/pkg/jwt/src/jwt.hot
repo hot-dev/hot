@@ -15,21 +15,27 @@ meta {
     ```hot
     ::jwt ::jwt
 
+    secret ::hot::ctx/get("jwt.secret")
+
     // Sign (HS256)
     token ::jwt/sign({sub: "user-42", exp: add(::jwt/now-seconds(), 3600)}, secret)
 
     // Verify + validate claims
     claims ::jwt/verify(token, secret)
-    claims.sub  // => "user-42"
+    claims.sub
 
     // RS256 with a PEM private key (Google service accounts, GitHub Apps)
-    token ::jwt/sign(claims, private-key-pem, "RS256")
+    private-key-pem ::hot::ctx/get("jwt.private.key")
+    rs-token ::jwt/sign(claims, private-key-pem, "RS256")
 
     // RS256 verification from JWKS components
-    claims ::jwt/verify-rs256(token, jwk.n, jwk.e)
+    rsa-jwk ::hot::ctx/get("jwt.rsa.jwk")
+    rs-claims ::jwt/verify-rs256(rs-token, rsa-jwk.n, rsa-jwk.e)
 
     // ES256 verification from an EC JWK
-    claims ::jwt/verify-es256(token, jwk.x, jwk.y, {max-age: 300})
+    ec-jwk ::hot::ctx/get("jwt.ec.jwk")
+    es-token ::hot::ctx/get("jwt.es.token")
+    es-claims ::jwt/verify-es256(es-token, ec-jwk.x, ec-jwk.y, {max-age: 300})
     ```
 
     Verification returns the payload claims on success and an Err
@@ -48,13 +54,25 @@ DEFAULT_LEEWAY_SECONDS 60
 
 now-seconds
 meta {
-    doc: """Current Unix time in whole seconds — convenient for building `exp` / `iat` / `nbf` claims."""
+    doc: """
+    Current Unix time in whole seconds. Convenient for building `exp` /
+    `iat` / `nbf` claims.
+
+    **Example**
+
+    ```hot
+    now ::jwt/now-seconds()
+    {iat: now, exp: add(now, 3600)}
+    ```
+    """
 }
 fn (): Int {
   ::time/epoch-seconds()
 }
 
-encode-segment fn (value: Map): Str {
+encode-segment
+meta {no-doc: true}
+fn (value: Map): Str {
   ::b64/encode-url(to-json(untype(value)))
 }
 
@@ -75,9 +93,11 @@ meta {
     **Example**
 
     ```hot
+    secret ::hot::ctx/get("jwt.secret")
     token ::jwt/sign({sub: "user-42", exp: add(::jwt/now-seconds(), 3600)}, secret)
 
     // Google service-account assertion
+    sa ::hot::ctx/get("google.service.account")
     assertion ::jwt/sign({
       iss: sa.client_email,
       scope: "https://www.googleapis.com/auth/gmail.send",
@@ -126,6 +146,14 @@ meta {
     `{header, payload, signing-input, signature}` where `signature` is the
     raw base64url segment. Use this to inspect an untrusted token (e.g. to
     pick a JWKS key by `kid`); never trust its payload without `verify`.
+
+    **Example**
+
+    ```hot
+    decoded ::jwt/decode("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTQyIn0.c2ln")
+    decoded.header  // {alg: "HS256", typ: "JWT"}
+    decoded.payload  // {sub: "user-42"}
+    ```
     """
 }
 fn (token: Str): Map {
@@ -163,7 +191,9 @@ fn (token: Str): Map {
 // Claims validation (shared by both verifiers)
 // ---------------------------------------------------------------------------
 
-validate-claims fn (payload: Map, options: Map): Any {
+validate-claims
+meta {no-doc: true}
+fn (payload: Map, options: Map): Any {
   leeway or(get(options, "leeway"), DEFAULT_LEEWAY_SECONDS)
   now or(get(options, "now"), now-seconds())
   exp get(payload, "exp")
@@ -239,8 +269,10 @@ meta {
     **Example**
 
     ```hot
+    token ::hot::ctx/get("session.token")
+    secret ::hot::ctx/get("jwt.secret")
     claims ::jwt/verify(token, secret, {issuer: "https://auth.example.com"})
-    if-err(claims, (e) { ... reject the request ... })
+    if-err(claims, (e) { ::hot::http/HttpResponse({status: 401, body: "invalid token"}) })
     ```
     """
 }
@@ -276,7 +308,10 @@ meta {
     **Example**
 
     ```hot
-    // jwks fetched from the provider's jwks_uri; pick the key by kid
+    token ::hot::ctx/get("oidc.id.token")
+    jwks ::hot::http/get("https://www.googleapis.com/oauth2/v3/certs").body
+
+    // Pick the key by kid
     decoded ::jwt/decode(token)
     key first(filter(jwks.keys, (k) { eq(k.kid, get(decoded.header, "kid")) }))
     claims ::jwt/verify-rs256(token, key.n, key.e, {issuer: "https://accounts.google.com"})
@@ -326,10 +361,13 @@ meta {
     **Example**
 
     ```hot
-    // Plaid webhooks: fetch the JWK for the token's kid, then verify
-    decoded ::jwt/decode(token)
-    key get-verification-key(get(decoded.header, "kid"))
-    claims ::jwt/verify-es256(token, key.x, key.y, {max-age: 300})
+    // Plaid webhooks: the token is in a header, and the JWK is looked up by kid
+    on-webhook fn (request) {
+      token get(request.headers, "plaid-verification")
+      decoded ::jwt/decode(token)
+      key ::hot::ctx/get(`plaid.jwk.${get(decoded.header, "kid")}`)
+      ::jwt/verify-es256(token, key.x, key.y, {max-age: 300})
+    }
     ```
     """
 }

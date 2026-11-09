@@ -42,7 +42,19 @@ GetChatMemberCountRequest type {
 
 get-chat-member-count
 meta {
-    doc: """getChatMemberCount - Get the number of members in a chat."""
+    doc: """
+    getChatMemberCount - Get the number of members in a chat.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    count ::chat/get-chat-member-count(::chat/GetChatMemberCountRequest({
+      chat_id: -1001234567890
+    }))
+    ```
+    """
 }
 fn
 (request: GetChatMemberCountRequest): Int {
@@ -59,7 +71,23 @@ GetChatMemberRequest type {
 
 get-chat-member
 meta {
-    doc: """getChatMember - Get information about a specific member of a chat. Returns their status (creator, administrator, member, restricted, left, kicked)."""
+    doc: """
+    getChatMember - Get information about a specific member of a chat.
+    Returns their status (creator, administrator, member, restricted, left,
+    kicked).
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    member ::chat/get-chat-member(::chat/GetChatMemberRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789
+    }))
+    member.status
+    ```
+    """
 }
 fn
 (request: GetChatMemberRequest): Map {
@@ -75,7 +103,21 @@ GetChatAdministratorsRequest type {
 
 get-chat-administrators
 meta {
-    doc: """getChatAdministrators - Get a list of administrators in a chat. Returns an array of ChatMember objects."""
+    doc: """
+    getChatAdministrators - Get a list of administrators in a chat. Returns
+    an array of ChatMember objects.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    admins ::chat/get-chat-administrators(::chat/GetChatAdministratorsRequest({
+      chat_id: -1001234567890
+    }))
+    map(admins, %.user.id)
+    ```
+    """
 }
 fn
 (request: GetChatAdministratorsRequest): Vec<Map> {
@@ -98,7 +140,24 @@ BanChatMemberRequest type {
 
 ban-chat-member
 meta {
-    doc: """banChatMember - Ban a user from a group or channel. `until_date` is a Unix timestamp for a temporary ban (30 seconds to 366 days in the future). Set `revoke_messages: true` to delete all messages from the user."""
+    doc: """
+    banChatMember - Ban a user from a group or channel. `until_date` is a
+    Unix timestamp for a temporary ban (30 seconds to 366 days in the
+    future). Set `revoke_messages: true` to delete all messages from the
+    user.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/ban-chat-member(::chat/BanChatMemberRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789,
+      revoke_messages: true
+    }))
+    ```
+    """
 }
 fn
 (request: BanChatMemberRequest): Bool {
@@ -116,7 +175,23 @@ UnbanChatMemberRequest type {
 
 unban-chat-member
 meta {
-    doc: """unbanChatMember - Unban a previously banned user. Set `only_if_banned: true` to avoid accidentally unbanning an active member (which would remove them)."""
+    doc: """
+    unbanChatMember - Unban a previously banned user. Set `only_if_banned:
+    true` to avoid accidentally unbanning an active member (which would
+    remove them).
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/unban-chat-member(::chat/UnbanChatMemberRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789,
+      only_if_banned: true
+    }))
+    ```
+    """
 }
 fn
 (request: UnbanChatMemberRequest): Bool {
@@ -136,7 +211,24 @@ RestrictChatMemberRequest type {
 
 restrict-chat-member
 meta {
-    doc: """restrictChatMember - Restrict a user in a supergroup. `permissions` is a ChatPermissions object controlling what the user can do (send messages, media, polls, etc.)."""
+    doc: """
+    restrictChatMember - Restrict a user in a supergroup. `permissions` is a
+    ChatPermissions object controlling what the user can do (send messages,
+    media, polls, etc.).
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/restrict-chat-member(::chat/RestrictChatMemberRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789,
+      permissions: {can_send_messages: false},
+      until_date: 1798761600
+    }))
+    ```
+    """
 }
 fn
 (request: RestrictChatMemberRequest): Bool {
@@ -168,7 +260,23 @@ PromoteChatMemberRequest type {
 
 promote-chat-member
 meta {
-    doc: """promoteChatMember - Promote or demote a user in a supergroup or channel. Pass the specific admin rights to grant. All rights default to false."""
+    doc: """
+    promoteChatMember - Promote or demote a user in a supergroup or channel.
+    Pass the specific admin rights to grant. All rights default to false.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/promote-chat-member(::chat/PromoteChatMemberRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789,
+      can_delete_messages: true,
+      can_pin_messages: true
+    }))
+    ```
+    """
 }
 fn
 (request: PromoteChatMemberRequest): Bool {
@@ -220,7 +328,19 @@ LeaveChatRequest type {
 
 leave-chat
 meta {
-    doc: """leaveChat - Leave a group, supergroup, or channel."""
+    doc: """
+    leaveChat - Leave a group, supergroup, or channel.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/leave-chat(::chat/LeaveChatRequest({
+      chat_id: -1001234567890
+    }))
+    ```
+    """
 }
 fn
 (request: LeaveChatRequest): Bool {
@@ -237,7 +357,21 @@ SetChatTitleRequest type {
 
 set-chat-title
 meta {
-    doc: """setChatTitle - Change the title of a group, supergroup, or channel. Titles can be 1-128 characters."""
+    doc: """
+    setChatTitle - Change the title of a group, supergroup, or channel.
+    Titles can be 1-128 characters.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/set-chat-title(::chat/SetChatTitleRequest({
+      chat_id: -1001234567890,
+      title: "Release Announcements"
+    }))
+    ```
+    """
 }
 fn
 (request: SetChatTitleRequest): Bool {
@@ -254,7 +388,21 @@ SetChatDescriptionRequest type {
 
 set-chat-description
 meta {
-    doc: """setChatDescription - Change the description of a group, supergroup, or channel. Pass empty/null to remove the description."""
+    doc: """
+    setChatDescription - Change the description of a group, supergroup, or
+    channel. Pass empty/null to remove the description.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/set-chat-description(::chat/SetChatDescriptionRequest({
+      chat_id: -1001234567890,
+      description: "Release notes and status updates."
+    }))
+    ```
+    """
 }
 fn
 (request: SetChatDescriptionRequest): Bool {
@@ -273,7 +421,22 @@ PinChatMessageRequest type {
 
 pin-chat-message
 meta {
-    doc: """pinChatMessage - Pin a message in a chat. Set `disable_notification: true` to silently pin."""
+    doc: """
+    pinChatMessage - Pin a message in a chat. Set `disable_notification:
+    true` to silently pin.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/pin-chat-message(::chat/PinChatMessageRequest({
+      chat_id: -1001234567890,
+      message_id: 42,
+      disable_notification: true
+    }))
+    ```
+    """
 }
 fn
 (request: PinChatMessageRequest): Bool {
@@ -291,7 +454,21 @@ UnpinChatMessageRequest type {
 
 unpin-chat-message
 meta {
-    doc: """unpinChatMessage - Unpin a message. If `message_id` is not specified, the most recent pinned message is unpinned."""
+    doc: """
+    unpinChatMessage - Unpin a message. If `message_id` is not specified,
+    the most recent pinned message is unpinned.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/unpin-chat-message(::chat/UnpinChatMessageRequest({
+      chat_id: -1001234567890,
+      message_id: 42
+    }))
+    ```
+    """
 }
 fn
 (request: UnpinChatMessageRequest): Bool {
@@ -307,7 +484,19 @@ UnpinAllChatMessagesRequest type {
 
 unpin-all-chat-messages
 meta {
-    doc: """unpinAllChatMessages - Remove all pinned messages from a chat."""
+    doc: """
+    unpinAllChatMessages - Remove all pinned messages from a chat.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/unpin-all-chat-messages(::chat/UnpinAllChatMessagesRequest({
+      chat_id: -1001234567890
+    }))
+    ```
+    """
 }
 fn
 (request: UnpinAllChatMessagesRequest): Bool {
@@ -331,7 +520,24 @@ CreateChatInviteLinkRequest type {
 
 create-chat-invite-link
 meta {
-    doc: """createChatInviteLink - Create an additional invite link. `member_limit` (1-99999) limits joins. `expire_date` is a Unix timestamp. Set `creates_join_request: true` to require admin approval."""
+    doc: """
+    createChatInviteLink - Create an additional invite link. `member_limit`
+    (1-99999) limits joins. `expire_date` is a Unix timestamp. Set
+    `creates_join_request: true` to require admin approval.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    invite ::chat/create-chat-invite-link(::chat/CreateChatInviteLinkRequest({
+      chat_id: -1001234567890,
+      name: "Beta testers",
+      member_limit: 25
+    }))
+    invite.invite_link
+    ```
+    """
 }
 fn
 (request: CreateChatInviteLinkRequest): Map {
@@ -348,7 +554,21 @@ RevokeChatInviteLinkRequest type {
 
 revoke-chat-invite-link
 meta {
-    doc: """revokeChatInviteLink - Revoke an invite link created by the bot. The link will no longer work."""
+    doc: """
+    revokeChatInviteLink - Revoke an invite link created by the bot. The
+    link will no longer work.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/revoke-chat-invite-link(::chat/RevokeChatInviteLinkRequest({
+      chat_id: -1001234567890,
+      invite_link: "https://t.me/+AbCdEf123456"
+    }))
+    ```
+    """
 }
 fn
 (request: RevokeChatInviteLinkRequest): Map {
@@ -364,7 +584,20 @@ ExportChatInviteLinkRequest type {
 
 export-chat-invite-link
 meta {
-    doc: """exportChatInviteLink - Generate a new primary invite link. Any previously generated primary link is revoked."""
+    doc: """
+    exportChatInviteLink - Generate a new primary invite link. Any
+    previously generated primary link is revoked.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    link ::chat/export-chat-invite-link(::chat/ExportChatInviteLinkRequest({
+      chat_id: -1001234567890
+    }))
+    ```
+    """
 }
 fn
 (request: ExportChatInviteLinkRequest): Str {
@@ -385,7 +618,21 @@ ApproveChatJoinRequestRequest type {
 
 approve-chat-join-request
 meta {
-    doc: """approveChatJoinRequest - Approve a chat join request. The bot must be an administrator with can_invite_users right."""
+    doc: """
+    approveChatJoinRequest - Approve a chat join request. The bot must be an
+    administrator with can_invite_users right.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/approve-chat-join-request(::chat/ApproveChatJoinRequestRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789
+    }))
+    ```
+    """
 }
 fn
 (request: ApproveChatJoinRequestRequest): Bool {
@@ -402,7 +649,20 @@ DeclineChatJoinRequestRequest type {
 
 decline-chat-join-request
 meta {
-    doc: """declineChatJoinRequest - Decline a chat join request."""
+    doc: """
+    declineChatJoinRequest - Decline a chat join request.
+
+    **Example**
+
+    ```hot
+    ::chat ::telegram::chat
+
+    ::chat/decline-chat-join-request(::chat/DeclineChatJoinRequestRequest({
+      chat_id: -1001234567890,
+      user_id: 123456789
+    }))
+    ```
+    """
 }
 fn
 (request: DeclineChatJoinRequestRequest): Bool {

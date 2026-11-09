@@ -163,6 +163,22 @@ meta {
 
     Returns the raw HTTP response with an event stream body.
     Note: Streaming requires parsing the AWS Event Stream binary format.
+
+    **Example**
+
+    ```hot
+    ::converse ::aws::bedrock::converse
+
+    response ::converse/converse-stream(
+      "anthropic.claude-3-haiku-20240307-v1:0",
+      [::converse/user-message("Write a haiku about rivers.")],
+      [{text: "You are a poet."}]
+    )
+
+    // The body is the AWS Event Stream binary format
+    events ::aws::eventstream/parse-stream(response.body)
+    map(events, ::aws::eventstream/get-header(%, ":event-type"))
+    ```
     """
 }
 fn
@@ -240,7 +256,7 @@ meta {
     **Example**
 
     ```hot
-    block ::aws::bedrock::converse/image-content("png", base64-image-data)
+    block ::aws::bedrock::converse/image-content("png", "iVBORw0KGgo=")
     // => {image: {format: "png", source: {bytes: "..."}}}
     ```
     """

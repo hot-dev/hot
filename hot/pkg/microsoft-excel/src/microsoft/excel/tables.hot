@@ -12,7 +12,20 @@ meta {
 
 list-tables
 meta {
-    doc: """GET /workbook/tables, or a worksheet's tables with `opts.sheet`. Returns a Vec of tables."""
+    doc: """
+    GET /workbook/tables, or a worksheet's tables with `opts.sheet`. Returns
+    a Vec of tables.
+
+    **Example**
+
+    ```hot
+    tables ::microsoft::excel::tables/list-tables("/Reports/Q3.xlsx")
+    map(tables, %.name)
+
+    // One worksheet's tables
+    ::microsoft::excel::tables/list-tables("/Reports/Q3.xlsx", {sheet: "Pipeline"})
+    ```
+    """
 }
 fn
 (item: Any): Vec {
@@ -26,7 +39,16 @@ fn
 
 get-table
 meta {
-    doc: """GET /workbook/tables/{table}."""
+    doc: """
+    GET /workbook/tables/{table}.
+
+    **Example**
+
+    ```hot
+    table ::microsoft::excel::tables/get-table("/Reports/Q3.xlsx", "Leads")
+    table.showTotals
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Map {
@@ -38,7 +60,17 @@ fn
 
 create-table-body
 meta {
-    doc: """The `tables/add` body (pure): the address qualified with its sheet, and `hasHeaders` from `opts.has-headers` (default true)."""
+    doc: """
+    The `tables/add` body (pure): the address qualified with its sheet, and
+    `hasHeaders` from `opts.has-headers` (default true).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/create-table-body("Q3 Plan", "A1:B5", {})  // {address: "'Q3 Plan'!A1:B5", hasHeaders: true}
+    ::microsoft::excel::tables/create-table-body("Data", "A1:B5", {has-headers: false})  // {address: "Data!A1:B5", hasHeaders: false}
+    ```
+    """
 }
 fn (sheet: Str, address: Str, opts: Map): Map {
   {address: ::records/a1(sheet, address), hasHeaders: get(opts, "has-headers", true)}
@@ -46,7 +78,21 @@ fn (sheet: Str, address: Str, opts: Map): Map {
 
 create-table
 meta {
-    doc: """POST /worksheets/{sheet}/tables/add: turn a range into a table. The first row is the header unless `opts.has-headers` is false. Returns the table; use `rename-table` to name it."""
+    doc: """
+    POST /worksheets/{sheet}/tables/add: turn a range into a table. The
+    first row is the header unless `opts.has-headers` is false. Returns the
+    table; use `rename-table` to name it.
+
+    **Example**
+
+    ```hot
+    table ::microsoft::excel::tables/create-table("/Reports/Q3.xlsx", "Pipeline", "A1:B2")
+    ::microsoft::excel::tables/rename-table("/Reports/Q3.xlsx", table.id, "PipelineTable")
+
+    // A range with no header row
+    ::microsoft::excel::tables/create-table("/Reports/Q3.xlsx", "Pipeline", "D1:E9", {has-headers: false})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, address: Str): Map {
@@ -58,7 +104,16 @@ fn
 
 update-table
 meta {
-    doc: """PATCH /workbook/tables/{table}. `changes` holds `name`, `showHeaders`, `showTotals`, `style`, ..."""
+    doc: """
+    PATCH /workbook/tables/{table}. `changes` holds `name`, `showHeaders`,
+    `showTotals`, `style`, ...
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/update-table("/Reports/Q3.xlsx", "Leads", {showTotals: true, style: "TableStyleMedium2"})
+    ```
+    """
 }
 fn
 (item: Any, table: Str, changes: Map): Map {
@@ -70,7 +125,15 @@ fn
 
 rename-table
 meta {
-    doc: """Rename a table."""
+    doc: """
+    Rename a table.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/rename-table("/Reports/Q3.xlsx", "Table1", "Leads")
+    ```
+    """
 }
 fn
 (item: Any, table: Str, name: Str): Map {
@@ -82,7 +145,16 @@ fn
 
 delete-table
 meta {
-    doc: """DELETE /workbook/tables/{table}: delete the table and its data. Returns `{}`."""
+    doc: """
+    DELETE /workbook/tables/{table}: delete the table and its data. Returns
+    `{}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/delete-table("/Reports/Q3.xlsx", "Leads")
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Map {
@@ -94,7 +166,16 @@ fn
 
 convert-to-range
 meta {
-    doc: """POST /workbook/tables/{table}/convertToRange: remove the table and keep its cells."""
+    doc: """
+    POST /workbook/tables/{table}/convertToRange: remove the table and keep
+    its cells.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/convert-to-range("/Reports/Q3.xlsx", "Leads")
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Map {
@@ -106,20 +187,42 @@ fn
 
 column-names
 meta {
-    doc: """A table's column names, in order."""
+    doc: """
+    A table's column names, in order.
+
+    **Example**
+
+    ```hot
+    names ::microsoft::excel::tables/column-names("/Reports/Q3.xlsx", "Leads")
+    length(names)
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Vec {
   column-names(item, table, {})
 },
 (item: Any, table: Str, opts: Map): Vec {
-  columns ::excel/collection(::excel/fetch(`${::excel/table-path(item, table, opts)}/columns`, {select: "name,index"}, opts))
+  columns ::excel/collection(::excel/fetch(`${::excel/table-path(item, table, opts)}/columns`, {select: "name,index"}, ::excel/without-query(opts)))
   if(is-err(columns), columns, map(columns, %.name))
 }
 
 list-rows
 meta {
-    doc: """GET /workbook/tables/{table}/rows. Returns a Vec of `{index, values}`, with `values` one row inside a grid. Pass `top` and `skip` to page."""
+    doc: """
+    GET /workbook/tables/{table}/rows. Returns a Vec of `{index, values}`,
+    with `values` one row inside a grid. Pass `top` and `skip` to page.
+
+    **Example**
+
+    ```hot
+    page ::microsoft::excel::tables/list-rows("/Reports/Q3.xlsx", "Leads", {top: 50})
+    first(first(page).values)
+
+    // The next page
+    ::microsoft::excel::tables/list-rows("/Reports/Q3.xlsx", "Leads", {top: 50, skip: 50})
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Vec {
@@ -129,14 +232,30 @@ fn
   ::excel/collection(::excel/fetch(`${::excel/table-path(item, table, opts)}/rows`, {}, opts))
 }
 
-read-body-values fn (item: Any, table: Str, opts: Map): Vec {
-  result ::excel/fetch(`${::excel/table-path(item, table, opts)}/dataBodyRange`, {select: "values"}, opts)
+read-body-values
+meta {no-doc: true}
+fn (item: Any, table: Str, opts: Map): Vec {
+  result ::excel/fetch(`${::excel/table-path(item, table, opts)}/dataBodyRange`, {select: "values"}, ::excel/without-query(opts))
   if(is-err(result), result, or(get(result, "values"), []))
 }
 
 read-table-records
 meta {
-    doc: """A table's data as records keyed by its column names. Blank cells are null and fully blank rows are skipped, so an empty table gives `[]`."""
+    doc: """
+    A table's data as records keyed by its column names. Blank cells are
+    null and fully blank rows are skipped, so an empty table gives `[]`.
+    It always reads the whole table; use `list-rows` to page.
+
+    **Example**
+
+    ```hot
+    leads ::microsoft::excel::tables/read-table-records("/Reports/Q3.xlsx", "Leads")
+    map(leads, %.name)
+
+    // A workbook in another drive
+    ::microsoft::excel::tables/read-table-records("01ABC", "Leads", {drive: "b1"})
+    ```
+    """
 }
 fn
 (item: Any, table: Str): Vec {
@@ -155,7 +274,17 @@ fn
 
 add-rows-body
 meta {
-    doc: """The `rows/add` body (pure): `values`, plus `index` from `opts.index` when set."""
+    doc: """
+    The `rows/add` body (pure): `values`, plus `index` from `opts.index`
+    when set.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/add-rows-body([["Ada", 9]], {})  // {values: [["Ada", 9]]}
+    ::microsoft::excel::tables/add-rows-body([["Ada", 9]], {index: 0})  // {values: [["Ada", 9]], index: 0}
+    ```
+    """
 }
 fn (rows: Vec, opts: Map): Map {
   ::excel/compact({values: rows, index: get(opts, "index")})
@@ -163,7 +292,20 @@ fn (rows: Vec, opts: Map): Map {
 
 add-rows
 meta {
-    doc: """POST /workbook/tables/{table}/rows/add: add rows at the end, or at `opts.index`. Send many rows in one call; adding them one at a time is slow. Not idempotent, so a blind retry can duplicate rows."""
+    doc: """
+    POST /workbook/tables/{table}/rows/add: add rows at the end, or at
+    `opts.index`. Send many rows in one call; adding them one at a time is
+    slow. Not idempotent, so a blind retry can duplicate rows.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/add-rows("/Reports/Q3.xlsx", "Leads", [["Ada", "demo"], ["Grace", "trial"]])
+
+    // At the top of the table
+    ::microsoft::excel::tables/add-rows("/Reports/Q3.xlsx", "Leads", [["Linus", "new"]], {index: 0})
+    ```
+    """
 }
 fn
 (item: Any, table: Str, rows: Vec): Map {
@@ -205,7 +347,15 @@ fn
 
 row-path
 meta {
-    doc: """The Graph path of a table row by its 0-based index (pure)."""
+    doc: """
+    The Graph path of a table row by its 0-based index (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/row-path("01ABC", "Leads", 3, {drive: "b1"})  // "/drives/b1/items/01ABC/workbook/tables/Leads/rows/3"
+    ```
+    """
 }
 fn (item: Any, table: Str, index: Int, opts: Map): Str {
   `${::excel/table-path(item, table, opts)}/rows/${index}`
@@ -213,7 +363,16 @@ fn (item: Any, table: Str, index: Int, opts: Map): Str {
 
 delete-row
 meta {
-    doc: """DELETE a table row by its 0-based index. Later rows move up, so delete from the highest index first. Returns `{}`."""
+    doc: """
+    DELETE a table row by its 0-based index. Later rows move up, so delete
+    from the highest index first. Returns `{}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::tables/delete-row("/Reports/Q3.xlsx", "Leads", 3)
+    ```
+    """
 }
 fn
 (item: Any, table: Str, index: Int): Map {

@@ -24,7 +24,9 @@ type {
     message: Str
 }
 
-body-snippet fn (body: Any): Str {
+body-snippet
+meta {no-doc: true}
+fn (body: Any): Str {
   text match body {
     Null => { "" }
     Str => { body }
@@ -37,7 +39,20 @@ body-snippet fn (body: Any): Str {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    url "https://example.test/x"
+    response ::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"})
+    e ::opensanctions::http/http-error(response, url)
+    e.status  // 404
+    e.message  // "HTTP 404 from https://example.test/x: not here"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   snippet body-snippet(response.body)
@@ -52,7 +67,26 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 request
 meta {
-    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+    doc: """
+    One request with the package User-Agent. Returns the `HttpResponse` on
+    2xx, or an Err carrying `HttpError` (transport failures pass through as
+    their own Err).
+
+    **Example**
+
+    ```hot
+    ::os ::opensanctions
+
+    key ::hot::ctx/get("opensanctions.api-key")
+    response ::opensanctions::http/request(
+      "POST",
+      ::os/match-url("https://api.opensanctions.org", "default", {limit: 5}),
+      ::os/match-headers(key),
+      to-json(::os/match-body("Acme Trading", {}))
+    )
+    response.body.responses.q.results
+    ```
+    """
 }
 fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
   response ::hot::http/request(HttpRequest({

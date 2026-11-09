@@ -9,6 +9,13 @@ meta {
     Quote an identifier for MySQL: backtick-wrapped with embedded
     backticks doubled (MySQL's default mode does not honor ANSI double
     quotes). Errs on empty or NUL-containing names.
+
+    **Example**
+
+    ```hot
+    ::sql::mysql/quote-ident("orders")  // "`orders`"
+    ::sql::mysql/quote-ident("odd`name")  // "`odd``name`"
+    ```
     """
 }
 fn (name: Str): Str {
@@ -22,14 +29,18 @@ fn (name: Str): Str {
     }
 }
 
-mysql-query fn (conn: Any, sql: Str, params: Vec): Vec {
+mysql-query
+meta {no-doc: true}
+fn (conn: Any, sql: Str, params: Vec): Vec {
     cond {
         is-empty(params) => { ::mysql/query(conn, sql) }
         => { ::mysql/query(conn, sql, params) }
     }
 }
 
-mysql-execute fn (conn: Any, sql: Str, params: Vec): Map {
+mysql-execute
+meta {no-doc: true}
+fn (conn: Any, sql: Str, params: Vec): Map {
     cond {
         is-empty(params) => { ::mysql/execute(conn, sql) }
         => { ::mysql/execute(conn, sql, params) }

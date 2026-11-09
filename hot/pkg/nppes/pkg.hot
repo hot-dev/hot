@@ -2,7 +2,7 @@
 
 hot.pkg.nppes {
   name: "hot.dev/nppes",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The CMS NPI Registry (NPPES) API for Hot, with no key: lookups by NPI, searches by name, organization, taxonomy and location, and paging.",
   author: "Hot Dev",

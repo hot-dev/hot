@@ -13,7 +13,18 @@ meta {
 
 list-macros
 meta {
-    doc: """GET /macros - One cursor page of macros: `{macros, meta, links}`. `options`: `active` (Bool), `access`, `category`, `group_id`, `include` ("usage_7d"), `page_size`, `after`."""
+    doc: """
+    GET /macros - One cursor page of macros: `{macros, meta, links}`.
+    `options`: `active` (Bool), `access`, `category`, `group_id`, `include`
+    ("usage_7d"), `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::macros/list-macros({active: true, category: "billing", page_size: 50})
+    map(page.macros, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -28,7 +39,16 @@ fn
 
 list-active-macros
 meta {
-    doc: """GET /macros/active - Active macros available to the user: `{macros}`."""
+    doc: """
+    GET /macros/active - Active macros available to the user: `{macros}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::macros/list-active-macros()
+    map(out.macros, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -40,7 +60,16 @@ fn
 
 get-macro
 meta {
-    doc: """GET /macros/{id} - One macro with its `actions`."""
+    doc: """
+    GET /macros/{id} - One macro with its `actions`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::macros/get-macro(360001234567)
+    out.macro.actions
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -52,7 +81,17 @@ fn
 
 preview-macro
 meta {
-    doc: """GET /tickets/{ticket_id}/macros/{id}/apply - What the ticket would look like after the macro: `{result: {ticket, comment?}}`. Changes nothing."""
+    doc: """
+    GET /tickets/{ticket_id}/macros/{id}/apply - What the ticket would look
+    like after the macro: `{result: {ticket, comment?}}`. Changes nothing.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::macros/preview-macro(35436, 360001234567)
+    out.result.ticket
+    ```
+    """
 }
 fn
 (ticket-id: Any, macro-id: Any): Any {
@@ -69,6 +108,13 @@ meta {
     /tickets/{id}`: the result's ticket fields, with its comment reduced
     to `body`, `html_body` and `public` (dropping the read-only
     `scoped_body`), and the ticket `id` and `url` removed. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    result {ticket: {id: 1, url: "https://acme.zendesk.com/api/v2/tickets/1.json", status: "solved", comment: {body: "Done", scoped_body: [], public: true}}}
+    ::zendesk::macros/macro-update(result)  // {status: "solved", comment: {body: "Done", public: true}}
+    ```
     """
 }
 fn (result: Map): Map {
@@ -101,7 +147,7 @@ meta {
     **Example**
 
     ```hot
-    ::zendesk::macros/apply-macro(ticket-id, 360001234567)
+    ::zendesk::macros/apply-macro(35436, 360001234567)
     ```
     """
 }

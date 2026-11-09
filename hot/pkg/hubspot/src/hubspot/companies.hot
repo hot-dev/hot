@@ -4,7 +4,20 @@
 
 create-company
 meta {
-    doc: """Create a company from a properties Map (`name`, `domain`, `industry`, ...)."""
+    doc: """
+    Create a company from a properties Map (`name`, `domain`, `industry`,
+    ...).
+
+    **Example**
+
+    ```hot
+    company ::hubspot::companies/create-company({name: "Acme", domain: "acme.com"})
+    company.id
+
+    // Another portal's token for this call
+    ::hubspot::companies/create-company({name: "Acme"}, {token: ::hot::ctx/get("tenant.hubspot.token")})
+    ```
+    """
 }
 fn
 (properties: Map): Map {
@@ -16,7 +29,16 @@ fn
 
 get-company
 meta {
-    doc: """Fetch a company by id; the 2-arity form selects `properties`."""
+    doc: """
+    Fetch a company by id; the 2-arity form selects `properties`.
+
+    **Example**
+
+    ```hot
+    company ::hubspot::companies/get-company("12345", ["name", "domain"])
+    company.properties.name
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -34,7 +56,15 @@ fn
 
 update-company
 meta {
-    doc: """Update a company's properties."""
+    doc: """
+    Update a company's properties.
+
+    **Example**
+
+    ```hot
+    ::hubspot::companies/update-company("12345", {industry: "COMPUTER_SOFTWARE"})
+    ```
+    """
 }
 fn
 (id: Str, properties: Map): Map {
@@ -46,7 +76,16 @@ fn
 
 find-by-domain
 meta {
-    doc: """Search for a company by exact domain. Returns the company or null."""
+    doc: """
+    Search for a company by exact domain. Returns the company or null.
+
+    **Example**
+
+    ```hot
+    company ::hubspot::companies/find-by-domain("acme.com")
+    if(is-some(company), company.id, null)
+    ```
+    """
 }
 fn
 (domain: Str): Any {
@@ -66,7 +105,21 @@ fn
 
 search-companies
 meta {
-    doc: """Search companies — see `::hubspot::objects/build-search-body` for the options."""
+    doc: """
+    Search companies — see `::hubspot::objects/build-search-body` for the
+    options.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::companies/search-companies({
+      filters: [{propertyName: "industry", operator: "EQ", value: "COMPUTER_SOFTWARE"}],
+      properties: ["name", "domain"],
+      limit: 50
+    })
+    map(out.results, %.id)
+    ```
+    """
 }
 fn
 (options: Map): Map {
@@ -78,7 +131,15 @@ fn
 
 archive-company
 meta {
-    doc: """Archive a company (recycle bin, restorable for 90 days)."""
+    doc: """
+    Archive a company (recycle bin, restorable for 90 days).
+
+    **Example**
+
+    ```hot
+    ::hubspot::companies/archive-company("12345")
+    ```
+    """
 }
 fn
 (id: Str): Any {

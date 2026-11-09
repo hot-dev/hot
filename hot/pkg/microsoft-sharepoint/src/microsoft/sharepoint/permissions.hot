@@ -30,7 +30,9 @@ meta {
 
 ROLES ["read", "write", "owner", "fullcontrol"]
 
-check-roles fn (roles: Vec): Vec {
+check-roles
+meta {no-doc: true}
+fn (roles: Vec): Vec {
   bad filter(roles, (r) { not(in(r, ROLES)) })
   cond {
     is-empty(roles) => { err("microsoft-sharepoint: a grant needs at least one role (read, write, owner, fullcontrol)") }
@@ -41,7 +43,20 @@ check-roles fn (roles: Vec): Vec {
 
 build-site-grant
 meta {
-    doc: """The body of a site grant (pure): `{roles, grantedToIdentities: [{application: {id, displayName}}]}`, the documented shape for `POST /sites/{id}/permissions`."""
+    doc: """
+    The body of a site grant (pure): `{roles, grantedToIdentities:
+    [{application: {id, displayName}}]}`, the documented shape for `POST
+    /sites/{id}/permissions`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::permissions/build-site-grant("a1", "Indexer", ["read"])
+    // {roles: ["read"], grantedToIdentities: [{application: {id: "a1", displayName: "Indexer"}}]}
+
+    is-err(::microsoft::sharepoint::permissions/build-site-grant("a1", null, ["admin"]))  // true
+    ```
+    """
 }
 fn (app-id: Str, display-name: Str?, roles: Vec): Map {
   checked check-roles(roles)
@@ -53,7 +68,18 @@ fn (app-id: Str, display-name: Str?, roles: Vec): Map {
 
 build-list-grant
 meta {
-    doc: """The body of a list grant (pure): `{roles, grantedToV2: {application: {id, displayName}}}`, the documented shape for `POST /sites/{id}/lists/{id}/permissions`."""
+    doc: """
+    The body of a list grant (pure): `{roles, grantedToV2: {application:
+    {id, displayName}}}`, the documented shape for `POST
+    /sites/{id}/lists/{id}/permissions`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::permissions/build-list-grant("a1", "Indexer", ["write"])
+    // {roles: ["write"], grantedToV2: {application: {id: "a1", displayName: "Indexer"}}}
+    ```
+    """
 }
 fn (app-id: Str, display-name: Str?, roles: Vec): Map {
   checked check-roles(roles)
@@ -63,7 +89,9 @@ fn (app-id: Str, display-name: Str?, roles: Vec): Map {
   }
 }
 
-perm-json fn (method: Str, path: Str, body: Any, opts: Map): Any {
+perm-json
+meta {no-doc: true}
+fn (method: Str, path: Str, body: Any, opts: Map): Any {
   ::api/json(method, path, {}, body, ::api/credential-opts(opts))
 }
 
@@ -75,10 +103,15 @@ meta {
     `Sites.FullControl.All`. Returns the permission (keep its `id` to
     revoke).
 
+    **Example**
+
     ```hot
     // Run once with an admin app's credentials
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
     grant ::microsoft::sharepoint::permissions/grant-site(site-id, "11111111-2222-3333-4444-555555555555", "Contoso Indexer", ["read"], {
-      client-id: admin-app-id, client-secret: admin-secret, tenant-id: "contoso.onmicrosoft.com"
+      client-id: ::hot::ctx/get("admin.client-id"),
+      client-secret: ::hot::ctx/get("admin.client-secret"),
+      tenant-id: "contoso.onmicrosoft.com"
     })
     grant.id
     ```
@@ -95,7 +128,18 @@ fn
 
 list-site-grants
 meta {
-    doc: """GET /sites/{site-id}/permissions - the app grants on a site (`id`, `roles`, `grantedToIdentitiesV2`). Needs `Sites.FullControl.All`."""
+    doc: """
+    GET /sites/{site-id}/permissions - the app grants on a site (`id`,
+    `roles`, `grantedToIdentitiesV2`). Needs `Sites.FullControl.All`.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    grants ::microsoft::sharepoint::permissions/list-site-grants(site-id)
+    map(grants, %.roles)
+    ```
+    """
 }
 fn
 (site-id: Str): Vec {
@@ -106,7 +150,19 @@ fn
 }
 
 get-site-grant
-meta {doc: """GET /sites/{site-id}/permissions/{id}."""}
+meta {
+    doc: """
+    GET /sites/{site-id}/permissions/{id}.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    grant ::microsoft::sharepoint::permissions/get-site-grant(site-id, "aTowaS50fG1zLnNw")
+    grant.roles
+    ```
+    """
+}
 fn
 (site-id: Str, permission-id: Str): Map {
   get-site-grant(site-id, permission-id, {})
@@ -117,7 +173,18 @@ fn
 
 update-site-grant
 meta {
-    doc: """PATCH /sites/{site-id}/permissions/{id} - change a grant's roles (e.g. raise `read` to `write`). Returns the permission."""
+    doc: """
+    PATCH /sites/{site-id}/permissions/{id} - change a grant's roles (e.g.
+    raise `read` to `write`). Returns the permission.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    grant ::microsoft::sharepoint::permissions/update-site-grant(site-id, "aTowaS50fG1zLnNw", ["write"])
+    grant.roles
+    ```
+    """
 }
 fn
 (site-id: Str, permission-id: Str, roles: Vec): Map {
@@ -130,7 +197,17 @@ fn
 
 delete-site-grant
 meta {
-    doc: """DELETE /sites/{site-id}/permissions/{id} - revoke an app's access to the site. Returns true."""
+    doc: """
+    DELETE /sites/{site-id}/permissions/{id} - revoke an app's access to the
+    site. Returns true.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    ::microsoft::sharepoint::permissions/delete-site-grant(site-id, "aTowaS50fG1zLnNw")
+    ```
+    """
 }
 fn
 (site-id: Str, permission-id: Str): Bool {
@@ -143,7 +220,19 @@ fn
 
 grant-list
 meta {
-    doc: """POST /sites/{site-id}/lists/{list}/permissions - grant an app `roles` on one list, for an app consented `Lists.SelectedOperations.Selected`. Breaks permission inheritance on the list. Returns the permission."""
+    doc: """
+    POST /sites/{site-id}/lists/{list}/permissions - grant an app `roles` on
+    one list, for an app consented `Lists.SelectedOperations.Selected`.
+    Breaks permission inheritance on the list. Returns the permission.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    grant ::microsoft::sharepoint::permissions/grant-list(site-id, "Tickets", "11111111-2222-3333-4444-555555555555", "Contoso Indexer", ["read"])
+    grant.id
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str, app-id: Str, display-name: Str?, roles: Vec): Map {
@@ -156,7 +245,18 @@ fn
 
 list-list-grants
 meta {
-    doc: """GET /sites/{site-id}/lists/{list}/permissions - the permissions on a list."""
+    doc: """
+    GET /sites/{site-id}/lists/{list}/permissions - the permissions on a
+    list.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    grants ::microsoft::sharepoint::permissions/list-list-grants(site-id, "Tickets")
+    map(grants, %.roles)
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str): Vec {
@@ -168,7 +268,17 @@ fn
 
 delete-list-grant
 meta {
-    doc: """DELETE /sites/{site-id}/lists/{list}/permissions/{id} - revoke a list grant. Returns true."""
+    doc: """
+    DELETE /sites/{site-id}/lists/{list}/permissions/{id} - revoke a list
+    grant. Returns true.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    ::microsoft::sharepoint::permissions/delete-list-grant(site-id, "Tickets", "aTowaS50fG1zLnNw")
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str, permission-id: Str): Bool {

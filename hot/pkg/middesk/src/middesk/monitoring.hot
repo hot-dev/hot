@@ -13,13 +13,25 @@ meta {
 
 seg ::middesk::api/seg
 
-path fn (business-id: Str): Str {
+path
+meta {no-doc: true}
+fn (business-id: Str): Str {
   `/businesses/${seg(business-id)}/monitor`
 }
 
 get-monitor
 meta {
-    doc: """GET /businesses/{id}/monitor - The business's monitor: `{id, event_types: [{type, enabled_at, status}]}`."""
+    doc: """
+    GET /businesses/{id}/monitor - The business's monitor: `{id,
+    event_types: [{type, enabled_at, status}]}`.
+
+    **Example**
+
+    ```hot
+    monitor ::middesk::monitoring/get-monitor("biz_a1b2c3")
+    map(monitor.event_types, %.type)
+    ```
+    """
 }
 fn
 (business-id: Str): Map {
@@ -51,7 +63,15 @@ fn
 
 update-monitor
 meta {
-    doc: """PUT /businesses/{id}/monitor - Replace the monitored types."""
+    doc: """
+    PUT /businesses/{id}/monitor - Replace the monitored types.
+
+    **Example**
+
+    ```hot
+    ::middesk::monitoring/update-monitor("biz_a1b2c3", ["watchlist_result", "lien"])
+    ```
+    """
 }
 fn
 (business-id: Str, event-types: Vec<Str>): Map {
@@ -63,7 +83,15 @@ fn
 
 delete-monitor
 meta {
-    doc: """DELETE /businesses/{id}/monitor - Stop monitoring."""
+    doc: """
+    DELETE /businesses/{id}/monitor - Stop monitoring.
+
+    **Example**
+
+    ```hot
+    ::middesk::monitoring/delete-monitor("biz_a1b2c3")
+    ```
+    """
 }
 fn
 (business-id: Str): Any {

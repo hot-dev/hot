@@ -4,7 +4,16 @@
 
 list-lists
 meta {
-    doc: """GET /lists - The workspace's lists (pipelines, curated collections)."""
+    doc: """
+    GET /lists - The workspace's lists (pipelines, curated collections).
+
+    **Example**
+
+    ```hot
+    lists ::attio::lists/list-lists()
+    map(lists.data, %.api_slug)
+    ```
+    """
 }
 fn
 (): Map {
@@ -25,7 +34,7 @@ meta {
     ```hot
     ::attio::lists/add-entry("sales-pipeline", {
       parent_object: "companies",
-      parent_record_id: company.id.record_id
+      parent_record_id: "7f4e2a10-3b9c-4d2a-8f1e-6a5c9d0b1e23"
     })
     ```
     """
@@ -54,7 +63,17 @@ fn
 
 query-entries
 meta {
-    doc: """POST /lists/{list}/entries/query - Query a list's entries (filter/sorts/limit/offset like record queries)."""
+    doc: """
+    POST /lists/{list}/entries/query - Query a list's entries
+    (filter/sorts/limit/offset like record queries).
+
+    **Example**
+
+    ```hot
+    page ::attio::lists/query-entries("sales-pipeline", {limit: 50})
+    page.data
+    ```
+    """
 }
 fn
 (list: Str): Map {
@@ -69,7 +88,16 @@ fn
 
 delete-entry
 meta {
-    doc: """DELETE /lists/{list}/entries/{id} - Remove an entry from a list (the parent record is untouched)."""
+    doc: """
+    DELETE /lists/{list}/entries/{id} - Remove an entry from a list (the
+    parent record is untouched).
+
+    **Example**
+
+    ```hot
+    ::attio::lists/delete-entry("sales-pipeline", "c2d8e4f1-5a6b-47c9-b0d3-1e2f3a4b5c6d")
+    ```
+    """
 }
 fn
 (list: Str, entry-id: Str): Any {

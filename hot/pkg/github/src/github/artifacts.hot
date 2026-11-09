@@ -3,7 +3,9 @@
 ::api ::github::api
 ::actions ::github::actions
 
-artifact-path fn (owner: Str, repo: Str, artifact-id: Any): Str {
+artifact-path
+meta {no-doc: true}
+fn (owner: Str, repo: Str, artifact-id: Any): Str {
   ::actions/actions-path(owner, repo, `/artifacts/${artifact-id}`)
 }
 
@@ -12,6 +14,13 @@ meta {
     doc: """
     GET /repos/{owner}/{repo}/actions/artifacts - Repository Actions
     artifacts. `params` supports `name`, `per_page`, and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::artifacts/list-artifacts("acme", "api", {name: "coverage"})
+    map(result.artifacts, %.id)
+    ```
     """
 }
 fn
@@ -34,6 +43,13 @@ meta {
     GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts - Artifacts
     produced by one workflow run. `params` supports `name`, `per_page`,
     and `page`.
+
+    **Example**
+
+    ```hot
+    result ::github::artifacts/list-workflow-run-artifacts("acme", "api", 1234567890)
+    map(result.artifacts, %.name)
+    ```
     """
 }
 fn
@@ -53,7 +69,17 @@ fn
 
 get-artifact
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Get artifact metadata."""
+    doc: """
+    GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Get artifact
+    metadata.
+
+    **Example**
+
+    ```hot
+    artifact ::github::artifacts/get-artifact("acme", "api", 555)
+    artifact.size_in_bytes
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, artifact-id: Any): Map {
@@ -68,6 +94,13 @@ meta {
     doc: """
     GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip -
     Download an artifact ZIP archive as Bytes.
+
+    **Example**
+
+    ```hot
+    archive ::github::artifacts/download-artifact("acme", "api", 555)
+    ::hot::zip/entries(archive)
+    ```
     """
 }
 fn
@@ -80,7 +113,16 @@ fn
 
 delete-artifact
 meta {
-    doc: """DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Delete an artifact."""
+    doc: """
+    DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Delete an
+    artifact.
+
+    **Example**
+
+    ```hot
+    ::github::artifacts/delete-artifact("acme", "api", 555)
+    ```
+    """
 }
 fn
 (owner: Str, repo: Str, artifact-id: Any): Any {

@@ -2,7 +2,7 @@
 
 hot.pkg.eu-sanctions {
   name: "hot.dev/eu-sanctions",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The EU Consolidated Financial Sanctions List for Hot: downloads the free FSF XML file and parses it into SanctionEntity records, with a cheap Last-Modified version check. Needs http.max-response-bytes of at least 32 MiB. Only fetches and parses: it does not screen names and stores nothing.",
   author: "Hot Dev",

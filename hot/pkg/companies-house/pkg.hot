@@ -2,7 +2,7 @@
 
 hot.pkg.companies-house {
   name: "hot.dev/companies-house",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "UK Companies House for Hot: company and officer search, profiles, officers, persons with significant control, filing history, and document downloads.",
   author: "Hot Dev",

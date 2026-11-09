@@ -42,6 +42,14 @@ meta {
     A UTC date or time as GDELT's `YYYYMMDDHHMMSS` (pure). Takes that form
     itself, `"2026-11-03"` (midnight), or `"2026-11-03T12:15:00Z"`; null
     stays null. An Err for anything else, including a non-UTC offset.
+
+    **Example**
+
+    ```hot
+    ::gdelt/datetime("2026-11-03")            // "20261103000000"
+    ::gdelt/datetime("2026-11-03T12:15:00Z")  // "20261103121500"
+    ::gdelt/datetime(null)                    // null
+    ```
     """
 }
 fn (value: Any): Str? {
@@ -63,6 +71,12 @@ meta {
     A GDELT timestamp as ISO 8601 (pure): `"20261103T121500Z"` →
     `"2026-11-03T12:15:00Z"`. Articles' `seendate` and timeline `date`
     use this form. Any other value comes back unchanged.
+
+    **Example**
+
+    ```hot
+    ::gdelt/iso-date("20261103T121500Z")  // "2026-11-03T12:15:00Z"
+    ```
     """
 }
 fn (value: Any): Any {
@@ -80,7 +94,9 @@ fn (value: Any): Any {
 // Parameters
 // ---------------------------------------------------------------------------
 
-capped fn (value: Any, limit: Int): Int? {
+capped
+meta {no-doc: true}
+fn (value: Any, limit: Int): Int? {
   if(is-some(value), min(value, limit), null)
 }
 
@@ -92,6 +108,14 @@ meta {
     `opts.start` and `opts.end`, via `datetime`), `sort`, `maxrecords`
     (capped at 250) and `timelinesmooth` (capped at 30). An Err when a
     datetime is invalid.
+
+    **Example**
+
+    ```hot
+    params ::gdelt/doc-params("\"data breach\"", "ArtList", {timespan: "24h", max-records: 500})
+    params.format      // "json"
+    params.maxrecords  // 250
+    ```
     """
 }
 fn (query: Str, mode: Str, opts: Map): Map {
@@ -116,7 +140,9 @@ fn (query: Str, mode: Str, opts: Map): Map {
   }
 }
 
-doc-get fn (query: Str, mode: Str, opts: Map): Any {
+doc-get
+meta {no-doc: true}
+fn (query: Str, mode: Str, opts: Map): Any {
   cfg ::api/resolve(opts)
   params doc-params(query, mode, opts)
   cond {
@@ -131,7 +157,16 @@ doc-get fn (query: Str, mode: Str, opts: Map): Any {
 
 article-list
 meta {
-    doc: """The articles in an ArtList response (pure), or `[]` when there are none."""
+    doc: """
+    The articles in an ArtList response (pure), or `[]` when there are none.
+
+    **Example**
+
+    ```hot
+    ::gdelt/article-list({articles: [{title: "Rates held"}]})  // [{title: "Rates held"}]
+    ::gdelt/article-list({})                                   // []
+    ```
+    """
 }
 fn (body: Any): Vec<Map> {
   or(get(or(body, {}), "articles"), [])
@@ -200,7 +235,17 @@ fn
 
 timeline-points
 meta {
-    doc: """Flatten a timeline response to `[{series, date, value}]`, with `date` in ISO 8601 (pure). `[]` when there are no points."""
+    doc: """
+    Flatten a timeline response to `[{series, date, value}]`, with `date` in
+    ISO 8601 (pure). `[]` when there are no points.
+
+    **Example**
+
+    ```hot
+    body {timeline: [{series: "Volume Intensity", data: [{date: "20261103T120000Z", value: 1.5}]}]}
+    ::gdelt/timeline-points(body)  // [{series: "Volume Intensity", date: "2026-11-03T12:00:00Z", value: 1.5}]
+    ```
+    """
 }
 fn (body: Any): Vec<Map> {
   mapcat(or(get(or(body, {}), "timeline"), []), (s) {

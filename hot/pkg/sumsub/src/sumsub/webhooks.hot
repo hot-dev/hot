@@ -55,7 +55,18 @@ KYT_EVENTS [
 
 digest-algorithm
 meta {
-    doc: """The HMAC (`"sha256"`, `"sha512"`, `"sha1"`) named by an `X-Payload-Digest-Alg` value, or null for a missing or unknown value. Exposed for testing."""
+    doc: """
+    The HMAC (`"sha256"`, `"sha512"`, `"sha1"`) named by an
+    `X-Payload-Digest-Alg` value, or null for a missing or unknown value.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::webhooks/digest-algorithm("HMAC_SHA256_HEX")  // "sha256"
+    ::sumsub::webhooks/digest-algorithm("MD5")  // null
+    ```
+    """
 }
 fn (alg-header: Any): Str? {
   name if(is-str(alg-header), uppercase(trim(alg-header)), "")
@@ -70,6 +81,15 @@ meta {
     an algorithm not in `allowed` (a Vec of `X-Payload-Digest-Alg`
     values). The secret is masked in call records. Exposed for testing;
     `verify-request` uses it.
+
+    **Example**
+
+    ```hot
+    secret ::hot::ctx/get("sumsub.webhook.secret")
+    body "{\"type\":\"applicantReviewed\"}"
+    digest ::hot::hmac/hmac-sha256(secret, body)
+    ::sumsub::webhooks/verify-digest(secret, body, digest, "HMAC_SHA256_HEX", ["HMAC_SHA256_HEX"])
+    ```
     """
 }
 fn (secret: Str, body: Str | Bytes, digest: Str?, alg-header: Str?, allowed: Vec): Bool {
@@ -150,7 +170,18 @@ fn
 
 payload-of
 meta {
-    doc: """The decoded payload of a webhook: from a request's parsed `body` (or its raw body when not parsed), a Map, or a JSON Str. `{}` for anything that isn't a JSON object. Exposed for testing."""
+    doc: """
+    The decoded payload of a webhook: from a request's parsed `body` (or its
+    raw body when not parsed), a Map, or a JSON Str. `{}` for anything that
+    isn't a JSON object. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::webhooks/payload-of("{\"type\":\"applicantCreated\"}")  // {type: "applicantCreated"}
+    ::sumsub::webhooks/payload-of("not json")  // {}
+    ```
+    """
 }
 fn (source: Any): Map {
   cond {
@@ -190,6 +221,20 @@ meta {
     fields `applicant-action-id`, `external-action-id`, and `payload`
     (the decoded body). Accepts the request, its body Map, or the raw JSON.
     Verify the request first.
+
+    **Example**
+
+    ```hot
+    event ::sumsub::webhooks/parse-event({
+      type: "applicantReviewed",
+      applicantId: "abc",
+      reviewStatus: "completed",
+      reviewResult: {reviewAnswer: "GREEN"}
+    })
+    event.type  // "applicantReviewed"
+    event.applicant-id  // "abc"
+    event.review-answer  // "GREEN"
+    ```
     """
 }
 fn (source: Any): Map {
@@ -223,14 +268,36 @@ fn (source: Any): Map {
 }
 
 is-kyt-event
-meta {doc: """True for transaction-monitoring and AML case events (`KYT_EVENTS`)."""}
+meta {
+    doc: """
+    True for transaction-monitoring and AML case events (`KYT_EVENTS`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::webhooks/is-kyt-event({type: "applicantKytTxnApproved"})  // true
+    ::sumsub::webhooks/is-kyt-event({type: "applicantReviewed"})  // false
+    ```
+    """
+}
 fn (event: Map): Bool {
   in(get(event, "type"), KYT_EVENTS)
 }
 
 is-final-review
 meta {
-    doc: """True when the event reports a completed review: `applicantReviewed` (or an action/transaction reviewed event) with `reviewStatus` `completed`. Map it with `::sumsub::decisions/review-outcome`."""
+    doc: """
+    True when the event reports a completed review: `applicantReviewed` (or
+    an action/transaction reviewed event) with `reviewStatus` `completed`.
+    Map it with `::sumsub::decisions/review-outcome`.
+
+    **Example**
+
+    ```hot
+    ::sumsub::webhooks/is-final-review({review-status: "completed", review-answer: "GREEN"})  // true
+    ::sumsub::webhooks/is-final-review({review-status: "pending"})  // false
+    ```
+    """
 }
 fn (event: Map): Bool {
   and(eq(get(event, "review-status"), "completed"), is-some(get(event, "review-answer")))
@@ -238,7 +305,18 @@ fn (event: Map): Bool {
 
 dedupe-key
 meta {
-    doc: """A stable key for one delivery, for idempotent handling of Sumsub's retries: the event type, applicant or transaction id, `correlationId` and `createdAtMs`, joined with `|`. Pure."""
+    doc: """
+    A stable key for one delivery, for idempotent handling of Sumsub's
+    retries: the event type, applicant or transaction id, `correlationId`
+    and `createdAtMs`, joined with `|`. Pure.
+
+    **Example**
+
+    ```hot
+    ::sumsub::webhooks/dedupe-key({type: "applicantReviewed", applicant-id: "abc", correlation-id: "c1", created-at-ms: 1700000000000})
+    // "applicantReviewed|abc|c1|1700000000000"
+    ```
+    """
 }
 fn (event: Map): Str {
   parts [

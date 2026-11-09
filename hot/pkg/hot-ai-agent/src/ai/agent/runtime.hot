@@ -36,7 +36,22 @@ type {
 REGISTERED_SESSIONS_KEY "registered-sessions"
 
 create-runtime
-meta { doc: "Create standard state/stats/errors stores for an agent name." }
+meta {
+    doc: """
+    Create standard state/stats/errors stores for an agent name.
+
+    **Example**
+
+    ```hot
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent", {store-prefix: "team-agent-v2", max-errors: 20})
+    rt.agent-name  // "team-agent"
+    rt.state-store.name  // "agent:team-agent-v2:state"
+    rt.max-errors  // 20
+    ```
+    """
+}
 fn
 (agent-name: Str): AgentRuntime {
     create-runtime(agent-name, {})
@@ -55,14 +70,34 @@ fn
 }
 
 now-epoch-secs
-meta { doc: "Current Unix epoch seconds." }
+meta {
+    doc: """
+    Current Unix epoch seconds.
+
+    **Example**
+
+    ```hot
+    started ::ai::agent::runtime/now-epoch-secs()
+    `started at ${started}`
+    ```
+    """
+}
 fn (): Int {
     floor(div(::time/epoch-millis(::time/now()), 1000))
 }
 
 today-bucket
 meta {
-    doc: "Day number since Unix epoch, useful for naturally sortable daily counters."
+    doc: """
+    Day number since Unix epoch, useful for naturally sortable daily
+    counters.
+
+    **Example**
+
+    ```hot
+    `messages:${::ai::agent::runtime/today-bucket()}`
+    ```
+    """
 }
 fn (): Int {
     floor(div(now-epoch-secs(), 86400))
@@ -73,6 +108,16 @@ meta {
     doc: """
     Increment a numeric counter in a store and return the new value. The
     store adds atomically, so concurrent bumps are never lost.
+
+    **Example**
+
+    ```hot
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    key `messages:${::runtime/today-bucket()}`
+    ::runtime/bump-counter(rt.stats-store, key, 1)
+    ```
     """
 }
 fn (store: ::hot::store/Map, key: Str, delta: Int): Int {
@@ -89,6 +134,15 @@ meta {
     Add a session to the runtime's registered-session index. Idempotent.
     Concurrent registrations are all kept: the index is replaced only while
     it still holds what was read, and the read is retried otherwise.
+
+    **Example**
+
+    ```hot
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    ::runtime/register-session(rt, ::ai::session/Session({id: "slack:C123"}))
+    ```
     """
 }
 fn (rt: AgentRuntime, session: Session): Vec {
@@ -115,14 +169,40 @@ fn (rt: AgentRuntime, serialized: Map, attempts: Int): Vec {
 }
 
 list-registered-sessions
-meta { doc: "Materialize registered sessions from the runtime state store." }
+meta {
+    doc: """
+    Materialize registered sessions from the runtime state store.
+
+    **Example**
+
+    ```hot
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    map(::runtime/list-registered-sessions(rt), %.id)
+    ```
+    """
+}
 fn (rt: AgentRuntime): Vec<Session> {
     raw or(::store/get(rt.state-store, REGISTERED_SESSIONS_KEY), [])
     map(raw, (s) { ::session/Session({id: s.id, meta: s.meta}) })
 }
 
 record-error
-meta { doc: "Append a rolling error entry to the runtime error store." }
+meta {
+    doc: """
+    Append a rolling error entry to the runtime error store.
+
+    **Example**
+
+    ```hot
+    ::runtime ::ai::agent::runtime
+
+    rt ::runtime/create-runtime("team-agent")
+    ::runtime/record-error(rt, "daily-recap", "provider timed out")
+    ```
+    """
+}
 fn (rt: AgentRuntime, where: Str, msg: Str): Any {
     ts now-epoch-secs()
     ::store/put(rt.errors-store, `${ts}:${where}`, {

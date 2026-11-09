@@ -53,19 +53,25 @@ ZONES {
 RFC_822 "^(?:[A-Za-z]+,?\\s+)?(\\d{1,2})\\s+([A-Za-z]{3})[A-Za-z]*\\s+(\\d{4})\\s+(\\d{2}):(\\d{2})(?::(\\d{2}))?\\s+([A-Za-z]+|[+-]\\d{4})$"
 RFC_3339 "^(\\d{4}-\\d{2}-\\d{2})[Tt ](\\d{2}:\\d{2}:\\d{2})(?:\\.\\d+)?([Zz]|[+-]\\d{2}:\\d{2})$"
 
-to-utc fn (date: Str, time: Str, offset: Str): Str? {
+to-utc
+meta {no-doc: true}
+fn (date: Str, time: Str, offset: Str): Str? {
   zoned ZonedDateTime(`${date}T${time}${offset}[${offset}]`)
   if(is-err(zoned), null, Str(::hot::time/to-instant(zoned)))
 }
 
-rfc-822-offset fn (zone: Str): Str? {
+rfc-822-offset
+meta {no-doc: true}
+fn (zone: Str): Str? {
   cond {
     ::re/is-match(zone, "^[+-]\\d{4}$") => { `${slice(zone, 0, 3)}:${slice(zone, 3, 5)}` }
     => { get(ZONES, lowercase(zone)) }
   }
 }
 
-from-rfc-822 fn (parts: Vec): Str? {
+from-rfc-822
+meta {no-doc: true}
+fn (parts: Vec): Str? {
   month get(MONTHS, lowercase(parts[1]))
   offset rfc-822-offset(parts[6])
   seconds if(::api/given(parts[5]), parts[5], "00")
@@ -111,14 +117,28 @@ fn (raw: Str?): Str? {
 // Reading XML (pure)
 // ---------------------------------------------------------------------------
 
-node-text fn (node: Any): Str? {
+node-text
+meta {no-doc: true}
+fn (node: Any): Str? {
   s if(is-null(node), "", trim(::xml/text(node)))
   if(is-empty(s), null, s)
 }
 
 first-text
 meta {
-    doc: """The first non-blank text among `node`'s children named by `tags`, in the order given, or null. Namespaced children go by their prefix, such as `dc:creator` (pure)."""
+    doc: """
+    The first non-blank text among `node`'s children named by `tags`, in the
+    order given, or null. Namespaced children go by their prefix, such as
+    `dc:creator` (pure).
+
+    **Example**
+
+    ```hot
+    item from-xml("<item><summary> </summary><description>Rates held</description></item>")
+    ::feed/first-text(item, ["summary", "description"])  // "Rates held"
+    ::feed/first-text(item, ["author"])                  // null
+    ```
+    """
 }
 fn (node: Any, tags: Vec<Str>): Str? {
   reduce(tags, (found, tag) {
@@ -126,7 +146,9 @@ fn (node: Any, tags: Vec<Str>): Str? {
   }, null)
 }
 
-all-text fn (node: Any, tag: Str): Vec<Str> {
+all-text
+meta {no-doc: true}
+fn (node: Any, tag: Str): Vec<Str> {
   filter(map(::xml/children(node, tag), node-text), is-some)
 }
 
@@ -164,7 +186,9 @@ fn (base: Str?, href: Str?): Str? {
   }
 }
 
-alternate-href fn (node: Any, tag: Str): Str? {
+alternate-href
+meta {no-doc: true}
+fn (node: Any, tag: Str): Str? {
   links ::xml/children(node, tag)
   alternate find-first(links, (l) {
     rel ::xml/attr(l, "rel")
@@ -174,7 +198,9 @@ alternate-href fn (node: Any, tag: Str): Str? {
   if(is-null(picked), null, ::xml/attr(picked, "href"))
 }
 
-with-dates fn (m: Map): Map {
+with-dates
+meta {no-doc: true}
+fn (m: Map): Map {
   {...m, published-at: normalize-date(m.published), updated-at: normalize-date(m.updated)}
 }
 
@@ -182,7 +208,9 @@ with-dates fn (m: Map): Map {
 // RSS 2.0 (pure)
 // ---------------------------------------------------------------------------
 
-permalink-guid fn (item: Any): Str? {
+permalink-guid
+meta {no-doc: true}
+fn (item: Any): Str? {
   guid ::xml/child(item, "guid")
   cond {
     is-null(guid) => { null }
@@ -192,16 +220,22 @@ permalink-guid fn (item: Any): Str? {
   }
 }
 
-rss-link fn (node: Any, base: Str?): Str? {
+rss-link
+meta {no-doc: true}
+fn (node: Any, base: Str?): Str? {
   resolve-link(base, or(first-text(node, ["link"]), alternate-href(node, "atom:link"), permalink-guid(node)))
 }
 
-rss-author fn (item: Any): Str? {
+rss-author
+meta {no-doc: true}
+fn (item: Any): Str? {
   creators all-text(item, "dc:creator")
   if(is-empty(creators), first-text(item, ["author"]), join(creators, ", "))
 }
 
-rss-entry fn (item: Any, base: Str?): Map {
+rss-entry
+meta {no-doc: true}
+fn (item: Any, base: Str?): Map {
   link rss-link(item, base)
   with-dates({
     id: or(first-text(item, ["guid"]), link),
@@ -215,7 +249,9 @@ rss-entry fn (item: Any, base: Str?): Map {
   })
 }
 
-parse-rss fn (root: Any, base: Str?): Map {
+parse-rss
+meta {no-doc: true}
+fn (root: Any, base: Str?): Map {
   channel ::xml/child(root, "channel")
   cond {
     is-null(channel) => { err("feed: an <rss> document with no <channel>") }
@@ -238,7 +274,18 @@ parse-rss fn (root: Any, base: Str?): Map {
 
 atom-text
 meta {
-    doc: """The first of `tags` under `node` with text, as `first-text`, except that `type="xhtml"` content comes back as its `<div>` markup, since `::hot::xml/text` skips child elements (pure)."""
+    doc: """
+    The first of `tags` under `node` with text, as `first-text`, except that
+    `type="xhtml"` content comes back as its `<div>` markup, since
+    `::hot::xml/text` skips child elements (pure).
+
+    **Example**
+
+    ```hot
+    entry from-xml("<entry><title type='xhtml'><div><b>Rates held</b></div></title></entry>")
+    ::feed/atom-text(entry, ["title"])  // "<div><b>Rates held</b></div>"
+    ```
+    """
 }
 fn (node: Any, tags: Vec<Str>): Str? {
   reduce(tags, (found, tag) {
@@ -253,12 +300,16 @@ fn (node: Any, tags: Vec<Str>): Str? {
   }, null)
 }
 
-atom-author fn (node: Any, p: Str): Str? {
+atom-author
+meta {no-doc: true}
+fn (node: Any, p: Str): Str? {
   names filter(map(::xml/children(node, `${p}author`), (a) { first-text(a, [`${p}name`, `${p}email`]) }), is-some)
   if(is-empty(names), null, join(names, ", "))
 }
 
-atom-entry fn (entry: Any, p: Str, feed-base: Str?, feed-author: Str?): Map {
+atom-entry
+meta {no-doc: true}
+fn (entry: Any, p: Str, feed-base: Str?, feed-author: Str?): Map {
   base resolve-link(feed-base, ::xml/attr(entry, "xml:base"))
   link resolve-link(or(base, feed-base), alternate-href(entry, `${p}link`))
   source ::xml/child(entry, `${p}source`)
@@ -275,7 +326,9 @@ atom-entry fn (entry: Any, p: Str, feed-base: Str?, feed-author: Str?): Map {
   })
 }
 
-parse-atom fn (root: Any, p: Str, base: Str?): Map {
+parse-atom
+meta {no-doc: true}
+fn (root: Any, p: Str, base: Str?): Map {
   updated first-text(root, [`${p}updated`])
   author atom-author(root, p)
   {
@@ -302,8 +355,10 @@ meta {
     **Example**
 
     ```hot
+    text "<rss version='2.0'><channel><title>News</title><item><title>Rates held</title><guid>a1</guid></item></channel></rss>"
     feed ::feed/parse(text)
-    first(feed.entries).title
+    feed.title                 // "News"
+    first(feed.entries).title  // "Rates held"
     ```
     """
 }
@@ -339,6 +394,15 @@ meta {
     The result of `fetch` for one response (pure). A 304 keeps the
     caller's `etag` and `last-modified` when the server doesn't repeat
     them.
+
+    **Example**
+
+    ```hot
+    response {status: 304, headers: {}, body: ""}
+    out ::feed/read-response(response, "https://example.com/feed.xml", {etag: "abc"})
+    out.not-modified  // true
+    out.etag          // "abc"
+    ```
     """
 }
 fn (response: HttpResponse, url: Str, opts: Map): Map {
@@ -409,9 +473,11 @@ meta {
     **Example**
 
     ```hot
-    feed ::feed/fetch(url)
-    fresh ::feed/new-entries(feed.entries, stored-ids)
-    map(feed.entries, (e) { e.id })  // the ids to store for next time
+    entries [{id: "a", title: "Old"}, {id: "b", title: "New"}]
+    map(::feed/new-entries(entries, ["a"]), %.title)  // ["New"]
+
+    // The ids to store for next time
+    map(entries, %.id)  // ["a", "b"]
     ```
     """
 }

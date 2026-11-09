@@ -4,7 +4,17 @@
 
 get-database
 meta {
-    doc: """GET /databases/{id} - The database schema: property names, types, and options."""
+    doc: """
+    GET /databases/{id} - The database schema: property names, types, and
+    options.
+
+    **Example**
+
+    ```hot
+    db ::notion::databases/get-database("d9824bdc-8445-4327-be8b-5b47500af6ce")
+    keys(db.properties)
+    ```
+    """
 }
 fn
 (database-id: Str): Map {
@@ -25,7 +35,7 @@ meta {
     **Example**
 
     ```hot
-    open ::notion::databases/query-database(db-id, {
+    open ::notion::databases/query-database("d9824bdc-8445-4327-be8b-5b47500af6ce", {
       filter: {property: "Status", status: {does_not_equal: "Done"}},
       sorts: [{property: "Priority", direction: "ascending"}]
     })
@@ -46,7 +56,21 @@ fn
 
 create-database
 meta {
-    doc: """POST /databases - Create a database under a parent page. `properties` is the schema, e.g. `{Name: {title: {}}, Status: {select: {options: [{name: "Todo"}]}}}`."""
+    doc: """
+    POST /databases - Create a database under a parent page. `properties` is
+    the schema, e.g. `{Name: {title: {}}, Status: {select: {options: [{name:
+    "Todo"}]}}}`.
+
+    **Example**
+
+    ```hot
+    db ::notion::databases/create-database("59833787-2cf9-4fdf-8782-e53db20768a5", "Roadmap", {
+      Name: {title: {}},
+      Status: {select: {options: [{name: "Todo"}, {name: "Done"}]}}
+    })
+    db.id
+    ```
+    """
 }
 fn
 (parent-page-id: Str, title: Str, properties: Map): Map {

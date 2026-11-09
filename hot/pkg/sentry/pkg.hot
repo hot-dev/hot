@@ -2,7 +2,7 @@
 
 hot.pkg.sentry {
   name: "hot.dev/sentry",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Sentry API bindings for Hot. Issue search and triage (bulk updates, events, comments), releases, commits and deploys for CI, projects and teams, and webhook verification, with cursor pagination and self-hosted support.",
   author: "Hot Dev",

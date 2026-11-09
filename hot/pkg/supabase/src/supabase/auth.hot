@@ -31,7 +31,21 @@ AuthResponse type {
 
 session-with-tokens-masked
 meta {
-    doc: """Mask a session's access and refresh tokens in the run's call records and return the session as is. An Err passes through."""
+    doc: """
+    Mask a session's access and refresh tokens in the run's call records and
+    return the session as is. An Err passes through.
+
+    **Example**
+
+    ```hot
+    password ::hot::ctx/get("supabase.test.password")
+    response ::supabase::api/request("POST", "/auth/v1/token?grant_type=password", {}, {email: "alice@example.com", password: password})
+
+    // Keeps the tokens out of the call records when you call the endpoint yourself
+    session ::supabase::auth/session-with-tokens-masked(response)
+    session.user.id
+    ```
+    """
 }
 fn (session: Result): Any {
   cond {
@@ -281,7 +295,21 @@ ExchangeCodeRequest type {
 
 exchange-code
 meta {
-    doc: """Exchange a PKCE authorization code for a session."""
+    doc: """
+    Exchange a PKCE authorization code for a session.
+
+    **Example**
+
+    ```hot
+    ::auth ::supabase::auth
+
+    session ::auth/exchange-code(::auth/ExchangeCodeRequest({
+      auth_code: "code-from-the-redirect",
+      code_verifier: ::hot::ctx/get("pkce.verifier")
+    }))
+    session.access_token
+    ```
+    """
 }
 fn
 (request: ExchangeCodeRequest): AuthResponse {

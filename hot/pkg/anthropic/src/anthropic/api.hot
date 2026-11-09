@@ -55,6 +55,7 @@ meta {
     **Example**
 
     ```hot
+    body {model: "claude-sonnet-4-5", max_tokens: 256, stream: true, messages: [{role: "user", content: "Hello!"}]}
     response ::anthropic::api/call-stream("POST", "/v1/messages", {}, body, "sse", {})
     if(gte(response.status, 400), err(::anthropic::api/refused-stream(response)), response)
     ```
@@ -73,7 +74,10 @@ fn (response: StreamingHttpResponse): HttpError {
 DEFAULT_API_VERSION "2023-06-01"
 
 non-blank
-meta { doc: """`value`, or null when it is null or a blank Str.""" }
+meta {
+    no-doc: true,
+    doc: """`value`, or null when it is null or a blank Str."""
+}
 fn (value: Any): Any {
   cond {
     is-str(value) => { if(is-empty(trim(value)), null, value) }
@@ -213,6 +217,15 @@ meta {
     Request headers from resolved settings (see `resolve`), pure:
     `x-api-key`, `anthropic-version`, and `Content-Type` when there is a body.
     Exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved ::anthropic::api/resolve()
+    headers ::anthropic::api/build-headers(resolved, true)
+    headers.Content-Type
+    headers.anthropic-version
+    ```
     """
 }
 fn (resolved: Map, has-body: Bool): Map {
@@ -289,6 +302,20 @@ meta {
     doc: """
     Streaming counterpart to `call`. Returns a `StreamingHttpResponse` whose
     body is an iterator of parsed SSE or NDJSON events.
+
+    **Example**
+
+    ```hot
+    response ::anthropic::api/call-stream("POST", "/v1/messages", {}, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 256,
+      stream: true,
+      messages: [{role: "user", content: "Hello!"}]
+    }, "sse", {})
+
+    // Parsed SSE events, one at a time
+    for-each(response.body, (event) { print(event.event) })
+    ```
     """,
     ctx: {
         "anthropic.api.key": {required: false},

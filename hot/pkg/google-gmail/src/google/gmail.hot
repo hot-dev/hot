@@ -83,7 +83,16 @@ DRAFT "DRAFT"
 api-root
 meta {
     ctx: {"google.gmail.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://gmail.googleapis.com` unless the `google.gmail.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://gmail.googleapis.com` unless the
+    `google.gmail.api-root` context variable points at a proxy or emulator.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/api-root()
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.gmail.api-root")
@@ -92,7 +101,19 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Gmail v1 URL for the authenticated user (`/gmail/v1/users/me` + `path`) with non-null `params` as a query string (Vec values repeat the key)."""
+    doc: """
+    A Gmail v1 URL for the authenticated user (`/gmail/v1/users/me` +
+    `path`) with non-null `params` as a query string (Vec values repeat the
+    key).
+
+    **Example**
+
+    ```hot
+    ::google::gmail/url("/profile")
+
+    ::google::gmail/url("/messages", {q: "is:unread", labelIds: ["INBOX", "STARRED"]})
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -104,14 +125,33 @@ fn
 
 upload-url
 meta {
-    doc: """A Gmail v1 media-upload URL (`/upload/gmail/v1/users/me` + `path`) with `params`."""
+    doc: """
+    A Gmail v1 media-upload URL (`/upload/gmail/v1/users/me` + `path`) with
+    `params`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/upload-url("/messages/send", {uploadType: "multipart"})
+    ```
+    """
 }
 fn (path: Str, params: Map): Str {
   ::api/with-query(`${api-root()}/upload/gmail/v1/users/me${path}`, params)
 }
 
 encode-id
-meta {doc: """URL-encode an id for a path segment."""}
+meta {
+    doc: """
+    URL-encode an id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/encode-id("a/b")  // "a%2Fb"
+    ```
+    """
+}
 fn (id: Str): Str {
   ::uri/encode(id)
 }
@@ -123,6 +163,14 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/query-params({format: "full"}, {format: "raw", retry: 3})  // {format: "raw"}
+    ::google::gmail/query-params({format: "full"}, {format: null})  // {}
+    ::google::gmail/query-params({}, {q: "is:unread", upload: true}, ["upload"])  // {q: "is:unread"}
+    ```
     """
 }
 fn
@@ -136,7 +184,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/creds({q: "is:unread", retry: 3, subject: "ada@example.com"})  // {retry: 3, subject: "ada@example.com"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -144,7 +201,19 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    ::gmail ::google::gmail
+
+    profile ::gmail/json(::gmail/READ_SCOPE, "GET", ::gmail/url("/profile"), "", {})
+    profile.emailAddress
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -152,7 +221,16 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Gmail bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Gmail bodies never carry JSON null
+    for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::gmail/compact({id: "d1", threadId: null})  // {id: "d1"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)
@@ -160,7 +238,17 @@ fn (body: Map): Map {
 
 done
 meta {
-    doc: """`true` for a successful call whose response has no useful body (delete, stop), or the call's Err."""
+    doc: """
+    `true` for a successful call whose response has no useful body (delete,
+    stop), or the call's Err.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/done({})  // true
+    is-err(::google::gmail/done(err("denied")))  // true
+    ```
+    """
 }
 fn (result: Result): Bool {
   if(is-err(result), result, true)

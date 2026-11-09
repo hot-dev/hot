@@ -71,7 +71,16 @@ type {
 
 build-ocr-args
 meta {
-    doc: "Build tesseract CLI arguments (after the `tesseract` executable name)."
+    doc: """
+    Build tesseract CLI arguments (after the `tesseract` executable name).
+
+    **Example**
+
+    ```hot
+    ::tesseract/build-ocr-args("/data/in.png", "/data/out", "eng", 6, null, "txt", null, null)
+    // ["/data/in.png", "/data/out", "-l", "eng", "--psm", "6", "txt"]
+    ```
+    """
 }
 fn (input-path: Str, output-base: Str, language: Str?, psm: Int?, oem: Int?, format: Str, dpi: Int?, extra-args: Vec<Str>?): Vec<Str> {
     lang-args if(is-some(language), ["-l", language], [])
@@ -89,7 +98,15 @@ fn (input-path: Str, output-base: Str, language: Str?, psm: Int?, oem: Int?, for
 
 build-version-args
 meta {
-    doc: "Build tesseract `--version` arguments."
+    doc: """
+    Build tesseract `--version` arguments.
+
+    **Example**
+
+    ```hot
+    ::tesseract/build-version-args()  // ["--version"]
+    ```
+    """
 }
 fn (): Vec<Str> {
     ["--version"]
@@ -101,7 +118,17 @@ fn (): Vec<Str> {
 
 parse-ocr-output
 meta {
-    doc: "Parse OCR stdout into text. For `txt` (and text-like formats), returns trimmed stdout. PDF output is file-only; returns empty text."
+    doc: """
+    Parse OCR stdout into text. For `txt` (and text-like formats), returns
+    trimmed stdout. PDF output is file-only; returns empty text.
+
+    **Example**
+
+    ```hot
+    ::tesseract/parse-ocr-output("txt", "  Hello\n")  // "Hello"
+    ::tesseract/parse-ocr-output("pdf", "ignored")  // ""
+    ```
+    """
 }
 fn (format: Str, stdout: Str): Str {
     cond {
@@ -114,7 +141,9 @@ fn (format: Str, stdout: Str): Str {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -124,7 +153,9 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-format-output-suffix fn (format: Str): Str {
+format-output-suffix
+meta {no-doc: true}
+fn (format: Str): Str {
     cond {
         eq(format, "hocr") => { "hocr" }
         eq(format, "tsv") => { "tsv" }
@@ -133,16 +164,35 @@ format-output-suffix fn (format: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
 }
 
-run-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
+}
+
+run-tesseract-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD}\n${script}`, script)
     info ::box/start({
@@ -156,7 +206,9 @@ run-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Ma
     ::task/await(info.id)
 }
 
-start-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+start-tesseract-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD}\n${script}`, script)
     ::box/start({
@@ -169,7 +221,9 @@ start-tesseract-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): 
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -243,8 +297,8 @@ fn (input: Str): Map {
     disk-out `${out-base}.${suffix}`
 
     tess-args join-args(build-ocr-args(in-path, out-base, opts.language, opts.psm, opts.oem, fmt, opts.dpi, opts.extra-args))
-    text-capture if(eq(fmt, "pdf"), "", ` && cat ${disk-out}`)
-    script `hotbox cp '${input}' ${in-path} && tesseract ${tess-args}${text-capture} && hotbox cp ${disk-out} '${hot-output}'`
+    text-capture if(eq(fmt, "pdf"), "", ` && cat ${shell-quote(disk-out)}`)
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && tesseract ${tess-args}${text-capture} && hotbox cp ${shell-quote(disk-out)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-tesseract-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -318,8 +372,8 @@ fn (input: Str): Map {
     disk-out `${out-base}.${suffix}`
 
     tess-args join-args(build-ocr-args(in-path, out-base, opts.language, opts.psm, opts.oem, fmt, opts.dpi, opts.extra-args))
-    text-capture if(eq(fmt, "pdf"), "", ` && cat ${disk-out}`)
-    script `hotbox cp '${input}' ${in-path} && tesseract ${tess-args}${text-capture} && hotbox cp ${disk-out} '${hot-output}'`
+    text-capture if(eq(fmt, "pdf"), "", ` && cat ${shell-quote(disk-out)}`)
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && tesseract ${tess-args}${text-capture} && hotbox cp ${shell-quote(disk-out)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-tesseract-box(script, box-size, opts.image, or(opts.timeout, 300))

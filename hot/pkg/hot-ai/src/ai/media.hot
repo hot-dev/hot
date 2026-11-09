@@ -8,12 +8,14 @@ meta {
 
     **Usage**
     ```hot
-    import ::hot::media
-    import ::ai::media
+    ::aim ::ai::media
+    file-meta ::hot::file/FileMeta({
+        file-id: "f1", path: "out/sunset.png", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
 
     // Create AI-generated image
-    ai-image AIImage({
-        media: Image({file: file-meta, width: 1024, height: 1024, format: "png"}),
+    ai-image ::aim/AIImage({
+        media: ::hot::media/Image({file: file-meta, width: 1024, height: 1024, format: "png"}),
         provider: "openai",
         model: "dall-e-3",
         prompt: "A sunset over mountains",
@@ -191,25 +193,85 @@ type {
 // ============================================================================
 
 is-image
-meta {doc: """Check if AI media is an Image variant."""}
+meta {
+    doc: """
+    Check if AI media is an Image variant.
+
+    **Example**
+
+    ```hot
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/image(::aim/AIImage({media: ::hot::media/Image({file: file})}))
+    ::aim/is-image(ai)  // true
+    ```
+    """
+}
 fn (ai: AIMedia): Bool {
     match ai { AIMedia.Image => true, => false }
 }
 
 is-audio
-meta {doc: """Check if AI media is an Audio variant."""}
+meta {
+    doc: """
+    Check if AI media is an Audio variant.
+
+    **Example**
+
+    ```hot
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/audio(::aim/AIAudio({media: ::hot::media/Audio({file: file, duration_seconds: 3.5})}))
+    ::aim/is-audio(ai)  // true
+    ```
+    """
+}
 fn (ai: AIMedia): Bool {
     match ai { AIMedia.Audio => true, => false }
 }
 
 is-video
-meta {doc: """Check if AI media is a Video variant."""}
+meta {
+    doc: """
+    Check if AI media is a Video variant.
+
+    **Example**
+
+    ```hot
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/video(::aim/AIVideo({media: ::hot::media/Video({file: file, duration_seconds: 8.0})}))
+    ::aim/is-video(ai)  // true
+    ```
+    """
+}
 fn (ai: AIMedia): Bool {
     match ai { AIMedia.Video => true, => false }
 }
 
 has-duration
-meta {doc: """Check if AI media has a duration (audio or video)."""}
+meta {
+    doc: """
+    Check if AI media has a duration (audio or video).
+
+    **Example**
+
+    ```hot
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/audio(::aim/AIAudio({media: ::hot::media/Audio({file: file, duration_seconds: 3.5})}))
+    ::aim/has-duration(ai)  // true
+    ```
+    """
+}
 fn (ai: AIMedia): Bool {
     match ai { AIMedia.Audio => true, AIMedia.Video => true, => false }
 }
@@ -221,8 +283,12 @@ meta {
 
     **Example**
     ```hot
-    seconds duration(ai-audio)  // 3.5
-    seconds duration(ai-image)  // null
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai-audio ::aim/audio(::aim/AIAudio({media: ::hot::media/Audio({file: file, duration_seconds: 3.5})}))
+    ::aim/duration(ai-audio)  // 3.5
     ```
     """
 }
@@ -241,7 +307,12 @@ meta {
 
     **Example**
     ```hot
-    ai image(AIImage({media: img, prompt: "A sunset", provider: "xai"}))
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/image(::aim/AIImage({media: ::hot::media/Image({file: file}), prompt: "A sunset", provider: "xai"}))
+    ai.prompt  // "A sunset"
     ```
     """
 }
@@ -256,7 +327,12 @@ meta {
 
     **Example**
     ```hot
-    ai audio(AIAudio({media: aud, voice: "alloy", provider: "openai"}))
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/audio(::aim/AIAudio({media: ::hot::media/Audio({file: file}), voice: "alloy", provider: "openai"}))
+    ai.voice  // "alloy"
     ```
     """
 }
@@ -271,7 +347,12 @@ meta {
 
     **Example**
     ```hot
-    ai video(AIVideo({media: vid, prompt: "A timelapse", provider: "openai"}))
+    ::aim ::ai::media
+    file ::hot::file/FileMeta({
+        file-id: "f1", path: "out/clip", size: 1024, storage-backend: "local", created-at: 0, updated-at: 0
+    })
+    ai ::aim/video(::aim/AIVideo({media: ::hot::media/Video({file: file}), prompt: "A timelapse", provider: "openai"}))
+    ai.prompt  // "A timelapse"
     ```
     """
 }

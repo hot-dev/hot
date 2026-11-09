@@ -60,7 +60,9 @@ fn (response: HttpResponse): HttpError {
 // Error parsing (pure, exposed for testing)
 // ---------------------------------------------------------------------------
 
-format-error-entry fn (entry: Any): Str {
+format-error-entry
+meta {no-doc: true}
+fn (entry: Any): Str {
   cond {
     not(is-map(entry)) => { Str(entry) }
     => {
@@ -76,13 +78,25 @@ format-error-entry fn (entry: Any): Str {
   }
 }
 
-is-blank-value fn (value: Any): Bool {
+is-blank-value
+meta {no-doc: true}
+fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-blank(value)))
 }
 
 error-code
 meta {
-    doc: """The first Salesforce error code in an error body (`errorCode` of the first array entry, or the OAuth `error`), or null. Exposed for testing."""
+    doc: """
+    The first Salesforce error code in an error body (`errorCode` of the
+    first array entry, or the OAuth `error`), or null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/error-code([{errorCode: "INVALID_FIELD", message: "No such column"}])  // "INVALID_FIELD"
+    ::salesforce::api/error-code({error: "invalid_grant"})  // "invalid_grant"
+    ```
+    """
 }
 fn (body: Any): Any {
   cond {
@@ -100,6 +114,13 @@ meta {
     (fields: Foo)`. Handles the REST error array, OAuth
     `{error, error_description}` bodies, and plain text. Exposed for
     testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/error-message(400, [{errorCode: "INVALID_FIELD", message: "No such column 'Foo'", fields: ["Foo"]}])
+    // "salesforce 400: INVALID_FIELD: No such column 'Foo' (fields: Foo)"
+    ```
     """
 }
 fn (status: Int, body: Any): Str {
@@ -121,7 +142,18 @@ fn (status: Int, body: Any): Str {
 
 is-invalid-session
 meta {
-    doc: """True for a 401 response, which Salesforce returns with `INVALID_SESSION_ID` when a session has expired or been revoked. Exposed for testing."""
+    doc: """
+    True for a 401 response, which Salesforce returns with
+    `INVALID_SESSION_ID` when a session has expired or been revoked. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/is-invalid-session({status: 401})  // true
+    ::salesforce::api/is-invalid-session({status: 200})  // false
+    ```
+    """
 }
 fn (response: Any): Bool {
   fields untype(response)
@@ -135,7 +167,17 @@ fn (response: Any): Bool {
 api-version
 meta {
     ctx: {"salesforce.api.version": {required: false, secret: false}},
-    doc: """The REST API version: `api-version` in `opts`, then `salesforce.api.version` ("66.0" and "v66.0" both work), else `::salesforce/DEFAULT_API_VERSION`."""
+    doc: """
+    The REST API version: `api-version` in `opts`, then
+    `salesforce.api.version` ("66.0" and "v66.0" both work), else
+    `::salesforce/DEFAULT_API_VERSION`.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/api-version({api-version: "62.0"})  // "v62.0"
+    ```
+    """
 }
 fn
 (): Str {
@@ -149,7 +191,17 @@ fn
 
 normalize-version
 meta {
-    doc: """`"66.0"`/`"v66.0"`/`66` → `"v66.0"`; null or blank → the default version. Exposed for testing."""
+    doc: """
+    `"66.0"`/`"v66.0"`/`66` → `"v66.0"`; null or blank → the default
+    version. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/normalize-version("66.0")  // "v66.0"
+    ::salesforce::api/normalize-version(66)  // "v66.0"
+    ```
+    """
 }
 fn (version: Any): Str {
   cond {
@@ -164,7 +216,19 @@ fn (version: Any): Str {
 
 data-path
 meta {
-    doc: """Prefix a REST resource with the data API root: `/sobjects/Lead` → `/services/data/v68.0/sobjects/Lead`. Paths that already start with `/services/` (e.g. a `nextRecordsUrl`) pass through unchanged. The 2-arity form takes the version explicitly. Exposed for testing."""
+    doc: """
+    Prefix a REST resource with the data API root: `/sobjects/Lead` →
+    `/services/data/v68.0/sobjects/Lead`. Paths that already start with
+    `/services/` (e.g. a `nextRecordsUrl`) pass through unchanged. The
+    2-arity form takes the version explicitly. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/data-path("/sobjects/Lead", "v66.0")  // "/services/data/v66.0/sobjects/Lead"
+    ::salesforce::api/data-path("/services/data/v60.0/limits", "v66.0")  // "/services/data/v60.0/limits"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -179,7 +243,17 @@ fn
 
 build-url
 meta {
-    doc: """The absolute URL for a resource on an instance: `build-url("https://acme.my.salesforce.com/", "/limits")`. Exposed for testing."""
+    doc: """
+    The absolute URL for a resource on an instance:
+    `build-url("https://acme.my.salesforce.com/", "/limits")`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/build-url("https://acme.my.salesforce.com/", "/limits", "v66.0")  // "https://acme.my.salesforce.com/services/data/v66.0/limits"
+    ```
+    """
 }
 fn
 (instance-url: Str, path: Str): Str {
@@ -191,7 +265,17 @@ fn
 
 query-string
 meta {
-    doc: """Build `?a=1&b=2` from a Map, dropping null values; Vec values are joined with commas. Returns "" when nothing is left. Exposed for testing."""
+    doc: """
+    Build `?a=1&b=2` from a Map, dropping null values; Vec values are joined
+    with commas. Returns "" when nothing is left. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/query-string({a: 1, b: null})  // "?a=1"
+    ::salesforce::api/query-string({a: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   flattened map-vals(filter-vals(params, is-some), (v) { if(is-vec(v), join(map(v, (x) { Str(x) }), ","), v) })
@@ -203,7 +287,16 @@ fn (params: Map): Str {
 
 segment
 meta {
-    doc: """URL-encode one path segment (a record id, an external id value). Exposed for testing."""
+    doc: """
+    URL-encode one path segment (a record id, an external id value). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/segment("a b/c")  // "a%20b%2Fc"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -215,6 +308,13 @@ meta {
     Request headers for a session. `options`: `content-type` (defaults
     to JSON when a body is sent), `accept` (defaults to JSON), `headers`
     (extra headers, e.g. `Sforce-Query-Options`). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/build-headers("TOKEN", false, {})  // {Authorization: "Bearer TOKEN", Accept: "application/json"}
+    ::salesforce::api/build-headers("TOKEN", true, {content-type: "text/csv"}).Content-Type  // "text/csv"
+    ```
     """
 }
 fn (token: Str, has-body: Bool, options: Map): Map {
@@ -227,7 +327,9 @@ fn (token: Str, has-body: Bool, options: Map): Map {
   {...with-type, ...or(get(options, "headers"), {})}
 }
 
-encode-body fn (body: Any): Str {
+encode-body
+meta {no-doc: true}
+fn (body: Any): Str {
   cond {
     is-null(body) => { "" }
     is-str(body) => { body }
@@ -268,7 +370,18 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from a resolved session (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from a resolved session (see `resolve`).
+    Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    session {token: "TOKEN", instance-url: "https://acme.my.salesforce.com", api-version: "v66.0"}
+    ::salesforce::api/build-request("GET", "/limits", null, {}, session).url
+    // "https://acme.my.salesforce.com/services/data/v66.0/limits"
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, options: Map, session: Map): HttpRequest {
   has-body and(is-some(body), not(eq(body, "")))
@@ -290,6 +403,18 @@ meta {
     drops the cached session, mints a new one, and retries once. The
     5-arity form takes per-call credentials (see `resolve`), or a session
     from `::salesforce::auth/session`, which is used as is with no retry.
+
+    **Example**
+
+    ```hot
+    // The raw response, at any status
+    response ::salesforce::api/send("GET", "/sobjects/Lead/00Q000000000001", null, {})
+    if(eq(response.status, 404), null, response.body.Email)
+
+    // For another org
+    tenant {access-token: ::hot::ctx/get("tenant.salesforce.token"), instance-url: "https://tenant.my.salesforce.com"}
+    ::salesforce::api/send("GET", "/limits", null, {}, tenant)
+    ```
     """
 }
 fn
@@ -320,7 +445,17 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response (null for 204), or an Err carrying `HttpError`. Exposed for testing."""
+    doc: """
+    The decoded body of a 2xx response (null for 204), or an Err carrying
+    `HttpError`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::api/unwrap(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "001"}}))  // {id: "001"}
+    ::salesforce::api/unwrap(::hot::http/HttpResponse({status: 204, headers: {}, body: null}))  // null
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {

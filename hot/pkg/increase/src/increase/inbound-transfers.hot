@@ -23,7 +23,18 @@ seg ::increase::api/seg
 
 list-inbound-ach-transfers
 meta {
-    doc: """GET /inbound_ach_transfers: one page of Inbound ACH Transfers. Filters: `account_id`, `account_number_id`, `"status.in"` (`pending`, `declined`, `accepted`, `returned`), `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /inbound_ach_transfers: one page of Inbound ACH Transfers. Filters:
+    `account_id`, `account_number_id`, `"status.in"` (`pending`, `declined`,
+    `accepted`, `returned`), `created_at`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::inbound-transfers/list-inbound-ach-transfers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["pending"]})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -38,7 +49,17 @@ fn
 
 get-inbound-ach-transfer
 meta {
-    doc: """GET /inbound_ach_transfers/{id}: retrieve an Inbound ACH Transfer."""
+    doc: """
+    GET /inbound_ach_transfers/{id}: retrieve an Inbound ACH Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::inbound-transfers/get-inbound-ach-transfer("inbound_ach_transfer_tdrwqr3fq9gnnq49odev")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (inbound-ach-transfer-id: Str): Map {
@@ -57,6 +78,13 @@ meta {
     `"payment_stopped"` or
     `"customer_advised_unauthorized_improper_ineligible_or_incomplete"`
     (null lets Increase pick). Needs an `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::increase::inbound-transfers/decline-inbound-ach-transfer("inbound_ach_transfer_tdrwqr3fq9gnnq49odev", "payment_stopped",
+      {idempotency-key: "decline-inbound-ach-tdrwqr"})
+    ```
     """
 }
 fn (inbound-ach-transfer-id: Str, reason: Str?, opts: Map): Map {
@@ -85,7 +113,19 @@ fn (inbound-ach-transfer-id: Str, reason: Str, opts: Map): Map {
 
 create-notification-of-change
 meta {
-    doc: """POST /inbound_ach_transfers/{id}/create_notification_of_change: tell the originator to use corrected details next time. `params`: `updated_account_number` and/or `updated_routing_number` (sensitive; never logged by this package)."""
+    doc: """
+    POST /inbound_ach_transfers/{id}/create_notification_of_change: tell the
+    originator to use corrected details next time. `params`:
+    `updated_account_number` and/or `updated_routing_number` (sensitive;
+    never logged by this package).
+
+    **Example**
+
+    ```hot
+    ::increase::inbound-transfers/create-notification-of-change("inbound_ach_transfer_tdrwqr3fq9gnnq49odev",
+      {updated_routing_number: "101050001"})
+    ```
+    """
 }
 fn
 (inbound-ach-transfer-id: Str, params: Map): Map {
@@ -101,7 +141,19 @@ fn
 
 list-inbound-wire-transfers
 meta {
-    doc: """GET /inbound_wire_transfers: one page of Inbound Wire Transfers. Filters: `account_id`, `account_number_id`, `"status.in"` (`pending`, `accepted`, `declined`, `reversed`), `wire_drawdown_request_id`, `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /inbound_wire_transfers: one page of Inbound Wire Transfers.
+    Filters: `account_id`, `account_number_id`, `"status.in"` (`pending`,
+    `accepted`, `declined`, `reversed`), `wire_drawdown_request_id`,
+    `created_at`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::inbound-transfers/list-inbound-wire-transfers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["accepted"]})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -116,7 +168,17 @@ fn
 
 get-inbound-wire-transfer
 meta {
-    doc: """GET /inbound_wire_transfers/{id}: retrieve an Inbound Wire Transfer."""
+    doc: """
+    GET /inbound_wire_transfers/{id}: retrieve an Inbound Wire Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::inbound-transfers/get-inbound-wire-transfer("inbound_wire_transfer_f228m6bmhtcxjco9pwp0")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (inbound-wire-transfer-id: Str): Map {
@@ -128,7 +190,18 @@ fn
 
 reverse-inbound-wire-transfer
 meta {
-    doc: """POST /inbound_wire_transfers/{id}/reverse: send an inbound wire back. `reason` is `"duplicate"`, `"creditor_request"` or `"transaction_forbidden"`. Needs an `idempotency-key`."""
+    doc: """
+    POST /inbound_wire_transfers/{id}/reverse: send an inbound wire back.
+    `reason` is `"duplicate"`, `"creditor_request"` or
+    `"transaction_forbidden"`. Needs an `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::increase::inbound-transfers/reverse-inbound-wire-transfer("inbound_wire_transfer_f228m6bmhtcxjco9pwp0", "duplicate",
+      {idempotency-key: "reverse-inbound-wire-f228m6"})
+    ```
+    """
 }
 fn (inbound-wire-transfer-id: Str, reason: Str, opts: Map): Map {
   ::api/move-money(`/inbound_wire_transfers/${seg(inbound-wire-transfer-id)}/reverse`, {reason: reason}, ["reason"], false, opts, "reverse-inbound-wire-transfer")
@@ -140,7 +213,18 @@ fn (inbound-wire-transfer-id: Str, reason: Str, opts: Map): Map {
 
 list-inbound-rtp-transfers
 meta {
-    doc: """GET /inbound_real_time_payments_transfers: one page of Inbound Real-Time Payments Transfers. Filters: `account_id`, `account_number_id`, `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /inbound_real_time_payments_transfers: one page of Inbound Real-Time
+    Payments Transfers. Filters: `account_id`, `account_number_id`,
+    `created_at`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::inbound-transfers/list-inbound-rtp-transfers({account_id: "account_in71c4amph0vgo2qllky", limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -155,7 +239,18 @@ fn
 
 get-inbound-rtp-transfer
 meta {
-    doc: """GET /inbound_real_time_payments_transfers/{id}: retrieve an Inbound Real-Time Payments Transfer."""
+    doc: """
+    GET /inbound_real_time_payments_transfers/{id}: retrieve an Inbound
+    Real-Time Payments Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::inbound-transfers/get-inbound-rtp-transfer("inbound_real_time_payments_transfer_shp8pcdyn3xqm9hk1zh2")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (inbound-rtp-transfer-id: Str): Map {
@@ -167,7 +262,19 @@ fn
 
 return-inbound-rtp-transfer
 meta {
-    doc: """POST /inbound_real_time_payments_transfers/{id}/return: return a received Real-Time Payment to its sender as a new outbound transfer. `params` may set `amount` (cents; default the full amount). Needs an `idempotency-key`."""
+    doc: """
+    POST /inbound_real_time_payments_transfers/{id}/return: return a
+    received Real-Time Payment to its sender as a new outbound transfer.
+    `params` may set `amount` (cents; default the full amount). Needs an
+    `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    ::increase::inbound-transfers/return-inbound-rtp-transfer("inbound_real_time_payments_transfer_shp8pcdyn3xqm9hk1zh2", {amount: 500},
+      {idempotency-key: "return-inbound-rtp-shp8pc"})
+    ```
+    """
 }
 fn (inbound-rtp-transfer-id: Str, params: Map, opts: Map): Map {
   ::api/move-money(`/inbound_real_time_payments_transfers/${seg(inbound-rtp-transfer-id)}/return`, params, [], false, opts, "return-inbound-rtp-transfer")
@@ -175,7 +282,18 @@ fn (inbound-rtp-transfer-id: Str, params: Map, opts: Map): Map {
 
 list-inbound-fednow-transfers
 meta {
-    doc: """GET /inbound_fednow_transfers: one page of Inbound FedNow Transfers. Filters: `account_id`, `account_number_id`, `created_at`, `limit`, `cursor`."""
+    doc: """
+    GET /inbound_fednow_transfers: one page of Inbound FedNow Transfers.
+    Filters: `account_id`, `account_number_id`, `created_at`, `limit`,
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::inbound-transfers/list-inbound-fednow-transfers({account_id: "account_in71c4amph0vgo2qllky", limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -190,7 +308,17 @@ fn
 
 get-inbound-fednow-transfer
 meta {
-    doc: """GET /inbound_fednow_transfers/{id}: retrieve an Inbound FedNow Transfer."""
+    doc: """
+    GET /inbound_fednow_transfers/{id}: retrieve an Inbound FedNow Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::inbound-transfers/get-inbound-fednow-transfer("inbound_fednow_transfer_ctxxbc07oh5ke5w1hk20")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (inbound-fednow-transfer-id: Str): Map {

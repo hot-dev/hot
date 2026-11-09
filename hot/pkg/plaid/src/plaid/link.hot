@@ -29,6 +29,14 @@ meta {
     in update mode (when `access_token` is given); `country_codes` to
     `["US"]`; `language` to `"en"`. Unset fields are omitted. Exposed
     for testing.
+
+    **Example**
+
+    ```hot
+    body ::plaid::link/build-link-token-request("user-42", "My App", {})
+    body.products  // ["transactions"]
+    body.user  // {client_user_id: "user-42"}
+    ```
     """
 }
 fn (user-id: Str, client-name: Str, options: Map): Map {
@@ -84,7 +92,18 @@ fn
 
 get-link-token
 meta {
-    doc: """POST /link/token/get: a Link token's metadata and, for Hosted Link or multi-Item sessions, the session results (public tokens)."""
+    doc: """
+    POST /link/token/get: a Link token's metadata and, for Hosted Link or
+    multi-Item sessions, the session results (public tokens).
+
+    **Example**
+
+    ```hot
+    link ::plaid::link/create-link-token("user-42", "My App")
+    out ::plaid::link/get-link-token(link.link_token)
+    out.expiration
+    ```
+    """
 }
 fn
 (link-token: Str): Map {
@@ -96,7 +115,19 @@ fn
 
 exchange-public-token
 meta {
-    doc: """POST /item/public_token/exchange: trade Link's short-lived `public_token` (30 minutes, single use) for `{access_token, item_id}`. Persist both; the access token doesn't expire."""
+    doc: """
+    POST /item/public_token/exchange: trade Link's short-lived
+    `public_token` (30 minutes, single use) for `{access_token, item_id}`.
+    Persist both; the access token doesn't expire.
+
+    **Example**
+
+    ```hot
+    pt ::plaid::sandbox/create-public-token("ins_109508", ["transactions"])
+    tokens ::plaid::link/exchange-public-token(pt.public_token)
+    tokens.item_id
+    ```
+    """
 }
 fn
 (public-token: Str): Map {

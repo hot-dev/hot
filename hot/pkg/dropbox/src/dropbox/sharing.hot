@@ -26,6 +26,13 @@ meta {
     (`"2026-12-31T23:59:59Z"`), `link_password` with `require_password:
     true`. A `settings` Map in `opts` is merged too. Some settings need a
     paid plan.
+
+    **Example**
+
+    ```hot
+    // Team-only and view-only, until the end of the year
+    ::dropbox::sharing/link-settings({audience: "team", access: "viewer", expires: "2026-12-31T23:59:59Z"})
+    ```
     """
 }
 fn (opts: Map): Map? {
@@ -62,7 +69,20 @@ fn
 
 existing-link
 meta {
-    doc: """The link metadata Dropbox returns inside a `shared_link_already_exists` error (pure), or null."""
+    doc: """
+    The link metadata Dropbox returns inside a `shared_link_already_exists`
+    error (pure), or null.
+
+    **Example**
+
+    ```hot
+    e err({error: {
+      ".tag": "shared_link_already_exists",
+      shared_link_already_exists: {".tag": "metadata", metadata: {url: "https://www.dropbox.com/s/abc/Q3.pdf"}}
+    }})
+    ::dropbox::sharing/existing-link(e)  // {url: "https://www.dropbox.com/s/abc/Q3.pdf"}
+    ```
+    """
 }
 fn (error: Result): Map? {
   payload ::api/plain-payload(error)
@@ -73,7 +93,18 @@ fn (error: Result): Map? {
 
 get-or-create-shared-link
 meta {
-    doc: """Return the path's existing shared link, or create one with `opts` settings. When a link exists, its current settings are kept (they are not changed to match `opts`)."""
+    doc: """
+    Return the path's existing shared link, or create one with `opts`
+    settings. When a link exists, its current settings are kept (they are
+    not changed to match `opts`).
+
+    **Example**
+
+    ```hot
+    link ::dropbox::sharing/get-or-create-shared-link("/Reports/Q3.pdf", {audience: "team"})
+    link.url
+    ```
+    """
 }
 fn
 (path: Str): Map {
@@ -99,6 +130,13 @@ meta {
     `{links, has_more, cursor?}`. Options: `path` (links that give access
     to it, including links to parent folders unless `direct_only: true`),
     `cursor` (from the previous page; only returned when no path is given).
+
+    **Example**
+
+    ```hot
+    page ::dropbox::sharing/list-shared-links({path: "/Reports/Q3.pdf", direct_only: true})
+    map(page.links, %.url)
+    ```
     """
 }
 fn
@@ -114,7 +152,17 @@ fn
 
 list-all-shared-links
 meta {
-    doc: """Every shared link (all pages), or at most `limit`. Options as for `list-shared-links`."""
+    doc: """
+    Every shared link (all pages), or at most `limit`. Options as for
+    `list-shared-links`.
+
+    **Example**
+
+    ```hot
+    links ::dropbox::sharing/list-all-shared-links({}, 500)
+    length(links)
+    ```
+    """
 }
 fn
 (opts: Map): Vec {
@@ -126,7 +174,17 @@ fn
 
 revoke-shared-link
 meta {
-    doc: """POST sharing/revoke_shared_link - revoke a shared link by `url`. The file may stay reachable through links to its parent folders (find them with `list-shared-links({path})`). Returns true."""
+    doc: """
+    POST sharing/revoke_shared_link - revoke a shared link by `url`. The
+    file may stay reachable through links to its parent folders (find them
+    with `list-shared-links({path})`). Returns true.
+
+    **Example**
+
+    ```hot
+    ::dropbox::sharing/revoke-shared-link("https://www.dropbox.com/s/abc/Q3.pdf")
+    ```
+    """
 }
 fn
 (url: Str): Bool {
@@ -139,7 +197,18 @@ fn
 
 get-shared-link-metadata
 meta {
-    doc: """POST sharing/get_shared_link_metadata - the metadata of a shared link `url` (`path` and `link_password` in `opts` for a file inside a shared folder link or a protected link)."""
+    doc: """
+    POST sharing/get_shared_link_metadata - the metadata of a shared link
+    `url` (`path` and `link_password` in `opts` for a file inside a shared
+    folder link or a protected link).
+
+    **Example**
+
+    ```hot
+    info ::dropbox::sharing/get-shared-link-metadata("https://www.dropbox.com/s/abc/Q3.pdf")
+    info.name
+    ```
+    """
 }
 fn
 (url: Str): Map {

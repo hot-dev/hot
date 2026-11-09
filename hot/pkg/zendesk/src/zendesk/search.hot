@@ -21,7 +21,18 @@ meta {
 
 build-search-query
 meta {
-    doc: """Build the GET /search query: `query` plus `options` (`sort_by`: "updated_at"/"created_at"/"priority"/"status"/"ticket_type"; `sort_order`: "asc"/"desc"; `page`, `per_page`, `include`). Nulls are dropped. Exposed for testing."""
+    doc: """
+    Build the GET /search query: `query` plus `options` (`sort_by`:
+    "updated_at"/"created_at"/"priority"/"status"/"ticket_type";
+    `sort_order`: "asc"/"desc"; `page`, `per_page`, `include`). Nulls are
+    dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::search/build-search-query("type:ticket status:open", {sort_by: "created_at"})  // "?query=type%3Aticket+status%3Aopen&sort_by=created_at"
+    ```
+    """
 }
 fn (query: Str, options: Map): Str {
   ::api/query-string({query: query, ...options})
@@ -29,7 +40,18 @@ fn (query: Str, options: Map): Str {
 
 search
 meta {
-    doc: """GET /search - One offset page of mixed results: `{results, count, next_page, previous_page, facets}`; each result has a `result_type`. Capped at 1,000 results per query; use `search-all` for more."""
+    doc: """
+    GET /search - One offset page of mixed results: `{results, count,
+    next_page, previous_page, facets}`; each result has a `result_type`.
+    Capped at 1,000 results per query; use `search-all` for more.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::search/search("type:ticket status:open priority:urgent", {sort_by: "created_at", sort_order: "desc", per_page: 50})
+    map(out.results, %.subject)
+    ```
+    """
 }
 fn
 (query: Str): Any {
@@ -44,7 +66,16 @@ fn
 
 count
 meta {
-    doc: """GET /search/count - How many results a query matches: `{count}`."""
+    doc: """
+    GET /search/count - How many results a query matches: `{count}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::search/count("type:ticket status:open")
+    out.count
+    ```
+    """
 }
 fn
 (query: Str): Any {
@@ -56,7 +87,17 @@ fn
 
 build-export-query
 meta {
-    doc: """Build the GET /search/export query: `query`, `filter[type]` (ticket, user, organization or group), and cursor options `page_size` (default 100, max 1000) and `after`. Exposed for testing."""
+    doc: """
+    Build the GET /search/export query: `query`, `filter[type]` (ticket,
+    user, organization or group), and cursor options `page_size` (default
+    100, max 1000) and `after`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::search/build-export-query("status:open", "ticket", {page_size: 500})  // "?query=status%3Aopen&filter%5Btype%5D=ticket&page%5Bsize%5D=500"
+    ```
+    """
 }
 fn (query: Str, object-type: Str, options: Map): Str {
   ::api/cursor-query({query: query, "filter[type]": object-type, ...options})
@@ -64,7 +105,19 @@ fn (query: Str, object-type: Str, options: Map): Str {
 
 export
 meta {
-    doc: """GET /search/export - One cursor page of a single object type: `{results, meta: {has_more, after_cursor}, links}`. Don't put `type:` in the query; pass `object-type` instead."""
+    doc: """
+    GET /search/export - One cursor page of a single object type: `{results,
+    meta: {has_more, after_cursor}, links}`. Don't put `type:` in the query;
+    pass `object-type` instead.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::search/export("status:open", "ticket", {page_size: 500})
+    following ::zendesk::search/export("status:open", "ticket", {page_size: 500, after: page.meta.after_cursor})
+    length(following.results)
+    ```
+    """
 }
 fn
 (query: Str, object-type: Str): Any {

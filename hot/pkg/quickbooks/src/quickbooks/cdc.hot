@@ -30,7 +30,20 @@ meta {
 
 build-params
 meta {
-    doc: """The CDC query params `{entities: "A,B", changedSince}` (pure). Entity names are checked and canonicalised; `changed-since` must be an ISO 8601 timestamp or date."""
+    doc: """
+    The CDC query params `{entities: "A,B", changedSince}` (pure). Entity
+    names are checked and canonicalised; `changed-since` must be an ISO 8601
+    timestamp or date.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::cdc/build-params(["invoice", "Payment"], "2026-10-31T00:00:00Z")
+    // {entities: "Invoice,Payment", changedSince: "2026-10-31T00:00:00Z"}
+
+    is-err(::quickbooks::cdc/build-params("Invoice", "yesterday"))  // true
+    ```
+    """
 }
 fn (entities: Str | Vec, changed-since: Str): Map {
   raw if(is-vec(entities), entities, split(Str(entities), ","))
@@ -48,7 +61,18 @@ fn (entities: Str | Vec, changed-since: Str): Map {
 }
 
 is-deleted
-meta {doc: """True for a CDC row that reports a deletion (`status: "Deleted"`)."""}
+meta {
+    doc: """
+    True for a CDC row that reports a deletion (`status: "Deleted"`).
+
+    **Example**
+
+    ```hot
+    ::quickbooks::cdc/is-deleted({Id: "88", status: "Deleted"})  // true
+    ::quickbooks::cdc/is-deleted({Id: "130", SyncToken: "1"})  // false
+    ```
+    """
+}
 fn (row: Any): Bool {
   and(is-map(row), eq(get(row, "status"), "Deleted"))
 }
@@ -60,6 +84,19 @@ meta {
     `changed` maps each entity name to its created or updated rows,
     `deleted` maps each name to the deleted Ids, and `time` is the
     server time to use as the next `changedSince`.
+
+    **Example**
+
+    ```hot
+    body {time: "2026-11-01T00:00:00Z", CDCResponse: [{QueryResponse: [{Invoice: [
+      {Id: "130", SyncToken: "1"},
+      {Id: "88", status: "Deleted"}
+    ]}]}]}
+    changes ::quickbooks::cdc/parse-changes(body)
+    map(changes.changed.Invoice, %.Id)  // ["130"]
+    changes.deleted  // {Invoice: ["88"]}
+    changes.time  // "2026-11-01T00:00:00Z"
+    ```
     """
 }
 fn (body: Map): Map {
@@ -82,7 +119,20 @@ fn (body: Map): Map {
 
 changes-since
 meta {
-    doc: """GET /cdc: changes to `entities` (Vec or comma-separated Str) since `changed-since`. Returns `parse-changes` output."""
+    doc: """
+    GET /cdc: changes to `entities` (Vec or comma-separated Str) since
+    `changed-since`. Returns `parse-changes` output.
+
+    **Example**
+
+    ```hot
+    changes ::quickbooks::cdc/changes-since("Invoice,Customer", "2026-10-31T00:00:00Z", {realm-id: "9341453"})
+    length(or(changes.changed.Invoice, []))
+
+    // Save this as the next changed-since
+    changes.time
+    ```
+    """
 }
 fn
 (entities: Str | Vec, changed-since: Str): Map {

@@ -33,7 +33,9 @@ DEFAULT_TOLERANCE_SECONDS 300
 // Signature verification
 // ---------------------------------------------------------------------------
 
-parse-signature-set fn (text: Str): Map {
+parse-signature-set
+meta {no-doc: true}
+fn (text: Str): Map {
   reduce(split(text, ","), (acc, part) {
     kv split(trim(part), "=")
     cond {
@@ -65,11 +67,15 @@ fn (header: Str): Vec {
   map(sets, parse-signature-set)
 }
 
-signed-payload fn (timestamp: Str, raw-body: Str | Bytes): Str | Bytes {
+signed-payload
+meta {no-doc: true}
+fn (timestamp: Str, raw-body: Str | Bytes): Str | Bytes {
   if(is-bytes(raw-body), concat(Bytes(`${timestamp}.`), raw-body), `${timestamp}.${raw-body}`)
 }
 
-set-matches fn (set: Map, secret: Str, raw-body: Str | Bytes, tolerance-seconds: Int): Bool {
+set-matches
+meta {no-doc: true}
+fn (set: Map, secret: Str, raw-body: Str | Bytes, tolerance-seconds: Int): Bool {
   cond {
     is-empty(set.t) => { false }
     is-empty(set.v1) => { false }
@@ -89,7 +95,25 @@ set-matches fn (set: Map, secret: Str, raw-body: Str | Bytes, tolerance-seconds:
 
 verify-signature
 meta {
-    doc: """Verify a `Persona-Signature` header value against a raw body and secret, with a replay window in seconds (0 skips the timestamp check). Fails closed on an empty secret or header. The secret is masked in call records. Exposed for testing; `verify-request` reads the header and body from the request."""
+    doc: """
+    Verify a `Persona-Signature` header value against a raw body and secret,
+    with a replay window in seconds (0 skips the timestamp check). Fails
+    closed on an empty secret or header. The secret is masked in call
+    records. Exposed for testing; `verify-request` reads the header and body
+    from the request.
+
+    **Example**
+
+    ```hot
+    persona-webhook
+    meta {webhook: {service: "persona", path: "/persona/webhook"}, secret-headers: ["persona-signature"]}
+    fn (request) {
+      secret ::hot::ctx/get("persona.webhook.secret")
+      header get(request.headers, "persona-signature")
+      if(::persona::webhooks/verify-signature(header, ::hot::http/raw-body(request), secret, 300), "accepted", "rejected")
+    }
+    ```
+    """
 }
 fn (header: Str, raw-body: Str | Bytes, secret: Str, tolerance-seconds: Int): Bool {
   cond {
@@ -185,7 +209,19 @@ fn (body: Any): Map {
 
 event-document
 meta {
-    doc: """The event's object as a JSON:API document `{data, included}`, so the `::persona::decisions` and `::persona::api` helpers that take a document work on it directly."""
+    doc: """
+    The event's object as a JSON:API document `{data, included}`, so the
+    `::persona::decisions` and `::persona::api` helpers that take a document
+    work on it directly.
+
+    **Example**
+
+    ```hot
+    event {object: {id: "inq_1", type: "inquiry", attributes: {status: "approved"}}, included: []}
+    doc ::persona::webhooks/event-document(event)
+    ::persona::decisions/inquiry-decision(doc).decision  // "approved"
+    ```
+    """
 }
 fn (event: Map): Map {
   {data: event.object, included: or(event.included, [])}
@@ -246,7 +282,17 @@ fn
 
 list-webhooks
 meta {
-    doc: """GET /webhooks - One page of webhook endpoints. `opts` takes `page-size`, `after`, `before`."""
+    doc: """
+    GET /webhooks - One page of webhook endpoints. `opts` takes `page-size`,
+    `after`, `before`.
+
+    **Example**
+
+    ```hot
+    page ::persona::webhooks/list-webhooks({page-size: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -261,7 +307,18 @@ fn
 
 mark-signing-secrets
 meta {
-    doc: """Mask the signing secrets in a webhook response's `attributes.secrets` in call records and return the response unchanged. An Err passes through. Exposed for testing."""
+    doc: """
+    Mask the signing secrets in a webhook response's `attributes.secrets` in
+    call records and return the response unchanged. An Err passes through.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::persona::api/send("GET", "/webhooks/wbh_123", {}, null, {})
+    ::persona::webhooks/mark-signing-secrets(response)
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -316,7 +373,16 @@ fn
 
 get-webhook
 meta {
-    doc: """GET /webhooks/{id} - Retrieve a webhook endpoint."""
+    doc: """
+    GET /webhooks/{id} - Retrieve a webhook endpoint.
+
+    **Example**
+
+    ```hot
+    hook ::persona::webhooks/get-webhook("wbh_123")
+    ::persona::api/attr(hook, "status")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Map {
@@ -328,7 +394,16 @@ fn
 
 update-webhook
 meta {
-    doc: """PATCH /webhooks/{id} - Update a webhook endpoint's attributes (`url`, `enabled-events`, `name`, ...)."""
+    doc: """
+    PATCH /webhooks/{id} - Update a webhook endpoint's attributes (`url`,
+    `enabled-events`, `name`, ...).
+
+    **Example**
+
+    ```hot
+    ::persona::webhooks/update-webhook("wbh_123", {enabled-events: ["inquiry.approved", "inquiry.declined"]})
+    ```
+    """
 }
 fn
 (webhook-id: Str, attributes: Map): Map {
@@ -338,13 +413,23 @@ fn
   ::api/send("PATCH", `/webhooks/${seg(webhook-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
-webhook-action fn (webhook-id: Str, name: Str, meta-block: Map, options: Map): Map {
+webhook-action
+meta {no-doc: true}
+fn (webhook-id: Str, name: Str, meta-block: Map, options: Map): Map {
   ::api/send("POST", `/webhooks/${seg(webhook-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
 }
 
 enable-webhook
 meta {
-    doc: """POST /webhooks/{id}/enable - Start deliveries."""
+    doc: """
+    POST /webhooks/{id}/enable - Start deliveries.
+
+    **Example**
+
+    ```hot
+    ::persona::webhooks/enable-webhook("wbh_123")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Map {
@@ -356,7 +441,15 @@ fn
 
 disable-webhook
 meta {
-    doc: """POST /webhooks/{id}/disable - Pause deliveries."""
+    doc: """
+    POST /webhooks/{id}/disable - Pause deliveries.
+
+    **Example**
+
+    ```hot
+    ::persona::webhooks/disable-webhook("wbh_123")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Map {
@@ -368,7 +461,15 @@ fn
 
 archive-webhook
 meta {
-    doc: """POST /webhooks/{id}/archive - Archive a webhook endpoint."""
+    doc: """
+    POST /webhooks/{id}/archive - Archive a webhook endpoint.
+
+    **Example**
+
+    ```hot
+    ::persona::webhooks/archive-webhook("wbh_123")
+    ```
+    """
 }
 fn
 (webhook-id: Str): Map {
@@ -380,7 +481,22 @@ fn
 
 rotate-secret
 meta {
-    doc: """POST /webhooks/{id}/rotate-secret - Issue a new signing secret. The old one keeps signing for `expires-in-seconds` (0, the default, expires it now), so deliveries carry one signature set per secret meanwhile. The new secret is in `attributes.secrets`; update `persona.webhook.secret`."""
+    doc: """
+    POST /webhooks/{id}/rotate-secret - Issue a new signing secret. The old
+    one keeps signing for `expires-in-seconds` (0, the default, expires it
+    now), so deliveries carry one signature set per secret meanwhile. The
+    new secret is in `attributes.secrets`; update `persona.webhook.secret`.
+
+    **Example**
+
+    ```hot
+    // Keep the old secret signing for an hour while you update persona.webhook.secret
+    rotated ::persona::webhooks/rotate-secret("wbh_123", 3600)
+
+    // The new signing secret. Store it, never log it.
+    ::persona::api/attr(rotated, "secrets")
+    ```
+    """
 }
 fn
 (webhook-id: Str, expires-in-seconds: Int): Map {

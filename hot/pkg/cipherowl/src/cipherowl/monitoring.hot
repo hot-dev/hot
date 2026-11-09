@@ -34,7 +34,20 @@ MAX_ADDRESSES_PER_CALL 1000
 
 create-pool-request
 meta {
-    doc: """The spec for creating a pool. `pool` takes `name` (required, unique in your organization), `description`, `riskConfigs` (1 to 3 `{riskConfig, riskLevel}` bindings, e.g. `{riskConfig: "co-vasp", riskLevel: "HIGH"}`) and `openCaseRiskLevels` (levels that open a case). Exposed for testing."""
+    doc: """
+    The spec for creating a pool. `pool` takes `name` (required, unique in
+    your organization), `description`, `riskConfigs` (1 to 3 `{riskConfig,
+    riskLevel}` bindings, e.g. `{riskConfig: "co-vasp", riskLevel: "HIGH"}`)
+    and `openCaseRiskLevels` (levels that open a case). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::monitoring/create-pool-request({name: "hot-wallets", riskConfigs: [{riskConfig: "co-vasp", riskLevel: "HIGH"}]})
+    spec.path  // "/api/monitoring/v1/pools"
+    is-err(::cipherowl::monitoring/create-pool-request({name: "hot-wallets", riskConfigs: []}))  // true
+    ```
+    """
 }
 fn (pool: Map): Map {
   body ::api/compact(untype(pool))
@@ -73,7 +86,18 @@ fn
 
 list-pools
 meta {
-    doc: """One page of pools: `{pools, nextPageToken}`. `options` takes `pageSize` and `pageToken`."""
+    doc: """
+    One page of pools: `{pools, nextPageToken}`. `options` takes `pageSize`
+    and `pageToken`.
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::monitoring/list-pools({pageSize: 50})
+    map(page.pools, (p) { p.name })
+    page.nextPageToken
+    ```
+    """
 }
 fn
 (): Map {
@@ -87,7 +111,18 @@ fn
 }
 
 list-all-pools
-meta {doc: """Collect up to `limit` pools across pages."""}
+meta {
+    doc: """
+    Collect up to `limit` pools across pages.
+
+    **Example**
+
+    ```hot
+    pools ::cipherowl::monitoring/list-all-pools(500)
+    length(pools)
+    ```
+    """
+}
 fn
 (limit: Int): Vec {
   list-all-pools(limit, {})
@@ -97,7 +132,18 @@ fn
 }
 
 get-pool
-meta {doc: """A pool by id: `{pool}`."""}
+meta {
+    doc: """
+    A pool by id: `{pool}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/get-pool("3f2b9c1e-0000-4000-8000-000000000001")
+    out.pool.name
+    ```
+    """
+}
 fn
 (pool-id: Str): Map {
   get-pool(pool-id, {})
@@ -108,7 +154,17 @@ fn
 
 update-pool-request
 meta {
-    doc: """The spec for renaming a pool and/or replacing its `openCaseRiskLevels` (sent as `{levels: [...]}`); omitted fields are unchanged. Exposed for testing."""
+    doc: """
+    The spec for renaming a pool and/or replacing its `openCaseRiskLevels`
+    (sent as `{levels: [...]}`); omitted fields are unchanged. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::monitoring/update-pool-request("pool-1", {openCaseRiskLevels: ["HIGH", "SEVERE"]}).body  // {openCaseRiskLevels: {levels: ["HIGH", "SEVERE"]}}
+    ```
+    """
 }
 fn (pool-id: Str, changes: Map): Map {
   levels get(changes, "openCaseRiskLevels")
@@ -120,7 +176,18 @@ fn (pool-id: Str, changes: Map): Map {
 }
 
 update-pool
-meta {doc: """Rename a pool or replace its `openCaseRiskLevels`. Returns `{pool}`."""}
+meta {
+    doc: """
+    Rename a pool or replace its `openCaseRiskLevels`. Returns `{pool}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/update-pool("3f2b9c1e-0000-4000-8000-000000000001", {openCaseRiskLevels: ["HIGH", "SEVERE"]})
+    out.pool.openCaseRiskLevels
+    ```
+    """
+}
 fn
 (pool-id: Str, changes: Map): Map {
   update-pool(pool-id, changes, {})
@@ -130,7 +197,18 @@ fn
 }
 
 delete-pool
-meta {doc: """Delete a pool and stop monitoring its addresses. Returns `{success}`."""}
+meta {
+    doc: """
+    Delete a pool and stop monitoring its addresses. Returns `{success}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/delete-pool("3f2b9c1e-0000-4000-8000-000000000001")
+    out.success
+    ```
+    """
+}
 fn
 (pool-id: Str): Map {
   delete-pool(pool-id, {})
@@ -145,7 +223,18 @@ fn
 
 address-entries
 meta {
-    doc: """Validate `[{chain, address, riskLevel?}]` entries for enrolment calls: each chain must be a known chain and each EVM address well-formed; 1 to 1000 entries. Exposed for testing."""
+    doc: """
+    Validate `[{chain, address, riskLevel?}]` entries for enrolment calls:
+    each chain must be a known chain and each EVM address well-formed; 1 to
+    1000 entries. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::monitoring/address-entries([{chain: "EVM", address: "0x0000000000000000000000000000000000000001"}])  // [{chain: "evm", address: "0x0000000000000000000000000000000000000001"}]
+    is-err(::cipherowl::monitoring/address-entries([]))  // true
+    ```
+    """
 }
 fn (entries: Vec<Map>): Vec<Map> {
   cond {
@@ -168,7 +257,18 @@ fn (entries: Vec<Map>): Vec<Map> {
 
 members-request
 meta {
-    doc: """The spec for an enrolment call (`addresses`, `addresses:batchDelete` or `addresses:rebaseline`; the colon is part of the path) with validated entries. Exposed for testing."""
+    doc: """
+    The spec for an enrolment call (`addresses`, `addresses:batchDelete` or
+    `addresses:rebaseline`; the colon is part of the path) with validated
+    entries. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::monitoring/members-request("pool-1", "addresses:batchDelete", [{chain: "evm", address: "0x0000000000000000000000000000000000000001"}])
+    spec.path  // "/api/monitoring/v1/pools/pool-1/addresses:batchDelete"
+    ```
+    """
 }
 fn (pool-id: Str, leaf: Str, entries: Vec<Map>): Map {
   checked address-entries(entries)
@@ -178,7 +278,9 @@ fn (pool-id: Str, leaf: Str, entries: Vec<Map>): Map {
   }
 }
 
-entry-problem fn (entry: Map): Str? {
+entry-problem
+meta {no-doc: true}
+fn (entry: Map): Str? {
   c ::api/validate-chain(Str(or(get(entry, "chain"), "")))
   a if(is-err(c), c, ::api/validate-address(lowercase(trim(Str(or(get(entry, "chain"), "")))), Str(or(get(entry, "address"), ""))))
   if(is-err(a), Str(err-value(a)), null)
@@ -186,7 +288,19 @@ entry-problem fn (entry: Map): Str? {
 
 list-addresses
 meta {
-    doc: """One page of a pool's members: `{members: [{chain, address, addedAt, initialRisk, currentRisk}], nextPageToken, totalCount}`. `options` takes `pageSize` (default 50, max 1000) and `pageToken`."""
+    doc: """
+    One page of a pool's members: `{members: [{chain, address, addedAt,
+    initialRisk, currentRisk}], nextPageToken, totalCount}`. `options` takes
+    `pageSize` (default 50, max 1000) and `pageToken`.
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::monitoring/list-addresses("3f2b9c1e-0000-4000-8000-000000000001", {pageSize: 100})
+    page.totalCount
+    map(page.members, (m) { m.currentRisk })
+    ```
+    """
 }
 fn
 (pool-id: Str): Map {
@@ -200,7 +314,18 @@ fn
 }
 
 list-all-addresses
-meta {doc: """Collect up to `limit` members of a pool across pages."""}
+meta {
+    doc: """
+    Collect up to `limit` members of a pool across pages.
+
+    **Example**
+
+    ```hot
+    members ::cipherowl::monitoring/list-all-addresses("3f2b9c1e-0000-4000-8000-000000000001", 5000)
+    length(members)
+    ```
+    """
+}
 fn
 (pool-id: Str, limit: Int): Vec {
   list-all-addresses(pool-id, limit, {})
@@ -236,7 +361,17 @@ fn
 
 remove-addresses
 meta {
-    doc: """Stop monitoring addresses (`[{chain, address}]`). Returns `{removedCount, results}`."""
+    doc: """
+    Stop monitoring addresses (`[{chain, address}]`). Returns
+    `{removedCount, results}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::monitoring/remove-addresses("3f2b9c1e-0000-4000-8000-000000000001", [{chain: "evm", address: "0x0000000000000000000000000000000000000001"}])
+    out.removedCount
+    ```
+    """
 }
 fn
 (pool-id: Str, entries: Vec<Map>): Map {
@@ -248,7 +383,19 @@ fn
 
 rebaseline-addresses
 meta {
-    doc: """Move the baseline risk of members (`[{chain, address, riskLevel?}]`) so only future changes are reported. Returns `{rebaselinedCount, results: [{outcome: APPLIED | NOT_FOUND | NO_OP, newBaseline}]}`."""
+    doc: """
+    Move the baseline risk of members (`[{chain, address, riskLevel?}]`) so
+    only future changes are reported. Returns `{rebaselinedCount, results:
+    [{outcome: APPLIED | NOT_FOUND | NO_OP, newBaseline}]}`.
+
+    **Example**
+
+    ```hot
+    // Accept the current risk, so only later changes are reported
+    out ::cipherowl::monitoring/rebaseline-addresses("3f2b9c1e-0000-4000-8000-000000000001", [{chain: "evm", address: "0x0000000000000000000000000000000000000001", riskLevel: "HIGH"}])
+    out.rebaselinedCount
+    ```
+    """
 }
 fn
 (pool-id: Str, entries: Vec<Map>): Map {
@@ -264,7 +411,18 @@ fn
 
 risk-changes-request
 meta {
-    doc: """The spec for one page of a pool's risk-change feed. `options` takes `pageSize` (default 50, max 1000), `pageToken` (resume position) and `since` (RFC 3339; ignored when a page token is given). Exposed for testing."""
+    doc: """
+    The spec for one page of a pool's risk-change feed. `options` takes
+    `pageSize` (default 50, max 1000), `pageToken` (resume position) and
+    `since` (RFC 3339; ignored when a page token is given). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::monitoring/risk-changes-request("pool-1", {pageSize: 100}).path  // "/api/monitoring/v1/pools/pool-1/risk-changes?pageSize=100"
+    ```
+    """
 }
 fn (pool-id: Str, options: Map): Map {
   token get(options, "pageToken")
@@ -281,7 +439,19 @@ fn (pool-id: Str, options: Map): Map {
 
 list-risk-changes
 meta {
-    doc: """One page of risk-change records, oldest first: `{changes: [{changeId, chain, address, kind (SCAN | ENROLL | REBASELINE), previousRisk, currentRisk, initialRisk, detectedAt}], nextPageToken}`."""
+    doc: """
+    One page of risk-change records, oldest first: `{changes: [{changeId,
+    chain, address, kind (SCAN | ENROLL | REBASELINE), previousRisk,
+    currentRisk, initialRisk, detectedAt}], nextPageToken}`.
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::monitoring/list-risk-changes("3f2b9c1e-0000-4000-8000-000000000001", {since: "2026-11-01T00:00:00Z", pageSize: 100})
+    map(page.changes, (c) { c.currentRisk })
+    page.nextPageToken
+    ```
+    """
 }
 fn
 (pool-id: Str, options: Map): Map {
@@ -293,7 +463,20 @@ fn
 
 drain-pages
 meta {
-    doc: """Follow the risk-change feed from `token`, collecting `changes`, until an empty page or `max-pages`. Returns `{changes, page-token}`, where `page-token` is the position to resume from next time (the last non-empty page's `nextPageToken`, or the starting token when nothing was new). `fetch` takes a token and returns one page. Exposed for testing."""
+    doc: """
+    Follow the risk-change feed from `token`, collecting `changes`, until an
+    empty page or `max-pages`. Returns `{changes, page-token}`, where
+    `page-token` is the position to resume from next time (the last
+    non-empty page's `nextPageToken`, or the starting token when nothing was
+    new). `fetch` takes a token and returns one page. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    fetch (token) { if(is-null(token), {changes: [{changeId: "c1"}], nextPageToken: "p2"}, {changes: []}) }
+    ::cipherowl::monitoring/drain-pages(fetch, null, 5, [])  // {changes: [{changeId: "c1"}], page-token: "p2"}
+    ```
+    """
 }
 fn (fetch: Fn, token: Str?, max-pages: Int, acc: Vec): Map {
   cond {
@@ -337,7 +520,16 @@ fn
 
 risk-history
 meta {
-    doc: """The risk history of one pool member. `options` takes `pageSize` and `pageToken`."""
+    doc: """
+    The risk history of one pool member. `options` takes `pageSize` and
+    `pageToken`.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::monitoring/risk-history("3f2b9c1e-0000-4000-8000-000000000001", "evm", "0x0000000000000000000000000000000000000001", {pageSize: 20})
+    ```
+    """
 }
 fn
 (pool-id: Str, chain: Str, address: Str, options: Map): Map {

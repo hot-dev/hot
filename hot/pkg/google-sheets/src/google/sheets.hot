@@ -58,7 +58,16 @@ FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
 api-root
 meta {
     ctx: {"google.sheets.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://sheets.googleapis.com` unless the `google.sheets.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://sheets.googleapis.com` unless the
+    `google.sheets.api-root` context variable points at a proxy or emulator.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/api-root()  // "https://sheets.googleapis.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.sheets.api-root")
@@ -71,6 +80,16 @@ meta {
     A Sheets v4 URL: `/v4/spreadsheets` + `path` with non-null `params`
     (Vec values repeat the key, as `ranges` needs).
     `url("/abc/values/Sheet1%21A1")`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/url("/abc/values/Sheet1%21A1")
+    // "https://sheets.googleapis.com/v4/spreadsheets/abc/values/Sheet1%21A1"
+
+    ::google::sheets/url("/abc/values:batchGet", {ranges: ["A1", "B2"]})
+    // "https://sheets.googleapis.com/v4/spreadsheets/abc/values:batchGet?ranges=A1&ranges=B2"
+    ```
     """
 }
 fn
@@ -82,14 +101,33 @@ fn
 }
 
 encode-id
-meta {doc: """URL-encode a spreadsheet id for a path segment."""}
+meta {
+    doc: """
+    URL-encode a spreadsheet id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/encode-id("a b")  // "a%20b"
+    ```
+    """
+}
 fn (id: Str): Str {
   ::uri/encode(id)
 }
 
 encode-range
 meta {
-    doc: """URL-encode an A1 range for a path segment: `"My Sheet!A1:B2"` becomes `My%20Sheet%21A1%3AB2`."""
+    doc: """
+    URL-encode an A1 range for a path segment: `"My Sheet!A1:B2"` becomes
+    `My%20Sheet%21A1%3AB2`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/encode-range("My Sheet!A1:B2")  // "My%20Sheet%21A1%3AB2"
+    ```
+    """
 }
 fn (range: Str): Str {
   ::uri/encode(range)
@@ -97,7 +135,17 @@ fn (range: Str): Str {
 
 values-path
 meta {
-    doc: """The path of a values call: `/{id}/values/{range}` plus an optional `:verb` (`append`, `clear`), with id and range encoded."""
+    doc: """
+    The path of a values call: `/{id}/values/{range}` plus an optional
+    `:verb` (`append`, `clear`), with id and range encoded.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/values-path("abc", "Log!A:C")  // "/abc/values/Log%21A%3AC"
+    ::google::sheets/values-path("abc", "Log!A:C", "append")  // "/abc/values/Log%21A%3AC:append"
+    ```
+    """
 }
 fn
 (spreadsheet-id: Str, range: Str): Str {
@@ -114,6 +162,19 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/query-params({valueInputOption: "USER_ENTERED"}, {fields: "updatedCells"})
+    // {valueInputOption: "USER_ENTERED", fields: "updatedCells"}
+
+    // Null in opts drops a default
+    ::google::sheets/query-params({valueInputOption: "USER_ENTERED"}, {valueInputOption: null})  // {}
+
+    // Local keys stay out of the query string
+    ::google::sheets/query-params({}, {majorDimension: "ROWS", fields: "values"}, ["majorDimension"])  // {fields: "values"}
+    ```
     """
 }
 fn
@@ -127,7 +188,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/creds({subject: "ada@example.com", fields: "values"})  // {subject: "ada@example.com"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -135,7 +205,17 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    // Package internals: prefer the functions in ::google::sheets::values
+    ::google::sheets/json(::google::sheets/READ_SCOPE, "GET", ::google::sheets/url("/abc"), "", {})
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -143,7 +223,16 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Sheets bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Sheets bodies never carry JSON
+    null for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::sheets/compact({title: "Report", locale: null})  // {title: "Report"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)

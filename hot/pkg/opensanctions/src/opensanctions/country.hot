@@ -616,7 +616,9 @@ FOLDS {
   "ź": "z", "ż": "z", "ž": "z", "ß": "ss", "æ": "ae", "œ": "oe", "þ": "th", "ĳ": "ij"
 }
 
-fold fn (s: Str): Str {
+fold
+meta {no-doc: true}
+fn (s: Str): Str {
   lower lowercase(s)
   cond {
     not(::re/is-match(lower, "[^\\x00-\\x7F]")) => { lower }
@@ -630,7 +632,9 @@ fold fn (s: Str): Str {
   }
 }
 
-norm fn (s: Str): Str {
+norm
+meta {no-doc: true}
+fn (s: Str): Str {
   lowercase(s)
     |> fold()
     |> ::re/replace-all("['’.]", "")

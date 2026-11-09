@@ -5,7 +5,7 @@ which includes the SSH and SFTP runtime bindings.
 
 ```hot
 hot.project.my-app.deps {
-    "hot.dev/ssh": "0.1.1"
+    "hot.dev/ssh": "0.1.2"
 }
 ```
 

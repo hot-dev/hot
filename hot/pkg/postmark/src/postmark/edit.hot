@@ -88,7 +88,21 @@ EditCurrentServerConfigurationResponse type {
 
 edit-server-configuration
 meta {
-    doc: """Update the current server configuration including name, color, webhook URLs, and tracking settings."""
+    doc: """
+    Update the current server configuration including name, color, webhook
+    URLs, and tracking settings.
+
+    **Example**
+
+    ```hot
+    config ::postmark::edit/edit-server-configuration(::postmark::edit/EditCurrentServerConfigurationRequest({
+        Name: "Production",
+        TrackOpens: true,
+        TrackLinks: "HtmlOnly"
+    }))
+    config.TrackLinks
+    ```
+    """
 }
 fn
 (request: EditCurrentServerConfigurationRequest): EditCurrentServerConfigurationResponse {

@@ -21,14 +21,18 @@ meta {
     ```hot
     ::oauth ::microsoft::graph::oauth
 
-    verifier ::oauth/pkce-verifier()
+    client-id "11111111-2222-3333-4444-555555555555"
+    state random-string(32)
+    verifier ::oauth2/pkce-verifier()
     url ::oauth/authorize-url(client-id, "https://app.example.com/oauth/microsoft",
       ["Files.Read.All", "Sites.Read.All"], state, {code-verifier: verifier})
 
     // callback handler:
-    tokens ::oauth/exchange-code(client-id, null, request.query.code,
-      "https://app.example.com/oauth/microsoft", {code-verifier: verifier})
-    tokens.refresh_token
+    on-callback (request) {
+      tokens ::oauth/exchange-code(client-id, null, request.query.code,
+        "https://app.example.com/oauth/microsoft", {code-verifier: verifier})
+      tokens.refresh_token
+    }
     ```
 
     **Consent.** `Files.Read`, `Files.ReadWrite`, `Sites.Read.All` and
@@ -49,18 +53,32 @@ pkce-challenge ::oauth2/pkce-challenge
 
 // Both read through the package's one resolver (`::auth/merge-sources` over
 // `::auth/ctx-source`), so per-call opts win and nothing is written to ctx.
-endpoints fn (opts: Map): Map {
+endpoints
+meta {no-doc: true}
+fn (opts: Map): Map {
   ::auth/cloud-config(::auth/merge-sources(::auth/pick(opts, ::auth/IDENTITY_KEYS), ::auth/ctx-source()))
 }
 
-tenant-of fn (opts: Map): Str {
+tenant-of
+meta {no-doc: true}
+fn (opts: Map): Str {
   t get(::auth/merge-sources(::auth/pick(opts, ::auth/IDENTITY_KEYS), ::auth/ctx-source()), "tenant-id")
   if(::auth/is-blank-value(t), ::graph/DEFAULT_TENANT, trim(Str(t)))
 }
 
 authorize-scopes
 meta {
-    doc: """The `scope` value `authorize-url` sends (pure): the normalised scopes plus `offline_access` (unless `offline` is false), space-separated."""
+    doc: """
+    The `scope` value `authorize-url` sends (pure): the normalised scopes
+    plus `offline_access` (unless `offline` is false), space-separated.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::oauth/authorize-scopes("Files.Read.All User.Read", "https://graph.microsoft.com", true)  // "Files.Read.All User.Read offline_access"
+    ::microsoft::graph::oauth/authorize-scopes("User.Read", "https://graph.microsoft.com", false)  // "User.Read"
+    ```
+    """
 }
 fn (scopes: Any, graph: Str, offline: Bool): Str {
   base ::auth/normalize-scopes(scopes, graph)
@@ -81,6 +99,14 @@ meta {
     - `domain-hint` - skip home-realm discovery (`"consumers"`, `"organizations"`, or a domain)
     - `response-mode` - `"query"` (default) or `"form_post"`
     - `extra` - any other parameters, merged last
+
+    **Example**
+
+    ```hot
+    built ::microsoft::graph::oauth/build-authorize-params({code-challenge: "abc", prompt: "consent", login-hint: "alex@contoso.com"})
+    built.code-challenge  // "abc"
+    built.params  // {prompt: "consent", login_hint: "alex@contoso.com"}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -110,7 +136,7 @@ meta {
     every client; it is required for public and single-page apps.
 
     ```hot
-    verifier ::microsoft::graph::oauth/pkce-verifier()
+    verifier ::oauth2/pkce-verifier()
     url ::microsoft::graph::oauth/authorize-url("11111111-2222-3333-4444-555555555555",
       "https://app.example.com/oauth/microsoft", "Files.Read.All User.Read", "csrf-123",
       {code-verifier: verifier, prompt: "select_account"})
@@ -148,6 +174,14 @@ meta {
     `{graph}/.default`). A tenant admin opens it once per tenant;
     Entra then redirects to `redirect-uri` with `admin_consent=True` and
     `tenant`. `opts.tenant-id` defaults to `organizations`.
+
+    **Example**
+
+    ```hot
+    // Send a tenant admin here once per tenant
+    url ::microsoft::graph::oauth/admin-consent-url("11111111-2222-3333-4444-555555555555", "https://app.example.com/oauth/consent", "csrf-123", {tenant-id: "contoso.onmicrosoft.com"})
+    url
+    ```
     """
 }
 fn
@@ -182,6 +216,19 @@ meta {
     `authorize-url`. Pass a null `client-secret` for public clients;
     `opts.private-key` + `opts.certificate` authenticate a confidential
     client with a certificate instead of a secret.
+
+    **Example**
+
+    ```hot
+    // In your OAuth callback, with the verifier you stored against `state`
+    states ::hot::store/Map({name: "oauth-states"})
+    on-callback (request) {
+      verifier ::hot::store/get(states, request.query.state)
+      tokens ::microsoft::graph::oauth/exchange-code("11111111-2222-3333-4444-555555555555", null, request.query.code,
+        "https://app.example.com/oauth/microsoft", {code-verifier: verifier})
+      tokens.refresh_token
+    }
+    ```
     """
 }
 fn
@@ -235,8 +282,11 @@ meta {
     consent again.
 
     ```hot
-    tokens ::microsoft::graph::oauth/refresh-access-token(client-id, stored-refresh-token, {client-secret: secret})
-    ::hot::store/put(tokens-store, user-id, tokens.refresh_token)
+    tokens ::microsoft::graph::oauth/refresh-access-token("11111111-2222-3333-4444-555555555555",
+      ::hot::ctx/get("microsoft.oauth.refresh-token"),
+      {client-secret: ::hot::ctx/get("microsoft.client.secret")})
+    store ::hot::store/Map({name: "microsoft-tokens"})
+    ::hot::store/put(store, "user-42", tokens.refresh_token)
     ```
     """
 }
@@ -263,6 +313,13 @@ meta {
     plus `certificate` (or `thumbprint`), and takes `cloud`. Returns the
     token response or a `TokenError`. Usually you let
     `::microsoft::graph::api/request` do this for you.
+
+    **Example**
+
+    ```hot
+    tokens ::microsoft::graph::oauth/client-credentials("contoso.onmicrosoft.com", "11111111-2222-3333-4444-555555555555", {client-secret: ::hot::ctx/get("microsoft.client.secret")})
+    tokens.expires_in
+    ```
     """
 }
 fn (tenant-id: Str, client-id: Str, opts: Map): Map {
@@ -277,7 +334,16 @@ fn (tenant-id: Str, client-id: Str, opts: Map): Map {
 
 granted-scopes
 meta {
-    doc: """The scopes a token response says were granted (`scope` split on spaces). Check it after consent: users and admins can decline permissions."""
+    doc: """
+    The scopes a token response says were granted (`scope` split on spaces).
+    Check it after consent: users and admins can decline permissions.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::oauth/granted-scopes({scope: "Files.Read User.Read"})  // ["Files.Read", "User.Read"]
+    ```
+    """
 }
 fn (tokens: Map): Vec {
   ::auth/normalize-scopes(or(tokens.scope, ""))
@@ -285,7 +351,19 @@ fn (tokens: Map): Vec {
 
 missing-scopes
 meta {
-    doc: """The `required` scopes (Vec or Str) a token response did not grant, compared case-insensitively and ignoring a `https://graph.microsoft.com/` prefix. Empty when everything was granted."""
+    doc: """
+    The `required` scopes (Vec or Str) a token response did not grant,
+    compared case-insensitively and ignoring a
+    `https://graph.microsoft.com/` prefix. Empty when everything was
+    granted.
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::oauth/missing-scopes({scope: "User.Read"}, "User.Read Files.Read")  // ["Files.Read"]
+    ::microsoft::graph::oauth/missing-scopes({scope: "User.Read"}, ["user.read"])  // []
+    ```
+    """
 }
 fn (tokens: Map, required: Str | Vec): Vec {
   strip (s) { lowercase(replace(s, "https://graph.microsoft.com/", "")) }

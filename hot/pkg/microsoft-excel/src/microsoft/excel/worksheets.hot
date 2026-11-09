@@ -7,7 +7,20 @@ meta {
 
 list-worksheets
 meta {
-    doc: """GET /workbook/worksheets. Returns a Vec of `{id, name, position, visibility}`."""
+    doc: """
+    GET /workbook/worksheets. Returns a Vec of `{id, name, position,
+    visibility}`.
+
+    **Example**
+
+    ```hot
+    sheets ::microsoft::excel::worksheets/list-worksheets("/Reports/Q3.xlsx")
+    map(sheets, %.name)
+
+    // A workbook in another drive
+    ::microsoft::excel::worksheets/list-worksheets("01ABC", {drive: "b1"})
+    ```
+    """
 }
 fn
 (item: Any): Vec {
@@ -19,7 +32,16 @@ fn
 
 get-worksheet
 meta {
-    doc: """GET /workbook/worksheets/{sheet}."""
+    doc: """
+    GET /workbook/worksheets/{sheet}.
+
+    **Example**
+
+    ```hot
+    sheet ::microsoft::excel::worksheets/get-worksheet("/Reports/Q3.xlsx", "Data")
+    sheet.visibility
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str): Map {
@@ -31,7 +53,16 @@ fn
 
 add-worksheet
 meta {
-    doc: """POST /workbook/worksheets/add. Returns the new worksheet."""
+    doc: """
+    POST /workbook/worksheets/add. Returns the new worksheet.
+
+    **Example**
+
+    ```hot
+    sheet ::microsoft::excel::worksheets/add-worksheet("/Reports/Q3.xlsx", "Pipeline")
+    sheet.id
+    ```
+    """
 }
 fn
 (item: Any, name: Str): Map {
@@ -43,7 +74,16 @@ fn
 
 update-worksheet
 meta {
-    doc: """PATCH /workbook/worksheets/{sheet}. `changes` holds `name`, `position` or `visibility` (`Visible`, `Hidden`, `VeryHidden`)."""
+    doc: """
+    PATCH /workbook/worksheets/{sheet}. `changes` holds `name`, `position`
+    or `visibility` (`Visible`, `Hidden`, `VeryHidden`).
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::worksheets/update-worksheet("/Reports/Q3.xlsx", "Scratch", {position: 0, visibility: "Hidden"})
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, changes: Map): Map {
@@ -55,7 +95,15 @@ fn
 
 rename-worksheet
 meta {
-    doc: """Rename a worksheet."""
+    doc: """
+    Rename a worksheet.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::worksheets/rename-worksheet("/Reports/Q3.xlsx", "Sheet1", "Data")
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str, name: Str): Map {
@@ -67,7 +115,15 @@ fn
 
 delete-worksheet
 meta {
-    doc: """DELETE /workbook/worksheets/{sheet}. Returns `{}`."""
+    doc: """
+    DELETE /workbook/worksheets/{sheet}. Returns `{}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::excel::worksheets/delete-worksheet("/Reports/Q3.xlsx", "Scratch")
+    ```
+    """
 }
 fn
 (item: Any, sheet: Str): Map {

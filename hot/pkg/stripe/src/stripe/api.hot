@@ -124,13 +124,25 @@ fn (options: RequestOptions | Map): Map {
   map-keys(fields, (key) { get(OPTION_KEYS, key, key) })
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has with a blank or null value, else null."""
+    doc: """
+    The first of `names` that `opts` has with a blank or null value, else
+    null.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/blank-option({stripe-account: " "}, ["api-key", "stripe-account"])  // "stripe-account"
+    ::stripe::api/blank-option({stripe-account: "acct_123"}, ["api-key", "stripe-account"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(non-blank(get(opts, name)))) })
@@ -139,7 +151,22 @@ fn (opts: Map, names: Vec): Str? {
 resolve-from
 meta {
     doc: """
-    The one resolver, pure: `{api-key, api-version}`, plus `stripe-account` and `idempotency-key` when set, from `options` first, then `ctx-values` (a Map of context variables), then `::stripe/API_VERSION`. An Err when no API key is set, or when `api-key`, `stripe-account` or `idempotency-key` is in `options` but blank or null. Exposed for testing; `resolve` feeds it the context.
+    The one resolver, pure: `{api-key, api-version}`, plus `stripe-account`
+    and `idempotency-key` when set, from `options` first, then `ctx-values`
+    (a Map of context variables), then `::stripe/API_VERSION`. An Err when
+    no API key is set, or when `api-key`, `stripe-account` or
+    `idempotency-key` is in `options` but blank or null. Exposed for
+    testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ctx-values {"stripe.api.key": "key-1"}
+
+    ::stripe::api/resolve-from({stripe-account: "acct_123"}, ctx-values).api-key  // "key-1"
+    ::stripe::api/resolve-from({stripe-account: "acct_123"}, ctx-values).stripe-account  // "acct_123"
+    is-err(::stripe::api/resolve-from({stripe-account: ""}, ctx-values))  // true
+    ```
     """
 }
 fn (options: RequestOptions | Map, ctx-values: Map): Map {
@@ -193,7 +220,18 @@ fn (options: RequestOptions | Map): Map {
 api-version
 meta {
     ctx: {"stripe.api.version": {required: false, secret: false}},
-    doc: """The `Stripe-Version` sent when a call doesn't override it: the `stripe.api.version` context variable when set, otherwise `::stripe/API_VERSION`."""
+    doc: """
+    The `Stripe-Version` sent when a call doesn't override it: the
+    `stripe.api.version` context variable when set, otherwise
+    `::stripe/API_VERSION`.
+
+    **Example**
+
+    ```hot
+    // The version a call sends unless its options override it
+    version ::stripe::api/api-version()
+    ```
+    """
 }
 fn (): Str {
   or(non-blank(::ctx/get("stripe.api.version")), ::stripe/API_VERSION)
@@ -225,7 +263,9 @@ fn (options: RequestOptions | Map): Map {
 // Encoding
 // ============================================================================
 
-encode-pairs fn (key: Str, value: Any): Vec<Str> {
+encode-pairs
+meta {no-doc: true}
+fn (key: Str, value: Any): Vec<Str> {
   cond {
     is-null(value) => { [] }
     is-map(value) => {
@@ -267,7 +307,20 @@ fn (data: Map): Str {
 
 query-string
 meta {
-    doc: """Build a query string (`?limit=10&starting_after=cus_123`) from a Map. Null values are omitted; returns an empty string when no parameters remain. Uses the same bracket syntax as `form-encode`, so `expand: ["customer"]` becomes `expand[0]=customer`."""
+    doc: """
+    Build a query string (`?limit=10&starting_after=cus_123`) from a Map.
+    Null values are omitted; returns an empty string when no parameters
+    remain. Uses the same bracket syntax as `form-encode`, so `expand:
+    ["customer"]` becomes `expand[0]=customer`.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/query-string({limit: 10, email: null})  // "?limit=10"
+    ::stripe::api/query-string({expand: ["customer"]})  // "?expand%5B0%5D=customer"
+    ::stripe::api/query-string({})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   encoded form-encode(untype(params))
@@ -276,7 +329,16 @@ fn (params: Map): Str {
 
 encode-id
 meta {
-    doc: """Percent-encode an object ID for use as a URL path segment, so an ID taken from user input can't change which endpoint is called."""
+    doc: """
+    Percent-encode an object ID for use as a URL path segment, so an ID
+    taken from user input can't change which endpoint is called.
+
+    **Example**
+
+    ```hot
+    ::stripe::api/encode-id("cus 1/2")  // "cus%201%2F2"
+    ```
+    """
 }
 fn (id: Str): Str {
   ::uri/encode(id)
@@ -454,7 +516,9 @@ fn (params: Map, page: Map): Map? {
   }
 }
 
-collect-pages fn (path: Str, params: Map, max-items: Int, acc: Vec, options: RequestOptions | Map): Vec {
+collect-pages
+meta {no-doc: true}
+fn (path: Str, params: Map, max-items: Int, acc: Vec, options: RequestOptions | Map): Vec {
   page call("GET", path, params, options)
   cond {
     is-err(page) => { page }

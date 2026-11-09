@@ -78,7 +78,21 @@ fn
 
 get-checkout-session
 meta {
-    doc: """GET /v1/checkout/sessions/{session} - Retrieve a Checkout Session by ID. Check `payment_status` ("paid", "unpaid", "no_payment_required") after redirect. Optional `params` such as `{expand: ["line_items", "subscription"]}`."""
+    doc: """
+    GET /v1/checkout/sessions/{session} - Retrieve a Checkout Session by ID.
+    Check `payment_status` ("paid", "unpaid", "no_payment_required") after
+    redirect. Optional `params` such as `{expand: ["line_items",
+    "subscription"]}`.
+
+    **Example**
+
+    ```hot
+    ::checkout ::stripe::checkout
+
+    session ::checkout/get-checkout-session("cs_test_123", {expand: ["line_items"]})
+    is-paid eq(session.payment_status, "paid")
+    ```
+    """
 }
 fn
 (session: Str): Map {
@@ -93,7 +107,19 @@ fn
 
 update-checkout-session
 meta {
-    doc: """POST /v1/checkout/sessions/{session} - Update an open Checkout Session. `params` takes the API's fields directly: `metadata`, `line_items`, `shipping_options`, `collected_information`."""
+    doc: """
+    POST /v1/checkout/sessions/{session} - Update an open Checkout Session.
+    `params` takes the API's fields directly: `metadata`, `line_items`,
+    `shipping_options`, `collected_information`.
+
+    **Example**
+
+    ```hot
+    ::checkout ::stripe::checkout
+
+    ::checkout/update-checkout-session("cs_test_123", {metadata: {order_id: "42"}})
+    ```
+    """
 }
 fn
 (session: Str, params: Map): Map {
@@ -105,7 +131,19 @@ fn
 
 expire-checkout-session
 meta {
-    doc: """POST /v1/checkout/sessions/{session}/expire - Expire an open Checkout Session so it can no longer be used."""
+    doc: """
+    POST /v1/checkout/sessions/{session}/expire - Expire an open Checkout
+    Session so it can no longer be used.
+
+    **Example**
+
+    ```hot
+    ::checkout ::stripe::checkout
+
+    expired ::checkout/expire-checkout-session("cs_test_123")
+    expired.status
+    ```
+    """
 }
 fn
 (session: Str): Map {
@@ -131,7 +169,20 @@ ListCheckoutSessionsRequest type {
 
 list-checkout-sessions
 meta {
-    doc: """GET /v1/checkout/sessions - List Checkout Sessions. Filter by `customer`, `payment_intent`, `subscription`, or `status` ("open", "complete", "expired")."""
+    doc: """
+    GET /v1/checkout/sessions - List Checkout Sessions. Filter by
+    `customer`, `payment_intent`, `subscription`, or `status` ("open",
+    "complete", "expired").
+
+    **Example**
+
+    ```hot
+    ::checkout ::stripe::checkout
+
+    page ::checkout/list-checkout-sessions(::checkout/ListCheckoutSessionsRequest({customer: "cus_123", status: "complete", limit: 10}))
+    ids map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -146,7 +197,20 @@ fn
 
 list-checkout-session-line-items
 meta {
-    doc: """GET /v1/checkout/sessions/{session}/line_items - List the line items of a Checkout Session. Optional `params`: `limit`, `starting_after`, `expand`."""
+    doc: """
+    GET /v1/checkout/sessions/{session}/line_items - List the line items of
+    a Checkout Session. Optional `params`: `limit`, `starting_after`,
+    `expand`.
+
+    **Example**
+
+    ```hot
+    ::checkout ::stripe::checkout
+
+    items ::checkout/list-checkout-session-line-items("cs_test_123", {limit: 100})
+    quantities map(items.data, %.quantity)
+    ```
+    """
 }
 fn
 (session: Str): Map {

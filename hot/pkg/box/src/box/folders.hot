@@ -30,6 +30,17 @@ meta {
     asks for offset paging (by passing `offset`), then your parameters
     (`fields`, `limit`, `marker`, `offset`, `sort` (`id`, `name`, `date`,
     `size`), `direction` (`ASC`, `DESC`)). Nulls are dropped.
+
+    **Example**
+
+    ```hot
+    params ::box::folders/items-params({sort: "name", limit: 50})
+    params.usemarker  // true
+    params.limit  // 50
+
+    // Offset paging drops usemarker
+    ::box::folders/items-params({offset: 0, fields: "id"})  // {fields: "id", limit: 1000, offset: 0}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -100,7 +111,21 @@ fn
 }
 
 list-all-doc-files
-meta {doc: """`list-all-items` normalised to `::box/DocFile`s."""}
+meta {
+    doc: """
+    `list-all-items` normalised to `::box/DocFile`s.
+
+    **Example**
+
+    ```hot
+    files ::box::folders/list-all-doc-files("12345")
+    map(files, %.name)
+
+    first-page ::box::folders/list-all-doc-files("12345", {fields: "id,type,name,size,sha1,etag"}, 100)
+    length(first-page)
+    ```
+    """
+}
 fn
 (folder-id: Str): Vec {
   list-all-doc-files(folder-id, {}, null)
@@ -116,7 +141,22 @@ fn
 
 get-folder
 meta {
-    doc: """GET /folders/{id} - folder information. `fields` defaults to `::box/FOLDER_FIELDS`. The response also carries the first page of `item_collection` when you ask for that field."""
+    doc: """
+    GET /folders/{id} - folder information. `fields` defaults to
+    `::box/FOLDER_FIELDS`. The response also carries the first page of
+    `item_collection` when you ask for that field.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/get-folder("12345")
+    folder.name
+
+    // The first page of items as well
+    items ::box::folders/get-folder("12345", {fields: "id,name,item_collection"})
+    items.item_collection.entries
+    ```
+    """
 }
 fn
 (folder-id: Str): Map {
@@ -128,7 +168,18 @@ fn
 }
 
 get-doc-file
-meta {doc: """`get-folder` normalised to a `::box/DocFile`."""}
+meta {
+    doc: """
+    `get-folder` normalised to a `::box/DocFile`.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/get-doc-file("12345")
+    folder.is-folder
+    ```
+    """
+}
 fn
 (folder-id: Str): DocFile {
   get-doc-file(folder-id, {})
@@ -144,7 +195,16 @@ fn
 
 create-body
 meta {
-    doc: """The `POST /folders` body (pure): `name`, `parent: {id}`, plus extra fields from `opts.metadata` (e.g. `sync_state`, `folder_upload_email`)."""
+    doc: """
+    The `POST /folders` body (pure): `name`, `parent: {id}`, plus extra
+    fields from `opts.metadata` (e.g. `sync_state`, `folder_upload_email`).
+
+    **Example**
+
+    ```hot
+    ::box::folders/create-body("Reports", "0", {})  // {name: "Reports", parent: {id: "0"}}
+    ```
+    """
 }
 fn (name: Str, parent-id: Str, opts: Map): Map {
   ::box/compact({name: name, parent: ::box/parent-ref(parent-id), ...or(get(opts, "metadata"), {})})
@@ -177,7 +237,17 @@ fn
 
 conflict-item
 meta {
-    doc: """The existing item a 409 `item_name_in_use` error points at (`context_info.conflicts`, a Map or the first of a Vec), or null (pure)."""
+    doc: """
+    The existing item a 409 `item_name_in_use` error points at
+    (`context_info.conflicts`, a Map or the first of a Vec), or null (pure).
+
+    **Example**
+
+    ```hot
+    error err({status: 409, context-info: {conflicts: [{type: "folder", id: "123"}]}})
+    ::box::folders/conflict-item(error)  // {type: "folder", id: "123"}
+    ```
+    """
 }
 fn (error: Result): Map? {
   payload ::api/plain-payload(error)
@@ -192,7 +262,18 @@ fn (error: Result): Map? {
 
 ensure-folder
 meta {
-    doc: """Create a folder named `name` in `parent-id`, or return the existing one when Box answers 409 `item_name_in_use` with a folder conflict. One API call either way; handy for idempotent workflow output folders."""
+    doc: """
+    Create a folder named `name` in `parent-id`, or return the existing one
+    when Box answers 409 `item_name_in_use` with a folder conflict. One API
+    call either way; handy for idempotent workflow output folders.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/ensure-folder("Output", "0")
+    folder.id
+    ```
+    """
 }
 fn
 (name: Str, parent-id: Str): Map {
@@ -215,6 +296,17 @@ meta {
     (`{id}`, to move), `tags`, `shared_link`, `folder_upload_email`,
     `sync_state`, ... Null values in `changes` are dropped. `opts.if-match`
     (an etag) makes the write fail with 412 when the folder changed.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/update-folder("12345", {description: "Quarterly reports"})
+    folder.description
+
+    // Fails with 412 if the folder changed
+    safe ::box::folders/update-folder("12345", {tags: ["finance"]}, {if-match: folder.etag})
+    safe.etag
+    ```
     """
 }
 fn
@@ -227,7 +319,18 @@ fn
 }
 
 rename-folder
-meta {doc: """Rename a folder."""}
+meta {
+    doc: """
+    Rename a folder.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/rename-folder("12345", "Archive")
+    folder.name
+    ```
+    """
+}
 fn
 (folder-id: Str, name: Str): Map {
   rename-folder(folder-id, name, {})
@@ -237,7 +340,18 @@ fn
 }
 
 move-folder
-meta {doc: """Move a folder (and its contents) into `parent-id`."""}
+meta {
+    doc: """
+    Move a folder (and its contents) into `parent-id`.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/move-folder("12345", "67890")
+    folder.parent.id
+    ```
+    """
+}
 fn
 (folder-id: Str, parent-id: Str): Map {
   move-folder(folder-id, parent-id, {})
@@ -247,14 +361,35 @@ fn
 }
 
 copy-body
-meta {doc: """The copy body (pure): `parent: {id}` and an optional new `name`."""}
+meta {
+    doc: """
+    The copy body (pure): `parent: {id}` and an optional new `name`.
+
+    **Example**
+
+    ```hot
+    ::box::folders/copy-body("67890", "Copy")  // {parent: {id: "67890"}, name: "Copy"}
+    ```
+    """
+}
 fn (parent-id: Str, name: Str?): Map {
   ::box/compact({parent: ::box/parent-ref(parent-id), name: name})
 }
 
 copy-folder
 meta {
-    doc: """POST /folders/{id}/copy - copy a folder and its contents into `parent-id`; `opts.name` renames the copy. Large folders copy asynchronously on Box's side."""
+    doc: """
+    POST /folders/{id}/copy - copy a folder and its contents into
+    `parent-id`; `opts.name` renames the copy. Large folders copy
+    asynchronously on Box's side.
+
+    **Example**
+
+    ```hot
+    copy ::box::folders/copy-folder("12345", "67890", {name: "Archive copy"})
+    copy.id
+    ```
+    """
 }
 fn
 (folder-id: Str, parent-id: Str): Map {
@@ -276,6 +411,15 @@ meta {
     the enterprise's trash retention, 30 days by default). A non-empty
     folder needs `{recursive: true}`. `opts.if-match` guards against
     concurrent changes. Returns true.
+
+    **Example**
+
+    ```hot
+    ::box::folders/trash-folder("12345")
+
+    // A folder with items in it
+    ::box::folders/trash-folder("67890", {recursive: true})
+    ```
     """
 }
 fn
@@ -290,7 +434,16 @@ fn
 
 restore-body
 meta {
-    doc: """The restore body (pure): an optional new `name` and `parent: {id}`, for when the original name or location is taken."""
+    doc: """
+    The restore body (pure): an optional new `name` and `parent: {id}`, for
+    when the original name or location is taken.
+
+    **Example**
+
+    ```hot
+    ::box::folders/restore-body({name: "Restored", parent-id: "67890"})  // {name: "Restored", parent: {id: "67890"}}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::box/compact({name: get(opts, "name"), parent: ::box/parent-ref(get(opts, "parent-id"))})
@@ -298,7 +451,18 @@ fn (opts: Map): Map {
 
 restore-folder
 meta {
-    doc: """POST /folders/{id} - restore a trashed folder. `opts.name` / `opts.parent-id` restore it under a new name or into another folder when the original is taken or gone."""
+    doc: """
+    POST /folders/{id} - restore a trashed folder. `opts.name` /
+    `opts.parent-id` restore it under a new name or into another folder when
+    the original is taken or gone.
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/restore-folder("12345", {name: "Restored"})
+    folder.item_status
+    ```
+    """
 }
 fn
 (folder-id: Str): Map {
@@ -311,7 +475,17 @@ fn
 
 get-trashed-folder
 meta {
-    doc: """GET /folders/{id}/trash - a trashed folder's information (404 when it is not in the trash)."""
+    doc: """
+    GET /folders/{id}/trash - a trashed folder's information (404 when it is
+    not in the trash).
+
+    **Example**
+
+    ```hot
+    folder ::box::folders/get-trashed-folder("12345")
+    folder.trashed_at
+    ```
+    """
 }
 fn
 (folder-id: Str): Map {

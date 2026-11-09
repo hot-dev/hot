@@ -55,7 +55,17 @@ fn
 
 get-transaction
 meta {
-    doc: """GET /transactions/{id} - Retrieve a transaction. `opts` takes `include` (e.g. `["related-objects"]`) and `fields`."""
+    doc: """
+    GET /transactions/{id} - Retrieve a transaction. `opts` takes `include`
+    (e.g. `["related-objects"]`) and `fields`.
+
+    **Example**
+
+    ```hot
+    txn ::persona::transactions/get-transaction("txn_123", {include: ["related-objects"]})
+    ::persona::api/attr(txn, "status")
+    ```
+    """
 }
 fn
 (transaction-id: Str): Map {
@@ -70,7 +80,17 @@ fn
 
 list-transactions
 meta {
-    doc: """GET /transactions - One page of transactions. Filters: `reference-id`, `transaction-type-id`. `opts` takes `page-size`, `after`, `before`."""
+    doc: """
+    GET /transactions - One page of transactions. Filters: `reference-id`,
+    `transaction-type-id`. `opts` takes `page-size`, `after`, `before`.
+
+    **Example**
+
+    ```hot
+    page ::persona::transactions/list-transactions({reference-id: "biz-42"}, {page-size: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (filters: Map): Map {
@@ -85,7 +105,17 @@ fn
 
 update-transaction
 meta {
-    doc: """PATCH /transactions/{id} - Update `fields`, `status` (one configured on the type), `reference-id` or `tags`. Send field and status changes one after another, not in parallel (Persona returns 409)."""
+    doc: """
+    PATCH /transactions/{id} - Update `fields`, `status` (one configured on
+    the type), `reference-id` or `tags`. Send field and status changes one
+    after another, not in parallel (Persona returns 409).
+
+    **Example**
+
+    ```hot
+    ::persona::transactions/update-transaction("txn_123", {status: "approved"})
+    ```
+    """
 }
 fn
 (transaction-id: Str, attributes: Map): Map {
@@ -97,7 +127,19 @@ fn
 
 label-transaction
 meta {
-    doc: """POST /transactions/{id}/label - Record a label (e.g. `"fraud"`, `"legitimate"`), with optional `score` and `model-version` in `opts`."""
+    doc: """
+    POST /transactions/{id}/label - Record a label (e.g. `"fraud"`,
+    `"legitimate"`), with optional `score` and `model-version` in `opts`.
+
+    **Example**
+
+    ```hot
+    ::persona::transactions/label-transaction("txn_123", "legitimate")
+
+    // With a model score
+    ::persona::transactions/label-transaction("txn_123", "fraud", {score: 0.92, model-version: "2026-11"})
+    ```
+    """
 }
 fn
 (transaction-id: Str, label: Str): Map {
@@ -113,7 +155,15 @@ fn
 
 redact-transaction
 meta {
-    doc: """DELETE /transactions/{id} - Permanently remove a transaction's PII."""
+    doc: """
+    DELETE /transactions/{id} - Permanently remove a transaction's PII.
+
+    **Example**
+
+    ```hot
+    ::persona::transactions/redact-transaction("txn_123")
+    ```
+    """
 }
 fn
 (transaction-id: Str): Map {
@@ -125,7 +175,17 @@ fn
 
 is-done
 meta {
-    doc: """True when a transaction left `created`/`pending`: Persona's workflows have set a decision or an error."""
+    doc: """
+    True when a transaction left `created`/`pending`: Persona's workflows
+    have set a decision or an error.
+
+    **Example**
+
+    ```hot
+    ::persona::transactions/is-done({data: {id: "txn_1", type: "transaction", attributes: {status: "needs_review"}}})  // true
+    ::persona::transactions/is-done({data: {id: "txn_2", type: "transaction", attributes: {status: "created"}}})  // false
+    ```
+    """
 }
 fn (doc: Any): Bool {
   s or(::api/attr(doc, "status"), "")

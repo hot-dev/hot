@@ -82,7 +82,9 @@ type {
     url: Str
 }
 
-present fn (v: Any): Bool {
+present
+meta {no-doc: true}
+fn (v: Any): Bool {
   match v {
     Null => { false }
     Str => { not(is-empty(trim(v))) }
@@ -92,7 +94,15 @@ present fn (v: Any): Bool {
 
 clean-list
 meta {
-    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+    doc: """
+    Trim strings, drop blanks and duplicates, keep the first-seen order.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/clean-list([" IR ", "IR", "", null, "SY"])  // ["IR", "SY"]
+    ```
+    """
 }
 fn (values: Vec): Vec<Str> {
   distinct(map(filter(values, present), (v) { trim(Str(v)) }))
@@ -100,13 +110,23 @@ fn (values: Vec): Vec<Str> {
 
 other-names
 meta {
-    doc: """Cleaned aliases without the primary name, ignoring case."""
+    doc: """
+    Cleaned aliases without the primary name, ignoring case.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/other-names(["Jane Roe", "JANE ROE", "J. Roe"], "Jane Roe")  // ["J. Roe"]
+    ```
+    """
 }
 fn (aliases: Vec, name: Str): Vec<Str> {
   filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
 }
 
-blank-to-null fn (v: Any): Str? {
+blank-to-null
+meta {no-doc: true}
+fn (v: Any): Str? {
   if(present(v), trim(Str(v)), null)
 }
 
@@ -119,7 +139,9 @@ MONTHS {
   jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
 }
 
-pad2 fn (s: Str): Str {
+pad2
+meta {no-doc: true}
+fn (s: Str): Str {
   if(eq(length(s), 1), `0${s}`, s)
 }
 
@@ -174,7 +196,9 @@ fn (raw: Str?): Str? {
   }
 }
 
-country-of fn (node: Str): Str? {
+country-of
+meta {no-doc: true}
+fn (node: Str): Str? {
   iso ::sx/attr(node, "countryIso2Code")
   desc ::sx/attr(node, "countryDescription")
   cond {
@@ -184,7 +208,9 @@ country-of fn (node: Str): Str? {
   }
 }
 
-dob-of fn (node: Str): Str? {
+dob-of
+meta {no-doc: true}
+fn (node: Str): Str? {
   full ::sx/attr(node, "birthdate")
   year ::sx/attr(node, "year")
   cond {
@@ -194,20 +220,38 @@ dob-of fn (node: Str): Str? {
   }
 }
 
-address-line fn (node: Str): Str {
+address-line
+meta {no-doc: true}
+fn (node: Str): Str {
   parts map(["street", "poBox", "city", "zipCode", "region", "place"], (a) { ::sx/attr(node, a) })
   country ::sx/attr(node, "countryDescription")
   shown if(and(is-some(country), ne(lowercase(country), "unknown")), country, null)
   join(filter(concat(parts, [shown]), is-some), ", ")
 }
 
-kind fn (code: Str?): Str {
+kind
+meta {no-doc: true}
+fn (code: Str?): Str {
   if(eq(code, "person"), "individual", "entity")
 }
 
 parse-entity
 meta {
-    doc: """Turn one `<sanctionEntity>` record string into a `SanctionEntity`. The primary name is the first English (`nameLanguage=""`) alias; the others are aliases. Exposed for testing."""
+    doc: """
+    Turn one `<sanctionEntity>` record string into a `SanctionEntity`. The
+    primary name is the first English (`nameLanguage=""`) alias; the others
+    are aliases. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    record "<sanctionEntity logicalId=\"13\"><subjectType code=\"person\"/><nameAlias wholeName=\"Jane Roe\" nameLanguage=\"\"/><nameAlias wholeName=\"J. Roe\" nameLanguage=\"EN\"/></sanctionEntity>"
+    e ::eu::sanctions/parse-entity(record)
+    e.name  // "Jane Roe"
+    e.kind  // "individual"
+    e.aliases  // ["J. Roe"]
+    ```
+    """
 }
 fn (record: Str): SanctionEntity {
   aliases filter(map(::sx/start-tags(record, "nameAlias"), (a) {
@@ -234,7 +278,17 @@ fn (record: Str): SanctionEntity {
 
 parse
 meta {
-    doc: """Parse the whole EU FSF XML 1.1 document into `SanctionEntity` records (pure)."""
+    doc: """
+    Parse the whole EU FSF XML 1.1 document into `SanctionEntity` records
+    (pure).
+
+    **Example**
+
+    ```hot
+    file "<export><sanctionEntity logicalId=\"7\"><subjectType code=\"enterprise\"/><nameAlias wholeName=\"Acme Trading\" nameLanguage=\"\"/></sanctionEntity></export>"
+    map(::eu::sanctions/parse(file), (e) { e.name })  // ["Acme Trading"]
+    ```
+    """
 }
 fn (doc: Str): Vec<SanctionEntity> {
   entries map(::sx/records(doc, "sanctionEntity"), parse-entity)
@@ -243,7 +297,18 @@ fn (doc: Str): Vec<SanctionEntity> {
 
 require-entries
 meta {
-    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+    doc: """
+    The parsed records, or an Err when there are none: a changed file format
+    can parse to nothing, and an empty list must not pass for a list with
+    nobody on it.
+
+    **Example**
+
+    ```hot
+    ::eu::sanctions/require-entries([{id: "13"}])  // [{id: "13"}]
+    is-err(::eu::sanctions/require-entries([]))  // true
+    ```
+    """
 }
 fn (entries: Vec): Vec {
   cond {

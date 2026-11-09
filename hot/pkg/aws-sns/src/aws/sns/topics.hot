@@ -205,7 +205,7 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::sns::topics/get-topic-attributes(topic-arn)
+    result ::aws::sns::topics/get-topic-attributes("arn:aws:sns:us-east-1:123456789012:orders")
     result.attributes.DisplayName  // => "My Alerts"
     result.attributes.TopicArn     // => "arn:aws:sns:us-east-1:123456:my-topic"
     ```
@@ -251,7 +251,7 @@ meta {
     **Example**
 
     ```hot
-    ::aws::sns::topics/set-topic-attributes(topic-arn, "DisplayName", "Updated Name")
+    ::aws::sns::topics/set-topic-attributes("arn:aws:sns:us-east-1:123456789012:orders", "DisplayName", "Updated Name")
     ```
     """
 }
@@ -293,7 +293,7 @@ meta {
     **Example**
 
     ```hot
-    ::aws::sns::topics/tag-resource(topic-arn, [
+    ::aws::sns::topics/tag-resource("arn:aws:sns:us-east-1:123456789012:orders", [
         {Key: "Environment", Value: "production"},
         {Key: "Application", Value: "my-app"}
     ])
@@ -337,7 +337,7 @@ meta {
     **Example**
 
     ```hot
-    ::aws::sns::topics/untag-resource(topic-arn, ["Environment", "Application"])
+    ::aws::sns::topics/untag-resource("arn:aws:sns:us-east-1:123456789012:orders", ["Environment", "Application"])
     ```
     """
 }
@@ -378,7 +378,7 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::sns::topics/list-tags-for-resource(topic-arn)
+    result ::aws::sns::topics/list-tags-for-resource("arn:aws:sns:us-east-1:123456789012:orders")
     result.tags
     // => [{Key: "Environment", Value: "production"}, {Key: "Application", Value: "my-app"}]
     ```

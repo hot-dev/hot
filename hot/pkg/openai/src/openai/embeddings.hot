@@ -49,7 +49,7 @@ meta {
     **Example - Single text**
 
     ```hot
-    response ::openai::embeddings/create(EmbeddingRequest({
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
         input: "The quick brown fox jumps over the lazy dog",
         model: "text-embedding-3-small"
     }))
@@ -61,7 +61,7 @@ meta {
     **Example - Multiple texts**
 
     ```hot
-    response ::openai::embeddings/create(EmbeddingRequest({
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
         input: ["Hello world", "Goodbye world"],
         model: "text-embedding-3-small"
     }))
@@ -72,7 +72,7 @@ meta {
     **Example - With custom dimensions**
 
     ```hot
-    response ::openai::embeddings/create(EmbeddingRequest({
+    response ::openai::embeddings/create(::openai::embeddings/EmbeddingRequest({
         input: "Test text",
         model: "text-embedding-3-small",
         dimensions: 256

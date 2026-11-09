@@ -78,7 +78,16 @@ LIST_FIELDS "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modified
 api-root
 meta {
     ctx: {"google.drive.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://www.googleapis.com` unless the `google.drive.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://www.googleapis.com` unless the
+    `google.drive.api-root` context variable points at a proxy or emulator.
+
+    **Example**
+
+    ```hot
+    ::google::drive/api-root()  // "https://www.googleapis.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.drive.api-root")
@@ -87,7 +96,17 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Drive v3 URL: `path` (e.g. `"/files/abc"`) plus non-null `params` as a query string."""
+    doc: """
+    A Drive v3 URL: `path` (e.g. `"/files/abc"`) plus non-null `params` as a
+    query string.
+
+    **Example**
+
+    ```hot
+    ::google::drive/url("/files/abc", {fields: "id"})
+    // "https://www.googleapis.com/drive/v3/files/abc?fields=id"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -98,13 +117,34 @@ fn
 }
 
 upload-url
-meta {doc: """A Drive v3 upload URL (`/upload/drive/v3...`) with `params`."""}
+meta {
+    doc: """
+    A Drive v3 upload URL (`/upload/drive/v3...`) with `params`.
+
+    **Example**
+
+    ```hot
+    ::google::drive/upload-url("/files", {uploadType: "multipart"})
+    // "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+    ```
+    """
+}
 fn (path: Str, params: Map): Str {
   ::api/with-query(`${api-root()}/upload/drive/v3${path}`, params)
 }
 
 encode-id
-meta {doc: """URL-encode an id for a path segment."""}
+meta {
+    doc: """
+    URL-encode an id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::google::drive/encode-id("a b")  // "a%20b"
+    ```
+    """
+}
 fn (id: Str): Str {
   ::uri/encode(id)
 }
@@ -116,6 +156,18 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::drive/query-params({fields: "id"}, {pageSize: 10})  // {fields: "id", pageSize: 10}
+
+    // Null in opts drops a default
+    ::google::drive/query-params({fields: "id"}, {fields: null})  // {}
+
+    // local-keys are the function's own options
+    ::google::drive/query-params({}, {pageSize: 10, chunk-size: 1024}, ["chunk-size"])  // {pageSize: 10}
+    ```
     """
 }
 fn
@@ -129,7 +181,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::drive/creds({retry: false, fields: "id"})  // {retry: false}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -137,7 +198,17 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: `scope` default, credential opts, JSON or empty body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    // Package internals: prefer the functions in ::google::drive::files
+    ::google::drive/json(::google::drive/READ_SCOPE, "GET", ::google::drive/url("/files/abc"), "", {})
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -145,13 +216,24 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Drive bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Drive bodies never carry JSON null
+    for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::drive/compact({name: "a.txt", description: null})  // {name: "a.txt"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)
 }
 
-as-vec fn (value: Any): Vec {
+as-vec
+meta {no-doc: true}
+fn (value: Any): Vec {
   cond {
     is-null(value) => { [] }
     is-vec(value) => { value }
@@ -161,7 +243,17 @@ as-vec fn (value: Any): Vec {
 
 to-int
 meta {
-    doc: """Drive returns int64 fields (size, version) as strings; parse to Int, or null when absent or malformed."""
+    doc: """
+    Drive returns int64 fields (size, version) as strings; parse to Int, or
+    null when absent or malformed.
+
+    **Example**
+
+    ```hot
+    ::google::drive/to-int("1024")  // 1024
+    ::google::drive/to-int("abc")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   ::api/parse-int(value)
@@ -173,7 +265,19 @@ fn (value: Any): Int? {
 
 is-google-native
 meta {
-    doc: """True for Google Workspace types (`application/vnd.google-apps.*`) other than folders and shortcuts: Docs, Sheets, Slides, Drawings, Forms, ... These have no bytes of their own and are exported."""
+    doc: """
+    True for Google Workspace types (`application/vnd.google-apps.*`) other
+    than folders and shortcuts: Docs, Sheets, Slides, Drawings, Forms, ...
+    These have no bytes of their own and are exported.
+
+    **Example**
+
+    ```hot
+    ::google::drive/is-google-native("application/vnd.google-apps.document")  // true
+    ::google::drive/is-google-native("application/vnd.google-apps.folder")  // false
+    ::google::drive/is-google-native("application/pdf")  // false
+    ```
+    """
 }
 fn (mime-type: Str?): Bool {
   m or(mime-type, "")
@@ -181,7 +285,18 @@ fn (mime-type: Str?): Bool {
 }
 
 is-folder
-meta {doc: """True for a folder MIME type."""}
+meta {
+    doc: """
+    True for a folder MIME type.
+
+    **Example**
+
+    ```hot
+    ::google::drive/is-folder("application/vnd.google-apps.folder")  // true
+    ::google::drive/is-folder("text/plain")  // false
+    ```
+    """
+}
 fn (mime-type: Str?): Bool {
   eq(mime-type, FOLDER_MIME)
 }
@@ -240,7 +355,20 @@ type {
 
 to-doc-file
 meta {
-    doc: """Normalise a Drive file resource (as returned by `get-file`, `list-files`, `changes`) into a `DocFile`. Missing fields become null/false."""
+    doc: """
+    Normalise a Drive file resource (as returned by `get-file`,
+    `list-files`, `changes`) into a `DocFile`. Missing fields become
+    null/false.
+
+    **Example**
+
+    ```hot
+    file ::google::drive/to-doc-file({id: "1AbC", name: "notes.txt", mimeType: "text/plain", size: "1024", version: "7"})
+    file.size  // 1024
+    file.version  // "7"
+    file.is-folder  // false
+    ```
+    """
 }
 fn (file: Map): DocFile {
   mime or(file.mimeType, "")
@@ -273,7 +401,18 @@ fn (file: Map): DocFile {
 }
 
 to-doc-files
-meta {doc: """`to-doc-file` over a Vec of Drive file resources."""}
+meta {
+    doc: """
+    `to-doc-file` over a Vec of Drive file resources.
+
+    **Example**
+
+    ```hot
+    files ::google::drive/to-doc-files([{id: "1AbC", name: "notes.txt", mimeType: "text/plain"}])
+    first(files).name  // "notes.txt"
+    ```
+    """
+}
 fn (files: Vec): Vec {
   map(files, to-doc-file)
 }
@@ -314,7 +453,17 @@ type {
 
 base-mime
 meta {
-    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+    doc: """
+    A Content-Type without parameters, lowercased: `"text/plain;
+    charset=utf-8"` becomes `"text/plain"`.
+
+    **Example**
+
+    ```hot
+    ::google::drive/base-mime("Text/Plain; charset=utf-8")  // "text/plain"
+    ::google::drive/base-mime(null)  // null
+    ```
+    """
 }
 fn (content-type: Str?): Str? {
   cond {
@@ -325,7 +474,17 @@ fn (content-type: Str?): Str? {
 
 is-textual-mime
 meta {
-    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, CSV/TSV, Markdown, and the Apps Script JSON export."""
+    doc: """
+    True when content of this MIME type is text: `text/*`, JSON, XML, SVG,
+    JavaScript, CSV/TSV, Markdown, and the Apps Script JSON export.
+
+    **Example**
+
+    ```hot
+    ::google::drive/is-textual-mime("application/json")  // true
+    ::google::drive/is-textual-mime("application/pdf")  // false
+    ```
+    """
 }
 fn (mime-type: Str?): Bool {
   m or(base-mime(mime-type), "")
@@ -338,7 +497,20 @@ fn (mime-type: Str?): Bool {
 }
 
 content-from-bytes
-meta {doc: """Build a `FileContent` from raw bytes and their MIME type."""}
+meta {
+    doc: """
+    Build a `FileContent` from raw bytes and their MIME type.
+
+    **Example**
+
+    ```hot
+    content ::google::drive/content-from-bytes("1AbC", Bytes("hi"), "text/plain; charset=utf-8", "download")
+    content.mime-type  // "text/plain"
+    content.text  // "hi"
+    content.size  // 2
+    ```
+    """
+}
 fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
   mime base-mime(mime-type)
   FileContent({
@@ -356,7 +528,19 @@ fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
 
 content-from-response
 meta {
-    doc: """Build a `FileContent` from an HTTP response: `body-bytes` (never the auto-decoded `body`, so a JSON file stays bytes and `123` stays text) and the Content-Type header."""
+    doc: """
+    Build a `FileContent` from an HTTP response: `body-bytes` (never the
+    auto-decoded `body`, so a JSON file stays bytes and `123` stays text)
+    and the Content-Type header.
+
+    **Example**
+
+    ```hot
+    response {body-bytes: Bytes("123"), headers: {content-type: "text/plain"}}
+    content ::google::drive/content-from-response("1AbC", response, "download")
+    content.text  // "123"
+    ```
+    """
 }
 fn (file-id: Str, response: Map, source: Str): FileContent {
   raw get(response, "body-bytes")
@@ -371,7 +555,17 @@ fn (file-id: Str, response: Map, source: Str): FileContent {
 
 content-text
 meta {
-    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+    doc: """
+    The text of a `FileContent`: its `text`, or the UTF-8 decoding of
+    `bytes` (invalid sequences become U+FFFD).
+
+    **Example**
+
+    ```hot
+    ::google::drive/content-text({text: "hello", bytes: Bytes("hello")})  // "hello"
+    ::google::drive/content-text({text: null, bytes: Bytes("hello")})  // "hello"
+    ```
+    """
 }
 fn (content: Map): Str {
   if(is-some(content.text), content.text, Str(content.bytes))

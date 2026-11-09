@@ -119,7 +119,17 @@ type {
 
 export-url
 meta {
-    doc: """The SLS download URL for an export file name (it redirects to a signed S3 URL)."""
+    doc: """
+    The SLS download URL for an export file name (it redirects to a signed
+    S3 URL).
+
+    **Example**
+
+    ```hot
+    ::ofac/export-url("SDN.CSV")
+    // "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV"
+    ```
+    """
 }
 fn (file: Str): Str {
   `${SLS_BASE}/api/PublicationPreview/exports/${::hot::uri/encode(file)}`
@@ -127,13 +137,24 @@ fn (file: Str): Str {
 
 detail-url
 meta {
-    doc: """The OFAC Sanctions List Search page for an entry."""
+    doc: """
+    The OFAC Sanctions List Search page for an entry.
+
+    **Example**
+
+    ```hot
+    ::ofac/detail-url("306")
+    // "https://sanctionssearch.ofac.treas.gov/Details.aspx?id=306"
+    ```
+    """
 }
 fn (ent-num: Str): Str {
   `https://sanctionssearch.ofac.treas.gov/Details.aspx?id=${::hot::uri/encode(ent-num)}`
 }
 
-present fn (v: Any): Bool {
+present
+meta {no-doc: true}
+fn (v: Any): Bool {
   match v {
     Null => { false }
     Str => { not(is-empty(trim(v))) }
@@ -143,7 +164,15 @@ present fn (v: Any): Bool {
 
 clean-list
 meta {
-    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+    doc: """
+    Trim strings, drop blanks and duplicates, keep the first-seen order.
+
+    **Example**
+
+    ```hot
+    ::ofac/clean-list([" a ", "b", "a", "  ", null])  // ["a", "b"]
+    ```
+    """
 }
 fn (values: Vec): Vec<Str> {
   distinct(map(filter(values, present), (v) { trim(Str(v)) }))
@@ -151,13 +180,23 @@ fn (values: Vec): Vec<Str> {
 
 other-names
 meta {
-    doc: """Cleaned aliases without the primary name, ignoring case."""
+    doc: """
+    Cleaned aliases without the primary name, ignoring case.
+
+    **Example**
+
+    ```hot
+    ::ofac/other-names(["acme", " Acme Two ", ""], "ACME")  // ["Acme Two"]
+    ```
+    """
 }
 fn (aliases: Vec, name: Str): Vec<Str> {
   filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
 }
 
-blank-to-null fn (v: Any): Str? {
+blank-to-null
+meta {no-doc: true}
+fn (v: Any): Str? {
   if(present(v), trim(Str(v)), null)
 }
 
@@ -170,7 +209,9 @@ MONTHS {
   jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
 }
 
-pad2 fn (s: Str): Str {
+pad2
+meta {no-doc: true}
+fn (s: Str): Str {
   if(eq(length(s), 1), `0${s}`, s)
 }
 
@@ -233,13 +274,24 @@ CSV_FIELD "(?:\"((?:[^\"]|\"\")*)\"|([^,\\r\\n]*))"
 
 row-pattern
 meta {
-    doc: """A multi-line regex matching one CSV row of `n` fields at the start of a line (quoted fields may contain commas and doubled quotes)."""
+    doc: """
+    A multi-line regex matching one CSV row of `n` fields at the start of a
+    line (quoted fields may contain commas and doubled quotes).
+
+    **Example**
+
+    ```hot
+    ::hot::regex/is-match("36,\"AEROCARIBBEAN AIRLINES\"", ::ofac/row-pattern(2))  // true
+    ```
+    """
 }
 fn (n: Int): Str {
   `(?m)^${join(map(range(0, n), (i) { CSV_FIELD }), ",")}`
 }
 
-csv-value fn (groups: Vec, i: Int): Str? {
+csv-value
+meta {no-doc: true}
+fn (groups: Vec, i: Int): Str? {
   quoted get(groups, mul(i, 2))
   bare get(groups, add(mul(i, 2), 1))
   raw if(is-some(quoted), ::hot::str/replace(quoted, "\"\"", "\""), or(bare, ""))
@@ -272,14 +324,18 @@ fn (text: Str, n: Int): Vec<Vec> {
 // Remarks
 // ---------------------------------------------------------------------------
 
-remark-items fn (remarks: Str?): Vec<Str> {
+remark-items
+meta {no-doc: true}
+fn (remarks: Str?): Vec<Str> {
   cond {
     is-null(remarks) => { [] }
     => { filter(map(split(::re/replace-all(remarks, "\\.$", ""), ";"), trim), (s) { not(is-empty(s)) }) }
   }
 }
 
-remark-values fn (items: Vec<Str>, label: Str): Vec<Str> {
+remark-values
+meta {no-doc: true}
+fn (items: Vec<Str>, label: Str): Vec<Str> {
   pattern `^(?:alt\\. )?${label} (.+)$`
   filter(map(items, (item) {
     m ::re/capture(item, pattern)
@@ -308,14 +364,18 @@ fn (remarks: Str?): Map {
   {dobs: dobs, nationalities: concat(remark-values(items, "nationality"), remark-values(items, "citizen"))}
 }
 
-programs fn (raw: Str?): Vec<Str> {
+programs
+meta {no-doc: true}
+fn (raw: Str?): Vec<Str> {
   cond {
     is-null(raw) => { [] }
     => { filter(map(split(::re/replace-all(raw, "^\\[|\\]$", ""), "] ["), trim), (s) { not(is-empty(s)) }) }
   }
 }
 
-kind fn (raw: Str?): Str {
+kind
+meta {no-doc: true}
+fn (raw: Str?): Str {
   t lowercase(or(raw, ""))
   cond {
     eq(t, "individual") => { "individual" }
@@ -325,19 +385,27 @@ kind fn (raw: Str?): Str {
   }
 }
 
-address-line fn (row: Vec): Str {
+address-line
+meta {no-doc: true}
+fn (row: Vec): Str {
   join(filter([row[2], row[3], row[4]], is-some), ", ")
 }
 
-tag-rows fn (rows: Vec<Vec>, tag: Str): Vec {
+tag-rows
+meta {no-doc: true}
+fn (rows: Vec<Vec>, tag: Str): Vec {
   map(rows, (r) { {id: r[0], t: tag, r: r} })
 }
 
-rows-of fn (group: Vec, tag: Str): Vec<Vec> {
+rows-of
+meta {no-doc: true}
+fn (group: Vec, tag: Str): Vec<Vec> {
   map(filter(group, (x) { eq(x.t, tag) }), (x) { x.r })
 }
 
-entry-from-group fn (source: Str, list: Str, group: Vec): Any {
+entry-from-group
+meta {no-doc: true}
+fn (source: Str, list: Str, group: Vec): Any {
   primary rows-of(group, "p")
   cond {
     is-empty(primary) => { null }
@@ -385,6 +453,17 @@ meta {
     ALT.CSV: ent_num, alt_num, alt_type, alt_name, alt_remarks.
     ADD.CSV: ent_num, add_num, address, city/state/postal, country,
     add_remarks. SDN_COMMENTS.CSV: ent_num, remarks continued.
+
+    **Example**
+
+    ```hot
+    primary "306,\"BANCO NACIONAL DE CUBA\",-0- ,\"CUBA\",-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,-0- ,\"a.k.a. 'BNC'.\""
+    alt "306,220,\"aka\",\"NATIONAL BANK OF CUBA\",-0-"
+    entries ::ofac/parse("ofac-sdn", primary, alt, "", "")
+    first(entries).name  // "BANCO NACIONAL DE CUBA"
+    first(entries).kind  // "entity"
+    first(entries).aliases  // ["NATIONAL BANK OF CUBA"]
+    ```
     """
 }
 fn (source: Str, primary: Str, alt: Str, add: Str, comments: Str): Vec<Entry> {
@@ -403,7 +482,9 @@ fn (source: Str, primary: Str, alt: Str, add: Str, comments: Str): Vec<Entry> {
 // Fetching
 // ---------------------------------------------------------------------------
 
-check-source fn (source: Any): Any {
+check-source
+meta {no-doc: true}
+fn (source: Any): Any {
   cond {
     in(source, SOURCES) => { source }
     => { err(`ofac: unknown source ${Str(source)}; use ${join(SOURCES, ", ")}`) }
@@ -412,7 +493,18 @@ check-source fn (source: Any): Any {
 
 require-entries
 meta {
-    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+    doc: """
+    The parsed records, or an Err when there are none: a changed file format
+    can parse to nothing, and an empty list must not pass for a list with
+    nobody on it.
+
+    **Example**
+
+    ```hot
+    ::ofac/require-entries(["an entry"])  // ["an entry"]
+    is-err(::ofac/require-entries([]))  // true
+    ```
+    """
 }
 fn (entries: Vec): Vec {
   cond {
@@ -427,6 +519,16 @@ meta {
     doc: """
     The SLS file listing for `"ofac-sdn"` or `"ofac-cons"`: a Map from
     file name to `{size, last-updated, sha256}`.
+
+    **Example**
+
+    ```hot
+    files ::ofac/manifest("ofac-sdn")
+
+    // One Map per published file, keyed by file name
+    get(files, "SDN.CSV").sha256
+    get(files, "SDN.CSV").last-updated
+    ```
     """
 }
 fn (source: Str): Map {
@@ -447,7 +549,19 @@ fn (source: Str): Map {
 
 parse-manifest
 meta {
-    doc: """Turn the SLS listing JSON (a Vec of `{fileName, size, lastUpdated, hashCodes}`, where `hashCodes` is itself a JSON string) into `{file-name: {size, last-updated, sha256}}`. Exposed for testing."""
+    doc: """
+    Turn the SLS listing JSON (a Vec of `{fileName, size, lastUpdated,
+    hashCodes}`, where `hashCodes` is itself a JSON string) into
+    `{file-name: {size, last-updated, sha256}}`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    files [{fileName: "SDN.CSV", size: 5750799, lastUpdated: "2026-10-28T00:00:00", hashCodes: "{\"SHA-256\":\"5f240bed\"}"}]
+    get(::ofac/parse-manifest(files), "SDN.CSV").sha256  // "5f240bed"
+    get(::ofac/parse-manifest(files), "SDN.CSV").size  // 5750799
+    ```
+    """
 }
 fn (files: Any): Map {
   items if(is-vec(files), files, [])
@@ -468,6 +582,14 @@ meta {
     A version string for a list from its SLS manifest: the SHA-256 of
     the primary CSV (first 16 hex digits), or its `lastUpdated` when no
     hash is listed. Null when the manifest has no entry for the file.
+
+    **Example**
+
+    ```hot
+    files {"SDN.CSV": {size: 5750799, last-updated: "2026-10-28T00:00:00", sha256: "5f240bed79d504e7a5aa"}}
+    ::ofac/version("ofac-sdn", files)  // "5f240bed79d504e7"
+    ::ofac/version("ofac-cons", files)  // null
+    ```
     """
 }
 fn (source: Str, files: Map): Str? {
@@ -503,7 +625,9 @@ fn (source: Str): Str? {
   }
 }
 
-fetch-file fn (file: Str): Str {
+fetch-file
+meta {no-doc: true}
+fn (file: Str): Str {
   ::http/get-text(export-url(file))
 }
 
@@ -540,7 +664,9 @@ fn
   }
 }
 
-fetch-list fn (source: Str, known-version: Str?): Map {
+fetch-list
+meta {no-doc: true}
+fn (source: Str, known-version: Str?): Map {
   spec get(LISTS, source)
   files manifest(source)
   ver if(is-err(files), null, version(source, files))

@@ -27,7 +27,19 @@ query ::sumsub::api/query
 level-or-default
 meta {
     ctx: {"sumsub.level.name": {required: false, secret: false}},
-    doc: """`level-name` when set, otherwise `opts.level-name`, otherwise the `sumsub.level.name` context variable; an Err when none is set."""
+    doc: """
+    `level-name` when set, otherwise `opts.level-name`, otherwise the
+    `sumsub.level.name` context variable; an Err when none is set.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/level-or-default("basic-kyc-level")
+
+    // Falls back to opts, then sumsub.level.name
+    ::sumsub::applicants/level-or-default(null, {level-name: "enhanced-kyc-level"})
+    ```
+    """
 }
 fn
 (level-name: Str?): Str {
@@ -48,6 +60,14 @@ meta {
     (`firstName`, `lastName`, `dob` as `YYYY-MM-DD`, `country` and
     `nationality` as ISO alpha-3, `addresses`, `tin`, ...). Unset fields
     are dropped. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::applicants/create-applicant-request("basic-kyc-level", {externalUserId: "user-42", email: null})
+    spec.path  // "/resources/applicants?levelName=basic-kyc-level"
+    spec.body  // {externalUserId: "user-42"}
+    ```
     """
 }
 fn (level-name: Str, applicant: Map): Map {
@@ -87,7 +107,16 @@ fn
 
 get-applicant
 meta {
-    doc: """Fetch an applicant by Sumsub id (`GET /resources/applicants/{id}/one`)."""
+    doc: """
+    Fetch an applicant by Sumsub id (`GET /resources/applicants/{id}/one`).
+
+    **Example**
+
+    ```hot
+    applicant ::sumsub::applicants/get-applicant("65f0c1e2a3b4c5d6e7f80912")
+    applicant.externalUserId
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -99,7 +128,16 @@ fn
 
 external-user-path
 meta {
-    doc: """The path for an applicant addressed by your `externalUserId`. Exposed for testing."""
+    doc: """
+    The path for an applicant addressed by your `externalUserId`. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/external-user-path("user 42")  // "/resources/applicants/-;externalUserId=user%2042/one"
+    ```
+    """
 }
 fn (external-user-id: Str): Str {
   `/resources/applicants/-;externalUserId=${seg(external-user-id)}/one`
@@ -107,7 +145,16 @@ fn (external-user-id: Str): Str {
 
 get-applicant-by-external-id
 meta {
-    doc: """Fetch an applicant by your `externalUserId`. A 404 Err when none exists; use `find-applicant-by-external-id` to test for existence."""
+    doc: """
+    Fetch an applicant by your `externalUserId`. A 404 Err when none exists;
+    use `find-applicant-by-external-id` to test for existence.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/get-applicant-by-external-id("user-42").id
+    ```
+    """
 }
 fn
 (external-user-id: Str): Map {
@@ -119,7 +166,17 @@ fn
 
 find-applicant-by-external-id
 meta {
-    doc: """`{exists, applicant?}` for your `externalUserId`, without a 404 when there is none (`GET /resources/applicants/-/byExternalUserId/{id}`)."""
+    doc: """
+    `{exists, applicant?}` for your `externalUserId`, without a 404 when
+    there is none (`GET /resources/applicants/-/byExternalUserId/{id}`).
+
+    **Example**
+
+    ```hot
+    found ::sumsub::applicants/find-applicant-by-external-id("user-42")
+    if(found.exists, found.applicant.id, null)
+    ```
+    """
 }
 fn
 (external-user-id: Str): Map {
@@ -141,6 +198,14 @@ meta {
     `reviewResult` (`reviewAnswer` GREEN/RED, `reviewRejectType`
     FINAL/RETRY, `rejectLabels`, comments), `levelName`, `attemptCnt`
     and dates. Feed it to `::sumsub::decisions/review-outcome`.
+
+    **Example**
+
+    ```hot
+    status ::sumsub::applicants/get-status("65f0c1e2a3b4c5d6e7f80912")
+    status.reviewStatus
+    ::sumsub::decisions/review-outcome(status).outcome
+    ```
     """
 }
 fn
@@ -153,7 +218,18 @@ fn
 
 get-required-docs-status
 meta {
-    doc: """Per-step status, keyed by step (`IDENTITY`, `SELFIE`, `PROOF_OF_RESIDENCE`, ...); each value is null (not submitted) or `{reviewResult, idDocType, country, imageIds, ...}`."""
+    doc: """
+    Per-step status, keyed by step (`IDENTITY`, `SELFIE`,
+    `PROOF_OF_RESIDENCE`, ...); each value is null (not submitted) or
+    `{reviewResult, idDocType, country, imageIds, ...}`.
+
+    **Example**
+
+    ```hot
+    steps ::sumsub::applicants/get-required-docs-status("65f0c1e2a3b4c5d6e7f80912")
+    steps.IDENTITY
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -165,7 +241,16 @@ fn
 
 get-review-history
 meta {
-    doc: """Past review attempts for an applicant (`GET /resources/applicants/{id}/review/history`)."""
+    doc: """
+    Past review attempts for an applicant (`GET
+    /resources/applicants/{id}/review/history`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/get-review-history("65f0c1e2a3b4c5d6e7f80912")
+    ```
+    """
 }
 fn
 (applicant-id: Str): Any {
@@ -177,7 +262,17 @@ fn
 
 list-levels
 meta {
-    doc: """The verification levels configured for your account (`GET /resources/applicants/-/levels`)."""
+    doc: """
+    The verification levels configured for your account (`GET
+    /resources/applicants/-/levels`).
+
+    **Example**
+
+    ```hot
+    levels ::sumsub::applicants/list-levels()
+    ::sumsub::api/page-items(levels)
+    ```
+    """
 }
 fn
 (): Any {
@@ -193,7 +288,18 @@ fn
 
 move-to-level-request
 meta {
-    doc: """The spec for moving an applicant to another level. The query parameter is `name` (not `levelName`). `doc-sets`, when not empty, limits the reset to those steps, e.g. `[{idDocSetType: "IDENTITY", resetOnlyIfUnsuitable: true}]`. Exposed for testing."""
+    doc: """
+    The spec for moving an applicant to another level. The query parameter
+    is `name` (not `levelName`). `doc-sets`, when not empty, limits the
+    reset to those steps, e.g. `[{idDocSetType: "IDENTITY",
+    resetOnlyIfUnsuitable: true}]`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/move-to-level-request("abc", "enhanced", []).path  // "/resources/applicants/abc/moveToLevel?name=enhanced"
+    ```
+    """
 }
 fn (applicant-id: Str, level-name: Str, doc-sets: Vec): Map {
   {
@@ -205,7 +311,19 @@ fn (applicant-id: Str, level-name: Str, doc-sets: Vec): Map {
 
 move-to-level
 meta {
-    doc: """Move an applicant to another verification level. Not allowed while the applicant is `pending`, `queued` or `onHold`. Returns the applicant."""
+    doc: """
+    Move an applicant to another verification level. Not allowed while the
+    applicant is `pending`, `queued` or `onHold`. Returns the applicant.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/move-to-level("65f0c1e2a3b4c5d6e7f80912", "enhanced-kyc-level")
+
+    // Only re-collect an unsuitable identity document
+    ::sumsub::applicants/move-to-level("65f0c1e2a3b4c5d6e7f80912", "enhanced-kyc-level", [{idDocSetType: "IDENTITY", resetOnlyIfUnsuitable: true}])
+    ```
+    """
 }
 fn
 (applicant-id: Str, level-name: Str): Map {
@@ -220,7 +338,17 @@ fn
 
 reset-applicant
 meta {
-    doc: """Reset an applicant to `init`, deactivating its documents. Not allowed while `pending`, `queued` or `prechecked`; Sumsub advises against resetting a FINAL rejection."""
+    doc: """
+    Reset an applicant to `init`, deactivating its documents. Not allowed
+    while `pending`, `queued` or `prechecked`; Sumsub advises against
+    resetting a FINAL rejection.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/reset-applicant("65f0c1e2a3b4c5d6e7f80912")
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -232,7 +360,16 @@ fn
 
 reset-step
 meta {
-    doc: """Reset one verification step (`idDocSetType`, e.g. `"IDENTITY"`, `"SELFIE"`)."""
+    doc: """
+    Reset one verification step (`idDocSetType`, e.g. `"IDENTITY"`,
+    `"SELFIE"`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/reset-step("65f0c1e2a3b4c5d6e7f80912", "SELFIE")
+    ```
+    """
 }
 fn
 (applicant-id: Str, id-doc-set-type: Str): Map {
@@ -244,7 +381,17 @@ fn
 
 request-check-request
 meta {
-    doc: """The spec for submitting an applicant for review; `reason` is optional and dropped when null. Exposed for testing."""
+    doc: """
+    The spec for submitting an applicant for review; `reason` is optional
+    and dropped when null. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/request-check-request("abc", null).path  // "/resources/applicants/abc/status/pending"
+    ::sumsub::applicants/request-check-request("abc", "retry").path  // "/resources/applicants/abc/status/pending?reason=retry"
+    ```
+    """
 }
 fn (applicant-id: Str, reason: Str?): Map {
   {method: "POST", path: `/resources/applicants/${seg(applicant-id)}/status/pending${query({reason: reason})}`, body: ""}
@@ -252,7 +399,21 @@ fn (applicant-id: Str, reason: Str?): Map {
 
 request-check
 meta {
-    doc: """Submit the applicant for review once its documents are in (`POST .../status/pending`). A 409 means steps are still missing. The result arrives later: on the `applicantReviewed` webhook, or by polling `get-status` from a schedule."""
+    doc: """
+    Submit the applicant for review once its documents are in (`POST
+    .../status/pending`). A 409 means steps are still missing. The result
+    arrives later: on the `applicantReviewed` webhook, or by polling
+    `get-status` from a schedule.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/request-check("65f0c1e2a3b4c5d6e7f80912")
+
+    // With a reason
+    ::sumsub::applicants/request-check("65f0c1e2a3b4c5d6e7f80912", "documents-updated")
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -269,7 +430,9 @@ fn
 // ID documents (multipart)
 // ---------------------------------------------------------------------------
 
-clean-filename fn (filename: Str): Str {
+clean-filename
+meta {no-doc: true}
+fn (filename: Str): Str {
   filename |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
 }
 
@@ -281,6 +444,13 @@ meta {
     null) a `content` part with the file. Sumsub accepts no other parts.
     `file` is `{filename, content: Bytes, content_type?}`. Exposed for
     testing; `add-id-document` signs and sends exactly these bytes.
+
+    **Example**
+
+    ```hot
+    body ::sumsub::applicants/id-doc-body({idDocType: "PASSPORT", country: "GBR"}, null, "xyz")
+    contains(::hot::bytes/to-str(body), "name=\"metadata\"")  // true
+    ```
     """
 }
 fn (metadata: Map, file: Map?, boundary: Str): Bytes {
@@ -364,7 +534,15 @@ fn
 
 list-documents
 meta {
-    doc: """The applicant's uploaded documents and images (`GET .../info/idDocs`)."""
+    doc: """
+    The applicant's uploaded documents and images (`GET .../info/idDocs`).
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/list-documents("65f0c1e2a3b4c5d6e7f80912")
+    ```
+    """
 }
 fn
 (applicant-id: Str): Any {
@@ -380,7 +558,16 @@ fn
 
 update-fixed-info
 meta {
-    doc: """Overwrite `fixedInfo` fields you supply (`PATCH .../fixedInfo`); fields you omit are kept. Fires `applicantPersonalInfoChanged`."""
+    doc: """
+    Overwrite `fixedInfo` fields you supply (`PATCH .../fixedInfo`); fields
+    you omit are kept. Fires `applicantPersonalInfoChanged`.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/update-fixed-info("65f0c1e2a3b4c5d6e7f80912", {firstName: "Ada", lastName: "Lovelace"})
+    ```
+    """
 }
 fn
 (applicant-id: Str, fields: Map): Map {
@@ -392,7 +579,18 @@ fn
 
 update-applicant-request
 meta {
-    doc: """The spec for a profile update (`email`, `phone`, `lang`, `sourceKey`, `metadata`, ...). Exposed for testing."""
+    doc: """
+    The spec for a profile update (`email`, `phone`, `lang`, `sourceKey`,
+    `metadata`, ...). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::applicants/update-applicant-request("abc", {email: "ada@example.com", lang: null})
+    spec.path  // "/resources/applicants"
+    spec.body  // {email: "ada@example.com", id: "abc"}
+    ```
+    """
 }
 fn (applicant-id: Str, fields: Map): Map {
   {method: "PATCH", path: "/resources/applicants", body: {...::api/compact(untype(fields)), id: applicant-id}}
@@ -400,7 +598,16 @@ fn (applicant-id: Str, fields: Map): Map {
 
 update-applicant
 meta {
-    doc: """Update top-level profile fields: `email`, `phone`, `lang`, `sourceKey`, `metadata`, `registrationDate`."""
+    doc: """
+    Update top-level profile fields: `email`, `phone`, `lang`, `sourceKey`,
+    `metadata`, `registrationDate`.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/update-applicant("65f0c1e2a3b4c5d6e7f80912", {email: "ada@example.com", lang: "en"})
+    ```
+    """
 }
 fn
 (applicant-id: Str, fields: Map): Map {
@@ -412,7 +619,16 @@ fn
 
 deactivate-applicant
 meta {
-    doc: """Deactivate an applicant (it can no longer be verified); returns the applicant with `deleted: true`."""
+    doc: """
+    Deactivate an applicant (it can no longer be verified); returns the
+    applicant with `deleted: true`.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/deactivate-applicant("65f0c1e2a3b4c5d6e7f80912").deleted
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -423,7 +639,17 @@ fn
 }
 
 activate-applicant
-meta {doc: """Re-activate a deactivated applicant."""}
+meta {
+    doc: """
+    Re-activate a deactivated applicant.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/activate-applicant("65f0c1e2a3b4c5d6e7f80912")
+    ```
+    """
+}
 fn
 (applicant-id: Str): Map {
   activate-applicant(applicant-id, {})
@@ -434,7 +660,17 @@ fn
 
 approve-applicant
 meta {
-    doc: """Approve from your own system (`POST .../-/approve`), with optional `options.note` and `options.tags`. A temporary 409 carries `retry-after`; let a handler `retry` policy re-run it."""
+    doc: """
+    Approve from your own system (`POST .../-/approve`), with optional
+    `options.note` and `options.tags`. A temporary 409 carries
+    `retry-after`; let a handler `retry` policy re-run it.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/approve-applicant("65f0c1e2a3b4c5d6e7f80912", {note: "Reviewed by compliance", tags: ["manual"]})
+    ```
+    """
 }
 fn
 (applicant-id: Str, options: Map): Map {
@@ -446,7 +682,17 @@ fn
 
 reject-applicant
 meta {
-    doc: """Reject from your own system (`POST .../-/reject`). `options` takes `note`, `tags` and `reasons` (`{fraud, finance, regulation, abuse, device, manual}`, each a Vec of Sumsub's external rejection reasons)."""
+    doc: """
+    Reject from your own system (`POST .../-/reject`). `options` takes
+    `note`, `tags` and `reasons` (`{fraud, finance, regulation, abuse,
+    device, manual}`, each a Vec of Sumsub's external rejection reasons).
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/reject-applicant("65f0c1e2a3b4c5d6e7f80912", {note: "Document forged", reasons: {fraud: ["FORGERY"]}})
+    ```
+    """
 }
 fn
 (applicant-id: Str, options: Map): Map {
@@ -462,7 +708,16 @@ fn
 
 add-tags
 meta {
-    doc: """Add tags to an applicant (at most 30 per applicant). Read them back from `get-applicant(...).tags`; there is no tag list endpoint."""
+    doc: """
+    Add tags to an applicant (at most 30 per applicant). Read them back from
+    `get-applicant(...).tags`; there is no tag list endpoint.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/add-tags("65f0c1e2a3b4c5d6e7f80912", ["vip", "manual-review"])
+    ```
+    """
 }
 fn
 (applicant-id: Str, tags: Vec<Str>): Map {
@@ -473,7 +728,17 @@ fn
 }
 
 set-tags
-meta {doc: """Replace all of an applicant's tags."""}
+meta {
+    doc: """
+    Replace all of an applicant's tags.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/set-tags("65f0c1e2a3b4c5d6e7f80912", ["vip"])
+    ```
+    """
+}
 fn
 (applicant-id: Str, tags: Vec<Str>): Map {
   set-tags(applicant-id, tags, {})
@@ -483,7 +748,17 @@ fn
 }
 
 remove-tags
-meta {doc: """Remove these tags from an applicant."""}
+meta {
+    doc: """
+    Remove these tags from an applicant.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/remove-tags("65f0c1e2a3b4c5d6e7f80912", ["manual-review"])
+    ```
+    """
+}
 fn
 (applicant-id: Str, tags: Vec<Str>): Map {
   remove-tags(applicant-id, tags, {})
@@ -499,14 +774,37 @@ fn
 NOTES_PATH "/resources/api/applicants/notes"
 
 list-notes-request
-meta {doc: """The spec for one page of an applicant's notes. Exposed for testing."""}
+meta {
+    doc: """
+    The spec for one page of an applicant's notes. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/list-notes-request("abc", 0, 50).path
+    // "/resources/api/applicants/notes?applicantId=abc&offset=0&limit=50"
+    ```
+    """
+}
 fn (applicant-id: Str, offset: Int, limit: Int): Map {
   {method: "GET", path: `${NOTES_PATH}${query({applicantId: applicant-id, offset: offset, limit: limit})}`, body: ""}
 }
 
 list-notes
 meta {
-    doc: """One page of an applicant's notes: `{list: {items, totalItems, pageInfo}}`. Read the items with `::sumsub::api/page-items` and the next offset with `::sumsub::api/next-offset`."""
+    doc: """
+    One page of an applicant's notes: `{list: {items, totalItems,
+    pageInfo}}`. Read the items with `::sumsub::api/page-items` and the next
+    offset with `::sumsub::api/next-offset`.
+
+    **Example**
+
+    ```hot
+    page ::sumsub::applicants/list-notes("65f0c1e2a3b4c5d6e7f80912", 0, 50)
+    ::sumsub::api/page-items(page)
+    ::sumsub::api/next-offset(page, 0)
+    ```
+    """
 }
 fn
 (applicant-id: Str): Map {
@@ -520,7 +818,18 @@ fn
 }
 
 list-all-notes
-meta {doc: """Collect up to `limit` notes across pages."""}
+meta {
+    doc: """
+    Collect up to `limit` notes across pages.
+
+    **Example**
+
+    ```hot
+    notes ::sumsub::applicants/list-all-notes("65f0c1e2a3b4c5d6e7f80912", 250)
+    length(notes)
+    ```
+    """
+}
 fn
 (applicant-id: Str, limit: Int): Vec {
   list-all-notes(applicant-id, limit, {})
@@ -531,7 +840,17 @@ fn
 
 add-note
 meta {
-    doc: """Add a note to an applicant, with optional tags. Notes are visible to your dashboard users; keep PII out of them unless your policy allows it."""
+    doc: """
+    Add a note to an applicant, with optional tags. Notes are visible to
+    your dashboard users; keep PII out of them unless your policy allows it.
+
+    **Example**
+
+    ```hot
+    note ::sumsub::applicants/add-note("65f0c1e2a3b4c5d6e7f80912", "Called the applicant", ["support"])
+    note.id
+    ```
+    """
 }
 fn
 (applicant-id: Str, note: Str): Map {
@@ -545,7 +864,17 @@ fn
 }
 
 update-note
-meta {doc: """Edit a note by its id."""}
+meta {
+    doc: """
+    Edit a note by its id.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/update-note("65f0c1e2a3b4c5d6e7f80912", "65f0c1e2a3b4c5d6e7f80999", "Called the applicant twice", ["support"])
+    ```
+    """
+}
 fn
 (applicant-id: Str, note-id: Str, note: Str, tags: Vec?): Map {
   update-note(applicant-id, note-id, note, tags, {})
@@ -555,7 +884,17 @@ fn
 }
 
 delete-note
-meta {doc: """Delete a note by its id."""}
+meta {
+    doc: """
+    Delete a note by its id.
+
+    **Example**
+
+    ```hot
+    ::sumsub::applicants/delete-note("65f0c1e2a3b4c5d6e7f80912", "65f0c1e2a3b4c5d6e7f80999")
+    ```
+    """
+}
 fn
 (applicant-id: Str, note-id: Str): Any {
   delete-note(applicant-id, note-id, {})
@@ -570,7 +909,20 @@ fn
 
 simulate-review-request
 meta {
-    doc: """The spec for the sandbox review simulator. `result` is `{reviewAnswer: "GREEN"}` or `{reviewAnswer: "RED", reviewRejectType: "RETRY" | "FINAL", rejectLabels: [...], moderationComment?, clientComment?}`. `rejectLabels` defaults to `[]`. Exposed for testing."""
+    doc: """
+    The spec for the sandbox review simulator. `result` is `{reviewAnswer:
+    "GREEN"}` or `{reviewAnswer: "RED", reviewRejectType: "RETRY" | "FINAL",
+    rejectLabels: [...], moderationComment?, clientComment?}`.
+    `rejectLabels` defaults to `[]`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    spec ::sumsub::applicants/simulate-review-request("abc", {reviewAnswer: "GREEN"})
+    spec.path  // "/resources/applicants/abc/status/testCompleted"
+    spec.body  // {rejectLabels: [], reviewAnswer: "GREEN"}
+    ```
+    """
 }
 fn (applicant-id: Str, result: Map): Map {
   body ::api/compact(untype(result))

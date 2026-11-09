@@ -122,7 +122,18 @@ type {
 
 build-resize-args
 meta {
-    doc: "Build ImageMagick `magick` arguments for resizing."
+    doc: """
+    Build ImageMagick `magick` arguments for resizing.
+
+    **Example**
+
+    ```hot
+    ::imagemagick/build-resize-args("/data/in.jpg", "/data/out.jpg", {width: 400})
+    // ["magick", "/data/in.jpg", "-resize", "400x", "/data/out.jpg"]
+    ::imagemagick/build-resize-args("/data/in.jpg", "/data/out.jpg", {width: 400, height: 300, fit: "fill", quality: 80})
+    // ["magick", "/data/in.jpg", "-resize", "400x300!", "-quality", "80", "/data/out.jpg"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: ResizeOpts): Vec<Str> {
     base ["magick", input-path]
@@ -163,7 +174,16 @@ fn (input-path: Str, output-path: Str, opts: ResizeOpts): Vec<Str> {
 
 build-convert-args
 meta {
-    doc: "Build ImageMagick `magick` arguments for format conversion."
+    doc: """
+    Build ImageMagick `magick` arguments for format conversion.
+
+    **Example**
+
+    ```hot
+    ::imagemagick/build-convert-args("/data/in.png", "/data/out.webp", {format: "webp", quality: 85, strip: true})
+    // ["magick", "/data/in.png", "-quality", "85", "-strip", "/data/out.webp"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
     base ["magick", input-path]
@@ -176,7 +196,18 @@ fn (input-path: Str, output-path: Str, opts: ConvertOpts): Vec<Str> {
 
 build-optimize-args
 meta {
-    doc: "Build ImageMagick `magick` arguments for optimization (strip, quality)."
+    doc: """
+    Build ImageMagick `magick` arguments for optimization (strip, quality).
+
+    **Example**
+
+    ```hot
+    ::imagemagick/build-optimize-args("/data/in.jpg", "/data/out.jpg", {})
+    // ["magick", "/data/in.jpg", "-strip", "-quality", "85", "/data/out.jpg"]
+    ::imagemagick/build-optimize-args("/data/in.jpg", "/data/out.jpg", {quality: 70, strip: false})
+    // ["magick", "/data/in.jpg", "-quality", "70", "/data/out.jpg"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: OptimizeOpts): Vec<Str> {
     q or(opts.quality, 85)
@@ -189,7 +220,17 @@ fn (input-path: Str, output-path: Str, opts: OptimizeOpts): Vec<Str> {
 
 build-identify-args
 meta {
-    doc: "Build `magick identify` arguments for verbose-style single-shot metadata (custom format lines)."
+    doc: """
+    Build `magick identify` arguments for verbose-style single-shot metadata
+    (custom format lines).
+
+    **Example**
+
+    ```hot
+    first(::imagemagick/build-identify-args("/data/in.jpg"))  // "identify"
+    last(::imagemagick/build-identify-args("/data/in.jpg"))  // "/data/in.jpg"
+    ```
+    """
 }
 fn (input-path: Str): Vec<Str> {
     fmt """%w
@@ -207,7 +248,17 @@ fn (input-path: Str): Vec<Str> {
 
 parse-identify-output
 meta {
-    doc: "Parse `identify -format` multi-line output: width, height, format, depth, colorspace, filesize."
+    doc: """
+    Parse `identify -format` multi-line output: width, height, format,
+    depth, colorspace, filesize.
+
+    **Example**
+
+    ```hot
+    ::imagemagick/parse-identify-output("800\n600\nJPEG\n8\nsRGB\n41739B")
+    // {width: 800, height: 600, format: "JPEG", depth: "8", colorspace: "sRGB", filesize: "41739B"}
+    ```
+    """
 }
 fn (stdout: Str?): Map {
     lines or(stdout, "") |> trim() |> split("\n")
@@ -232,7 +283,9 @@ fn (stdout: Str?): Map {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -242,16 +295,35 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
 }
 
-run-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
+}
+
+run-magick-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     info ::box/start({
@@ -265,7 +337,9 @@ run-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
     ::task/await(info.id)
 }
 
-start-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
+start-magick-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?): Map {
     img or(image, DEFAULT_IMAGE)
     full-script if(eq(img, DEFAULT_IMAGE), `${INSTALL_CMD} && ${script}`, script)
     ::box/start({
@@ -278,7 +352,9 @@ start-magick-box fn (script: Str, box-size: Str, image: Str?): Map {
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -329,7 +405,7 @@ fn (input: Str): Map {
     ext file-ext(input)
     in-path `/data/input.${ext}`
 
-    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${shell-quote(in-path)}`
 
     result run-magick-box(script, "nano", null)
     checked check-box-result(result, "identify")
@@ -339,7 +415,7 @@ fn (input: Str): Map {
     ext file-ext(input)
     in-path `/data/input.${ext}`
 
-    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${shell-quote(in-path)}`
 
     result run-magick-box(script, "nano", image)
     checked check-box-result(result, "identify")
@@ -372,7 +448,7 @@ fn (input: Str, opts: ResizeOpts): Map {
     out-path `/data/output.${format}`
 
     magick-args join-args(build-resize-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-magick-box(script, box-size, opts.image)
@@ -406,7 +482,7 @@ fn (input: Str, opts: ConvertOpts): Map {
     out-path `/data/output.${opts.format}`
 
     magick-args join-args(build-convert-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-magick-box(script, box-size, opts.image)
@@ -446,7 +522,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     magick-args join-args(build-optimize-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-magick-box(script, box-size, opts.image)
@@ -465,6 +541,14 @@ meta {
     Start an `identify` task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    task ::imagemagick/start-identify("hot://uploads/photo.jpg")
+    done ::hot::task/await(task.id)
+    done.stdout
+    ```
     """,
     box: {min-size: "nano"}
 }
@@ -472,7 +556,7 @@ fn (input: Str): Map {
     ext file-ext(input)
     in-path `/data/input.${ext}`
 
-    script `hotbox cp '${input}' ${in-path} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${in-path}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && magick identify -format '%w\n%h\n%m\n%z\n%[colorspace]\n%b' ${shell-quote(in-path)}`
 
     start-magick-box(script, "nano", null)
 }
@@ -483,6 +567,14 @@ meta {
     Start a resize task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    task ::imagemagick/start-resize("hot://uploads/photo.jpg", {width: 800})
+    ::hot::task/await(task.id)
+    task.data.output
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -496,7 +588,7 @@ fn (input: Str, opts: ResizeOpts): Map {
     out-path `/data/output.${format}`
 
     magick-args join-args(build-resize-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-magick-box(script, box-size, opts.image)
@@ -509,6 +601,14 @@ meta {
     Start a format-conversion task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    task ::imagemagick/start-convert("hot://uploads/photo.png", {format: "webp", quality: 85})
+    ::hot::task/await(task.id)
+    task.data.output
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -521,7 +621,7 @@ fn (input: Str, opts: ConvertOpts): Map {
     out-path `/data/output.${opts.format}`
 
     magick-args join-args(build-convert-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-magick-box(script, box-size, opts.image)
@@ -534,6 +634,17 @@ meta {
     Start an optimization task without awaiting the result.
 
     Returns a TaskInfo map that can be passed to `::task/await` later.
+
+    **Example**
+
+    ```hot
+    task ::imagemagick/start-optimize("hot://uploads/photo.jpg")
+    ::hot::task/await(task.id)
+    task.data.output
+
+    // With options
+    task ::imagemagick/start-optimize("hot://uploads/photo.jpg", {quality: 70, format: "webp"})
+    ```
     """,
     box: {min-size: "small"}
 }
@@ -552,7 +663,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     magick-args join-args(build-optimize-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ${magick-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ${magick-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-magick-box(script, box-size, opts.image)

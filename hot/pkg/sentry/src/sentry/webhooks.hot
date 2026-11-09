@@ -17,14 +17,26 @@ meta {
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
 
-header fn (request: Map, name: Str): Str? {
+header
+meta {no-doc: true}
+fn (request: Map, name: Str): Str? {
   headers or(get(request, "headers"), {})
   get(headers, name)
 }
 
 hook-resource
 meta {
-    doc: """The `Sentry-Hook-Resource` header: what the delivery is about (`issue`, `error`, `event_alert`, `metric_alert`, `comment`, `installation`, …), or null."""
+    doc: """
+    The `Sentry-Hook-Resource` header: what the delivery is about (`issue`,
+    `error`, `event_alert`, `metric_alert`, `comment`, `installation`, …),
+    or null.
+
+    **Example**
+
+    ```hot
+    ::sentry::webhooks/hook-resource({headers: {"sentry-hook-resource": "issue"}})  // "issue"
+    ```
+    """
 }
 fn (request: Map): Str? {
   header(request, "sentry-hook-resource")
@@ -32,7 +44,17 @@ fn (request: Map): Str? {
 
 hook-timestamp
 meta {
-    doc: """The `Sentry-Hook-Timestamp` header as Unix seconds, or null when absent or malformed."""
+    doc: """
+    The `Sentry-Hook-Timestamp` header as Unix seconds, or null when absent
+    or malformed.
+
+    **Example**
+
+    ```hot
+    ::sentry::webhooks/hook-timestamp({headers: {"sentry-hook-timestamp": "1762689600"}})  // 1762689600
+    ::sentry::webhooks/hook-timestamp({headers: {"sentry-hook-timestamp": "soon"}})  // null
+    ```
+    """
 }
 fn (request: Map): Int? {
   raw header(request, "sentry-hook-timestamp")
@@ -45,13 +67,24 @@ fn (request: Map): Int? {
 
 request-id
 meta {
-    doc: """The delivery's `Request-ID` header (a UUID), useful for de-duplicating retries."""
+    doc: """
+    The delivery's `Request-ID` header (a UUID), useful for de-duplicating
+    retries.
+
+    **Example**
+
+    ```hot
+    ::sentry::webhooks/request-id({headers: {"request-id": "9a1b2c3d"}})  // "9a1b2c3d"
+    ```
+    """
 }
 fn (request: Map): Str? {
   header(request, "request-id")
 }
 
-timestamp-fresh fn (request: Map, max-age-seconds: Int): Bool {
+timestamp-fresh
+meta {no-doc: true}
+fn (request: Map, max-age-seconds: Int): Bool {
   ts hook-timestamp(request)
   cond {
     is-null(ts) => { false }

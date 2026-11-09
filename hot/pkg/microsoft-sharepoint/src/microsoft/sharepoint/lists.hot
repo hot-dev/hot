@@ -30,7 +30,9 @@ meta {
 LIST_LOCAL_KEYS ["fields", "allow-non-indexed"]
 NON_INDEXED_PREFER "HonorNonIndexedQueriesWarningMayFailRandomly"
 
-field-list fn (fields: Any): Str? {
+field-list
+meta {no-doc: true}
+fn (fields: Any): Str? {
   cond {
     ::auth/is-blank-value(fields) => { null }
     is-vec(fields) => { if(is-empty(fields), null, join(map(fields, (f) { trim(Str(f)) }), ",")) }
@@ -45,6 +47,8 @@ meta {
     `fields($select=...)` from `opts.fields` (or `fields` for all
     columns), merged with an `expand` you pass; other OData options
     (`filter`, `orderby`, `top`, `select`) pass through.
+
+    **Example**
 
     ```hot
     ::microsoft::sharepoint::lists/items-query({fields: ["Title", "Status"], top: 100})
@@ -62,19 +66,46 @@ fn (opts: Map): Map {
 
 items-headers
 meta {
-    doc: """The extra headers for an items query (pure): `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly` when `opts.allow-non-indexed` is true."""
+    doc: """
+    The extra headers for an items query (pure): `Prefer:
+    HonorNonIndexedQueriesWarningMayFailRandomly` when
+    `opts.allow-non-indexed` is true.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::lists/items-headers({allow-non-indexed: true})
+    // {Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly"}
+
+    ::microsoft::sharepoint::lists/items-headers({})  // {}
+    ```
+    """
 }
 fn (opts: Map): Map {
   if(eq(get(opts, "allow-non-indexed"), true), {Prefer: NON_INDEXED_PREFER}, {})
 }
 
-with-headers fn (opts: Map): Map {
+with-headers
+meta {no-doc: true}
+fn (opts: Map): Map {
   {...::api/credential-opts(opts), headers: {...or(get(opts, "headers"), {}), ...items-headers(opts)}}
 }
 
 list-lists
 meta {
-    doc: """GET /sites/{site}/lists - the site's lists and libraries (`id`, `displayName`, `list.template`), all pages. `opts.filter` e.g. `"list/hidden eq false"`."""
+    doc: """
+    GET /sites/{site}/lists - the site's lists and libraries (`id`,
+    `displayName`, `list.template`), all pages. `opts.filter` e.g.
+    `"list/hidden eq false"`.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    lists ::microsoft::sharepoint::lists/list-lists(site-id, {filter: "list/hidden eq false"})
+    map(lists, %.displayName)
+    ```
+    """
 }
 fn
 (site-id: Str): Vec {
@@ -86,7 +117,18 @@ fn
 
 get-list
 meta {
-    doc: """GET /sites/{site}/lists/{list-id or display name}. `opts.expand: "columns"` includes the column definitions."""
+    doc: """
+    GET /sites/{site}/lists/{list-id or display name}. `opts.expand:
+    "columns"` includes the column definitions.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    tickets ::microsoft::sharepoint::lists/get-list(site-id, "Tickets", {expand: "columns"})
+    map(tickets.columns, %.name)
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str): Map {
@@ -102,7 +144,10 @@ meta {
     GET /sites/{site}/lists/{list}/items - one page of items with their
     `fields`: Graph's `{value, @odata.nextLink?}`. See `items-query`.
 
+    **Example**
+
     ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
     page ::microsoft::sharepoint::lists/list-items(site-id, "Tickets", {
       fields: ["Title", "Status", "Priority"],
       filter: "fields/Status eq 'Open'",
@@ -124,7 +169,23 @@ fn
 
 list-all-items
 meta {
-    doc: """Every item of a list (all pages), or at most `limit`. Takes the same `opts` as `list-items`; uses `top: 200` unless set."""
+    doc: """
+    Every item of a list (all pages), or at most `limit`. Takes the same
+    `opts` as `list-items`; uses `top: 200` unless set.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    // At most 1,000 open tickets
+    items ::microsoft::sharepoint::lists/list-all-items(site-id, "Tickets", {
+      fields: ["Title", "Status"],
+      filter: "fields/Status eq 'Open'",
+      allow-non-indexed: true
+    }, 1000)
+    map(items, %.fields.Title)
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str): Vec {
@@ -140,7 +201,18 @@ fn
 
 get-item
 meta {
-    doc: """GET /sites/{site}/lists/{list}/items/{id} with its `fields` (`opts.fields` to choose columns)."""
+    doc: """
+    GET /sites/{site}/lists/{list}/items/{id} with its `fields`
+    (`opts.fields` to choose columns).
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    item ::microsoft::sharepoint::lists/get-item(site-id, "Tickets", "42", {fields: ["Title", "Status"]})
+    item.fields.Status
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str, item-id: Str): Map {
@@ -158,7 +230,10 @@ meta {
     values (internal names; nulls are dropped). Returns the item with
     its `fields`.
 
+    **Example**
+
     ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
     item ::microsoft::sharepoint::lists/create-item(site-id, "Tickets", {Title: "Printer jam", Status: "Open"})
     item.id
     ```
@@ -174,7 +249,19 @@ fn
 
 update-item
 meta {
-    doc: """PATCH /sites/{site}/lists/{list}/items/{id}/fields - change column values (only the ones you pass). Returns the updated field values. To clear a column, pass `""` rather than null."""
+    doc: """
+    PATCH /sites/{site}/lists/{list}/items/{id}/fields - change column
+    values (only the ones you pass). Returns the updated field values. To
+    clear a column, pass `""` rather than null.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    fields ::microsoft::sharepoint::lists/update-item(site-id, "Tickets", "42", {Status: "Closed", Notes: ""})
+    fields.Status
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str, item-id: Str, fields: Map): Map {
@@ -186,7 +273,17 @@ fn
 
 delete-item
 meta {
-    doc: """DELETE /sites/{site}/lists/{list}/items/{id} - move an item to the site recycle bin. Returns true."""
+    doc: """
+    DELETE /sites/{site}/lists/{list}/items/{id} - move an item to the site
+    recycle bin. Returns true.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    ::microsoft::sharepoint::lists/delete-item(site-id, "Tickets", "42")
+    ```
+    """
 }
 fn
 (site-id: Str, list: Str, item-id: Str): Bool {
@@ -199,7 +296,17 @@ fn
 
 list-resource
 meta {
-    doc: """The subscription resource for a list (pure): `sites/{site}/lists/{list}`."""
+    doc: """
+    The subscription resource for a list (pure):
+    `sites/{site}/lists/{list}`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::lists/list-resource("contoso.sharepoint.com,1,2", "L1")
+    // "sites/contoso.sharepoint.com%2C1%2C2/lists/L1"
+    ```
+    """
 }
 fn (site-id: Str, list: Str): Str {
   ::subs/strip-slashes(::sp/list-path(site-id, list))
@@ -213,6 +320,17 @@ meta {
     so read the changes with a delta query or by `Modified`). `opts` as
     for `::microsoft::graph::subscriptions/create-subscription`
     (`client-state`, `lifecycle-url`, `expires-in-minutes`, up to 42,300).
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    sub ::microsoft::sharepoint::lists/subscribe-list(site-id, "Tickets", "https://myapp.hot.dev/graph/notify", {
+      client-state: ::hot::ctx/get("graph.client-state"),
+      expires-in-minutes: 10080
+    })
+    sub.id
+    ```
     """
 }
 fn

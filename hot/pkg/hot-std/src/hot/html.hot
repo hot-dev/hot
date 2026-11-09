@@ -12,6 +12,7 @@ meta {
     ```hot
     ::html ::hot::html
 
+    page "<table class=\"results\"><tbody><tr><td>Ada</td><td><a href=\"/ada\">Profile</a></td></tr></tbody></table>"
     doc ::html/from-html(page)
     rows ::html/select(doc, "table.results tbody tr")
     map(rows, (row) {
@@ -101,6 +102,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<ul><li>One<li>Two</ul>")
     doc.tag                        // "html"
     length(::html/select(doc, "ul > li")) // 2
@@ -121,6 +123,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<table><tr><td>a<td>b</table><a href=/x>x</a>")
     length(::html/select(doc, "td"))          // 2
     length(::html/select(doc, "a[href^='/']"))  // 1
@@ -142,6 +145,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<h1>Title</h1><h1>Other</h1>")
     ::html/text(::html/select-first(doc, "h1"))  // "Title"
     ::html/select-first(doc, "h2")        // null
@@ -168,6 +172,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<td>\n  Smith &amp; <b>Sons</b><br>LLC\n</td>")
     ::html/text(doc)  // "Smith & Sons LLC"
     ```
@@ -188,6 +193,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<script>if (a < b) { go(\"<p>\") }</script>")
     ::html/raw-text(::html/select-first(doc, "script"))  // "if (a < b) { go(\"<p>\") }"
     ```
@@ -208,6 +214,7 @@ meta {
     **Example**
 
     ```hot
+    ::html ::hot::html
     doc ::html/from-html("<input name=q disabled>")
     input ::html/select-first(doc, "input")
     ::html/attr(input, "name")      // "q"

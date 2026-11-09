@@ -7,7 +7,7 @@
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/brave-search": "0.1.1"
+"hot.dev/brave-search": "0.1.2"
 ```
 
 ## Setup

@@ -33,7 +33,18 @@ PACKAGE_AGENT "hot-dev-cfpb-complaints-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string or an empty Vec."""
+    doc: """
+    True for a non-null value that is not a blank string or an empty Vec.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints::api/given("CA")  // true
+    ::cfpb::complaints::api/given("  ")  // false
+    ::cfpb::complaints::api/given([])  // false
+    ::cfpb::complaints::api/given(0)  // true
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -44,7 +55,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -54,7 +67,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -99,11 +114,15 @@ type {
     message: Str
 }
 
-clip fn (text: Str): Str {
+clip
+meta {no-doc: true}
+fn (text: Str): Str {
   if(gt(length(text), 200), `${slice(text, 0, 200)}…`, text)
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { clip(body) }
     is-map(body) => {
@@ -119,7 +138,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -130,7 +151,19 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    response {status: 429, headers: {retry-after: "60"}, body: {detail: "Request was throttled."}}
+    e ::cfpb::complaints::api/http-error(response, "https://ccdb-proxy.example/api/v1/")
+    e.retry-after  // 60
+    e.message  // "cfpb-complaints: HTTP 429: Request was throttled."
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -148,7 +181,18 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 not-json-error
 meta {
-    doc: """An `HttpError` for a 2xx response that is not JSON. consumerfinance.gov answers an unknown API path with its HTML search page and status 200, so a removed route looks like success. Exposed for testing."""
+    doc: """
+    An `HttpError` for a 2xx response that is not JSON. consumerfinance.gov
+    answers an unknown API path with its HTML search page and status 200, so
+    a removed route looks like success. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response {status: 200, headers: {}, body: "<html></html>"}
+    ::cfpb::complaints::api/not-json-error(response, "https://ccdb-proxy.example/api/v1/").status  // 200
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   HttpError({
@@ -166,13 +210,26 @@ fn (response: HttpResponse, url: Str): HttpError {
 // Requests
 // ---------------------------------------------------------------------------
 
-query-pairs fn (key: Str, value: Any): Vec<Str> {
+query-pairs
+meta {no-doc: true}
+fn (key: Str, value: Any): Vec<Str> {
   map(if(is-vec(value), value, [value]), (item) { ::uri/encode-query(assoc({}, key, Str(item))) })
 }
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty values (pure); `""` when nothing remains. A Vec value repeats the key: `{state: ["CA", "NY"]}` gives `?state=CA&state=NY`."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null, blank and empty
+    values (pure); `""` when nothing remains. A Vec value repeats the key:
+    `{state: ["CA", "NY"]}` gives `?state=CA&state=NY`.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints::api/query-string({state: ["CA", "NY"], company: null})  // "?state=CA&state=NY"
+    ::cfpb::complaints::api/query-string({})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   kept filter-vals(params, given)
@@ -182,7 +239,16 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::cfpb::complaints::api/path-segment("a b")  // "a%20b"
+    ::cfpb::complaints::api/path-segment(3456789)  // "3456789"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -194,6 +260,13 @@ meta {
     GET (or another method) a CFPB URL with `headers`, returning the
     `HttpResponse` on 2xx or an Err carrying `HttpError`. A transport
     failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    response ::cfpb::complaints::api/request("GET", "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/?size=1", {Accept: "application/json"})
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -212,7 +285,20 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 decode-body
 meta {
-    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+    doc: """
+    The decoded JSON of a 2xx response, or an Err carrying `HttpError` when
+    the body is not JSON (pure). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ok-response {status: 200, headers: {}, body: "[1, 2]"}
+    ::cfpb::complaints::api/decode-body(ok-response, "https://ccdb-proxy.example/api/v1/")  // [1, 2]
+
+    html {status: 200, headers: {}, body: "<html></html>"}
+    is-err(::cfpb::complaints::api/decode-body(html, "https://ccdb-proxy.example/api/v1/"))  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): Any {
   body response.body
@@ -227,7 +313,20 @@ fn (response: HttpResponse, url: Str): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    ::api ::cfpb::complaints::api
+
+    base ::api/resolve({}).base-url
+    page ::api/get-json(`${base}/${::api/query-string({size: 1})}`, {})
+    page._meta.total_record_count
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})

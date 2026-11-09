@@ -59,7 +59,20 @@ SendEmailResponse type {
 // Raw message data for the API: a Base64 blob
 raw-message-data
 meta {
-    doc: """The `RawMessage.Data` value for a MIME message: SES requires the entire message Base64 encoded. A message that is already Base64 (a MIME message has `:` and spaces, so it can't be mistaken for one) passes through."""
+    doc: """
+    The `RawMessage.Data` value for a MIME message: SES requires the entire
+    message Base64 encoded. A message that is already Base64 (a MIME message
+    has `:` and spaces, so it can't be mistaken for one) passes through.
+
+    **Example**
+
+    ```hot
+    ::aws::ses::email/raw-message-data("Subject: Hi\n\nHello")  // "U3ViamVjdDogSGkKCkhlbGxv"
+
+    // Already Base64, so left alone
+    ::aws::ses::email/raw-message-data("U3ViamVjdDogSGkKCkhlbGxv")  // "U3ViamVjdDogSGkKCkhlbGxv"
+    ```
+    """
 }
 fn (raw_message: Str): Str {
     cond {
@@ -71,7 +84,23 @@ fn (raw_message: Str): Str {
 // The JSON body for SendEmail
 send-email-body
 meta {
-    doc: """The SendEmail request body for a `SendEmailRequest`. Exposed for testing."""
+    doc: """
+    The SendEmail request body for a `SendEmailRequest`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    request ::aws::ses::email/SendEmailRequest({
+      from_email_address: "hello@example.com",
+      destination: ::aws::ses::email/Destination({to_addresses: ["ada@example.com"]}),
+      content: ::aws::ses::email/EmailContent({simple: ::aws::ses::email/Message({subject: "Hi", body: ::aws::ses::email/Body({text: "Hello"})})})
+    })
+    body ::aws::ses::email/send-email-body(request)
+    body.FromEmailAddress  // "hello@example.com"
+    body.Content.Simple.Subject  // {Data: "Hi"}
+    ```
+    """
 }
 fn (request: SendEmailRequest): Map {
     simple request.content.simple

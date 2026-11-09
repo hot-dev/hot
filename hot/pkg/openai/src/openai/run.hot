@@ -33,7 +33,21 @@ RunGraderResponse type {
 
 run-grader
 meta {
-    doc: """POST /fine_tuning/alpha/graders/run - Run a grader to evaluate model samples for reinforcement fine-tuning."""
+    doc: """
+    POST /fine_tuning/alpha/graders/run - Run a grader to evaluate model
+    samples for reinforcement fine-tuning.
+
+    **Example**
+
+    ```hot
+    result ::openai::run/run-grader(::openai::run/RunGraderRequest({
+      grader: {type: "string_check", name: "Exact", input: "{{sample.output_text}}", operation: "eq", reference: "yes"},
+      item: {},
+      model_sample: "yes"
+    }))
+    result.reward
+    ```
+    """
 }
 fn
 (request: RunGraderRequest): RunGraderResponse {

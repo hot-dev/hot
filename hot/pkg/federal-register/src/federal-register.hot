@@ -25,7 +25,9 @@ MAX_PER_PAGE 1000
 // Parameters and paths
 // ---------------------------------------------------------------------------
 
-as-vec fn (v: Any): Vec {
+as-vec
+meta {no-doc: true}
+fn (v: Any): Vec {
   cond {
     is-null(v) => { [] }
     is-vec(v) => { v }
@@ -35,7 +37,17 @@ as-vec fn (v: Any): Vec {
 
 significant-param
 meta {
-    doc: """`"1"` for true, `"0"` for false, null when unset (pure)."""
+    doc: """
+    `"1"` for true, `"0"` for false, null when unset (pure).
+
+    **Example**
+
+    ```hot
+    ::federal-register/significant-param(true)   // "1"
+    ::federal-register/significant-param(false)  // "0"
+    ::federal-register/significant-param(null)   // null
+    ```
+    """
 }
 fn (v: Bool?): Str? {
   cond {
@@ -47,7 +59,16 @@ fn (v: Bool?): Str? {
 
 page-params
 meta {
-    doc: """`per_page` (capped at 1000) and `page` from `opts`, omitted when unset (pure)."""
+    doc: """
+    `per_page` (capped at 1000) and `page` from `opts`, omitted when unset
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::federal-register/page-params({per-page: 5000, page: 2})  // {per_page: 1000, page: 2}
+    ```
+    """
 }
 fn (opts: Map): Map {
   size get(opts, "per-page")
@@ -68,6 +89,15 @@ meta {
     - `order`: `"relevance"`, `"newest"` or `"oldest"`
     - `fields`: a Vec of the fields to return
     - `per-page`, `page`
+
+    **Example**
+
+    ```hot
+    params ::federal-register/search-params({type: "rule", agencies: "financial-crimes-enforcement-network", significant: true})
+    get(params, "conditions[type][]")         // ["RULE"]
+    get(params, "conditions[agencies][]")     // ["financial-crimes-enforcement-network"]
+    get(params, "conditions[significant]")    // "1"
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -87,17 +117,23 @@ fn (opts: Map): Map {
   }
 }
 
-fr-get fn (path: Str, params: Map, opts: Map): Any {
+fr-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`)
 }
 
-fr-get-or-null fn (path: Str, params: Map, opts: Map): Any {
+fr-get-or-null
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   cfg ::api/resolve(opts)
   ::api/get-json-or-null(`${cfg.base-url}${path}${::api/query-string(params)}`)
 }
 
-fields-param fn (opts: Map): Map {
+fields-param
+meta {no-doc: true}
+fn (opts: Map): Map {
   {"fields[]": as-vec(get(opts, "fields"))}
 }
 
@@ -198,7 +234,16 @@ fn
 
 get-public-inspection
 meta {
-    doc: """One public inspection document by number, or null when there is none."""
+    doc: """
+    One public inspection document by number, or null when there is none.
+
+    **Example**
+
+    ```hot
+    doc ::federal-register/get-public-inspection("2026-18194")
+    if(is-null(doc), "not on inspection", doc.title)
+    ```
+    """
 }
 fn
 (number: Str): Map? {
@@ -265,7 +310,9 @@ fn (page: Any): Str? {
   }
 }
 
-collect-pages fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, opts: Map, limit: Int, acc: Vec): Vec {
   page fetch(opts)
   cond {
     // Not `if-ok`: a recursive call inside its lambda isn't in tail position.

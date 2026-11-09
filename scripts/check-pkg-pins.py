@@ -44,10 +44,7 @@ CI_CTX = PROJECT_ROOT / "hot" / "ci.ctx.hot"
 # Pins on an older version of a sibling, kept on purpose. Each entry is
 # (package directory, dependency, pinned version). The smoke test still
 # compiles these against the published version.
-ALLOWED_PINS = {
-    # The one exception when this check was added.
-    ("slack-admin", "hot.dev/slack", "1.1.0"),
-}
+ALLOWED_PINS: set[tuple[str, str, str]] = set()
 
 # The message `hot` gives when a pkg.hot.dev download fails for a reason
 # other than a missing version (see download_cdn_package in

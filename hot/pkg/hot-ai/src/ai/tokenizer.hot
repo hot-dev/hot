@@ -30,11 +30,16 @@ meta {
     ```hot
     ::tokenizer ::ai::tokenizer
 
-    opts ChatOptions({
-        chat-fn: ::openai/chat-with-tools,
+    // Any provider's tools-aware chat function fits here
+    chat-fn (model, messages, system, tools) {
+        ::ai::chat/ChatReply({text: "Hello", stop-reason: "end_turn"})
+    }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: chat-fn,
         model: "gpt-4o-mini",
         count-tokens-fn: ::tokenizer/count-messages,
-        max-context-tokens: 120_000,
+        max-context-tokens: 120000,
         warn-context-pct: 0.85
     })
     ```
@@ -71,6 +76,13 @@ meta {
     | `p50k_base`     | `text-davinci-002`, `text-davinci-003`, `code-*`    |
     | `p50k_edit`     | `text-davinci-edit-001`, `code-davinci-edit-001`    |
     | `r50k_base`     | `davinci`, `curie`, `babbage`, `ada`, `gpt2`        |
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/encoding-for-model("gpt-4o-mini")  // "o200k_base"
+    ::ai::tokenizer/encoding-for-model("claude-sonnet-4-5")  // null
+    ```
     """
 }
 fn cond (model: Str): Str? {
@@ -107,6 +119,13 @@ meta {
     to tokenize with. Cheap probe; useful when deciding whether to
     install `count-messages` as `count-tokens-fn` or fall back to a
     provider-native counter.
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/is-supported-model("gpt-4o-mini")  // true
+    ::ai::tokenizer/is-supported-model("claude-sonnet-4-5")  // false
+    ```
     """
 }
 fn (model: Str): Bool { is-some(encoding-for-model(model)) }
@@ -121,6 +140,12 @@ meta {
     Character-based token estimator (chars/4) used when no BPE
     encoding is known for the model. Tracks BPE tokenizers to within
     ~10% on English prose; code, JSON, and non-Latin text skew higher.
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/count-text-heuristic("hello")  // 2
+    ```
     """
 }
 fn (text: Str): Int {
@@ -140,6 +165,15 @@ meta {
 
     Pure (no IO, no allocation beyond the encode buffer); safe to call
     inside hot loops.
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/count("hello world", "gpt-4o-mini")  // 2
+
+    // No BPE encoding for this model, so chars/4
+    ::ai::tokenizer/count("hello", "claude-sonnet-4-5")  // 2
+    ```
     """
 }
 fn (text: Str, model: Str): Int {
@@ -154,6 +188,12 @@ meta {
     directly (e.g. `"o200k_base"`). Errors when `encoding` is unknown
     to the host runtime — use `::hot::internal::tokenizer/encodings`
     to enumerate what is supported.
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/count-with-encoding("hello world", "o200k_base")  // 2
+    ```
     """
 }
 fn (text: Str, encoding: Str): Int {
@@ -165,6 +205,12 @@ meta {
     doc: """
     The BPE encoding names this runtime can tokenize with. Thin
     pass-through over `::hot::internal::tokenizer/encodings`.
+
+    **Example**
+
+    ```hot
+    in("o200k_base", ::ai::tokenizer/supported-encodings())  // true
+    ```
     """
 }
 fn (): Vec<Str> {
@@ -207,6 +253,12 @@ meta {
     tool-calls?, tool-call-id?}`), inclusive of a fixed per-message
     overhead. Uses the BPE tokenizer when an encoding is known for
     `model`; falls back to the heuristic otherwise.
+
+    **Example**
+
+    ```hot
+    ::ai::tokenizer/count-message({role: "user", content: "Hi"}, "claude-sonnet-4-5")  // 6
+    ```
     """
 }
 fn (m: Map, model: Str): Int {
@@ -222,11 +274,14 @@ meta {
     directly:
 
     ```hot
-    opts ChatOptions({
-        chat-fn: ::openai/chat-with-tools,
+    ::ai::tokenizer/count-messages([{role: "user", content: "Hi"}], "claude-sonnet-4-5")  // 6
+
+    // As the counter for a run
+    opts ::ai::chat/ChatOptions({
         model: "gpt-4o-mini",
         count-tokens-fn: ::ai::tokenizer/count-messages
     })
+    opts.model  // "gpt-4o-mini"
     ```
 
     For OpenAI-family models the result is within a few tokens of the

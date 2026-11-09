@@ -2,7 +2,7 @@
 
 hot.pkg.microsoft-excel {
   name: "hot.dev/microsoft-excel",
-  version: "0.1.0",
+  version: "0.1.1",
   hot-min-version: "3.0.2",
   description: "Excel workbook bindings for Hot over Microsoft Graph: worksheets, cell ranges (values, formulas, used range, clear), tables and rows, rows as records, workbook sessions and recalculation, for workbooks in OneDrive and SharePoint.",
   author: "Hot Dev",
@@ -10,8 +10,8 @@ hot.pkg.microsoft-excel {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/microsoft-graph": "0.1.1",
-    "hot.dev/microsoft-onedrive": "0.1.1"
+    "hot.dev/microsoft-graph": "0.1.2",
+    "hot.dev/microsoft-onedrive": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

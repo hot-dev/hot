@@ -83,7 +83,9 @@ type {
     url: Str
 }
 
-present fn (v: Any): Bool {
+present
+meta {no-doc: true}
+fn (v: Any): Bool {
   match v {
     Null => { false }
     Str => { not(is-empty(trim(v))) }
@@ -93,7 +95,15 @@ present fn (v: Any): Bool {
 
 clean-list
 meta {
-    doc: """Trim strings, drop blanks and duplicates, keep the first-seen order."""
+    doc: """
+    Trim strings, drop blanks and duplicates, keep the first-seen order.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions/clean-list([" Iran ", "Iran", "", null, "Syria"])  // ["Iran", "Syria"]
+    ```
+    """
 }
 fn (values: Vec): Vec<Str> {
   distinct(map(filter(values, present), (v) { trim(Str(v)) }))
@@ -101,13 +111,23 @@ fn (values: Vec): Vec<Str> {
 
 other-names
 meta {
-    doc: """Cleaned aliases without the primary name, ignoring case."""
+    doc: """
+    Cleaned aliases without the primary name, ignoring case.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions/other-names(["Jane Roe", "JANE ROE", "J. Roe"], "Jane Roe")  // ["J. Roe"]
+    ```
+    """
 }
 fn (aliases: Vec, name: Str): Vec<Str> {
   filter(clean-list(aliases), (a) { ne(lowercase(a), lowercase(name)) })
 }
 
-blank-to-null fn (v: Any): Str? {
+blank-to-null
+meta {no-doc: true}
+fn (v: Any): Str? {
   if(present(v), trim(Str(v)), null)
 }
 
@@ -120,7 +140,9 @@ MONTHS {
   jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12"
 }
 
-pad2 fn (s: Str): Str {
+pad2
+meta {no-doc: true}
+fn (s: Str): Str {
   if(eq(length(s), 1), `0${s}`, s)
 }
 
@@ -175,12 +197,16 @@ fn (raw: Str?): Str? {
   }
 }
 
-full-name fn (name: Str): Str {
+full-name
+meta {no-doc: true}
+fn (name: Str): Str {
   parts filter(map(["Name1", "Name2", "Name3", "Name4", "Name5", "Name6"], (t) { ::sx/text(name, t) }), is-some)
   join(parts, " ")
 }
 
-kind fn (raw: Str?): Str {
+kind
+meta {no-doc: true}
+fn (raw: Str?): Str {
   t lowercase(or(raw, ""))
   cond {
     eq(t, "individual") => { "individual" }
@@ -189,14 +215,29 @@ kind fn (raw: Str?): Str {
   }
 }
 
-address-line fn (address: Str): Str {
+address-line
+meta {no-doc: true}
+fn (address: Str): Str {
   tags ["AddressLine1", "AddressLine2", "AddressLine3", "AddressLine4", "AddressLine5", "AddressLine6", "AddressPostalCode", "AddressCountry"]
   join(filter(map(tags, (t) { ::sx/text(address, t) }), is-some), ", ")
 }
 
 parse-designation
 meta {
-    doc: """Turn one `<Designation>` record string into a `Designation`. Exposed for testing."""
+    doc: """
+    Turn one `<Designation>` record string into a `Designation`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    record "<Designation><UniqueID>AFG0007</UniqueID><Names><Name><Name1>Jane</Name1><Name6>ROE</Name6><NameType>Primary Name</NameType></Name><Name><Name6>J Roe</Name6><NameType>Alias</NameType></Name></Names><IndividualEntityShip>Individual</IndividualEntityShip></Designation>"
+    d ::uk::sanctions/parse-designation(record)
+    d.name  // "Jane ROE"
+    d.kind  // "individual"
+    d.aliases  // ["J Roe"]
+    ```
+    """
 }
 fn (record: Str): Designation {
   names map(::sx/blocks(::sx/block(record, "Names"), "Name"), (n) {
@@ -230,20 +271,43 @@ fn (record: Str): Designation {
 
 parse
 meta {
-    doc: """Parse the whole UK Sanctions List XML into `Designation` records (pure). Records without a name or id are skipped."""
+    doc: """
+    Parse the whole UK Sanctions List XML into `Designation` records (pure).
+    Records without a name or id are skipped.
+
+    **Example**
+
+    ```hot
+    file "<Designations><Designation><UniqueID>CYB0001</UniqueID><Names><Name><Name6>Acme Trading</Name6><NameType>Primary Name</NameType></Name></Names><IndividualEntityShip>Entity</IndividualEntityShip></Designation></Designations>"
+    map(::uk::sanctions/parse(file), (d) { d.name })  // ["Acme Trading"]
+    ```
+    """
 }
 fn (doc: Str): Vec<Designation> {
   entries map(::sx/records(doc, "Designation"), parse-designation)
   filter(entries, (e) { and(not(is-empty(e.id)), not(is-empty(e.name))) })
 }
 
-version-of fn (info: Map): Str? {
+version-of
+meta {no-doc: true}
+fn (info: Map): Str? {
   or(info.etag, info.last-modified)
 }
 
 require-entries
 meta {
-    doc: """The parsed records, or an Err when there are none: a changed file format can parse to nothing, and an empty list must not pass for a list with nobody on it."""
+    doc: """
+    The parsed records, or an Err when there are none: a changed file format
+    can parse to nothing, and an empty list must not pass for a list with
+    nobody on it.
+
+    **Example**
+
+    ```hot
+    ::uk::sanctions/require-entries([{id: "AFG0007"}])  // [{id: "AFG0007"}]
+    is-err(::uk::sanctions/require-entries([]))  // true
+    ```
+    """
 }
 fn (entries: Vec): Vec {
   cond {

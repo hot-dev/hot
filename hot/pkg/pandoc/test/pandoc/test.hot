@@ -154,3 +154,51 @@ meta ["test"] fn () {
     assert-eq("small", opts.size)
     assert-eq(1, length(opts.extra-args))
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::pandoc/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::pandoc/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::pandoc/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::pandoc/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::pandoc/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::pandoc/shell-quote("a\nb"))
+    assert-eq("''", ::pandoc/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::pandoc/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::pandoc/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::pandoc/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::pandoc/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::pandoc/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::pandoc/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::pandoc/file-ext("hot://uploads/a.x y"))
+}

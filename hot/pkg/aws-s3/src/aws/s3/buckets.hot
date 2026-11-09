@@ -40,13 +40,17 @@ HeadBucketResponse type {
 }
 
 // Text of a child element, or null when it's absent
-child-text fn (elem: Any, name: Str): Str? {
+child-text
+meta {no-doc: true}
+fn (elem: Any, name: Str): Str? {
     child ::xml/child(elem, name)
     if(is-null(child), null, ::xml/text(child))
 }
 
 // Parse the ListAllMyBucketsResult XML
-parse-list-buckets-response fn (xml-str: Str): ListBucketsResponse {
+parse-list-buckets-response
+meta {no-doc: true}
+fn (xml-str: Str): ListBucketsResponse {
     root ::xml/from-xml(xml-str)
     owner ::xml/child(root, "Owner")
     buckets ::xml/child(root, "Buckets")

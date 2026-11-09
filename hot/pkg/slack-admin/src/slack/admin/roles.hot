@@ -38,6 +38,15 @@ meta {
 
     Scope: `admin.roles:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `list-assignments-all`.
+
+    **Example**
+
+    ```hot
+    ::roles ::slack::admin::roles
+
+    page ::roles/list-assignments(::roles/ListAssignmentsRequest({role_ids: ["Rl0123ABCDEF"], limit: 100}))
+    page.role_assignments
+    ```
     """
 }
 fn
@@ -54,7 +63,18 @@ fn
 list-assignments-all
 meta {
     doc: """
-    Every `role_assignments` entry from `admin.roles.listAssignments`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `role_assignments` entry from `admin.roles.listAssignments`,
+    following `next_cursor` until the last page or `max-items` (default
+    1000). `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::roles ::slack::admin::roles
+
+    assignments ::roles/list-assignments-all(::roles/ListAssignmentsRequest({entity_ids: ["T0123ABCDEF"]}), 500)
+    length(assignments)
+    ```
     """
 }
 fn
@@ -83,6 +103,16 @@ meta {
     admin.roles.addAssignments - Assign a role to users on the given entities. Partial failures come back in `rejected_users` / `rejected_entities`.
 
     Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::roles ::slack::admin::roles
+
+    res ::roles/add-assignments(::roles/AddAssignmentsRequest({role_id: "Rl0123ABCDEF", entity_ids: ["T0123ABCDEF"], user_ids: ["U0123ABCDEF"]}))
+    res.rejected_users
+    res.rejected_entities
+    ```
     """
 }
 fn
@@ -105,6 +135,14 @@ meta {
     admin.roles.removeAssignments - Remove a role from users on the given entities.
 
     Scope: `admin.roles:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::roles ::slack::admin::roles
+
+    ::roles/remove-assignments(::roles/RemoveAssignmentsRequest({role_id: "Rl0123ABCDEF", entity_ids: ["T0123ABCDEF"], user_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn

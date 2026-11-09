@@ -21,7 +21,7 @@ meta {
     ```hot
     ::oauth ::dropbox::oauth
 
-    verifier ::oauth/pkce-verifier()
+    verifier ::oauth2/pkce-verifier()
     url ::oauth/authorize-url("abc123appkey", "https://app.example.com/oauth/dropbox", "csrf-123", {
       code-verifier: verifier,
       scope: ["files.metadata.read", "files.content.read"]
@@ -46,7 +46,17 @@ REVOKE_PATH "/auth/token/revoke"
 
 scope-str
 meta {
-    doc: """A scope value as Dropbox wants it (space-separated): a Vec is joined, a Str is passed through with commas turned into spaces, null stays null."""
+    doc: """
+    A scope value as Dropbox wants it (space-separated): a Vec is joined, a
+    Str is passed through with commas turned into spaces, null stays null.
+
+    **Example**
+
+    ```hot
+    ::dropbox::oauth/scope-str(["files.content.read", "sharing.write"])  // "files.content.read sharing.write"
+    ::dropbox::oauth/scope-str("files.content.read,sharing.write")  // "files.content.read sharing.write"
+    ```
+    """
 }
 fn (scope: Any): Str? {
   cond {
@@ -59,7 +69,16 @@ fn (scope: Any): Str? {
 
 bool-param
 meta {
-    doc: """A Bool option as a query value: `"true"`, `"false"`, or null when unset."""
+    doc: """
+    A Bool option as a query value: `"true"`, `"false"`, or null when unset.
+
+    **Example**
+
+    ```hot
+    ::dropbox::oauth/bool-param(true)  // "true"
+    ::dropbox::oauth/bool-param(null)  // null
+    ```
+    """
 }
 fn (value: Any): Str? {
   cond {
@@ -87,6 +106,13 @@ meta {
     - `require-role` - `"personal"` or `"work"`
     - `locale` - e.g. `"de"`
     - `extra` - any other parameters, merged last
+
+    **Example**
+
+    ```hot
+    built ::dropbox::oauth/build-authorize-params({scope: ["files.content.read"], locale: "de"})
+    built.params  // {token_access_type: "offline", scope: "files.content.read", locale: "de"}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -149,6 +175,20 @@ meta {
     `::dropbox::auth/TokenError`. The tokens are marked as secrets.
     `app-secret` may be null for a PKCE flow; `redirect-uri` must match the one sent to `authorize-url`
     (null when none was). `opts.code-verifier` completes a PKCE flow.
+
+    **Example**
+
+    ```hot
+    redirect "https://app.example.com/oauth/dropbox"
+    tokens ::dropbox::oauth/exchange-code("abc123appkey", ::hot::ctx/get("dropbox.app.secret"), "code-from-query", redirect)
+    tokens.refresh_token
+
+    // PKCE: no app secret, send the verifier from the authorize step
+    pkce ::dropbox::oauth/exchange-code("abc123appkey", null, "code-from-query", redirect, {
+      code-verifier: ::hot::ctx/get("oauth.pkce.verifier")
+    })
+    pkce.account_id
+    ```
     """
 }
 fn
@@ -169,7 +209,18 @@ fn
 
 refresh-access-token
 meta {
-    doc: """Exchange a refresh token for a fresh access token (no cache). Returns the token response or a `TokenError`; a revoked refresh token yields `error-code: "invalid_grant"`, so ask the user to connect again."""
+    doc: """
+    Exchange a refresh token for a fresh access token (no cache). Returns
+    the token response or a `TokenError`; a revoked refresh token yields
+    `error-code: "invalid_grant"`, so ask the user to connect again.
+
+    **Example**
+
+    ```hot
+    tokens ::dropbox::oauth/refresh-access-token("abc123appkey", ::hot::ctx/get("dropbox.app.secret"), ::hot::ctx/get("dropbox.refresh.token"))
+    tokens.access_token
+    ```
+    """
 }
 fn (app-key: Str, app-secret: Str?, refresh-token: Str): Map {
   ::auth/refresh-token-grant(app-key, if(::dropbox/is-blank(app-secret), null, app-secret), refresh-token)
@@ -183,6 +234,13 @@ meta {
     minted from it, so this is how an app disconnects a user. Pass a
     fresh access token (mint one with `refresh-access-token` when you
     only stored the refresh token). Returns true, or a `TokenError`.
+
+    **Example**
+
+    ```hot
+    // Disconnect this user: revokes the refresh token too
+    ::dropbox::oauth/revoke-token(::dropbox::auth/access-token())
+    ```
     """
 }
 fn (access-token: Str): Bool {
@@ -202,7 +260,15 @@ fn (access-token: Str): Bool {
 
 granted-scopes
 meta {
-    doc: """The scopes a token response says were granted (`scope` split on spaces)."""
+    doc: """
+    The scopes a token response says were granted (`scope` split on spaces).
+
+    **Example**
+
+    ```hot
+    ::dropbox::oauth/granted-scopes({scope: "files.content.read sharing.write"})  // ["files.content.read", "sharing.write"]
+    ```
+    """
 }
 fn (tokens: Map): Vec {
   filter(split(or(tokens.scope, ""), " "), (s) { not(is-empty(s)) })
@@ -210,7 +276,16 @@ fn (tokens: Map): Vec {
 
 missing-scopes
 meta {
-    doc: """The `required` scopes (Vec or space/comma separated Str) that a token response did not grant. Empty when everything was granted."""
+    doc: """
+    The `required` scopes (Vec or space/comma separated Str) that a token
+    response did not grant. Empty when everything was granted.
+
+    **Example**
+
+    ```hot
+    ::dropbox::oauth/missing-scopes({scope: "files.content.read"}, ["files.content.read", "sharing.write"])  // ["sharing.write"]
+    ```
+    """
 }
 fn (tokens: Map, required: Str | Vec): Vec {
   granted granted-scopes(tokens)

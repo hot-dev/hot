@@ -69,7 +69,9 @@ type {
 // Connect / auth
 // ---------------------------------------------------------------------------
 
-write-packet fn (socket, seq: Int, payload: Bytes): Any {
+write-packet
+meta {no-doc: true}
+fn (socket, seq: Int, payload: Bytes): Any {
     framed ::wire/frame(seq, payload)
     match framed {
         Result.Err => { err(framed) }
@@ -80,7 +82,9 @@ write-packet fn (socket, seq: Int, payload: Bytes): Any {
 
 // The post-handshake-response auth conversation. Recursive: the server
 // may send AuthSwitchRequest (0xFE) or AuthMoreData (0x01) before OK.
-auth-loop fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
+auth-loop
+meta {no-doc: true}
+fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
     packet ::wire/read-packet(socket)
     match packet {
         Result.Err => { err(packet) }
@@ -147,6 +151,21 @@ meta {
     Connect and authenticate. Returns a connection (pass it to
     `query`/`execute`/`close`), or an Err carrying
     `{code, sqlstate, message}` for server-reported failures.
+
+    **Example**
+
+    ```hot
+    conn ::mysql/connect({
+      host: "db.internal",
+      user: "app",
+      password: ::hot::ctx/get("mysql.password"),
+      database: "shop",
+      ssl: true,
+      tls: {ca-pem: ::hot::ctx/get("mysql.ca.pem")}
+    })
+    conn.server-version
+    ::mysql/close(conn)
+    ```
     """
 }
 fn (options: MySqlOptions | Map): Any {
@@ -185,7 +204,9 @@ fn (options: MySqlOptions | Map): Any {
     }
 }
 
-finish-connect fn (socket, handshake: Map, user: Str, password: Str, database: Str, use-ssl: Bool, tls-options: Any): Any {
+finish-connect
+meta {no-doc: true}
+fn (socket, handshake: Map, user: Str, password: Str, database: Str, use-ssl: Bool, tls-options: Any): Any {
     upgraded cond {
         use-ssl => {
             sent write-packet(socket, 1, ::auth/ssl-request(not(is-empty(database))))
@@ -232,7 +253,9 @@ finish-connect fn (socket, handshake: Map, user: Str, password: Str, database: S
 // Result sets
 // ---------------------------------------------------------------------------
 
-read-columns fn (socket, remaining: Int, acc: Vec): Any {
+read-columns
+meta {no-doc: true}
+fn (socket, remaining: Int, acc: Vec): Any {
     cond {
         eq(remaining, 0) => {
             // The EOF packet that terminates the column definitions.
@@ -254,7 +277,9 @@ read-columns fn (socket, remaining: Int, acc: Vec): Any {
     }
 }
 
-read-rows fn (socket, cols: Vec, binary: Bool, acc: Vec): Any {
+read-rows
+meta {no-doc: true}
+fn (socket, cols: Vec, binary: Bool, acc: Vec): Any {
     packet ::wire/read-packet(socket)
     cond {
         is-err(packet) => { packet }
@@ -271,7 +296,9 @@ read-rows fn (socket, cols: Vec, binary: Bool, acc: Vec): Any {
     }
 }
 
-read-result-set fn (socket, binary: Bool): Any {
+read-result-set
+meta {no-doc: true}
+fn (socket, binary: Bool): Any {
     packet ::wire/read-packet(socket)
     cond {
         is-err(packet) => { packet }
@@ -307,14 +334,18 @@ read-result-set fn (socket, binary: Bool): Any {
 TYPE-VAR-STRING 253
 TYPE-BLOB 252
 
-encode-param-type fn (value: Any): Bytes {
+encode-param-type
+meta {no-doc: true}
+fn (value: Any): Bytes {
     cond {
         is-bytes(value) => { Bytes([TYPE-BLOB, 0]) }
         => { Bytes([TYPE-VAR-STRING, 0]) }
     }
 }
 
-encode-param-value fn (value: Any): Bytes {
+encode-param-value
+meta {no-doc: true}
+fn (value: Any): Bytes {
     cond {
         is-null(value) => { Bytes([]) }
         is-bytes(value) => { ::wire/lenenc-bytes(value) }
@@ -324,7 +355,9 @@ encode-param-value fn (value: Any): Bytes {
     }
 }
 
-null-bitmap fn (params: Vec): Bytes {
+null-bitmap
+meta {no-doc: true}
+fn (params: Vec): Bytes {
     n length(params)
     len Int(floor(div(add(n, 7), 8)))
     reduce(::hot::iter/range(0, len), (acc, byte-idx) {
@@ -341,6 +374,7 @@ null-bitmap fn (params: Vec): Bytes {
 
 stmt-execute-payload
 meta {
+    no-doc: true,
     doc: """Build the COM_STMT_EXECUTE payload for a statement id and params. Exposed for testing."""
 }
 fn (stmt-id: Int, params: Vec): Bytes {
@@ -361,7 +395,9 @@ fn (stmt-id: Int, params: Vec): Bytes {
 
 // Prepare, execute, close — one round trip per call. Statement caching
 // can come later; correctness first.
-run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
+run-prepared
+meta {no-doc: true}
+fn (conn: Map, sql: Str, params: Vec): Any {
     socket conn.socket
     sent write-packet(socket, 0, concat(::wire/int1(COM-STMT-PREPARE), Bytes(sql)))
     match sent {
@@ -400,7 +436,9 @@ run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
 // Everything between a successful COM_STMT_PREPARE and the COM_STMT_CLOSE
 // that run-prepared always sends: drain metadata, check arity, execute,
 // read the result set.
-execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, params: Vec): Any {
+execute-prepared
+meta {no-doc: true}
+fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, params: Vec): Any {
     params-drained drain-defs(socket, num-params)
     match params-drained {
         Result.Err => { err(params-drained) }
@@ -425,7 +463,9 @@ execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, param
     }
 }
 
-drain-defs fn (socket, remaining: Int): Any {
+drain-defs
+meta {no-doc: true}
+fn (socket, remaining: Int): Any {
     cond {
         eq(remaining, 0) => { true }
         => {
@@ -446,7 +486,9 @@ drain-defs fn (socket, remaining: Int): Any {
     }
 }
 
-drain-packets fn (socket, remaining: Int): Any {
+drain-packets
+meta {no-doc: true}
+fn (socket, remaining: Int): Any {
     cond {
         eq(remaining, 0) => { true }
         => {
@@ -482,8 +524,10 @@ meta {
     **Example**
 
     ```hot
+    conn ::mysql/connect({host: "localhost", user: "app", password: ::hot::ctx/get("mysql.password"), database: "shop"})
     rows ::mysql/query(conn, "SELECT id, name FROM users WHERE active = ?", [true])
     first(rows).name
+    ::mysql/close(conn)
     ```
     """
 }
@@ -523,6 +567,24 @@ meta {
     Run a statement (INSERT/UPDATE/DELETE/DDL). Returns
     `{command, rows-affected, last-insert-id}` or an Err. With params,
     uses the binary prepared-statement protocol.
+
+    **Example**
+
+    ```hot
+    conn ::mysql/connect({
+      host: "db.internal",
+      user: "app",
+      password: ::hot::ctx/get("mysql.password"),
+      database: "shop"
+    })
+
+    updated ::mysql/execute(conn, "UPDATE orders SET status = ? WHERE id = ?", ["shipped", 42])
+    updated.rows-affected
+
+    // No params: the text protocol
+    ::mysql/execute(conn, "DELETE FROM carts WHERE expired = 1")
+    ::mysql/close(conn)
+    ```
     """
 }
 fn
@@ -560,7 +622,9 @@ fn
 }
 
 // Callers must guard: an Err argument would halt before the body runs.
-execute-result fn (result: Any, sql: Str): Any {
+execute-result
+meta {no-doc: true}
+fn (result: Any, sql: Str): Any {
     cond {
         is-null(result.ok) => { {command: command-word(sql), rows-affected: 0, last-insert-id: 0} }
         => {
@@ -573,12 +637,31 @@ execute-result fn (result: Any, sql: Str): Any {
     }
 }
 
-command-word fn (sql: Str): Str {
+command-word
+meta {no-doc: true}
+fn (sql: Str): Str {
     ::hot::str/uppercase(first(split(::hot::str/trim(sql), " ")))
 }
 
 close
-meta {doc: """Send COM_QUIT and close the socket. Safe to call more than once."""}
+meta {
+    doc: """
+    Send COM_QUIT and close the socket. Safe to call more than once.
+
+    **Example**
+
+    ```hot
+    conn ::mysql/connect({
+      host: "db.internal",
+      user: "app",
+      password: ::hot::ctx/get("mysql.password"),
+      database: "shop"
+    })
+    ::mysql/query(conn, "SELECT 1")
+    ::mysql/close(conn)
+    ```
+    """
+}
 fn (conn: Map): Bool {
     written write-packet(conn.socket, 0, ::wire/int1(COM-QUIT))
     closed ::tcp/close(conn.socket)

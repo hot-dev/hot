@@ -55,7 +55,9 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
-github-response fn (response: HttpResponse): GitHubResponse {
+github-response
+meta {no-doc: true}
+fn (response: HttpResponse): GitHubResponse {
   GitHubResponse({
     status: response.status,
     headers: or(response.headers, {}),
@@ -65,7 +67,18 @@ github-response fn (response: HttpResponse): GitHubResponse {
 
 present
 meta {
-    doc: """`value` with surrounding whitespace removed when it's a Str, null when it's blank or null. Ids may be Ints and pass through."""
+    doc: """
+    `value` with surrounding whitespace removed when it's a Str, null when
+    it's blank or null. Ids may be Ints and pass through.
+
+    **Example**
+
+    ```hot
+    ::github::api/present("  acme  ")  // "acme"
+    ::github::api/present("   ")  // null
+    ::github::api/present(42)  // 42
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -81,7 +94,18 @@ CREDENTIAL_KEYS ["token", "app-id", "private-key", "installation-id"]
 
 blank-credential
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an error, never a fallback to context: a tenant whose key is missing must not run on the project's credentials."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an error, never a fallback to context: a tenant
+    whose key is missing must not run on the project's credentials.
+
+    **Example**
+
+    ```hot
+    ::github::api/blank-credential({token: ""}, ["token", "app-id"])  // "token"
+    ::github::api/blank-credential({token: "test-token"}, ["token", "app-id"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-null(present(get(opts, name)))) })
@@ -89,7 +113,19 @@ fn (opts: Map, names: Vec): Str? {
 
 settings-from
 meta {
-    doc: """The non-credential settings of a call (pure): `{base-url, api-version}` from `opts`, else the package defaults. `base-url` loses any trailing slash."""
+    doc: """
+    The non-credential settings of a call (pure): `{base-url, api-version}`
+    from `opts`, else the package defaults. `base-url` loses any trailing
+    slash.
+
+    **Example**
+
+    ```hot
+    settings ::github::api/settings-from({base-url: "https://ghe.example.com/api/v3/"})
+    settings.base-url  // "https://ghe.example.com/api/v3"
+    settings.api-version  // "2026-03-10"
+    ```
+    """
 }
 fn (opts: Map): Map {
   base-url or(present(get(opts, "base-url")), ::github/BASE_URL)
@@ -110,6 +146,14 @@ meta {
     token. An Err when there is no credential, the App identity is
     incomplete, a credential key in `opts` is blank or null, or `opts` has
     `base-url` without a credential. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::github::api/resolve-from({token: "test-token"}, {}).token  // "test-token"
+    ::github::api/resolve-from({}, {"github.token": "ctx-token"}).token  // "ctx-token"
+    is-err(::github::api/resolve-from({token: ""}, {"github.token": "ctx-token"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -174,7 +218,20 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). `additional-headers` win over the defaults, and a `""` body sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`).
+    `additional-headers` win over the defaults, and a `""` body sends no
+    `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    resolved {token: "test-token", base-url: "https://api.github.com", api-version: "2026-03-10"}
+    req ::github::api/build-request("GET", "/user", {}, "", resolved)
+    req.url  // "https://api.github.com/user"
+    req.headers.Authorization  // "Bearer test-token"
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
   default-headers {
@@ -238,7 +295,9 @@ fn
   }
 }
 
-json-response-body fn (response: HttpResponse): Any {
+json-response-body
+meta {no-doc: true}
+fn (response: HttpResponse): Any {
   match response.status {
     204 | 205 => { null }
     => { response.body }
@@ -251,6 +310,19 @@ meta {
     Like `json`, but preserve successful response metadata as
     `GitHubResponse({status, headers, data})`. Use this when an agent needs
     pagination links, request ids, or rate-limit headers.
+
+    **Example**
+
+    ```hot
+    ::api ::github::api
+
+    page ::api/json-response("GET", "/repos/acme/api/issues?per_page=100")
+    length(page.data)
+    get(page.headers, "x-ratelimit-remaining")
+
+    // Walk to the following page, or null on the last one
+    ::api/next-page(page)
+    ```
     """
 }
 fn
@@ -286,7 +358,22 @@ fn
 
 json
 meta {
-    doc: """Like `request`, but unwraps: returns the decoded JSON body on 2xx, null for a no-content response, or an Err carrying `HttpError`. The shape used by all github endpoint functions."""
+    doc: """
+    Like `request`, but unwraps: returns the decoded JSON body on 2xx, null
+    for a no-content response, or an Err carrying `HttpError`. The shape
+    used by all github endpoint functions.
+
+    **Example**
+
+    ```hot
+    me ::github::api/json("GET", "/user")
+    me.login
+
+    // A POST with a JSON body, for one tenant
+    issue ::github::api/json("POST", "/repos/acme/api/issues", {}, {title: "Timeout"}, {token: ::hot::ctx/get("acme.github-token")})
+    issue.number
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
@@ -324,6 +411,14 @@ meta {
     doc: """
     Extract one relation URL (for example `"next"`) from a GitHub `link`
     response header. Returns null when the relation is absent.
+
+    **Example**
+
+    ```hot
+    headers {link: `<https://api.github.com/repos/acme/api/issues?page=9>; rel="last"`}
+    ::github::api/link-url(headers, "last")  // "https://api.github.com/repos/acme/api/issues?page=9"
+    ::github::api/link-url(headers, "next")  // null
+    ```
     """
 }
 fn (headers: Map, relation: Str): Str? {
@@ -347,6 +442,14 @@ meta {
     Return the relative API path from a GitHub response's `rel="next"` link,
     or null on the final page. Rejects pagination links outside `base-url`
     (api.github.com by default).
+
+    **Example**
+
+    ```hot
+    headers {link: `<https://api.github.com/repos/acme/api/issues?page=2>; rel="next"`}
+    ::github::api/next-page-path(headers)  // "/repos/acme/api/issues?page=2"
+    ::github::api/next-page-path({})  // null
+    ```
     """
 }
 fn
@@ -368,15 +471,21 @@ fn
 }
 
 // `auth` is null (context), an explicit token Str, or an opts Map.
-auth-base-url fn (auth: Any): Str {
+auth-base-url
+meta {no-doc: true}
+fn (auth: Any): Str {
   if(is-map(auth), settings-from(auth).base-url, ::github/BASE_URL)
 }
 
-fetch-page fn (path: Str, auth: Any): GitHubResponse {
+fetch-page
+meta {no-doc: true}
+fn (path: Str, auth: Any): GitHubResponse {
   if(is-null(auth), json-response("GET", path), json-response("GET", path, {}, "", auth))
 }
 
-next-page-with-token fn (response: GitHubResponse, auth: Any): GitHubResponse? {
+next-page-with-token
+meta {no-doc: true}
+fn (response: GitHubResponse, auth: Any): GitHubResponse? {
   path next-page-path(response.headers, auth-base-url(auth))
   cond {
     is-err(path) => { path }
@@ -392,6 +501,16 @@ meta {
     response's metadata. Returns null when the supplied page is the last one.
     Pass an explicit token or the same `opts` Map as the second argument when
     the first page used one. A pagination link outside the API root is an Err.
+
+    **Example**
+
+    ```hot
+    ::api ::github::api
+
+    first-page ::api/json-response("GET", "/repos/acme/api/pulls?per_page=100")
+    second-page ::api/next-page(first-page)
+    if(is-null(second-page), [], second-page.data)
+    ```
     """
 }
 fn
@@ -405,7 +524,9 @@ fn
   next-page-with-token(response, opts)
 }
 
-collect-list-pages fn (path: Str, accumulated: Vec, auth: Any): Vec {
+collect-list-pages
+meta {no-doc: true}
+fn (path: Str, accumulated: Vec, auth: Any): Vec {
   page fetch-page(path, auth)
   cond {
     is-err(page) => { page }
@@ -435,6 +556,17 @@ meta {
     GitHub's `link` header serially. Prefer manual `json-response`/`next-page`
     when the result may be very large. Pass an explicit token or an `opts` Map
     as the second argument for a per-call identity.
+
+    **Example**
+
+    ```hot
+    issues ::github::api/paginate-list("/repos/acme/api/issues?state=all&per_page=100")
+    length(issues)
+
+    // For one tenant
+    pulls ::github::api/paginate-list("/repos/acme/api/pulls?per_page=100", {token: ::hot::ctx/get("acme.github-token")})
+    map(pulls, %.number)
+    ```
     """
 }
 fn
@@ -448,7 +580,9 @@ fn
   collect-list-pages(path, [], opts)
 }
 
-collect-key-pages fn (path: Str, key: Str, accumulated: Vec, auth: Any): Vec {
+collect-key-pages
+meta {no-doc: true}
+fn (path: Str, key: Str, accumulated: Vec, auth: Any): Vec {
   page fetch-page(path, auth)
   cond {
     is-err(page) => { page }
@@ -477,6 +611,13 @@ meta {
     Fetch every page for an endpoint whose item Vec is nested under `key`,
     such as `"check_runs"` or `"items"`. Pass an explicit token or an `opts`
     Map as the third argument for a per-call identity.
+
+    **Example**
+
+    ```hot
+    checks ::github::api/paginate-key("/repos/acme/api/commits/main/check-runs?per_page=100", "check_runs")
+    map(checks, %.name)
+    ```
     """
 }
 fn
@@ -496,6 +637,13 @@ meta {
     Return a response's decoded body, falling back to its wire bytes when the
     transport has no decoded body. Text logs remain Str values while binary
     archives remain Bytes.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({status: 200, headers: {}, body: "log text"})
+    ::github::api/response-body(response)  // "log text"
+    ```
     """
 }
 fn (response: HttpResponse): Any {
@@ -512,6 +660,13 @@ meta {
     Returns the downloaded text or Bytes on 2xx, and an Err carrying
     `HttpError` otherwise. The HTTP transport follows GitHub's temporary
     redirect for Actions logs and artifacts.
+
+    **Example**
+
+    ```hot
+    log ::github::api/download("/repos/acme/api/actions/jobs/9876543210/logs")
+    length(log)
+    ```
     """
 }
 fn

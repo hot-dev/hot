@@ -49,7 +49,17 @@ fn (params: Map, opts: Map): Map {
 
 get-ach-transfer
 meta {
-    doc: """GET /ach_transfers/{id}: retrieve an ACH Transfer."""
+    doc: """
+    GET /ach_transfers/{id}: retrieve an ACH Transfer.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::ach-transfers/get-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    transfer.amount
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -61,7 +71,19 @@ fn
 
 list-ach-transfers
 meta {
-    doc: """GET /ach_transfers: one page of ACH Transfers (`{data, next_cursor}`). Filters: `account_id`, `external_account_id`, `"status.in"`, `idempotency_key`, `created_at: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`."""
+    doc: """
+    GET /ach_transfers: one page of ACH Transfers (`{data, next_cursor}`).
+    Filters: `account_id`, `external_account_id`, `"status.in"`,
+    `idempotency_key`, `created_at: {after, before, on_or_after,
+    on_or_before}`, `limit`, `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::ach-transfers/list-ach-transfers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["pending_approval"], limit: 25})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -76,7 +98,20 @@ fn
 
 approve-ach-transfer
 meta {
-    doc: """POST /ach_transfers/{id}/approve: approve an ACH Transfer in `pending_approval`. Approving releases the transfer to be sent: agents must not approve on their own; leave it to a person (in the Increase dashboard, or through your own approval step that calls this)."""
+    doc: """
+    POST /ach_transfers/{id}/approve: approve an ACH Transfer in
+    `pending_approval`. Approving releases the transfer to be sent: agents
+    must not approve on their own; leave it to a person (in the Increase
+    dashboard, or through your own approval step that calls this).
+
+    **Example**
+
+    ```hot
+    // Call this from a person's approval step, never from an agent.
+    transfer ::increase::ach-transfers/approve-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {
@@ -88,7 +123,17 @@ fn
 
 cancel-ach-transfer
 meta {
-    doc: """POST /ach_transfers/{id}/cancel: cancel an ACH Transfer that is still `pending_approval`."""
+    doc: """
+    POST /ach_transfers/{id}/cancel: cancel an ACH Transfer that is still
+    `pending_approval`.
+
+    **Example**
+
+    ```hot
+    transfer ::increase::ach-transfers/cancel-ach-transfer("ach_transfer_uoxatyh3lt5evrsdvo7q")
+    transfer.status
+    ```
+    """
 }
 fn
 (transfer-id: Str): Map {

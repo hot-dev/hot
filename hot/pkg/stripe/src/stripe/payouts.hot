@@ -45,7 +45,19 @@ fn
 
 get-payout
 meta {
-    doc: """GET /v1/payouts/{payout} - Retrieve a payout by ID."""
+    doc: """
+    GET /v1/payouts/{payout} - Retrieve a payout by ID.
+
+    **Example**
+
+    ```hot
+    ::payouts ::stripe::payouts
+
+    payout ::payouts/get-payout("po_123")
+    payout.status
+    payout.arrival_date
+    ```
+    """
 }
 fn
 (payout: Str): Map {

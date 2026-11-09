@@ -51,7 +51,7 @@ meta {
     handle capture-stdout()
     println("captured text")
     content get-captured-content(handle)
-    release(handle)
+    ::hot::io/release(handle)
     // content = "captured text\n"
     ```
     """
@@ -71,7 +71,7 @@ meta {
     handle capture-stderr()
     eprintln("error message")
     content get-captured-content(handle)
-    release(handle)
+    ::hot::io/release(handle)
     ```
     """
 }
@@ -88,7 +88,7 @@ meta {
     ```hot
     handle capture-stdout()
     // ... do work ...
-    release(handle)  // Restores normal stdout
+    ::hot::io/release(handle)  // Restores normal stdout
     ```
     """
 }
@@ -107,7 +107,7 @@ meta {
     ```hot
     handle capture-stdout()
     println("this will be discarded")
-    discard(handle)  // Content is lost, not printed
+    ::hot::io/discard(handle)  // Content is lost, not printed
     ```
     """
 }

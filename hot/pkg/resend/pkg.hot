@@ -2,7 +2,7 @@
 
 hot.pkg.resend {
   name: "hot.dev/resend",
-  version: "1.2.1",
+  version: "1.2.2",
   hot-min-version: "3.0.2",
   description: "resend API bindings for Hot.",
   author: "Hot Dev",

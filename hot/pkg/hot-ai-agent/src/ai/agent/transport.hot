@@ -60,7 +60,20 @@ type {
 }
 
 session-with-transport
-meta { doc: "Stamp a Session with a transport tag in `session.meta.transport`." }
+meta {
+    doc: """
+    Stamp a Session with a transport tag in `session.meta.transport`.
+
+    **Example**
+
+    ```hot
+    ::transport ::ai::agent::transport
+
+    session ::transport/session-with-transport(::ai::session/Session({id: "slack:C123"}), "slack")
+    session.meta.transport  // "slack"
+    ```
+    """
+}
 fn (session: Session, transport: Str): Session {
     existing-meta or(session.meta, {})
     ::session/Session({
@@ -71,7 +84,22 @@ fn (session: Session, transport: Str): Session {
 
 session-transport
 meta {
-    doc: "Read `session.meta.transport`, defaulting to `unknown` unless a caller supplies another default."
+    doc: """
+    Read `session.meta.transport`, defaulting to `unknown` unless a caller
+    supplies another default.
+
+    **Example**
+
+    ```hot
+    ::transport ::ai::agent::transport
+
+    plain ::ai::session/Session({id: "s1"})
+    stamped ::transport/session-with-transport(plain, "slack")
+    ::transport/session-transport(stamped)  // "slack"
+    ::transport/session-transport(plain)  // "unknown"
+    ::transport/session-transport(plain, "webhook")  // "webhook"
+    ```
+    """
 }
 fn
 (session: Session): Str {
@@ -83,7 +111,16 @@ fn
 
 transport-name
 meta {
-    doc: "Return a stable, lower-case transport label for storage and source metadata."
+    doc: """
+    Return a stable, lower-case transport label for storage and source
+    metadata.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::transport/transport-name("Slack")  // "slack"
+    ```
+    """
 }
 fn (transport: Str): Str {
     lowercase(or(transport, "unknown"))
@@ -94,12 +131,31 @@ meta {
     doc: """
     Store bucket key for per-session counters and state. Session ids
     should already be transport-prefixed, so the id is sufficient.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::transport/session-bucket(::ai::session/Session({id: "slack:C123"}))  // "slack:C123"
+    ```
     """
 }
 fn (session: Session): Str { session.id }
 
 capabilities
-meta { doc: "Build a TransportCapabilities record with sensible defaults." }
+meta {
+    doc: """
+    Build a TransportCapabilities record with sensible defaults.
+
+    **Example**
+
+    ```hot
+    caps ::ai::agent::transport/capabilities("slack", {markup: "mrkdwn", supports-streaming: true})
+    caps.markup  // "mrkdwn"
+    caps.supports-streaming  // true
+    caps.reply-mode  // "post"
+    ```
+    """
+}
 fn (name: Str, opts: Map?): TransportCapabilities {
     data or(opts, {})
     TransportCapabilities({

@@ -47,7 +47,17 @@ fn (value: Str): Str {
 
 escape-like
 meta {
-    doc: """Like `escape`, and also escapes the LIKE wildcards `%` and `_` so the value matches literally. Add your own `%` around it: `` `Name LIKE '%${escape-like(term)}%'` ``."""
+    doc: """
+    Like `escape`, and also escapes the LIKE wildcards `%` and `_` so the
+    value matches literally. Add your own `%` around it: `` `Name LIKE
+    '%${escape-like(term)}%'` ``.
+
+    **Example**
+
+    ```hot
+    ::salesforce::query/escape-like("50%_off")  // "50\\%\\_off"
+    ```
+    """
 }
 fn (value: Str): Str {
   replace(replace(escape(value), "%", "\\%"), "_", "\\_")
@@ -81,7 +91,17 @@ fn (value: Any): Str {
 
 query-path
 meta {
-    doc: """The `/query` (or `/queryAll`, with `include-deleted`) path for a SOQL string. Exposed for testing."""
+    doc: """
+    The `/query` (or `/queryAll`, with `include-deleted`) path for a SOQL
+    string. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::query/query-path("SELECT Id FROM Lead", false)  // "/query?q=SELECT+Id+FROM+Lead"
+    ::salesforce::query/query-path("SELECT Id FROM Lead", true)  // "/queryAll?q=SELECT+Id+FROM+Lead"
+    ```
+    """
 }
 fn (query: Str, include-deleted: Bool): Str {
   resource if(include-deleted, "/queryAll", "/query")
@@ -90,7 +110,17 @@ fn (query: Str, include-deleted: Bool): Str {
 
 query-headers
 meta {
-    doc: """Request options for a query: `batch-size` (200 to 2000) becomes `Sforce-Query-Options: batchSize=N`. Exposed for testing."""
+    doc: """
+    Request options for a query: `batch-size` (200 to 2000) becomes
+    `Sforce-Query-Options: batchSize=N`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::query/query-headers({batch-size: 500})  // {headers: {Sforce-Query-Options: "batchSize=500"}}
+    ::salesforce::query/query-headers({})  // {}
+    ```
+    """
 }
 fn (options: Map): Map {
   batch-size get(options, "batch-size")
@@ -136,7 +166,18 @@ fn
 
 query-all
 meta {
-    doc: """GET /queryAll?q= - Like `soql`, but includes deleted (recycle bin) and archived records (`IsDeleted = true` rows, archived Tasks and Events). One page; see `soql-records` with `include-deleted` for every page."""
+    doc: """
+    GET /queryAll?q= - Like `soql`, but includes deleted (recycle bin) and
+    archived records (`IsDeleted = true` rows, archived Tasks and Events).
+    One page; see `soql-records` with `include-deleted` for every page.
+
+    **Example**
+
+    ```hot
+    out ::salesforce::query/query-all("SELECT Id FROM Lead WHERE IsDeleted = true")
+    out.records
+    ```
+    """
 }
 fn
 (query: Str): Map {
@@ -148,7 +189,17 @@ fn
 
 next-page
 meta {
-    doc: """Fetch the next page of a SOQL result from its `nextRecordsUrl` (a full `/services/data/vXX.X/query/...` path, used as is)."""
+    doc: """
+    Fetch the next page of a SOQL result from its `nextRecordsUrl` (a full
+    `/services/data/vXX.X/query/...` path, used as is).
+
+    **Example**
+
+    ```hot
+    page ::salesforce::query/soql("SELECT Id FROM Contact")
+    more if(page.done, null, ::salesforce::query/next-page(page.nextRecordsUrl))
+    ```
+    """
 }
 fn
 (next-records-url: Str): Map {
@@ -161,7 +212,9 @@ fn
   }
 }
 
-collect-pages fn
+collect-pages
+meta {no-doc: true}
+fn
 (page: Result, acc: Vec, max-records: Any): Vec {
   collect-pages(page, acc, max-records, {})
 },

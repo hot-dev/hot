@@ -34,7 +34,17 @@ meta {
 
 auth-header
 meta {
-    doc: """`Basic base64("{api-key}:")`: the key is the username and the password is empty (pure)."""
+    doc: """
+    `Basic base64("{api-key}:")`: the key is the username and the password
+    is empty (pure).
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("companies-house.api-key")
+    headers {Authorization: ::companies-house/auth-header(key)}
+    ```
+    """
 }
 fn (api-key: Str): Str {
   credentials `${api-key}:`
@@ -49,6 +59,14 @@ meta {
     `"00000006"`); prefixed numbers such as `"SC123456"` or
     `"OC301540"` are kept. An Err for anything that is not one to eight
     letters and digits.
+
+    **Example**
+
+    ```hot
+    ::companies-house/company-number("6")  // "00000006"
+    ::companies-house/company-number("sc1234")  // "SC001234"
+    is-err(::companies-house/company-number("../etc"))  // true
+    ```
     """
 }
 fn (number: Any): Str {
@@ -67,7 +85,9 @@ fn (number: Any): Str {
 }
 
 // Errors are returned, not consumed: consuming an Err would halt the run.
-with-key fn (opts: Map, f: Fn): Any {
+with-key
+meta {no-doc: true}
+fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -78,7 +98,9 @@ with-key fn (opts: Map, f: Fn): Any {
   }
 }
 
-ch-get fn (path: Str, params: Map, opts: Map): Any {
+ch-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   with-key(opts, (cfg, auth) {
     ::api/get-json(`${cfg.base-url}${path}${::api/query-string(params)}`, {Authorization: auth})
   })
@@ -86,13 +108,26 @@ ch-get fn (path: Str, params: Map, opts: Map): Any {
 
 page-params
 meta {
-    doc: """`items_per_page` and `start_index` from `opts.items-per-page` and `opts.start-index`, omitted when unset (pure)."""
+    doc: """
+    `items_per_page` and `start_index` from `opts.items-per-page` and
+    `opts.start-index` (pure). Unset values stay null and drop out of the
+    query string.
+
+    **Example**
+
+    ```hot
+    ::companies-house/page-params({items-per-page: 50, start-index: 100})  // {items_per_page: 50, start_index: 100}
+    ::companies-house/page-params({})  // {items_per_page: null, start_index: null}
+    ```
+    """
 }
 fn (opts: Map): Map {
   {items_per_page: get(opts, "items-per-page"), start_index: get(opts, "start-index")}
 }
 
-company-path fn (number: Any): Str {
+company-path
+meta {no-doc: true}
+fn (number: Any): Str {
   `/company/${::api/path-segment(company-number(number))}`
 }
 
@@ -127,7 +162,17 @@ fn
 
 search-officers
 meta {
-    doc: """Search officers (directors, secretaries, LLP members) by name. Items link to `/officers/{id}/appointments`."""
+    doc: """
+    Search officers (directors, secretaries, LLP members) by name. Items
+    link to `/officers/{id}/appointments`.
+
+    **Example**
+
+    ```hot
+    found ::companies-house/search-officers("Jane Smith", {items-per-page: 10})
+    map(found.items, %.title)
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -139,7 +184,17 @@ fn
 
 search-all
 meta {
-    doc: """Search companies, officers and disqualified officers together (`/search`)."""
+    doc: """
+    Search companies, officers and disqualified officers together
+    (`/search`).
+
+    **Example**
+
+    ```hot
+    found ::companies-house/search-all("tesco", {start-index: 20})
+    map(found.items, %.kind)
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -151,7 +206,16 @@ fn
 
 search-disqualified-officers
 meta {
-    doc: """Search disqualified directors by name."""
+    doc: """
+    Search disqualified directors by name.
+
+    **Example**
+
+    ```hot
+    found ::companies-house/search-disqualified-officers("Smith")
+    found.total_results
+    ```
+    """
 }
 fn
 (q: Str): Map {
@@ -167,7 +231,19 @@ fn
 
 company
 meta {
-    doc: """The company profile (`company_name`, `company_status`, `type`, `date_of_creation`, `registered_office_address`, `sic_codes`, `accounts`, `confirmation_statement`, `links`, ...), or null when there is no such company."""
+    doc: """
+    The company profile (`company_name`, `company_status`, `type`,
+    `date_of_creation`, `registered_office_address`, `sic_codes`,
+    `accounts`, `confirmation_statement`, `links`, ...), or null when there
+    is no such company.
+
+    **Example**
+
+    ```hot
+    profile ::companies-house/company("00445790")
+    if(is-null(profile), "no such company", profile.company_name)
+    ```
+    """
 }
 fn
 (number: Any): Map? {
@@ -181,7 +257,16 @@ fn
 
 registered-office-address
 meta {
-    doc: """The registered office address."""
+    doc: """
+    The registered office address.
+
+    **Example**
+
+    ```hot
+    address ::companies-house/registered-office-address("00445790")
+    address.postal_code
+    ```
+    """
 }
 fn
 (number: Any): Map {
@@ -193,7 +278,19 @@ fn
 
 officers
 meta {
-    doc: """One page of a company's officers. `opts`: `items-per-page` (max 100), `start-index`, `register-type` (`"directors"`, `"secretaries"`, `"llp-members"`), `register-view`, `order-by` (`"appointed_on"`, `"resigned_on"`, `"surname"`)."""
+    doc: """
+    One page of a company's officers. `opts`: `items-per-page` (max 100),
+    `start-index`, `register-type` (`"directors"`, `"secretaries"`,
+    `"llp-members"`), `register-view`, `order-by` (`"appointed_on"`,
+    `"resigned_on"`, `"surname"`).
+
+    **Example**
+
+    ```hot
+    page ::companies-house/officers("00445790", {order-by: "appointed_on", items-per-page: 100})
+    map(page.items, %.name)
+    ```
+    """
 }
 fn
 (number: Any): Map {
@@ -210,7 +307,21 @@ fn
 
 officer-appointments
 meta {
-    doc: """One page of an officer's appointments across companies. `officer-id` comes from an officer's `links.officer.appointments` (see `officer-id-from-link`)."""
+    doc: """
+    One page of an officer's appointments across companies. `officer-id`
+    comes from an officer's `links.officer.appointments` (see
+    `officer-id-from-link`).
+
+    **Example**
+
+    ```hot
+    ::ch ::companies-house
+    page ::ch/officers("00445790", {items-per-page: 1})
+    id ::ch/officer-id-from-link(first(page.items).links.officer.appointments)
+    appointments ::ch/officer-appointments(id, {items-per-page: 50})
+    map(appointments.items, %.appointed_to.company_name)
+    ```
+    """
 }
 fn
 (officer-id: Str): Map {
@@ -222,7 +333,17 @@ fn
 
 officer-id-from-link
 meta {
-    doc: """The officer id in a link such as `/officers/AbC123/appointments` (pure), or null."""
+    doc: """
+    The officer id in a link such as `/officers/AbC123/appointments` (pure),
+    or null.
+
+    **Example**
+
+    ```hot
+    ::companies-house/officer-id-from-link("/officers/AbC123/appointments")  // "AbC123"
+    ::companies-house/officer-id-from-link(null)  // null
+    ```
+    """
 }
 fn (link: Str?): Str? {
   m if(is-null(link), null, ::hot::regex/capture(link, "/officers/([^/]+)/appointments"))
@@ -231,7 +352,19 @@ fn (link: Str?): Str? {
 
 persons-with-significant-control
 meta {
-    doc: """One page of a company's persons with significant control (individuals, corporate entities, legal persons, and beneficial owners), with `natures_of_control`. `opts`: `items-per-page`, `start-index`, `register-view`."""
+    doc: """
+    One page of a company's persons with significant control (individuals,
+    corporate entities, legal persons, and beneficial owners), with
+    `natures_of_control`. `opts`: `items-per-page`, `start-index`,
+    `register-view`.
+
+    **Example**
+
+    ```hot
+    page ::companies-house/persons-with-significant-control("00445790", {items-per-page: 25})
+    map(page.items, %.natures_of_control)
+    ```
+    """
 }
 fn
 (number: Any): Map {
@@ -243,7 +376,16 @@ fn
 
 psc-statements
 meta {
-    doc: """One page of a company's PSC statements (e.g. no registrable person)."""
+    doc: """
+    One page of a company's PSC statements (e.g. no registrable person).
+
+    **Example**
+
+    ```hot
+    page ::companies-house/psc-statements("00445790")
+    map(page.items, %.statement)
+    ```
+    """
 }
 fn
 (number: Any): Map {
@@ -261,6 +403,13 @@ meta {
     comma list), `items-per-page` (max 100), `start-index`. Each item's
     `links.document_metadata` points to the Document API (see
     `document-id`).
+
+    **Example**
+
+    ```hot
+    page ::companies-house/filing-history("00445790", {category: "accounts", items-per-page: 10})
+    map(page.items, %.transaction_id)
+    ```
     """
 }
 fn
@@ -273,7 +422,16 @@ fn
 
 filing
 meta {
-    doc: """One filing-history item by transaction id."""
+    doc: """
+    One filing-history item by transaction id.
+
+    **Example**
+
+    ```hot
+    item ::companies-house/filing("00445790", "MzAxNTYyMDQ4OGFkaXF6a2N4")
+    item.description
+    ```
+    """
 }
 fn
 (number: Any, transaction-id: Str): Map {
@@ -285,7 +443,16 @@ fn
 
 charges
 meta {
-    doc: """One page of a company's charges (mortgages and security interests)."""
+    doc: """
+    One page of a company's charges (mortgages and security interests).
+
+    **Example**
+
+    ```hot
+    page ::companies-house/charges("00445790", {items-per-page: 50})
+    map(page.items, %.status)
+    ```
+    """
 }
 fn
 (number: Any): Map {
@@ -305,6 +472,14 @@ meta {
     The document id from a filing's `links.document_metadata` URL (any
     host, e.g. `https://frontend-doc-api.company-information.service.gov.uk/document/abc123`),
     or the id itself (pure). Null when there is none.
+
+    **Example**
+
+    ```hot
+    ::companies-house/document-id("https://frontend-doc-api.company-information.service.gov.uk/document/abc123")  // "abc123"
+    ::companies-house/document-id("abc123")  // "abc123"
+    ::companies-house/document-id(null)  // null
+    ```
     """
 }
 fn (link-or-id: Str?): Str? {
@@ -328,6 +503,13 @@ meta {
     available content type (`application/pdf`, often
     `application/xhtml+xml` for iXBRL accounts) to its size, plus
     `pages`, `created_at` and `links`.
+
+    **Example**
+
+    ```hot
+    info ::companies-house/document-metadata("abc123")
+    keys(info.resources)
+    ```
     """
 }
 fn
@@ -398,7 +580,17 @@ fn
 
 next-start
 meta {
-    doc: """The `start_index` of the page after `page` (`start_index + items` while below `total_results`), or null on the last page (pure)."""
+    doc: """
+    The `start_index` of the page after `page` (`start_index + items` while
+    below `total_results`), or null on the last page (pure).
+
+    **Example**
+
+    ```hot
+    ::companies-house/next-start({start_index: 0, items: [1, 2], total_results: 5})  // 2
+    ::companies-house/next-start({start_index: 4, items: [5], total_results: 5})  // null
+    ```
+    """
 }
 fn (page: Any): Int? {
   p or(page, {})
@@ -414,7 +606,9 @@ fn (page: Any): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, start: Int, size: Int, limit: Int, acc: Vec): Vec {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, start: Int, size: Int, limit: Int, acc: Vec): Vec {
   page fetch(start)
   cond {
     // Returned, not consumed: consuming an Err would halt the run.

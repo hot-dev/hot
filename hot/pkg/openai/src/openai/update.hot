@@ -86,7 +86,19 @@ UpdateChatCompletionResponse type {
 
 update-chat-completion
 meta {
-    doc: """POST /chat/completions/{completion_id} - Update metadata on a stored chat completion."""
+    doc: """
+    POST /chat/completions/{completion_id} - Update metadata on a stored
+    chat completion.
+
+    **Example**
+
+    ```hot
+    completion ::openai::update/update-chat-completion("chatcmpl_abc123", ::openai::update/UpdateChatCompletionRequest({
+      metadata: {ticket: "T-42"}
+    }))
+    completion.id
+    ```
+    """
 }
 fn
 (completion-id: Str, request: UpdateChatCompletionRequest): UpdateChatCompletionResponse {
@@ -118,7 +130,20 @@ UpdateEvalResponse type {
 
 
 update-eval
-meta {doc: """POST /evals/{eval_id} - Update the name or metadata of an evaluation."""}
+meta {
+    doc: """
+    POST /evals/{eval_id} - Update the name or metadata of an evaluation.
+
+    **Example**
+
+    ```hot
+    evaluation ::openai::update/update-eval("eval_abc123", ::openai::update/UpdateEvalRequest({
+      name: "Greeting check v2"
+    }))
+    evaluation.name
+    ```
+    """
+}
 fn
 (eval-id: Str, request: UpdateEvalRequest): UpdateEvalResponse {
   update-eval(eval-id, request, {})
@@ -151,7 +176,19 @@ UpdateVectorStoreFileAttributesResponse type {
 
 update-vector-store-file-attributes
 meta {
-    doc: """POST /vector_stores/{vector_store_id}/files/{file_id} - Update vector store file attributes"""
+    doc: """
+    POST /vector_stores/{vector_store_id}/files/{file_id} - Update vector
+    store file attributes
+
+    **Example**
+
+    ```hot
+    store-file ::openai::update/update-vector-store-file-attributes("vs_abc123", "file-abc123", ::openai::update/UpdateVectorStoreFileAttributesRequest({
+      attributes: {author: "ada"}
+    }))
+    store-file.attributes
+    ```
+    """
 }
 fn
 (vector-store-id: Str, file-id: Str, request: UpdateVectorStoreFileAttributesRequest): UpdateVectorStoreFileAttributesResponse {

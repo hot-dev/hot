@@ -36,7 +36,8 @@ meta {
 
     url ::oauth/authorize-url("ABcd123", "https://app.example.com/oauth/quickbooks", "csrf-123")
 
-    // In the callback handler:
+    // In the callback handler, `request` is the inbound request:
+    request {query: {code: "Q011abc", state: "csrf-123", realmId: "9341453"}}
     cb ::oauth/callback-params(request)
     tokens ::oauth/exchange-code(cb.code, "https://app.example.com/oauth/quickbooks")
     // persist tokens.refresh-token and cb.realm-id for this company
@@ -113,7 +114,17 @@ type {
 
 is-blank
 meta {
-    doc: """True for null, `""` and whitespace-only strings (unset env placeholders arrive as `""`)."""
+    doc: """
+    True for null, `""` and whitespace-only strings (unset env placeholders
+    arrive as `""`).
+
+    **Example**
+
+    ```hot
+    ::quickbooks::oauth/is-blank("  ")  // true
+    ::quickbooks::oauth/is-blank("9341453")  // false
+    ```
+    """
 }
 fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
@@ -121,7 +132,17 @@ fn (value: Any): Bool {
 
 int-or-null
 meta {
-    doc: """An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so bad input never halts a run."""
+    doc: """
+    An Int from an Int or digit-only Str; null otherwise. Guards `Int()` so
+    bad input never halts a run.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::oauth/int-or-null("42")  // 42
+    ::quickbooks::oauth/int-or-null("4x")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   cond {
@@ -133,7 +154,19 @@ fn (value: Any): Int? {
 
 blank-option
 meta {
-    doc: """The first of `names` that `opts` has but with a blank or null value, else null. Such a key is an Err, never a fallback to context: a tenant whose credential is missing must not run on the project's. Exposed for testing."""
+    doc: """
+    The first of `names` that `opts` has but with a blank or null value,
+    else null. Such a key is an Err, never a fallback to context: a tenant
+    whose credential is missing must not run on the project's. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::oauth/blank-option({realm-id: ""}, ["realm-id", "environment"])  // "realm-id"
+    ::quickbooks::oauth/blank-option({realm-id: "9341453"}, ["realm-id"])  // null
+    ```
+    """
 }
 fn (opts: Map, names: Vec): Str? {
   find-first(names, (name) { and(in(name, keys(opts)), is-blank(get(opts, name))) })
@@ -141,20 +174,47 @@ fn (opts: Map, names: Vec): Str? {
 
 mark-tokens
 meta {
-    doc: """Mask the tokens in a token-endpoint response and return it unchanged. Only the tokens: marking the whole body would also hide values like `token_type` and `scope`. Exposed for testing."""
+    doc: """
+    Mask the tokens in a token-endpoint response and return it unchanged.
+    Only the tokens: marking the whole body would also hide values like
+    `token_type` and `scope`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::quickbooks::oauth/mark-tokens({access_token: ::hot::ctx/get("quickbooks.access.token"), token_type: "bearer"})
+    body.token_type
+    ```
+    """
 }
 fn (body: Map): Map {
   ::ctx/mark-secret([get(body, "access_token"), get(body, "refresh_token"), get(body, "id_token")])
   body
 }
 
-now-ms fn (): Int {
+now-ms
+meta {no-doc: true}
+fn (): Int {
   ::time/epoch-millis(::time/now())
 }
 
 token-error
 meta {
-    doc: """Build a `TokenError`. The 1-arity form wraps a message; the 2-arity form describes a failed token response (`{status, body, headers}`) or transport error, prefixed with `prefix`."""
+    doc: """
+    Build a `TokenError`. The 1-arity form wraps a message; the 2-arity form
+    describes a failed token response (`{status, body, headers}`) or
+    transport error, prefixed with `prefix`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::oauth/token-error("quickbooks: no credentials").message  // "quickbooks: no credentials"
+
+    failed ::quickbooks::oauth/token-error("quickbooks: token refresh failed", {status: 400, body: {error: "invalid_grant"}})
+    failed.error-code  // "invalid_grant"
+    failed.message  // "quickbooks: token refresh failed: invalid_grant"
+    ```
+    """
 }
 fn
 (message: Str): TokenError {
@@ -187,7 +247,17 @@ fn
 
 basic-auth
 meta {
-    doc: """The `Authorization` header value for token calls: `Basic base64(client-id:client-secret)`."""
+    doc: """
+    The `Authorization` header value for token calls: `Basic
+    base64(client-id:client-secret)`.
+
+    **Example**
+
+    ```hot
+    header ::quickbooks::oauth/basic-auth("ABcd123", ::hot::ctx/get("quickbooks.client.secret"))
+    {Authorization: header}
+    ```
+    """
 }
 fn (client-id: Str, client-secret: Str): Str {
   pair `${client-id}:${client-secret}`
@@ -200,7 +270,21 @@ meta {
         "quickbooks.client.id": {required: false, secret: false},
         "quickbooks.client.secret": {required: false}
     },
-    doc: """The app's `{client-id, client-secret}` from `opts`, else context, with a per-call secret marked so it is masked in call records. A `TokenError` names what is missing; a key in `opts` that is blank or null is one too, never a fallback to context."""
+    doc: """
+    The app's `{client-id, client-secret}` from `opts`, else context, with a
+    per-call secret marked so it is masked in call records. A `TokenError`
+    names what is missing; a key in `opts` that is blank or null is one too,
+    never a fallback to context.
+
+    **Example**
+
+    ```hot
+    app ::quickbooks::oauth/app-credentials({})
+    app.client-id
+
+    ::quickbooks::oauth/app-credentials({client-id: "ABcd123", client-secret: ::hot::ctx/get("quickbooks.client.secret")})
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::ctx/mark-secret(get(opts, "client-secret"))
@@ -221,7 +305,18 @@ fn (opts: Map): Map {
 
 normalize-scopes
 meta {
-    doc: """Scopes as a space-separated Str from a Vec or a space/comma-separated Str; `SCOPE_ACCOUNTING` when null or empty."""
+    doc: """
+    Scopes as a space-separated Str from a Vec or a space/comma-separated
+    Str; `SCOPE_ACCOUNTING` when null or empty.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::oauth/normalize-scopes(null)  // "com.intuit.quickbooks.accounting"
+    ::quickbooks::oauth/normalize-scopes("openid,email")  // "openid email"
+    ::quickbooks::oauth/normalize-scopes(["openid", "openid"])  // "openid"
+    ```
+    """
 }
 fn (scopes: Any): Str {
   raw cond {
@@ -282,6 +377,15 @@ meta {
     absent). `realm-id` is the company the user picked; store it next to
     the refresh token. Compare `state` with the value you issued before
     exchanging the code.
+
+    **Example**
+
+    ```hot
+    cb ::quickbooks::oauth/callback-params({query: {code: "Q011abc", state: "csrf-123", realmId: "9341453"}})
+    cb.realm-id  // "9341453"
+    cb.state  // "csrf-123"
+    cb.error  // null
+    ```
     """
 }
 fn (request: Map): Map {
@@ -306,6 +410,15 @@ meta {
     form-encoded grant `body`, HTTP Basic client authentication, and the
     `x-include-refresh-token-hard-expires-in` header so Intuit reports
     the five-year refresh-token limit. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    body ::quickbooks::oauth/build-refresh-body(::hot::ctx/get("quickbooks.refresh.token"))
+    req ::quickbooks::oauth/build-token-request(body, "ABcd123", ::hot::ctx/get("quickbooks.client.secret"))
+    req.url
+    req.headers.Content-Type
+    ```
     """
 }
 fn (body: Map, client-id: Str, client-secret: Str): HttpRequest {
@@ -324,13 +437,26 @@ fn (body: Map, client-id: Str, client-secret: Str): HttpRequest {
 
 // The ::oauth2 body builders include client_id/client_secret for
 // client_secret_post; Intuit's SDKs authenticate with Basic instead.
-without-client fn (body: Map): Map {
+without-client
+meta {no-doc: true}
+fn (body: Map): Map {
   delete(delete(body, "client_id"), "client_secret")
 }
 
 build-exchange-body
 meta {
-    doc: """The `authorization_code` grant body (client credentials go in the Basic header). `code-verifier` completes a PKCE flow."""
+    doc: """
+    The `authorization_code` grant body (client credentials go in the Basic
+    header). `code-verifier` completes a PKCE flow.
+
+    **Example**
+
+    ```hot
+    body ::quickbooks::oauth/build-exchange-body("Q011abc", "https://app.example.com/oauth/quickbooks", null)
+    body.grant_type  // "authorization_code"
+    body.code  // "Q011abc"
+    ```
+    """
 }
 fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
   without-client(::oauth2/build-exchange-body(filter-vals({
@@ -343,7 +469,17 @@ fn (code: Str, redirect-uri: Str, code-verifier: Str?): Map {
 
 build-refresh-body
 meta {
-    doc: """The `refresh_token` grant body (client credentials go in the Basic header)."""
+    doc: """
+    The `refresh_token` grant body (client credentials go in the Basic
+    header).
+
+    **Example**
+
+    ```hot
+    body ::quickbooks::oauth/build-refresh-body(::hot::ctx/get("quickbooks.refresh.token"))
+    body.grant_type
+    ```
+    """
 }
 fn (refresh-token: Str): Map {
   without-client(::oauth2/build-refresh-body({client-id: "", refresh-token: refresh-token}))
@@ -356,6 +492,16 @@ meta {
     is the refresh token the request used (null for a code exchange):
     when Intuit's response has no `refresh_token` the sent one is kept,
     and `rotated` says whether the value changed. `now` is epoch ms.
+
+    **Example**
+
+    ```hot
+    body {access_token: "access", refresh_token: "new", expires_in: 3600}
+    tokens ::quickbooks::oauth/token-set(body, "old", 1000)
+    tokens.rotated  // true
+    tokens.refresh-token  // "new"
+    tokens.expires-at  // 3601000
+    ```
     """
 }
 fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
@@ -380,7 +526,20 @@ fn (body: Map, sent-refresh-token: Str?, now: Int): TokenSet {
 
 send-token-request
 meta {
-    doc: """Send a token request; the decoded body on 2xx with its tokens marked so they are masked in call records, else a `TokenError` prefixed with `prefix`."""
+    doc: """
+    Send a token request; the decoded body on 2xx with its tokens marked so
+    they are masked in call records, else a `TokenError` prefixed with
+    `prefix`.
+
+    **Example**
+
+    ```hot
+    body ::quickbooks::oauth/build-refresh-body(::hot::ctx/get("quickbooks.refresh.token"))
+    req ::quickbooks::oauth/build-token-request(body, "ABcd123", ::hot::ctx/get("quickbooks.client.secret"))
+    response ::quickbooks::oauth/send-token-request(req, "quickbooks: token refresh failed")
+    response.expires_in
+    ```
+    """
 }
 fn (req: HttpRequest, prefix: Str): Map {
   response http-request(req)
@@ -397,6 +556,20 @@ meta {
     Exchange the authorization `code` for a `TokenSet`. `redirect-uri`
     must match the one used for `authorize-url`. Options: `client-id`,
     `client-secret` (else context), `code-verifier` (PKCE).
+
+    **Example**
+
+    ```hot
+    tokens ::quickbooks::oauth/exchange-code("Q011abc", "https://app.example.com/oauth/quickbooks")
+    tokens.refresh-token
+
+    // PKCE, with the app passed per call
+    ::quickbooks::oauth/exchange-code("Q011abc", "https://app.example.com/oauth/quickbooks", {
+      client-id: "ABcd123",
+      client-secret: ::hot::ctx/get("quickbooks.client.secret"),
+      code-verifier: "dBjftJeZ4CVP"
+    })
+    ```
     """
 }
 fn
@@ -428,8 +601,8 @@ meta {
     again. Options: `client-id`, `client-secret` (else context).
 
     ```hot
-    tokens ::quickbooks::oauth/refresh(stored.refresh-token)
-    if(tokens.rotated, save-refresh-token(realm-id, tokens.refresh-token), null)
+    tokens ::quickbooks::oauth/refresh(::hot::ctx/get("quickbooks.refresh.token"))
+    if(tokens.rotated, ::hot::store/put(::hot::store/Map({name: "quickbooks-tokens"}), "9341453", tokens.refresh-token), null)
     ```
     """
 }
@@ -455,7 +628,17 @@ fn
 
 build-revoke-request
 meta {
-    doc: """Build the revoke `HttpRequest` (JSON `{token}`, Basic client auth). Pure; exposed for testing."""
+    doc: """
+    Build the revoke `HttpRequest` (JSON `{token}`, Basic client auth).
+    Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::quickbooks::oauth/build-revoke-request(::hot::ctx/get("quickbooks.refresh.token"), "ABcd123", ::hot::ctx/get("quickbooks.client.secret"))
+    req.url
+    ```
+    """
 }
 fn (token: Str, client-id: Str, client-secret: Str): HttpRequest {
   HttpRequest({
@@ -476,6 +659,13 @@ meta {
     Revoke a refresh or access token, disconnecting the app from the
     company (revoking the refresh token also ends its access tokens).
     Returns true, or a `TokenError`. Options: `client-id`, `client-secret`.
+
+    **Example**
+
+    ```hot
+    result ::quickbooks::oauth/revoke(::hot::ctx/get("quickbooks.refresh.token"))
+    if(is-err(result), err-message(result), "disconnected")
+    ```
     """
 }
 fn

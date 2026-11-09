@@ -26,7 +26,19 @@ CASE_FILTERS [
 
 list-cases-request
 meta {
-    doc: """The spec for one page of cases. `filters` takes CipherOwl's query fields (`CASE_FILTERS`: `status`, `network`, `address`, `clientReference`, `createdFrom`/`createdTo` and `updatedFrom`/`updatedTo` (RFC 3339), `excludeClosed`, `page`, `pageSize`, ...); other keys are ignored. Exposed for testing."""
+    doc: """
+    The spec for one page of cases. `filters` takes CipherOwl's query fields
+    (`CASE_FILTERS`: `status`, `network`, `address`, `clientReference`,
+    `createdFrom`/`createdTo` and `updatedFrom`/`updatedTo` (RFC 3339),
+    `excludeClosed`, `page`, `pageSize`, ...); other keys are ignored.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::cases/list-cases-request({excludeClosed: true, ignored: 1}).path  // "/api/case-management/v1/cases?excludeClosed=true"
+    ```
+    """
 }
 fn (filters: Map): Map {
   kept filter-keys(untype(filters), (k) { in(k, CASE_FILTERS) })
@@ -34,7 +46,19 @@ fn (filters: Map): Map {
 }
 
 list-cases
-meta {doc: """One page of cases: `{cases, totalCount, page, pageSize}`."""}
+meta {
+    doc: """
+    One page of cases: `{cases, totalCount, page, pageSize}`.
+
+    **Example**
+
+    ```hot
+    page ::cipherowl::cases/list-cases({excludeClosed: true, pageSize: 25})
+    page.totalCount
+    length(page.cases)
+    ```
+    """
+}
 fn
 (filters: Map): Map {
   list-cases(filters, {})
@@ -44,7 +68,19 @@ fn
 }
 
 get-case
-meta {doc: """One case: `{case, screeningRoute}`."""}
+meta {
+    doc: """
+    One case: `{case, screeningRoute}`.
+
+    **Example**
+
+    ```hot
+    out ::cipherowl::cases/get-case("8a1d4f02-0000-4000-8000-000000000002")
+    out.case
+    out.screeningRoute
+    ```
+    """
+}
 fn
 (case-id: Str): Map {
   get-case(case-id, {})
@@ -55,7 +91,16 @@ fn
 
 list-case-screenings
 meta {
-    doc: """The screenings attached to a case. `options` takes `page` and `pageSize`."""
+    doc: """
+    The screenings attached to a case. `options` takes `page` and
+    `pageSize`.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::cases/list-case-screenings("8a1d4f02-0000-4000-8000-000000000002", {page: 1, pageSize: 25})
+    ```
+    """
 }
 fn
 (case-id: Str, options: Map): Map {
@@ -67,7 +112,18 @@ fn
 
 list-case-audit-events
 meta {
-    doc: """A case's audit trail. `options` takes `page`, `pageSize`, `descending`, `createdAfter`, `createdBefore`, `actorType`, and the keyset cursor `cursorCreatedAt` plus `cursorEventSequence`."""
+    doc: """
+    A case's audit trail. `options` takes `page`, `pageSize`, `descending`,
+    `createdAfter`, `createdBefore`, `actorType`, and the keyset cursor
+    `cursorCreatedAt` plus `cursorEventSequence`.
+
+    **Example**
+
+    ```hot
+    // Newest first
+    ::cipherowl::cases/list-case-audit-events("8a1d4f02-0000-4000-8000-000000000002", {descending: true, pageSize: 20})
+    ```
+    """
 }
 fn
 (case-id: Str, options: Map): Map {

@@ -60,7 +60,18 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 error-message
 meta {
-    doc: """Build a readable message from a Deepgram error status and body. Exposed for testing."""
+    doc: """
+    Build a readable message from a Deepgram error status and body. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::deepgram::api/error-message(402, {err_code: "ASR_PAYMENT_REQUIRED", err_msg: "Out of credits."})
+    // "Deepgram API error (HTTP 402): ASR_PAYMENT_REQUIRED: Out of credits."
+    ::deepgram::api/error-message(500, "")  // "Deepgram API error (HTTP 500)"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   detail cond {
@@ -112,7 +123,9 @@ fn (params: Map): Str {
   if(is-empty(pairs), "", `?${join(pairs, "&")}`)
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
@@ -128,6 +141,13 @@ meta {
     to context), or when `opts` has `base-url` without `api-key`. A
     per-call `base-url` also keeps `deepgram.callback.secret` out of the
     request. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    settings ::deepgram::api/resolve-from({}, {"deepgram.api.key": ::hot::ctx/get("deepgram.api.key")})
+    settings.base-url
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {
@@ -183,7 +203,18 @@ fn (opts: Map): Map {
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). An empty `content-type` sends no `Content-Type`. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). An
+    empty `content-type` sends no `Content-Type`. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    settings ::deepgram::api/resolve({})
+    req ::deepgram::api/build-request("POST", "/v1/listen?model=nova-3", "application/json", to-json({url: "https://example.com/a.wav"}), settings)
+    req.url
+    ```
+    """
 }
 fn (method: Str, path: Str, content-type: Str, body: Any, resolved: Map): HttpRequest {
   auth {Authorization: `Token ${resolved.api-key}`}
@@ -203,6 +234,16 @@ meta {
     (e.g. `/v1/listen?model=nova-3`). `body` is sent as-is: a JSON
     string, raw audio `Bytes`, or `""` for none. Returns the raw
     `HttpResponse`; `json` and `bytes` unwrap it.
+
+    **Example**
+
+    ```hot
+    response ::deepgram::api/request("GET", "/v1/models")
+    response.status
+
+    // A different key for this call
+    ::deepgram::api/request("GET", "/v1/models", "", "", {api-key: ::hot::ctx/get("tenant-b.deepgram.api.key")})
+    ```
     """
 }
 fn
@@ -227,7 +268,17 @@ fn
 
 json
 meta {
-    doc: """Like `request`, but returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
+    doc: """
+    Like `request`, but returns the decoded JSON body on 2xx, or an Err
+    carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    models ::deepgram::api/json("GET", "/v1/models")
+    map(models.stt, %.canonical_name)
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
@@ -247,7 +298,17 @@ fn
 
 bytes
 meta {
-    doc: """Like `request`, but returns the verbatim response `Bytes` on 2xx (for audio), or an Err carrying `HttpError`."""
+    doc: """
+    Like `request`, but returns the verbatim response `Bytes` on 2xx (for
+    audio), or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    audio ::deepgram::api/bytes("POST", "/v1/speak?model=aura-2-thalia-en", "application/json", to-json({text: "Hello."}))
+    ::hot::file/write-file-bytes("hello.mp3", audio)
+    ```
+    """
 }
 fn
 (method: Str, path: Str, content-type: Str, body: Any): Bytes {

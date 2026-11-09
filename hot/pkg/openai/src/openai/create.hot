@@ -741,7 +741,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-assistant(CreateAssistantRequest({
+    response ::openai::create/create-assistant(::openai::create/CreateAssistantRequest({
         model: "gpt-4o-mini",
         name: "Math Tutor",
         instructions: "You are a helpful math tutor."
@@ -790,7 +790,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-speech(CreateSpeechRequest({
+    response ::openai::create/create-speech(::openai::create/CreateSpeechRequest({
         model: "tts-1",
         input: "Hello, world!",
         voice: "alloy"
@@ -829,11 +829,15 @@ CreateTranscriptionResponse type {
 }
 
 
-multipart-field fn (boundary: Str, name: Str, value: Str): Bytes {
+multipart-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, value: Str): Bytes {
   Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
 }
 
-optional-multipart-field fn (boundary: Str, name: Str, value: Any): Bytes {
+optional-multipart-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, value: Any): Bytes {
   cond {
     is-null(value) => { Bytes("") }
     is-empty(Str(value)) => { Bytes("") }
@@ -841,14 +845,18 @@ optional-multipart-field fn (boundary: Str, name: Str, value: Any): Bytes {
   }
 }
 
-optional-json-multipart-field fn (boundary: Str, name: Str, value: Any): Bytes {
+optional-json-multipart-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, value: Any): Bytes {
   cond {
     is-null(value) => { Bytes("") }
     => { multipart-field(boundary, name, to-json(untype(value))) }
   }
 }
 
-repeated-multipart-field fn (boundary: Str, name: Str, values: Any): Bytes {
+repeated-multipart-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, values: Any): Bytes {
   cond {
     is-null(values) => { Bytes("") }
     not(is-vec(values)) => { Bytes("") }
@@ -860,12 +868,16 @@ repeated-multipart-field fn (boundary: Str, name: Str, values: Any): Bytes {
   }
 }
 
-file-name-from-path fn (path: Str): Str {
+file-name-from-path
+meta {no-doc: true}
+fn (path: Str): Str {
   candidate last(split(path, "/"))
   if(is-blank(candidate), "audio.webm", candidate)
 }
 
-audio-file-mime-type fn (path: Str): Str {
+audio-file-mime-type
+meta {no-doc: true}
+fn (path: Str): Str {
   lower lowercase(path)
   cond {
     ends-with(lower, ".mp3") => { "audio/mpeg" }
@@ -878,7 +890,9 @@ audio-file-mime-type fn (path: Str): Str {
   }
 }
 
-multipart-file-field fn (boundary: Str, name: Str, path: Str): Bytes {
+multipart-file-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, path: Str): Bytes {
   filename file-name-from-path(path)
   mime-type audio-file-mime-type(path)
   file-bytes ::file/read-file-bytes(path)
@@ -889,7 +903,9 @@ multipart-file-field fn (boundary: Str, name: Str, path: Str): Bytes {
   )
 }
 
-transcription-multipart-body fn (request: CreateTranscriptionRequest, boundary: Str): Bytes {
+transcription-multipart-body
+meta {no-doc: true}
+fn (request: CreateTranscriptionRequest, boundary: Str): Bytes {
   concat(
     multipart-file-field(boundary, "file", request.file),
     optional-multipart-field(boundary, "model", request.model),
@@ -913,7 +929,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-transcription(CreateTranscriptionRequest({
+    response ::openai::create/create-transcription(::openai::create/CreateTranscriptionRequest({
         file: "audio.mp3",
         model: "whisper-1"
     }))
@@ -957,7 +973,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-translation(CreateTranslationRequest({
+    response ::openai::create/create-translation(::openai::create/CreateTranslationRequest({
         file: "french-audio.mp3",
         model: "whisper-1"
     }))
@@ -1018,7 +1034,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-batch(CreateBatchRequest({
+    response ::openai::create/create-batch(::openai::create/CreateBatchRequest({
         input_file_id: "file-abc123",
         endpoint: "/v1/chat/completions",
         completion_window: "24h"
@@ -1067,7 +1083,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-chat-completion(CreateChatCompletionRequest({
+    response ::openai::create/create-chat-completion(::openai::create/CreateChatCompletionRequest({
         model: "gpt-4o-mini",
         messages: [{role: "user", content: "What is 1+1?"}],
         max_completion_tokens: 50
@@ -1128,6 +1144,17 @@ meta {
     POST /completions - Create a text completion (legacy endpoint).
 
     For chat-based completions, prefer `create-chat-completion` or `::openai::chat/complete`.
+
+    **Example**
+
+    ```hot
+    completion ::openai::create/create-completion(::openai::create/CreateCompletionRequest({
+      model: "gpt-3.5-turbo-instruct",
+      prompt: "Say hello",
+      max_tokens: 16
+    }))
+    completion.choices[0].text
+    ```
     """
 }
 fn
@@ -1169,7 +1196,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-embeddings(CreateEmbeddingRequest({
+    response ::openai::create/create-embeddings(::openai::create/CreateEmbeddingRequest({
         input: "The quick brown fox",
         model: "text-embedding-3-small"
     }))
@@ -1211,7 +1238,31 @@ CreateEvalResponse type {
 
 create-eval
 meta {
-    doc: """POST /evals - Create an evaluation to test model outputs against criteria."""
+    doc: """
+    POST /evals - Create an evaluation to test model outputs against
+    criteria.
+
+    **Example**
+
+    ```hot
+    evaluation ::openai::create/create-eval(::openai::create/CreateEvalRequest({
+      name: "Greeting check",
+      data_source_config: {
+        type: "custom",
+        item_schema: {type: "object", properties: {ideal: {type: "string"}}},
+        include_sample_schema: true
+      },
+      testing_criteria: [{
+        type: "string_check",
+        name: "Matches ideal",
+        input: "{{sample.output_text}}",
+        operation: "eq",
+        reference: "{{item.ideal}}"
+      }]
+    }))
+    evaluation.id
+    ```
+    """
 }
 fn
 (request: CreateEvalRequest): CreateEvalResponse {
@@ -1251,7 +1302,26 @@ CreateEvalRunResponse type {
 
 
 create-eval-run
-meta {doc: """POST /evals/{eval_id}/runs - Run an evaluation against a data source."""}
+meta {
+    doc: """
+    POST /evals/{eval_id}/runs - Run an evaluation against a data source.
+
+    **Example**
+
+    ```hot
+    eval-run ::openai::create/create-eval-run("eval_abc123", ::openai::create/CreateEvalRunRequest({
+      name: "Nightly",
+      data_source: {
+        type: "completions",
+        model: "gpt-4o-mini",
+        source: {type: "file_id", id: "file-abc123"},
+        input_messages: {type: "template", template: [{role: "user", content: "{{item.question}}"}]}
+      }
+    }))
+    eval-run.status
+    ```
+    """
+}
 fn
 (eval-id: Str, request: CreateEvalRunRequest): CreateEvalRunResponse {
   create-eval-run(eval-id, request, {})
@@ -1291,7 +1361,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/upload-file(CreateFileRequest({
+    response ::openai::create/upload-file(::openai::create/CreateFileRequest({
         file: "training-data.jsonl",
         purpose: "fine-tune"
     }))
@@ -1330,7 +1400,19 @@ CreateFineTuningCheckpointPermissionResponse type {
 
 create-checkpoint-permissions
 meta {
-    doc: """POST /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions - Create checkpoint permissions"""
+    doc: """
+    POST /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions
+    - Create checkpoint permissions
+
+    **Example**
+
+    ```hot
+    permissions ::openai::create/create-checkpoint-permissions("ft:gpt-4o-mini-2024-07-18:acme::abc123:ckpt-step-100", ::openai::create/CreateFineTuningCheckpointPermissionRequest({
+      project_ids: ["proj_abc123"]
+    }))
+    map(permissions.data, %.id)
+    ```
+    """
 }
 fn
 (fine-tuned-model-checkpoint: Str, request: CreateFineTuningCheckpointPermissionRequest): CreateFineTuningCheckpointPermissionResponse {
@@ -1388,7 +1470,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-finetuning-job(CreateFineTuningJobRequest({
+    response ::openai::create/create-finetuning-job(::openai::create/CreateFineTuningJobRequest({
         model: "gpt-4o-mini-2024-07-18",
         training_file: "file-abc123"
     }))
@@ -1446,6 +1528,17 @@ meta {
     POST /images/edits - Edit an image with a text prompt (inpainting).
 
     For a more ergonomic API, see `::openai::images/edit`.
+
+    **Example**
+
+    ```hot
+    edited ::openai::create/create-image-edit(::openai::create/CreateImageEditRequest({
+      image: "path/to/image.png",
+      prompt: "Add a red hat to the person",
+      model: "gpt-image-1"
+    }))
+    edited.data[0].b64_json
+    ```
     """
 }
 fn
@@ -1499,7 +1592,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-image(CreateImageRequest({
+    response ::openai::create/create-image(::openai::create/CreateImageRequest({
         prompt: "A simple red circle on a white background",
         model: "dall-e-2",
         size: "256x256",
@@ -1549,6 +1642,17 @@ meta {
     POST /images/variations - Create variations of an existing image.
 
     For a more ergonomic API, see `::openai::images/variation`.
+
+    **Example**
+
+    ```hot
+    variations ::openai::create/create-image-variation(::openai::create/CreateImageVariationRequest({
+      image: "path/to/image.png",
+      n: 2,
+      size: "512x512"
+    }))
+    map(variations.data, %.url)
+    ```
     """
 }
 fn
@@ -1586,7 +1690,7 @@ meta {
     **Example**
 
     ```hot
-    response ::openai::create/create-moderation(CreateModerationRequest({
+    response ::openai::create/create-moderation(::openai::create/CreateModerationRequest({
         input: "I love programming!"
     }))
 
@@ -1615,7 +1719,22 @@ CreateResponseResponse type Map
 
 
 create-model-response
-meta {doc: """POST /responses - Create a model response using the Responses API."""}
+meta {
+    doc: """
+    POST /responses - Create a model response using the Responses API.
+
+    **Example**
+
+    ```hot
+    response ::openai::create/create-model-response(::openai::create/CreateResponseRequest({
+      model: "gpt-4o-mini",
+      input: "Write a one-sentence bedtime story."
+    }))
+    response.status
+    response.output
+    ```
+    """
+}
 fn
 (request: CreateResponseRequest): CreateResponseResponse {
   create-model-response(request, {})
@@ -1645,7 +1764,21 @@ CreateThreadResponse type {
 
 
 create-thread
-meta {doc: """POST /threads - Create a new thread for the Assistants API."""}
+meta {
+    doc: """
+    POST /threads - Create a new thread for the Assistants API.
+
+    **Example**
+
+    ```hot
+    thread ::openai::create/create-thread(::openai::create/CreateThreadRequest({
+      messages: [{role: "user", content: "How do I reset my password?"}],
+      metadata: {user: "u_123"}
+    }))
+    thread.id
+    ```
+    """
+}
 fn
 (request: CreateThreadRequest): CreateThreadResponse {
   create-thread(request, {})
@@ -1711,7 +1844,21 @@ CreateThreadAndRunResponse type {
 
 create-thread-and-run
 meta {
-    doc: """POST /threads/runs - Create a thread and immediately run an assistant on it."""
+    doc: """
+    POST /threads/runs - Create a thread and immediately run an assistant on
+    it.
+
+    **Example**
+
+    ```hot
+    run ::openai::create/create-thread-and-run(::openai::create/CreateThreadAndRunRequest({
+      assistant_id: "asst_abc123",
+      thread: {messages: [{role: "user", content: "Summarize this ticket."}]}
+    }))
+    run.thread_id
+    run.status
+    ```
+    """
 }
 fn
 (request: CreateThreadAndRunRequest): CreateThreadAndRunResponse {
@@ -1752,7 +1899,21 @@ CreateMessageResponse type {
 
 
 create-message
-meta {doc: """POST /threads/{thread_id}/messages - Create a message in a thread."""}
+meta {
+    doc: """
+    POST /threads/{thread_id}/messages - Create a message in a thread.
+
+    **Example**
+
+    ```hot
+    message ::openai::create/create-message("thread_abc123", ::openai::create/CreateMessageRequest({
+      role: "user",
+      content: "What is 17 + 25?"
+    }))
+    message.id
+    ```
+    """
+}
 fn
 (thread-id: Str, request: CreateMessageRequest): CreateMessageResponse {
   create-message(thread-id, request, {})
@@ -1819,7 +1980,22 @@ CreateRunResponse type {
 
 create-run
 meta {
-    doc: """POST /threads/{thread_id}/runs - Create a run to execute an assistant on a thread."""
+    doc: """
+    POST /threads/{thread_id}/runs - Create a run to execute an assistant on
+    a thread.
+
+    **Example**
+
+    ```hot
+    // The second argument is the run's include[] query value. Pass "" for none.
+    run ::openai::create/create-run(
+      "thread_abc123",
+      "step_details.tool_calls[*].file_search.results[*].content",
+      ::openai::create/CreateRunRequest({assistant_id: "asst_abc123", instructions: "Answer briefly."})
+    )
+    run.status
+    ```
+    """
 }
 fn
 (thread-id: Str, include: Str, request: CreateRunRequest): CreateRunResponse {
@@ -1855,7 +2031,23 @@ CreateUploadResponse type {
 
 
 create-upload
-meta {doc: """POST /uploads - Create a multi-part upload for large files."""}
+meta {
+    doc: """
+    POST /uploads - Create a multi-part upload for large files.
+
+    **Example**
+
+    ```hot
+    upload ::openai::create/create-upload(::openai::create/CreateUploadRequest({
+      filename: "training.jsonl",
+      purpose: "fine-tune",
+      bytes: 2147483648,
+      mime_type: "text/jsonl"
+    }))
+    upload.id
+    ```
+    """
+}
 fn
 (request: CreateUploadRequest): CreateUploadResponse {
   create-upload(request, {})
@@ -1893,7 +2085,24 @@ CreateVectorStoreResponse type {
 
 
 create-vector-store
-meta {doc: """POST /vector_stores - Create a vector store for file search."""}
+meta {
+    doc: """
+    POST /vector_stores - Create a vector store for file search.
+
+    **Example**
+
+    ```hot
+    tenant {api-key: ::hot::ctx/get("tenant.openai.key")}
+    store ::openai::create/create-vector-store(::openai::create/CreateVectorStoreRequest({
+      name: "Support docs",
+      file_ids: ["file-abc123"],
+      expires_after: {anchor: "last_active_at", days: 7}
+    }), tenant)
+    store.id
+    store.status
+    ```
+    """
+}
 fn
 (request: CreateVectorStoreRequest): CreateVectorStoreResponse {
   create-vector-store(request, {})
@@ -1925,7 +2134,20 @@ CreateVectorStoreFileBatchResponse type {
 
 create-vector-store-file-batch
 meta {
-    doc: """POST /vector_stores/{vector_store_id}/file_batches - Add a batch of files to a vector store."""
+    doc: """
+    POST /vector_stores/{vector_store_id}/file_batches - Add a batch of
+    files to a vector store.
+
+    **Example**
+
+    ```hot
+    file-batch ::openai::create/create-vector-store-file-batch("vs_abc123", ::openai::create/CreateVectorStoreFileBatchRequest({
+      file_ids: ["file-abc123", "file-def456"]
+    }))
+    file-batch.status
+    file-batch.file_counts
+    ```
+    """
 }
 fn
 (vector-store-id: Str, request: CreateVectorStoreFileBatchRequest): CreateVectorStoreFileBatchResponse {
@@ -1961,7 +2183,19 @@ CreateVectorStoreFileResponse type {
 
 create-vector-store-file
 meta {
-    doc: """POST /vector_stores/{vector_store_id}/files - Add a file to a vector store."""
+    doc: """
+    POST /vector_stores/{vector_store_id}/files - Add a file to a vector
+    store.
+
+    **Example**
+
+    ```hot
+    store-file ::openai::create/create-vector-store-file("vs_abc123", ::openai::create/CreateVectorStoreFileRequest({
+      file_id: "file-abc123"
+    }))
+    store-file.status
+    ```
+    """
 }
 fn
 (vector-store-id: Str, request: CreateVectorStoreFileRequest): CreateVectorStoreFileResponse {

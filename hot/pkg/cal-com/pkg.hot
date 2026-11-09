@@ -2,7 +2,7 @@
 
 hot.pkg.cal-com {
   name: "hot.dev/cal-com",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Cal.com API v2 bindings for Hot. Event types, availability schedules and slots, bookings (paged lists, confirm, decline, cancel, reschedule, no-shows), profile, and webhooks with X-Cal-Signature-256 verification.",
   author: "Hot Dev",

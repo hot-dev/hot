@@ -7,7 +7,18 @@ meta {
 
 record-path
 meta {
-    doc: """`/sobjects/{type}`, plus `/{id}` segments when given, each URL-encoded. Exposed for testing."""
+    doc: """
+    `/sobjects/{type}`, plus `/{id}` segments when given, each URL-encoded.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::sobjects/record-path("Lead")  // "/sobjects/Lead"
+    ::salesforce::sobjects/record-path("Lead", "00Q1")  // "/sobjects/Lead/00Q1"
+    ::salesforce::sobjects/record-path("Contact", "External_Id__c", "u-42")  // "/sobjects/Contact/External_Id__c/u-42"
+    ```
+    """
 }
 fn
 (sobject-type: Str): Str {
@@ -20,7 +31,9 @@ fn
   `${record-path(sobject-type)}/${::api/segment(external-id-field)}/${::api/segment(value)}`
 }
 
-fields-query fn (fields: Vec): Str {
+fields-query
+meta {no-doc: true}
+fn (fields: Vec): Str {
   ::api/query-string({fields: if(is-empty(fields), null, fields)})
 }
 
@@ -47,7 +60,17 @@ fn
 
 get-record
 meta {
-    doc: """GET /sobjects/{type}/{id} - One record; the 3-arity form limits the returned `fields` (Vec of API names)."""
+    doc: """
+    GET /sobjects/{type}/{id} - One record; the 3-arity form limits the
+    returned `fields` (Vec of API names).
+
+    **Example**
+
+    ```hot
+    lead ::salesforce::sobjects/get-record("Lead", "00Q000000000001", ["Name", "Email"])
+    lead.Email
+    ```
+    """
 }
 fn
 (sobject-type: Str, id: Str): Map {
@@ -65,7 +88,16 @@ fn
 
 update-record
 meta {
-    doc: """PATCH /sobjects/{type}/{id} - Update the given fields; others are untouched. Salesforce replies 204: returns null on success."""
+    doc: """
+    PATCH /sobjects/{type}/{id} - Update the given fields; others are
+    untouched. Salesforce replies 204: returns null on success.
+
+    **Example**
+
+    ```hot
+    ::salesforce::sobjects/update-record("Lead", "00Q000000000001", {Status: "Working"})
+    ```
+    """
 }
 fn
 (sobject-type: Str, id: Str, fields: Map): Any {
@@ -77,7 +109,16 @@ fn
 
 delete-record
 meta {
-    doc: """DELETE /sobjects/{type}/{id} - Delete a record (it goes to the recycle bin). Returns null on success."""
+    doc: """
+    DELETE /sobjects/{type}/{id} - Delete a record (it goes to the recycle
+    bin). Returns null on success.
+
+    **Example**
+
+    ```hot
+    ::salesforce::sobjects/delete-record("Lead", "00Q000000000001")
+    ```
+    """
 }
 fn
 (sobject-type: Str, id: Str): Any {
@@ -114,7 +155,17 @@ fn
 
 get-by-external-id
 meta {
-    doc: """GET /sobjects/{type}/{externalIdField}/{value} - Fetch a record by an external id field; the 4-arity form limits the returned `fields`."""
+    doc: """
+    GET /sobjects/{type}/{externalIdField}/{value} - Fetch a record by an
+    external id field; the 4-arity form limits the returned `fields`.
+
+    **Example**
+
+    ```hot
+    contact ::salesforce::sobjects/get-by-external-id("Contact", "External_Id__c", "u-42", ["Id", "Email"])
+    contact.Id
+    ```
+    """
 }
 fn
 (sobject-type: Str, external-id-field: Str, value: Any): Map {
@@ -132,7 +183,17 @@ fn
 
 describe-global
 meta {
-    doc: """GET /sobjects - Every object in the org (`sobjects`: `name`, `label`, `custom`, `queryable`, `createable`, ...) plus `maxBatchSize`."""
+    doc: """
+    GET /sobjects - Every object in the org (`sobjects`: `name`, `label`,
+    `custom`, `queryable`, `createable`, ...) plus `maxBatchSize`.
+
+    **Example**
+
+    ```hot
+    global ::salesforce::sobjects/describe-global()
+    map(filter(global.sobjects, (o) { o.custom }), (o) { o.name })
+    ```
+    """
 }
 fn
 (): Map {
@@ -169,7 +230,16 @@ fn
 
 field-names
 meta {
-    doc: """The field API names from a `describe-object` result. Handy for building `SELECT` lists."""
+    doc: """
+    The field API names from a `describe-object` result. Handy for building
+    `SELECT` lists.
+
+    **Example**
+
+    ```hot
+    ::salesforce::sobjects/field-names({fields: [{name: "Id"}, {name: "Email"}]})  // ["Id", "Email"]
+    ```
+    """
 }
 fn (description: Map): Vec {
   map(or(get(description, "fields"), []), (f) { f.name })

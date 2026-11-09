@@ -2,7 +2,7 @@
 
 hot.pkg.sql-mysql {
   name: "hot.dev/sql-mysql",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "2.6.1",
   description: "MySQL driver for hot.dev/sql: the `::sql::mysql` adapter (backtick identifier quoting) over the pure-Hot hot.dev/mysql wire client.",
   author: "Hot Dev",
@@ -10,8 +10,8 @@ hot.pkg.sql-mysql {
   license: "Apache-2.0",
   tags: ["database"],
   deps: {
-    "hot.dev/mysql": "0.2.1",
-    "hot.dev/sql": "0.1.1"
+    "hot.dev/mysql": "0.2.2",
+    "hot.dev/sql": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

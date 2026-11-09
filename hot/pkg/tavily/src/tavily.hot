@@ -33,7 +33,18 @@ BASE_URL "https://api.tavily.com"
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` for a key. Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` for a key. Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    key ::hot::ctx/get("tavily.api.key")
+    req ::tavily/build-request("/search", {query: "hot language", topic: null}, key)
+    req.url
+    req.body
+    ```
+    """
 }
 fn (path: Str, body: Map, api-key: Str): HttpRequest {
   HttpRequest({
@@ -47,7 +58,28 @@ fn (path: Str, body: Map, api-key: Str): HttpRequest {
   })
 }
 
-post fn
+post
+meta {
+    doc: """
+    POST `body` as JSON to a Tavily `path`, dropping null values, and return
+    the decoded response. The escape hatch for endpoints this package does
+    not wrap. The third argument is an `api-key` Str or an `opts` Map (see
+    `::tavily::api`). A failed call is an Err carrying
+    `::tavily::http/HttpError`.
+
+    **Example**
+
+    ```hot
+    // An endpoint this package does not wrap
+    out ::tavily/post("/crawl", {url: "https://example.com", limit: 5})
+    map(out.results, (r) { r.url })
+
+    // With a per-call key
+    ::tavily/post("/search", {query: "hot language"}, {api-key: ::hot::ctx/get("tenant.tavily.key")})
+    ```
+    """
+}
+fn
 (path: Str, body: Map): Any {
   post(path, body, {})
 },
@@ -100,7 +132,21 @@ fn
 extract
 meta {
     ctx: {"tavily.api.key": {required: false}},
-    doc: """POST /extract - Fetch and clean page content for up to 20 URLs. `options`: `extract_depth` ("basic"/"advanced"), `format` ("markdown"/"text"), `query` (rerank chunks by relevance), `include_images`, `timeout` (seconds). Returns `{results: [{url, raw_content}], failed_results: [{url, error}]}`; check both."""
+    doc: """
+    POST /extract - Fetch and clean page content for up to 20 URLs.
+    `options`: `extract_depth` ("basic"/"advanced"), `format`
+    ("markdown"/"text"), `query` (rerank chunks by relevance),
+    `include_images`, `timeout` (seconds). Returns `{results: [{url,
+    raw_content}], failed_results: [{url, error}]}`; check both.
+
+    **Example**
+
+    ```hot
+    pages ::tavily/extract(["https://example.com"], {format: "markdown"})
+    map(pages.results, (r) { r.raw_content })
+    map(pages.failed_results, (f) { f.error })
+    ```
+    """
 }
 fn
 (urls: Vec): Map {

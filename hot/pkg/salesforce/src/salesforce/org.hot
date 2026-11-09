@@ -30,7 +30,18 @@ fn
 
 versions
 meta {
-    doc: """GET /services/data - The REST API versions the org supports (`[{version, label, url}]`), oldest first. Use it to pick `salesforce.api.version` for an older org."""
+    doc: """
+    GET /services/data - The REST API versions the org supports (`[{version,
+    label, url}]`), oldest first. Use it to pick `salesforce.api.version`
+    for an older org.
+
+    **Example**
+
+    ```hot
+    all ::salesforce::org/versions()
+    last(all).version
+    ```
+    """
 }
 fn
 (): Vec {
@@ -42,7 +53,17 @@ fn
 
 api-usage
 meta {
-    doc: """Parse a `Sforce-Limit-Info` header value (`api-usage=25/15000`) into `{used, max}`, or null when it does not match. Exposed for testing."""
+    doc: """
+    Parse a `Sforce-Limit-Info` header value (`api-usage=25/15000`) into
+    `{used, max}`, or null when it does not match. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::salesforce::org/api-usage("api-usage=25/15000")  // {used: 25, max: 15000}
+    ::salesforce::org/api-usage("none")  // null
+    ```
+    """
 }
 fn (header: Any): Any {
   cond {

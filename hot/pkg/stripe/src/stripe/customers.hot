@@ -58,7 +58,24 @@ fn
 
 get-customer
 meta {
-    doc: """GET /v1/customers/{customer} - Retrieve a customer by ID. Optional `params` such as `{expand: ["invoice_settings.default_payment_method"]}`. A deleted customer comes back as `{id, object: "customer", deleted: true}`."""
+    doc: """
+    GET /v1/customers/{customer} - Retrieve a customer by ID. Optional
+    `params` such as `{expand:
+    ["invoice_settings.default_payment_method"]}`. A deleted customer comes
+    back as `{id, object: "customer", deleted: true}`.
+
+    **Example**
+
+    ```hot
+    ::customers ::stripe::customers
+
+    customer ::customers/get-customer("cus_123", {expand: ["invoice_settings.default_payment_method"]})
+    customer.invoice_settings.default_payment_method.card.last4
+
+    // For a connected account
+    ::customers/get-customer("cus_123", {}, {stripe-account: "acct_123"})
+    ```
+    """
 }
 fn
 (customer: Str): Map {
@@ -89,7 +106,22 @@ UpdateCustomerRequest type {
 
 update-customer
 meta {
-    doc: """POST /v1/customers/{customer} - Update a customer. Only the fields you provide are changed. To set the default card for subscriptions and invoices, pass `invoice_settings: {default_payment_method: "pm_..."}`."""
+    doc: """
+    POST /v1/customers/{customer} - Update a customer. Only the fields you
+    provide are changed. To set the default card for subscriptions and
+    invoices, pass `invoice_settings: {default_payment_method: "pm_..."}`.
+
+    **Example**
+
+    ```hot
+    ::customers ::stripe::customers
+
+    ::customers/update-customer("cus_123", ::customers/UpdateCustomerRequest({
+      email: "alice@example.com",
+      invoice_settings: {default_payment_method: "pm_123"}
+    }))
+    ```
+    """
 }
 fn
 (customer: Str, request: UpdateCustomerRequest): Map {
@@ -101,7 +133,20 @@ fn
 
 delete-customer
 meta {
-    doc: """DELETE /v1/customers/{customer} - Permanently delete a customer. Cancels any active subscriptions. Returns `{id, object: "customer", deleted: true}`."""
+    doc: """
+    DELETE /v1/customers/{customer} - Permanently delete a customer. Cancels
+    any active subscriptions. Returns `{id, object: "customer", deleted:
+    true}`.
+
+    **Example**
+
+    ```hot
+    ::customers ::stripe::customers
+
+    result ::customers/delete-customer("cus_123")
+    result.deleted
+    ```
+    """
 }
 fn
 (customer: Str): Map {
@@ -151,8 +196,22 @@ fn
 search-customers
 meta {
     doc: """
-GET /v1/customers/search - Search customers with Stripe's search query language, e.g. `email:"alice@example.com"` or `metadata["user_id"]:"42"`. Returns `{object: "search_result", data, has_more, next_page}`; pass `next_page` back as `page` in `params`. Search results can lag writes by about a minute. See https://docs.stripe.com/search#query-fields-for-customers.
-"""
+    GET /v1/customers/search - Search customers with Stripe's search query
+    language, e.g. `email:"alice@example.com"` or
+    `metadata["user_id"]:"42"`. Returns `{object: "search_result", data,
+    has_more, next_page}`; pass `next_page` back as `page` in `params`.
+    Search results can lag writes by about a minute. See
+    https://docs.stripe.com/search#query-fields-for-customers.
+
+    **Example**
+
+    ```hot
+    ::customers ::stripe::customers
+
+    results ::customers/search-customers(`email:"alice@example.com"`, {limit: 10})
+    ids map(results.data, %.id)
+    ```
+    """
 }
 fn
 (query: Str): Map {

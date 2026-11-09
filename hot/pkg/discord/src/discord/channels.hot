@@ -117,7 +117,24 @@ DeleteChannelRequest type {
 
 delete-channel
 meta {
-    doc: """DELETE /channels/{channel_id} - Delete a guild channel or thread, or close a DM. Returns the deleted channel. Needs MANAGE_CHANNELS (MANAGE_THREADS for threads). Deleting a category leaves its channels in place."""
+    doc: """
+    DELETE /channels/{channel_id} - Delete a guild channel or thread, or
+    close a DM. Returns the deleted channel. Needs MANAGE_CHANNELS
+    (MANAGE_THREADS for threads). Deleting a category leaves its channels in
+    place.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    deleted ::channels/delete-channel(::channels/DeleteChannelRequest({
+      channel_id: "1100000000000000000",
+      reason: "Incident closed"
+    }))
+    deleted.name
+    ```
+    """
 }
 fn
 (request: DeleteChannelRequest): Map {
@@ -178,7 +195,22 @@ DeleteChannelPermissionRequest type {
 
 delete-channel-permission
 meta {
-    doc: """DELETE /channels/{channel_id}/permissions/{overwrite_id} - Remove a role or member permission overwrite. Needs MANAGE_ROLES."""
+    doc: """
+    DELETE /channels/{channel_id}/permissions/{overwrite_id} - Remove a role
+    or member permission overwrite. Needs MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/delete-channel-permission(::channels/DeleteChannelPermissionRequest({
+      channel_id: "1100000000000000000",
+      overwrite_id: "1000000000000000000",
+      reason: "Back to category defaults"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteChannelPermissionRequest): Bool {
@@ -194,7 +226,19 @@ GetChannelInvitesRequest type {
 
 get-channel-invites
 meta {
-    doc: """GET /channels/{channel_id}/invites - Invites for a channel, with metadata. Needs MANAGE_CHANNELS."""
+    doc: """
+    GET /channels/{channel_id}/invites - Invites for a channel, with
+    metadata. Needs MANAGE_CHANNELS.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    invites ::channels/get-channel-invites(::channels/GetChannelInvitesRequest({channel_id: "1100000000000000000"}))
+    map(invites, %.code)
+    ```
+    """
 }
 fn
 (request: GetChannelInvitesRequest): Vec<Map> {
@@ -259,7 +303,22 @@ FollowAnnouncementChannelRequest type {
 
 follow-announcement-channel
 meta {
-    doc: """POST /channels/{channel_id}/followers - Follow an Announcement channel into `webhook_channel_id`. Needs MANAGE_WEBHOOKS in the target channel."""
+    doc: """
+    POST /channels/{channel_id}/followers - Follow an Announcement channel
+    into `webhook_channel_id`. Needs MANAGE_WEBHOOKS in the target channel.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    follow ::channels/follow-announcement-channel(::channels/FollowAnnouncementChannelRequest({
+      channel_id: "1100000000000000000",
+      webhook_channel_id: "1100000000000000001"
+    }))
+    follow.webhook_id
+    ```
+    """
 }
 fn
 (request: FollowAnnouncementChannelRequest): Map {
@@ -278,7 +337,18 @@ TriggerTypingIndicatorRequest type {
 
 trigger-typing-indicator
 meta {
-    doc: """POST /channels/{channel_id}/typing - Show "typing..." for about 10 seconds or until the bot sends a message."""
+    doc: """
+    POST /channels/{channel_id}/typing - Show "typing..." for about 10
+    seconds or until the bot sends a message.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/trigger-typing-indicator(::channels/TriggerTypingIndicatorRequest({channel_id: "1100000000000000000"}))
+    ```
+    """
 }
 fn
 (request: TriggerTypingIndicatorRequest): Bool {
@@ -384,7 +454,26 @@ ModifyGuildChannelPositionsRequest type {
 
 modify-guild-channel-positions
 meta {
-    doc: """PATCH /guilds/{guild_id}/channels - Reorder channels. `positions` is `[{id, position?, lock_permissions?, parent_id?}]`. Needs MANAGE_CHANNELS."""
+    doc: """
+    PATCH /guilds/{guild_id}/channels - Reorder channels. `positions` is
+    `[{id, position?, lock_permissions?, parent_id?}]`. Needs
+    MANAGE_CHANNELS.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/modify-guild-channel-positions(::channels/ModifyGuildChannelPositionsRequest({
+      guild_id: "1000000000000000000",
+      positions: [
+        {id: "1100000000000000000", position: 0},
+        {id: "1100000000000000001", position: 1, parent_id: "1400000000000000000"}
+      ],
+      reason: "Reorder for launch"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyGuildChannelPositionsRequest): Bool {
@@ -412,7 +501,25 @@ StartThreadFromMessageRequest type {
 
 start-thread-from-message
 meta {
-    doc: """POST /channels/{channel_id}/messages/{message_id}/threads - Start a thread on an existing message. `auto_archive_duration` is 60, 1440, 4320 or 10080 minutes."""
+    doc: """
+    POST /channels/{channel_id}/messages/{message_id}/threads - Start a
+    thread on an existing message. `auto_archive_duration` is 60, 1440, 4320
+    or 10080 minutes.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    thread ::channels/start-thread-from-message(::channels/StartThreadFromMessageRequest({
+      channel_id: "1100000000000000000",
+      message_id: "1200000000000000000",
+      name: "Deploy discussion",
+      auto_archive_duration: 1440
+    }))
+    thread.id
+    ```
+    """
 }
 fn
 (request: StartThreadFromMessageRequest): Map {
@@ -437,7 +544,25 @@ StartThreadWithoutMessageRequest type {
 
 start-thread-without-message
 meta {
-    doc: """POST /channels/{channel_id}/threads - Start a thread with no starter message. `type` 11 = public, 12 = private (the default is private, so set it)."""
+    doc: """
+    POST /channels/{channel_id}/threads - Start a thread with no starter
+    message. `type` 11 = public, 12 = private (the default is private, so
+    set it).
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    thread ::channels/start-thread-without-message(::channels/StartThreadWithoutMessageRequest({
+      channel_id: "1100000000000000000",
+      name: "Launch checklist",
+      type: 11,
+      auto_archive_duration: 4320
+    }))
+    thread.id
+    ```
+    """
 }
 fn
 (request: StartThreadWithoutMessageRequest): Map {
@@ -509,7 +634,18 @@ JoinThreadRequest type {
 
 join-thread
 meta {
-    doc: """PUT /channels/{channel_id}/thread-members/@me - Join a thread (it must not be archived)."""
+    doc: """
+    PUT /channels/{channel_id}/thread-members/@me - Join a thread (it must
+    not be archived).
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/join-thread(::channels/JoinThreadRequest({channel_id: "1100000000000000000"}))
+    ```
+    """
 }
 fn
 (request: JoinThreadRequest): Bool {
@@ -525,7 +661,17 @@ LeaveThreadRequest type {
 
 leave-thread
 meta {
-    doc: """DELETE /channels/{channel_id}/thread-members/@me - Leave a thread."""
+    doc: """
+    DELETE /channels/{channel_id}/thread-members/@me - Leave a thread.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/leave-thread(::channels/LeaveThreadRequest({channel_id: "1100000000000000000"}))
+    ```
+    """
 }
 fn
 (request: LeaveThreadRequest): Bool {
@@ -542,7 +688,21 @@ AddThreadMemberRequest type {
 
 add-thread-member
 meta {
-    doc: """PUT /channels/{channel_id}/thread-members/{user_id} - Add a user to a thread. Needs SEND_MESSAGES_IN_THREADS."""
+    doc: """
+    PUT /channels/{channel_id}/thread-members/{user_id} - Add a user to a
+    thread. Needs SEND_MESSAGES_IN_THREADS.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/add-thread-member(::channels/AddThreadMemberRequest({
+      channel_id: "1100000000000000000",
+      user_id: "1300000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: AddThreadMemberRequest): Bool {
@@ -559,7 +719,22 @@ RemoveThreadMemberRequest type {
 
 remove-thread-member
 meta {
-    doc: """DELETE /channels/{channel_id}/thread-members/{user_id} - Remove a user from a thread. Needs MANAGE_THREADS, or to be the creator of a private thread."""
+    doc: """
+    DELETE /channels/{channel_id}/thread-members/{user_id} - Remove a user
+    from a thread. Needs MANAGE_THREADS, or to be the creator of a private
+    thread.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    ::channels/remove-thread-member(::channels/RemoveThreadMemberRequest({
+      channel_id: "1100000000000000000",
+      user_id: "1300000000000000000"
+    }))
+    ```
+    """
 }
 fn
 (request: RemoveThreadMemberRequest): Bool {
@@ -577,7 +752,23 @@ GetThreadMemberRequest type {
 
 get-thread-member
 meta {
-    doc: """GET /channels/{channel_id}/thread-members/{user_id} - One thread member; `with_member: true` adds the guild member object."""
+    doc: """
+    GET /channels/{channel_id}/thread-members/{user_id} - One thread member;
+    `with_member: true` adds the guild member object.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    member ::channels/get-thread-member(::channels/GetThreadMemberRequest({
+      channel_id: "1100000000000000000",
+      user_id: "1300000000000000000",
+      with_member: true
+    }))
+    member.join_timestamp
+    ```
+    """
 }
 fn
 (request: GetThreadMemberRequest): Map {
@@ -598,7 +789,24 @@ ListThreadMembersRequest type {
 
 list-thread-members
 meta {
-    doc: """GET /channels/{channel_id}/thread-members - Thread members (up to `limit`, 1-100). Page with `after` (a user id) when `with_member` is true. Needs the GUILD_MEMBERS intent."""
+    doc: """
+    GET /channels/{channel_id}/thread-members - Thread members (up to
+    `limit`, 1-100). Page with `after` (a user id) when `with_member` is
+    true. Needs the GUILD_MEMBERS intent.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    members ::channels/list-thread-members(::channels/ListThreadMembersRequest({
+      channel_id: "1100000000000000000",
+      with_member: true,
+      limit: 100
+    }))
+    map(members, %.user_id)
+    ```
+    """
 }
 fn
 (request: ListThreadMembersRequest): Vec<Map> {
@@ -616,7 +824,19 @@ ListActiveThreadsRequest type {
 
 list-active-threads
 meta {
-    doc: """GET /guilds/{guild_id}/threads/active - Every active thread in a guild the bot can see. Returns `{threads, members}`."""
+    doc: """
+    GET /guilds/{guild_id}/threads/active - Every active thread in a guild
+    the bot can see. Returns `{threads, members}`.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    active ::channels/list-active-threads(::channels/ListActiveThreadsRequest({guild_id: "1000000000000000000"}), {token: ::hot::ctx/get("tenant-b.discord.bot.token")})
+    map(active.threads, %.name)
+    ```
+    """
 }
 fn
 (request: ListActiveThreadsRequest): Map {
@@ -634,7 +854,24 @@ ListArchivedThreadsRequest type {
 
 list-public-archived-threads
 meta {
-    doc: """GET /channels/{channel_id}/threads/archived/public - Archived public threads, newest first. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY."""
+    doc: """
+    GET /channels/{channel_id}/threads/archived/public - Archived public
+    threads, newest first. `before` is an ISO8601 timestamp. Returns
+    `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    archived ::channels/list-public-archived-threads(::channels/ListArchivedThreadsRequest({
+      channel_id: "1100000000000000000",
+      before: "2026-11-01T00:00:00Z",
+      limit: 50
+    }))
+    archived.has_more
+    ```
+    """
 }
 fn
 (request: ListArchivedThreadsRequest): Map {
@@ -648,7 +885,23 @@ fn
 
 list-private-archived-threads
 meta {
-    doc: """GET /channels/{channel_id}/threads/archived/private - Archived private threads. `before` is an ISO8601 timestamp. Returns `{threads, members, has_more}`. Needs READ_MESSAGE_HISTORY and MANAGE_THREADS."""
+    doc: """
+    GET /channels/{channel_id}/threads/archived/private - Archived private
+    threads. `before` is an ISO8601 timestamp. Returns `{threads, members,
+    has_more}`. Needs READ_MESSAGE_HISTORY and MANAGE_THREADS.
+
+    **Example**
+
+    ```hot
+    ::channels ::discord::channels
+
+    archived ::channels/list-private-archived-threads(::channels/ListArchivedThreadsRequest({
+      channel_id: "1100000000000000000",
+      limit: 50
+    }))
+    map(archived.threads, %.name)
+    ```
+    """
 }
 fn
 (request: ListArchivedThreadsRequest): Map {

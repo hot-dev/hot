@@ -62,12 +62,13 @@ meta {
 
     ```hot
     ::chat ::openai-compatible::chat
+    ::oai ::openai::chat
 
     response ::chat/complete(::openai-compatible/groq(), {
         model: "llama-3.3-70b-versatile",
         messages: [
-            ::chat/system-message("You are terse."),
-            ::chat/user-message("Why is the sky blue?")
+            ::oai/system-message("You are terse."),
+            ::oai/user-message("Why is the sky blue?")
         ]
     })
     response.choices[0].message.content
@@ -98,12 +99,13 @@ meta {
 
     ```hot
     ::chat ::openai-compatible::chat
+    ::oai ::openai::chat
 
     stream ::chat/complete-stream(::openai-compatible/ollama(), {
         model: "llama3.2",
-        messages: [::chat/user-message("Count to five.")]
+        messages: [::oai/user-message("Count to five.")]
     })
-    for-each(stream.body, (event) { print(::chat/extract-chunk-text(event)) })
+    for-each(stream.body, (event) { print(::oai/extract-chunk-text(event)) })
     ```
     """
 }
@@ -162,7 +164,16 @@ fn
 
 reply-text
 meta {
-    doc: """First-choice message text from a chat response body, or `""`."""
+    doc: """
+    First-choice message text from a chat response body, or `""`.
+
+    **Example**
+
+    ```hot
+    ::openai-compatible::chat/reply-text({choices: [{message: {content: "Hi"}}]})  // "Hi"
+    ::openai-compatible::chat/reply-text({choices: []})  // ""
+    ```
+    """
 }
 fn (response: Map): Str {
     choices or(get(response, "choices"), [])

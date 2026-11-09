@@ -279,10 +279,10 @@ meta {
 
     **Examples**
     ```hot
-    is-media("image/png")   // true
-    is-media("audio/mpeg")  // true
-    is-media("video/mp4")   // true
-    is-media("text/plain")  // false
+    ::hot::mime/is-media("image/png")   // true
+    ::hot::mime/is-media("audio/mpeg")  // true
+    ::hot::mime/is-media("video/mp4")   // true
+    ::hot::mime/is-media("text/plain")  // false
     ```
     """
 }

@@ -107,7 +107,19 @@ ResumeFineTuningJobResponse type {
 
 resume-finetuning
 meta {
-    doc: """POST /fine_tuning/jobs/{fine_tuning_job_id}/resume - Resume a paused fine-tuning job."""
+    doc: """
+    POST /fine_tuning/jobs/{fine_tuning_job_id}/resume - Resume a paused
+    fine-tuning job.
+
+    **Example**
+
+    ```hot
+    job ::openai::resume/resume-finetuning(::openai::resume/ResumeFineTuningJobRequest({
+      fine-tuning-job-id: "ftjob_abc123"
+    }))
+    job.status
+    ```
+    """
 }
 fn
 (request: ResumeFineTuningJobRequest): ResumeFineTuningJobResponse {

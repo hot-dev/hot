@@ -84,11 +84,12 @@ meta {
     **Examples**
 
     ```hot
+    ::tcp ::hot::tcp
     // Simple connection
     conn ::tcp/connect("db.example.com", 5432)
 
     // With a shorter connect timeout
-    conn ::tcp/connect("db.example.com", 5432, TcpOptions({timeout: 5000}))
+    conn ::tcp/connect("db.example.com", 5432, ::tcp/TcpOptions({timeout: 5000}))
     ```
     """
 }
@@ -113,8 +114,10 @@ meta {
     **Example**
 
     ```hot
+    ::tcp ::hot::tcp
+    conn ::tcp/connect("db.example.com", 5432)
     data ::tcp/read(conn, 4096)
-    if(is-null(data), handle-disconnect(), process(data))
+    if(is-null(data), "disconnected", ::hot::bytes/to-str(data))
     ```
     """
 }
@@ -138,8 +141,10 @@ meta {
     **Example**
 
     ```hot
+    ::tcp ::hot::tcp
     ::bytes ::hot::bytes
 
+    conn ::tcp/connect("db.example.com", 5432)
     // Read a Postgres-style message: 1-byte type + 4-byte length + body
     msg-type ::tcp/read-exact(conn, 1)
     len-bytes ::tcp/read-exact(conn, 4)
@@ -167,8 +172,11 @@ meta {
     **Example**
 
     ```hot
+    ::tcp ::hot::tcp
     ::bytes ::hot::bytes
 
+    conn ::tcp/connect("db.example.com", 5432)
+    payload Bytes([1, 2, 3])
     n ::tcp/write(conn, concat(::bytes/from-int(length(payload), 4), payload))
     ```
     """
@@ -185,6 +193,8 @@ meta {
     **Example**
 
     ```hot
+    ::tcp ::hot::tcp
+    conn ::tcp/connect("db.example.com", 5432)
     ::tcp/close(conn)
     ```
     """
@@ -205,7 +215,9 @@ meta {
     **Example**
 
     ```hot
-    if(::tcp/is-open(conn), send-more(conn), reconnect())
+    ::tcp ::hot::tcp
+    conn ::tcp/connect("db.example.com", 5432)
+    if(::tcp/is-open(conn), ::tcp/close(conn))
     ```
     """
 }

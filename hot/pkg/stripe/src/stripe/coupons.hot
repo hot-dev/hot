@@ -60,7 +60,18 @@ fn
 
 get-coupon
 meta {
-    doc: """GET /v1/coupons/{coupon} - Retrieve a coupon by ID."""
+    doc: """
+    GET /v1/coupons/{coupon} - Retrieve a coupon by ID.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    coupon ::coupons/get-coupon("SUMMER25")
+    coupon.valid
+    ```
+    """
 }
 fn
 (coupon: Str): Map {
@@ -79,7 +90,21 @@ UpdateCouponRequest type {
 
 update-coupon
 meta {
-    doc: """POST /v1/coupons/{coupon} - Update a coupon's `name`, `metadata`, or `currency_options`. Discount terms are immutable."""
+    doc: """
+    POST /v1/coupons/{coupon} - Update a coupon's `name`, `metadata`, or
+    `currency_options`. Discount terms are immutable.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    ::coupons/update-coupon("SUMMER25", ::coupons/UpdateCouponRequest({
+      name: "Summer sale",
+      metadata: {campaign: "2026-summer"}
+    }))
+    ```
+    """
 }
 fn
 (coupon: Str, request: UpdateCouponRequest): Map {
@@ -91,7 +116,19 @@ fn
 
 delete-coupon
 meta {
-    doc: """DELETE /v1/coupons/{coupon} - Delete a coupon so it can't be redeemed again. Existing discounts that use it are unaffected."""
+    doc: """
+    DELETE /v1/coupons/{coupon} - Delete a coupon so it can't be redeemed
+    again. Existing discounts that use it are unaffected.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    result ::coupons/delete-coupon("SUMMER25")
+    result.deleted
+    ```
+    """
 }
 fn
 (coupon: Str): Map {
@@ -103,7 +140,19 @@ fn
 
 list-coupons
 meta {
-    doc: """GET /v1/coupons - List coupons. Optional `params`: `created`, `limit`, `starting_after`, `ending_before`."""
+    doc: """
+    GET /v1/coupons - List coupons. Optional `params`: `created`, `limit`,
+    `starting_after`, `ending_before`.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    page ::coupons/list-coupons({limit: 20})
+    names map(page.data, %.name)
+    ```
+    """
 }
 fn
 (): Map {
@@ -134,7 +183,26 @@ CreatePromotionCodeRequest type {
 
 create-promotion-code
 meta {
-    doc: """POST /v1/promotion_codes - Create a customer-facing code for a coupon. `promotion` is `{type: "coupon", coupon: "..."}` (it replaced the top-level `coupon` parameter in 2025-09-30.clover). Omit `code` to have Stripe generate one. `restrictions` can require `first_time_transaction` or a `minimum_amount`."""
+    doc: """
+    POST /v1/promotion_codes - Create a customer-facing code for a coupon.
+    `promotion` is `{type: "coupon", coupon: "..."}` (it replaced the
+    top-level `coupon` parameter in 2025-09-30.clover). Omit `code` to have
+    Stripe generate one. `restrictions` can require `first_time_transaction`
+    or a `minimum_amount`.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    promo ::coupons/create-promotion-code(::coupons/CreatePromotionCodeRequest({
+      promotion: {type: "coupon", coupon: "SUMMER25"},
+      code: "SUMMER25OFF",
+      restrictions: {first_time_transaction: true}
+    }))
+    promo.id
+    ```
+    """
 }
 fn
 (request: CreatePromotionCodeRequest): Map {
@@ -146,7 +214,20 @@ fn
 
 get-promotion-code
 meta {
-    doc: """GET /v1/promotion_codes/{promotion_code} - Retrieve a promotion code by ID (`promo_...`). To look one up by its customer-facing code, use `list-promotion-codes({code: "LAUNCH25"})`."""
+    doc: """
+    GET /v1/promotion_codes/{promotion_code} - Retrieve a promotion code by
+    ID (`promo_...`). To look one up by its customer-facing code, use
+    `list-promotion-codes({code: "LAUNCH25"})`.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    promo ::coupons/get-promotion-code("promo_123")
+    promo.active
+    ```
+    """
 }
 fn
 (promotion-code: Str): Map {
@@ -165,7 +246,18 @@ UpdatePromotionCodeRequest type {
 
 update-promotion-code
 meta {
-    doc: """POST /v1/promotion_codes/{promotion_code} - Update a promotion code. Set `active: false` to stop redemptions."""
+    doc: """
+    POST /v1/promotion_codes/{promotion_code} - Update a promotion code. Set
+    `active: false` to stop redemptions.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    ::coupons/update-promotion-code("promo_123", ::coupons/UpdatePromotionCodeRequest({active: false}))
+    ```
+    """
 }
 fn
 (promotion-code: Str, request: UpdatePromotionCodeRequest): Map {
@@ -189,7 +281,19 @@ ListPromotionCodesRequest type {
 
 list-promotion-codes
 meta {
-    doc: """GET /v1/promotion_codes - List promotion codes. Filter by `code` (case-insensitive), `coupon`, `customer`, or `active`."""
+    doc: """
+    GET /v1/promotion_codes - List promotion codes. Filter by `code`
+    (case-insensitive), `coupon`, `customer`, or `active`.
+
+    **Example**
+
+    ```hot
+    ::coupons ::stripe::coupons
+
+    page ::coupons/list-promotion-codes(::coupons/ListPromotionCodesRequest({code: "SUMMER25OFF", active: true}))
+    promo-id page.data[0].id
+    ```
+    """
 }
 fn
 (): Map {

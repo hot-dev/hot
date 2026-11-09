@@ -17,21 +17,40 @@ meta {
 ::auth ::microsoft::graph::auth
 ::od ::microsoft::onedrive
 
-opts-query fn (opts: Map): Map {
+opts-query
+meta {no-doc: true}
+fn (opts: Map): Map {
   ::od/query-opts({}, opts)
 }
 
-get-json fn (path: Str, opts: Map): Any {
+get-json
+meta {no-doc: true}
+fn (path: Str, opts: Map): Any {
   ::api/json("GET", ::api/with-query(path, opts-query(opts)), ::api/credential-opts(opts))
 }
 
-collect fn (path: Str, opts: Map, limit: Int?): Vec {
+collect
+meta {no-doc: true}
+fn (path: Str, opts: Map, limit: Int?): Vec {
   ::api/collect-pages(path, {...opts-query(opts), ...::api/credential-opts(opts)}, limit)
 }
 
 get-root-site
 meta {
-    doc: """GET /sites/root - the tenant's root site (`https://{tenant}.sharepoint.com`)."""
+    doc: """
+    GET /sites/root - the tenant's root site
+    (`https://{tenant}.sharepoint.com`).
+
+    **Example**
+
+    ```hot
+    root ::microsoft::sharepoint::sites/get-root-site()
+    root.webUrl
+
+    // Only the fields you need
+    ::microsoft::sharepoint::sites/get-root-site({select: "id,displayName"})
+    ```
+    """
 }
 fn
 (): Map {
@@ -43,7 +62,22 @@ fn
 
 get-site
 meta {
-    doc: """GET /sites/{site-id}. `opts` takes `select`, `expand` (e.g. `"drive"`, `"lists"`)."""
+    doc: """
+    GET /sites/{site-id}. `opts` takes `select`, `expand` (e.g. `"drive"`,
+    `"lists"`).
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    site ::microsoft::sharepoint::sites/get-site(site-id)
+    site.displayName
+
+    // With its default library
+    with-drive ::microsoft::sharepoint::sites/get-site(site-id, {expand: "drive"})
+    with-drive.drive.id
+    ```
+    """
 }
 fn
 (site-id: Str): Map {
@@ -55,7 +89,21 @@ fn
 
 site-by-path-path
 meta {
-    doc: """The Graph path for a site by host and server-relative path (pure): `/sites/{hostname}:/{path}` (each segment encoded), or `/sites/{hostname}` for the host's root site."""
+    doc: """
+    The Graph path for a site by host and server-relative path (pure):
+    `/sites/{hostname}:/{path}` (each segment encoded), or
+    `/sites/{hostname}` for the host's root site.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::sites/site-by-path-path("Contoso.SharePoint.com", "/sites/eng")
+    // "/sites/contoso.sharepoint.com:/sites/eng"
+
+    ::microsoft::sharepoint::sites/site-by-path-path("contoso.sharepoint.com", "/")
+    // "/sites/contoso.sharepoint.com"
+    ```
+    """
 }
 fn (hostname: Str, path: Str?): Str {
   segments filter(split(or(path, ""), "/"), (s) { not(is-empty(s)) })
@@ -68,6 +116,8 @@ meta {
     doc: """
     GET /sites/{hostname}:/{server-relative-path} - a site by host and
     path.
+
+    **Example**
 
     ```hot
     site ::microsoft::sharepoint::sites/get-site-by-path("contoso.sharepoint.com", "/sites/engineering")
@@ -90,6 +140,8 @@ meta {
     or fragment, and a library/page suffix after the site
     (`/Shared Documents/...`, `/Lists/...`, `/SitePages/...`,
     `/_layouts/...`). Returns an Err for a non-https URL.
+
+    **Example**
 
     ```hot
     ::microsoft::sharepoint::sites/parse-site-url("https://contoso.sharepoint.com/sites/eng/Shared%20Documents/Forms/AllItems.aspx")
@@ -128,6 +180,8 @@ meta {
     GET a site from its browser URL (`https://contoso.sharepoint.com/sites/eng`,
     or a library or page URL inside it). See `parse-site-url`.
 
+    **Example**
+
     ```hot
     site ::microsoft::sharepoint::sites/get-site-by-url("https://contoso.sharepoint.com/sites/engineering")
     ```
@@ -144,7 +198,17 @@ fn
 
 search-path
 meta {
-    doc: """The site search path (pure): `/sites?search={encoded query}` (Graph's `search` parameter, not OData `$search`)."""
+    doc: """
+    The site search path (pure): `/sites?search={encoded query}` (Graph's
+    `search` parameter, not OData `$search`).
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint::sites/search-path("engineering docs")
+    // "/sites?search=engineering%20docs"
+    ```
+    """
 }
 fn (query: Str): Str {
   `/sites?search=${::api/encode-segment(query)}`
@@ -156,6 +220,8 @@ meta {
     GET /sites?search={query} - sites whose name or description matches,
     all pages or at most `limit`. `"*"` lists every site the caller can
     see.
+
+    **Example**
 
     ```hot
     hits ::microsoft::sharepoint::sites/search-sites("engineering", {}, 20)
@@ -176,7 +242,19 @@ fn
 
 get-all-sites
 meta {
-    doc: """GET /sites/getAllSites - every site in the tenant (app-only with `Sites.Read.All`), all pages or at most `limit`. Includes OneDrive personal sites unless filtered."""
+    doc: """
+    GET /sites/getAllSites - every site in the tenant (app-only with
+    `Sites.Read.All`), all pages or at most `limit`. Includes OneDrive
+    personal sites unless filtered.
+
+    **Example**
+
+    ```hot
+    // App-only: at most 500 sites, with two fields each
+    sites ::microsoft::sharepoint::sites/get-all-sites({select: "id,webUrl"}, 500)
+    map(sites, %.webUrl)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -190,7 +268,19 @@ fn
 }
 
 list-subsites
-meta {doc: """GET /sites/{site-id}/sites - a site's direct subsites, all pages."""}
+meta {
+    doc: """
+    GET /sites/{site-id}/sites - a site's direct subsites, all pages.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    subsites ::microsoft::sharepoint::sites/list-subsites(site-id)
+    map(subsites, %.displayName)
+    ```
+    """
+}
 fn
 (site-id: Str): Vec {
   list-subsites(site-id, {})
@@ -205,6 +295,14 @@ meta {
     GET /sites/{site-id}/drives - the site's document libraries, each a
     drive (`id`, `name`, `webUrl`, `driveType: "documentLibrary"`). Pass
     a library's `id` as `opts.drive` to `microsoft-onedrive`.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    libraries ::microsoft::sharepoint::sites/list-drives(site-id)
+    map(libraries, %.name)
+    ```
     """
 }
 fn
@@ -217,7 +315,18 @@ fn
 
 get-default-drive
 meta {
-    doc: """GET /sites/{site-id}/drive - the site's default document library ("Documents" / "Shared Documents")."""
+    doc: """
+    GET /sites/{site-id}/drive - the site's default document library
+    ("Documents" / "Shared Documents").
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    lib ::microsoft::sharepoint::sites/get-default-drive(site-id)
+    lib.id
+    ```
+    """
 }
 fn
 (site-id: Str): Map {
@@ -229,7 +338,19 @@ fn
 
 find-drive
 meta {
-    doc: """The site library whose `name` matches (case-insensitive), or an Err listing the names there are. Library names are display names, e.g. `"Documents"`, `"Contracts"`."""
+    doc: """
+    The site library whose `name` matches (case-insensitive), or an Err
+    listing the names there are. Library names are display names, e.g.
+    `"Documents"`, `"Contracts"`.
+
+    **Example**
+
+    ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
+    lib ::microsoft::sharepoint::sites/find-drive(site-id, "Contracts")
+    if(is-err(lib), "no such library", lib.id)
+    ```
+    """
 }
 fn
 (site-id: Str, name: Str): Map {
@@ -250,7 +371,10 @@ drive-opts
 meta {
     doc: """Opts that point `microsoft-onedrive` at a library: `{drive: id}` from a drive Map or id, merged into `opts` (pure).
 
+    **Example**
+
     ```hot
+    site-id "contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE"
     lib ::microsoft::sharepoint::sites/find-drive(site-id, "Contracts")
     ::microsoft::onedrive::items/list-all-children("root", ::microsoft::sharepoint::sites/drive-opts(lib))
     ```

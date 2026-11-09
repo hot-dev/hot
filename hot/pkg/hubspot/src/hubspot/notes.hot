@@ -8,7 +8,17 @@ meta {
 
 note-association-type-id
 meta {
-    doc: """The HUBSPOT_DEFINED association type id linking a note to a record type (contacts 202, companies 190, deals 214, tickets 228). Exposed for testing."""
+    doc: """
+    The HUBSPOT_DEFINED association type id linking a note to a record type
+    (contacts 202, companies 190, deals 214, tickets 228). Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::hubspot::notes/note-association-type-id("deals")  // 214
+    ```
+    """
 }
 fn (object-type: Str): Int {
   ::engagements/association-type-id("notes", object-type)
@@ -16,7 +26,17 @@ fn (object-type: Str): Int {
 
 build-note-body
 meta {
-    doc: """Build the create-note payload for a note attached to a record. Exposed for testing; `log-note` uses it."""
+    doc: """
+    Build the create-note payload for a note attached to a record. Exposed
+    for testing; `log-note` uses it.
+
+    **Example**
+
+    ```hot
+    ::hubspot::notes/build-note-body("contacts", "123", "Called.", 1762000000000).properties
+    // {hs_note_body: "Called.", hs_timestamp: 1762000000000}
+    ```
+    """
 }
 fn (object-type: Str, record-id: Str, body: Str, timestamp-ms: Int): Map {
   ::engagements/build-activity-body("notes", {hs_note_body: body}, [{type: object-type, id: record-id}], timestamp-ms)

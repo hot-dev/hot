@@ -2,7 +2,7 @@
 
 hot.pkg.sftp {
   name: "hot.dev/sftp",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.5",
   description: "SFTP file transfer and directory operations.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.sftp {
   license: "Apache-2.0",
   tags: ["protocols"],
   deps: {
-    "hot.dev/ssh": "0.1.1"
+    "hot.dev/ssh": "0.1.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

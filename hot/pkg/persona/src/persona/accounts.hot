@@ -41,7 +41,20 @@ fn
 
 get-account
 meta {
-    doc: """GET /accounts/{id} - Retrieve an account. `opts` takes `include` and `fields` as in `::persona::inquiries/get-inquiry`."""
+    doc: """
+    GET /accounts/{id} - Retrieve an account. `opts` takes `include` and
+    `fields` as in `::persona::inquiries/get-inquiry`.
+
+    **Example**
+
+    ```hot
+    account ::persona::accounts/get-account("act_123")
+    ::persona::api/attr(account, "reference-id")
+
+    // Only the attributes you need
+    ::persona::accounts/get-account("act_123", {fields: {account: ["reference-id", "tags"]}})
+    ```
+    """
 }
 fn
 (account-id: Str): Map {
@@ -56,7 +69,17 @@ fn
 
 list-accounts
 meta {
-    doc: """GET /accounts - One page of accounts. The only filter is `reference-id`; `opts` takes `page-size`, `after`, `before`."""
+    doc: """
+    GET /accounts - One page of accounts. The only filter is `reference-id`;
+    `opts` takes `page-size`, `after`, `before`.
+
+    **Example**
+
+    ```hot
+    page ::persona::accounts/list-accounts({reference-id: "user-42"}, {page-size: 10})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (filters: Map): Map {
@@ -71,7 +94,17 @@ fn
 
 find-by-reference-id
 meta {
-    doc: """The account (a resource, not a document) with this `reference-id`, or null when there is none."""
+    doc: """
+    The account (a resource, not a document) with this `reference-id`, or
+    null when there is none.
+
+    **Example**
+
+    ```hot
+    account ::persona::accounts/find-by-reference-id("user-42")
+    if(is-null(account), "no account yet", account.id)
+    ```
+    """
 }
 fn
 (reference-id: Str): Map? {
@@ -90,7 +123,16 @@ fn
 
 update-account
 meta {
-    doc: """PATCH /accounts/{id} - Update `reference-id`, `account-status`, `tags` or `fields`."""
+    doc: """
+    PATCH /accounts/{id} - Update `reference-id`, `account-status`, `tags`
+    or `fields`.
+
+    **Example**
+
+    ```hot
+    ::persona::accounts/update-account("act_123", {tags: ["vip"], fields: {name-first: "Jane"}})
+    ```
+    """
 }
 fn
 (account-id: Str, attributes: Map): Map {
@@ -107,6 +149,12 @@ meta {
     account `account-id`. Their inquiries, verifications and reports move
     to the target (attributes don't), and each source is archived. A
     source can be consolidated only once.
+
+    **Example**
+
+    ```hot
+    ::persona::accounts/consolidate-accounts("act_123", ["act_456", "act_789"])
+    ```
     """
 }
 fn
@@ -119,7 +167,16 @@ fn
 
 redact-account
 meta {
-    doc: """DELETE /accounts/{id} - Permanently remove the account's PII. Cannot be undone."""
+    doc: """
+    DELETE /accounts/{id} - Permanently remove the account's PII. Cannot be
+    undone.
+
+    **Example**
+
+    ```hot
+    ::persona::accounts/redact-account("act_123")
+    ```
+    """
 }
 fn
 (account-id: Str): Map {
@@ -131,7 +188,15 @@ fn
 
 add-tag
 meta {
-    doc: """POST /accounts/{id}/add-tag - Add a tag by name."""
+    doc: """
+    POST /accounts/{id}/add-tag - Add a tag by name.
+
+    **Example**
+
+    ```hot
+    ::persona::accounts/add-tag("act_123", "vip")
+    ```
+    """
 }
 fn
 (account-id: Str, tag-name: Str): Map {

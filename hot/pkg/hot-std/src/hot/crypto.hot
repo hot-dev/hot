@@ -62,6 +62,9 @@ meta {
     ::crypto ::hot::crypto
     ::b64 ::hot::base64
 
+    private-key-pem ::hot::ctx/get("jwt.private.key")
+    header "eyJhbGciOiJSUzI1NiJ9"
+    payload "eyJzdWIiOiIxIn0"
     signature ::crypto/rsa-sha256-sign(private-key-pem, `${header}.${payload}`)
     jwt `${header}.${payload}.${::b64/encode-url(signature)}`
     ```
@@ -86,6 +89,10 @@ meta {
     ::crypto ::hot::crypto
     ::b64 ::hot::base64
 
+    jwk {n: "sXchDaQebHnPiGvyDOAT4saGEUetSyo9MKLOoWFsueri23bOdgWp4Dy1WlU", e: "AQAB"}
+    header "eyJhbGciOiJSUzI1NiJ9"
+    payload "eyJzdWIiOiIxIn0"
+    signature ::b64/decode-url("c2lnbmF0dXJl")
     n ::b64/decode-url(jwk.n)
     e ::b64/decode-url(jwk.e)
     valid ::crypto/rsa-sha256-verify(n, e, `${header}.${payload}`, signature)
@@ -111,6 +118,10 @@ meta {
     ::crypto ::hot::crypto
     ::b64 ::hot::base64
 
+    jwk {x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}
+    header "eyJhbGciOiJSUzI1NiJ9"
+    payload "eyJzdWIiOiIxIn0"
+    signature ::b64/decode-url("c2lnbmF0dXJl")
     x ::b64/decode-url(jwk.x)
     y ::b64/decode-url(jwk.y)
     valid ::crypto/ecdsa-p256-sha256-verify(x, y, `${header}.${payload}`, signature)

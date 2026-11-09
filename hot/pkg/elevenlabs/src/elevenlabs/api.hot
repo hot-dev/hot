@@ -57,7 +57,18 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 error-message
 meta {
-    doc: """Build a readable message from an ElevenLabs error status and body. Exposed for testing."""
+    doc: """
+    Build a readable message from an ElevenLabs error status and body.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::api/error-message(401, {detail: {status: "invalid_api_key", message: "Invalid API key"}})
+    // "ElevenLabs API error (HTTP 401): invalid_api_key: Invalid API key"
+    ::elevenlabs::api/error-message(500, null)  // "ElevenLabs API error (HTTP 500)"
+    ```
+    """
 }
 fn (status: Int, body: Any): Str {
   detail if(is-map(body), get(body, "detail"), null)
@@ -117,19 +128,44 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment (a voice or history item id)."""
+    doc: """
+    Percent-encode one path segment (a voice or history item id).
+
+    **Example**
+
+    ```hot
+    ::elevenlabs::api/path-segment("a/b")  // "a%2Fb"
+    ```
+    """
 }
 fn (value: Str): Str {
   ::uri/encode(value)
 }
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-blank(value), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{api-key, base-url}` for a call from `opts` first, then `ctx-values` (a Map of context variables), then defaults. An Err when no API key is set, when `api-key` is in `opts` but blank or null (that never falls back to context), or when `opts` has `base-url` without `api-key`. Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{api-key, base-url}` for a call from `opts`
+    first, then `ctx-values` (a Map of context variables), then defaults. An
+    Err when no API key is set, when `api-key` is in `opts` but blank or
+    null (that never falls back to context), or when `opts` has `base-url`
+    without `api-key`. Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::api ::elevenlabs::api
+
+    ::api/resolve-from({}, {"elevenlabs.api.key": "ctx-key"}).api-key  // "ctx-key"
+    ::api/resolve-from({api-key: "tenant-key"}, {}).base-url  // "https://api.elevenlabs.io"
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opt-key non-blank(get(opts, "api-key"))
@@ -174,7 +210,17 @@ fn (opts: Map): Map {
 
 multipart-field
 meta {
-    doc: """One `multipart/form-data` text field as Bytes. Bools render as `true`/`false`; Maps and Vecs as JSON. Exposed for testing."""
+    doc: """
+    One `multipart/form-data` text field as Bytes. Bools render as
+    `true`/`false`; Maps and Vecs as JSON. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    Str(::elevenlabs::api/multipart-field("B", "language_code", "en"))
+    // "--B\r\nContent-Disposition: form-data; name=\"language_code\"\r\n\r\nen\r\n"
+    ```
+    """
 }
 fn (boundary: Str, name: Str, value: Any): Bytes {
   text cond {
@@ -188,7 +234,18 @@ fn (boundary: Str, name: Str, value: Any): Bytes {
 
 multipart-file
 meta {
-    doc: """One `multipart/form-data` file part as Bytes. The file bytes are concatenated verbatim, never interpolated into a string. Exposed for testing."""
+    doc: """
+    One `multipart/form-data` file part as Bytes. The file bytes are
+    concatenated verbatim, never interpolated into a string. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    Str(::elevenlabs::api/multipart-file("B", "file", "a.txt", "text/plain", Bytes("hi")))
+    // "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n"
+    ```
+    """
 }
 fn (boundary: Str, name: Str, filename: Str, mime-type: Str, data: Bytes): Bytes {
   concat(
@@ -198,7 +255,9 @@ fn (boundary: Str, name: Str, filename: Str, mime-type: Str, data: Bytes): Bytes
   )
 }
 
-multipart-close fn (boundary: Str): Bytes {
+multipart-close
+meta {no-doc: true}
+fn (boundary: Str): Bytes {
   Bytes(`--${boundary}--\r\n`)
 }
 
@@ -250,7 +309,21 @@ fn
 
 build-request
 meta {
-    doc: """The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure; exposed for testing."""
+    doc: """
+    The outgoing `HttpRequest` from resolved settings (see `resolve`). Pure;
+    exposed for testing.
+
+    **Example**
+
+    ```hot
+    req ::elevenlabs::api/build-request("POST", "/v1/sound-generation", {}, {text: "Rain"}, {
+      api-key: "tenant-key",
+      base-url: "https://api.elevenlabs.io"
+    })
+    req.url  // "https://api.elevenlabs.io/v1/sound-generation"
+    req.body  // "{\"text\":\"Rain\"}"
+    ```
+    """
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): HttpRequest {
   base-headers {xi-api-key: resolved.api-key}
@@ -270,7 +343,20 @@ fn (method: Str, path: Str, additional-headers: Map, body: Any, resolved: Map): 
 
 json
 meta {
-    doc: """Like `request`, but returns the decoded JSON body on 2xx, or an Err carrying `HttpError`."""
+    doc: """
+    Like `request`, but returns the decoded JSON body on 2xx, or an Err
+    carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    page ::elevenlabs::api/json("GET", "/v2/voices?page_size=5")
+    map(page.voices, (v) { v.name })
+
+    // Act for another tenant, with its key from context
+    ::elevenlabs::api/json("GET", "/v1/user", {}, "", {api-key: ::hot::ctx/get("tenant.elevenlabs.key")})
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Any {
@@ -293,7 +379,17 @@ fn
 
 bytes
 meta {
-    doc: """Like `request`, but returns the verbatim response `Bytes` on 2xx (for audio), or an Err carrying `HttpError`."""
+    doc: """
+    Like `request`, but returns the verbatim response `Bytes` on 2xx (for
+    audio), or an Err carrying `HttpError`.
+
+    **Example**
+
+    ```hot
+    audio ::elevenlabs::api/bytes("POST", "/v1/sound-generation", {text: "Rain on a tin roof"})
+    ::hot::file/write-file-bytes("rain.mp3", audio)
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Bytes {
@@ -313,7 +409,19 @@ fn
 
 request-stream
 meta {
-    doc: """Make an authenticated streaming request with raw (binary chunk) framing, used for streaming audio endpoints."""
+    doc: """
+    Make an authenticated streaming request with raw (binary chunk) framing,
+    used for streaming audio endpoints.
+
+    **Example**
+
+    ```hot
+    response ::elevenlabs::api/request-stream("POST", `/v1/text-to-speech/${::elevenlabs/GEORGE_VOICE_ID}/stream`, {}, {
+      text: "Read this aloud."
+    })
+    chunks collect(response.body)
+    ```
+    """
 }
 fn
 (method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {

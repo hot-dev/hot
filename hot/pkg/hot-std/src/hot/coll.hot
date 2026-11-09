@@ -16,6 +16,8 @@ meta {
     map({a: 1, b: 2}, (k, v) { add(v, 10) })
     // [11, 12]
 
+    items [1, 0, 2]
+    risky (x) { div(10, x) }
     map(items, risky, OnErr.Preserve)
     // preserves domain Err values as result slots
     ```
@@ -301,6 +303,7 @@ meta {
     assoc-some({a: 1}, "b", null)    // {a: 1}
 
     // Pipe-friendly for building maps with optional fields
+    user {email: "a@b.com", phone: null, age: 30}
     {name: "Alice"}
       |> assoc-some("email", user.email)
       |> assoc-some("phone", user.phone)
@@ -1046,6 +1049,7 @@ meta {
     // {name: "Bob", email: "b@b.com"}
 
     // With or for a default
+    items [{id: 1}, {id: 2, featured: true}]
     or(find-first(items, %.featured), first(items))
     ```
     """
@@ -1096,6 +1100,7 @@ meta {
     // 60
 
     // Short-circuit search with accumulation
+    orders [{id: 1, status: "new"}, {id: 2, status: "urgent"}]
     reduce(orders, (acc, order) {
         if(eq(order.status, "urgent"), reduced(order), acc)
     }, null)
@@ -1234,7 +1239,7 @@ meta {
     // Double all numbers in a nested structure
     walk(
         if(is-int(%), mul(%, 2), %),
-        %,
+        (x) { x },
         {a: [1, 2], b: 3}
     )
     // {a: [2, 4], b: 6}

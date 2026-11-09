@@ -96,7 +96,17 @@ token-error ::quickbooks::oauth/token-error
 
 has-primary-credential
 meta {
-    doc: """True when `source` carries `access-token`, `token-store` or `refresh-token`."""
+    doc: """
+    True when `source` carries `access-token`, `token-store` or
+    `refresh-token`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::auth/has-primary-credential({token-store: "quickbooks-tokens"})  // true
+    ::quickbooks::auth/has-primary-credential({realm-id: "9341453"})  // false
+    ```
+    """
 }
 fn (source: Map): Bool {
   or(
@@ -107,7 +117,18 @@ fn (source: Map): Bool {
 }
 
 ctx-source
-meta {doc: """The credential source read from context, in the `opts` shape."""}
+meta {
+    doc: """
+    The credential source read from context, in the `opts` shape.
+
+    **Example**
+
+    ```hot
+    source ::quickbooks::auth/ctx-source()
+    ::quickbooks::auth/has-primary-credential(source)
+    ```
+    """
+}
 fn (): Map {
   {
     access-token: ::ctx/get("quickbooks.access.token"),
@@ -120,7 +141,18 @@ fn (): Map {
 
 merge-sources
 meta {
-    doc: """Pick the source for a call: `opts` when it has a primary credential (client id and secret still fall back to `ctx`), else `ctx`. Pure."""
+    doc: """
+    Pick the source for a call: `opts` when it has a primary credential
+    (client id and secret still fall back to `ctx`), else `ctx`. Pure.
+
+    **Example**
+
+    ```hot
+    merged ::quickbooks::auth/merge-sources({token-store: "quickbooks-tokens"}, {client-id: "ABcd123"})
+    merged.token-store  // "quickbooks-tokens"
+    merged.client-id  // "ABcd123"
+    ```
+    """
 }
 fn (opts: Map, ctx: Map): Map {
   base if(has-primary-credential(opts), opts, ctx)
@@ -141,6 +173,17 @@ meta {
     client-secret}`. `realm-id` keys keeper entries when no
     `token-store-key` is given. Returns a `TokenError` when nothing usable
     is set. Pure.
+
+    **Example**
+
+    ```hot
+    creds ::quickbooks::auth/credentials-from({
+      refresh-token: ::hot::ctx/get("quickbooks.refresh.token"),
+      client-id: "ABcd123",
+      client-secret: ::hot::ctx/get("quickbooks.client.secret")
+    }, "9341453")
+    creds.kind
+    ```
     """
 }
 fn (source: Map, realm-id: Str?): Map {
@@ -189,7 +232,18 @@ fn (source: Map, realm-id: Str?): Map {
 
 resolve-credentials
 meta {
-    doc: """Resolve the credentials for a call from `opts` and context, marking per-call credentials so they are masked in call records. A credential key in `opts` that is blank or null is a `TokenError` naming the key."""
+    doc: """
+    Resolve the credentials for a call from `opts` and context, marking
+    per-call credentials so they are masked in call records. A credential
+    key in `opts` that is blank or null is a `TokenError` naming the key.
+
+    **Example**
+
+    ```hot
+    creds ::quickbooks::auth/resolve-credentials({access-token: ::hot::ctx/get("quickbooks.access.token")}, "9341453")
+    creds.kind
+    ```
+    """
 }
 fn (opts: Map, realm-id: Str?): Map {
   ::ctx/mark-secret([get(opts, "access-token"), get(opts, "refresh-token"), get(opts, "client-secret")])
@@ -208,7 +262,18 @@ fn (opts: Map, realm-id: Str?): Map {
 
 cache-key
 meta {
-    doc: """The run-context key a token is cached under, or null for explicit access tokens. Derived from the app and the refresh token (or the keeper store and key), hashed."""
+    doc: """
+    The run-context key a token is cached under, or null for explicit access
+    tokens. Derived from the app and the refresh token (or the keeper store
+    and key), hashed.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::auth/cache-key({kind: "token"})  // null
+    starts-with(::quickbooks::auth/cache-key({kind: "keeper", store: "quickbooks-tokens", key: "9341453"}), "quickbooks.token-cache.")  // true
+    ```
+    """
 }
 fn (creds: Map): Str? {
   cond {
@@ -220,7 +285,18 @@ fn (creds: Map): Str? {
 
 token-entry
 meta {
-    doc: """The cached or stored form of a `TokenSet`: `{access-token, expires-at, refresh-token, refresh-token-expires-at, updated-at}`; `expires-at` is pulled in by `EXPIRY_MARGIN_SECONDS`."""
+    doc: """
+    The cached or stored form of a `TokenSet`: `{access-token, expires-at,
+    refresh-token, refresh-token-expires-at, updated-at}`; `expires-at` is
+    pulled in by `EXPIRY_MARGIN_SECONDS`.
+
+    **Example**
+
+    ```hot
+    // 3600 seconds, less the 60 second margin, after now
+    ::quickbooks::auth/token-entry({expires-in: 3600}, 1000)  // {expires-at: 3541000, updated-at: 1000}
+    ```
+    """
 }
 fn (tokens: Map, now: Int): Map {
   expires-in or(get(tokens, "expires-in"), 3600)
@@ -235,7 +311,18 @@ fn (tokens: Map, now: Int): Map {
 
 is-fresh
 meta {
-    doc: """True when an entry has an access token that has not reached its margin-adjusted expiry."""
+    doc: """
+    True when an entry has an access token that has not reached its
+    margin-adjusted expiry.
+
+    **Example**
+
+    ```hot
+    entry {access-token: "access", expires-at: 2000}
+    ::quickbooks::auth/is-fresh(entry, 1000)  // true
+    ::quickbooks::auth/is-fresh(entry, 3000)  // false
+    ```
+    """
 }
 fn (entry: Any, now: Int): Bool {
   and(is-map(entry), is-some(get(entry, "access-token")), lt(now, or(get(entry, "expires-at"), 0)))
@@ -243,7 +330,17 @@ fn (entry: Any, now: Int): Bool {
 
 keeper-refresh-token
 meta {
-    doc: """The refresh token to use for a keeper entry: the stored one, else the seed. Null when neither exists."""
+    doc: """
+    The refresh token to use for a keeper entry: the stored one, else the
+    seed. Null when neither exists.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::auth/keeper-refresh-token({refresh-token: "stored"}, "seed")  // "stored"
+    ::quickbooks::auth/keeper-refresh-token(null, "seed")  // "seed"
+    ```
+    """
 }
 fn (entry: Any, seed: Str?): Str? {
   stored if(is-map(entry), get(entry, "refresh-token"), null)
@@ -256,14 +353,26 @@ fn (entry: Any, seed: Str?): Str? {
 
 mark-entry
 meta {
-    doc: """Mask the tokens in a keeper entry and return it unchanged. Null passes through. Exposed for testing."""
+    doc: """
+    Mask the tokens in a keeper entry and return it unchanged. Null passes
+    through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    entry ::quickbooks::auth/mark-entry(::quickbooks::auth/keeper-entry("quickbooks-tokens", "9341453"))
+    is-some(entry)
+    ```
+    """
 }
 fn (entry: Any): Any {
   if(is-map(entry), ::ctx/mark-secret([get(entry, "access-token"), get(entry, "refresh-token")]), null)
   entry
 }
 
-store-map fn (name: Str) {
+store-map
+meta {no-doc: true}
+fn (name: Str) {
   ::store/Map({name: name})
 }
 
@@ -275,6 +384,8 @@ meta {
     `TokenSet` to store its access token too. Returns the entry written.
 
     ```hot
+    redirect-uri "https://app.example.com/oauth/quickbooks"
+    cb ::quickbooks::oauth/callback-params({query: {code: "Q011abc", realmId: "9341453"}})
     tokens ::quickbooks::oauth/exchange-code(cb.code, redirect-uri)
     ::quickbooks::auth/keeper-seed("quickbooks-tokens", cb.realm-id, tokens)
     ```
@@ -289,20 +400,47 @@ fn (store-name: Str, key: Str, tokens: Str | Map): Map {
 
 keeper-entry
 meta {
-    doc: """Read a keeper entry (null when absent). The entry holds tokens: never log it."""
+    doc: """
+    Read a keeper entry (null when absent). The entry holds tokens: never
+    log it.
+
+    **Example**
+
+    ```hot
+    entry ::quickbooks::auth/keeper-entry("quickbooks-tokens", "9341453")
+    if(is-some(entry), entry.updated-at, "not connected")
+    ```
+    """
 }
 fn (store-name: Str, key: Str): Map? {
   mark-entry(::store/get(store-map(store-name), key))
 }
 
-refresh-into-entry fn (creds: Map, refresh-token: Str, now: Int): Map {
+refresh-into-entry
+meta {no-doc: true}
+fn (creds: Map, refresh-token: Str, now: Int): Map {
   tokens ::oauth/refresh(refresh-token, {client-id: creds.client-id, client-secret: creds.client-secret})
   if(is-err(tokens), tokens, token-entry(untype(tokens), now))
 }
 
 keeper-mint
 meta {
-    doc: """Return a fresh entry for keeper credentials: the stored one when fresh, else refresh and write back with `put-if` (re-reading on a lost race)."""
+    doc: """
+    Return a fresh entry for keeper credentials: the stored one when fresh,
+    else refresh and write back with `put-if` (re-reading on a lost race).
+
+    **Example**
+
+    ```hot
+    creds ::quickbooks::auth/credentials-from({
+      token-store: "quickbooks-tokens",
+      client-id: "ABcd123",
+      client-secret: ::hot::ctx/get("quickbooks.client.secret")
+    }, "9341453")
+    entry ::quickbooks::auth/keeper-mint(creds, ::hot::time/epoch-millis(::hot::time/now()))
+    entry.expires-at
+    ```
+    """
 }
 fn (creds: Map, now: Int): Map {
   sm store-map(creds.store)
@@ -332,7 +470,9 @@ fn (creds: Map, now: Int): Map {
   }
 }
 
-mint-entry fn (creds: Map, cached: Any, now: Int): Map {
+mint-entry
+meta {no-doc: true}
+fn (creds: Map, cached: Any, now: Int): Map {
   cond {
     eq(creds.kind, "keeper") => { keeper-mint(creds, now) }
     => {
@@ -350,6 +490,14 @@ meta {
     Returns `{token, cache-key, cached}` (`cached` is true when the token
     came from the cache, so a 401 should `evict` and retry), or a
     `TokenError`.
+
+    **Example**
+
+    ```hot
+    creds ::quickbooks::auth/resolve-credentials({}, "9341453")
+    auth ::quickbooks::auth/bearer(creds)
+    {Authorization: `Bearer ${auth.token}`}
+    ```
     """
 }
 fn (creds: Map): Map {
@@ -378,7 +526,20 @@ fn (creds: Map): Map {
 
 evict
 meta {
-    doc: """Expire a cached access token (after a 401) while keeping the newest refresh token, and expire a keeper entry's access token. No-op for null."""
+    doc: """
+    Expire a cached access token (after a 401) while keeping the newest
+    refresh token, and expire a keeper entry's access token. No-op for null.
+
+    **Example**
+
+    ```hot
+    creds ::quickbooks::auth/resolve-credentials({}, "9341453")
+    auth ::quickbooks::auth/bearer(creds)
+
+    // After a 401, the next bearer call refreshes
+    ::quickbooks::auth/evict(creds, auth.cache-key)
+    ```
+    """
 }
 fn (creds: Map, cache-key: Str?): Bool {
   cond {
@@ -406,7 +567,7 @@ meta {
     caching as needed), or a `TokenError`.
 
     ```hot
-    token ::quickbooks::auth/access-token({refresh-token: stored-refresh-token})
+    token ::quickbooks::auth/access-token({refresh-token: ::hot::ctx/get("quickbooks.refresh.token")})
     ```
     """
 }
@@ -434,8 +595,9 @@ meta {
     credentials). Persist it when you are not using the token keeper.
 
     ```hot
+    stored ::hot::ctx/get("quickbooks.refresh.token")
     latest ::quickbooks::auth/current-refresh-token({refresh-token: stored})
-    if(ne(latest, stored), save-refresh-token(realm-id, latest), null)
+    if(ne(latest, stored), ::hot::store/put(::hot::store/Map({name: "quickbooks-tokens"}), "9341453", latest), null)
     ```
     """
 }

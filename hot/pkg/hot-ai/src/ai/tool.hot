@@ -164,6 +164,13 @@ meta {
     underscores, and hyphens. Valid short names pass through unchanged.
     Rewritten names carry a hash suffix so two distinct internal names cannot
     silently collapse onto the same provider-facing alias.
+
+    **Example**
+
+    ```hot
+    ::ai::tool/provider-name("search-docs")  // "search-docs"
+    starts-with(::ai::tool/provider-name("::myapp/search"), "__myapp_search_")  // true
+    ```
     """
 }
 fn (name: Str): Str {
@@ -198,14 +205,14 @@ meta {
     **Example**
 
     ```hot
-    add fn (x: Int, y: Int): Int { add(x, y) }
+    sum fn (x: Int, y: Int): Int { add(x, y) }
 
     // Defaults
-    t1 ::ai::tool/from-fn(add)
-    // => Tool({name: "::myapp/add", input-schema: {...}, fn: add})
+    t1 ::ai::tool/from-fn(sum)
+    // => Tool({name: "::myapp/sum", input-schema: {...}, fn: sum})
 
     // With overrides for the model-facing surface
-    t2 ::ai::tool/from-fn(add, {
+    t2 ::ai::tool/from-fn(sum, {
         name: "add-numbers",
         description: "Add two integers and return the sum."
     })
@@ -250,7 +257,7 @@ meta {
 
     ```hot
     search fn (query: Str): Vec<Str> { [query] }
-    web-tool Tool({name: "web", input-schema: {...}, fn: search})
+    web-tool ::ai::tool/Tool({name: "web", input-schema: {type: "object"}, fn: search})
 
     tools ::ai::tool/for-agent([search, web-tool])
     // => [Tool({name: "::myapp/search", ...}),
@@ -274,6 +281,14 @@ meta {
     Look up a `Tool` in `tools` by `name`, returning `null` when no
     tool matches. Used by `dispatch` and surfaced for callers that
     need to inspect or rewrite a tool before invoking it.
+
+    **Example**
+
+    ```hot
+    web ::ai::tool/Tool({name: "web", input-schema: {}, fn: (q: Str) { [q] }})
+    ::ai::tool/find-by-name([web], "web").name  // "web"
+    ::ai::tool/find-by-name([web], "missing")  // null
+    ```
     """
 }
 fn (tools: Vec<Tool>, name: Str): Tool? {
@@ -296,10 +311,10 @@ meta {
     **Example**
 
     ```hot
-    add fn (x: Int, y: Int): Int { add(x, y) }
-    tools ::ai::tool/for-agent([add])
+    sum fn (x: Int, y: Int): Int { add(x, y) }
+    tools ::ai::tool/for-agent([sum])
 
-    call ToolCall({id: "call_1", name: "::myapp/add", input: {x: 2, y: 3}})
+    call ::ai::tool/ToolCall({id: "call_1", name: "::myapp/sum", input: {x: 2, y: 3}})
     ::ai::tool/dispatch(tools, call)
     // => ToolResult({id: "call_1", output: 5, is-error: false})
     ```

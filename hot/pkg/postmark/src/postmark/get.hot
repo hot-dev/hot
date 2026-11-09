@@ -317,7 +317,23 @@ GetSingleBounceResponse type {
 
 
 get-single-bounce
-meta {doc: """Retrieve details for a single bounce by its bounce ID."""}
+meta {
+    doc: """
+    Retrieve details for a single bounce by its bounce ID.
+
+    **Example**
+
+    ```hot
+    bounce ::postmark::get/get-single-bounce(::postmark::get/GetSingleBounceRequest({bounceid: "692560173"}))
+    bounce.Email
+
+    // With a tenant's server token
+    ::postmark::get/get-single-bounce(::postmark::get/GetSingleBounceRequest({bounceid: "692560173"}), {
+        server-token: ::hot::ctx/get("tenant.postmark.token")
+    })
+    ```
+    """
+}
 fn
 (request: GetSingleBounceRequest): GetSingleBounceResponse {
   get-single-bounce(request, {})
@@ -358,7 +374,17 @@ GetOutboundMessageDetailsResponse type {
 
 outbound-message-details
 meta {
-    doc: """Retrieve full details of an outbound message including recipients, status, and message events."""
+    doc: """
+    Retrieve full details of an outbound message including recipients,
+    status, and message events.
+
+    **Example**
+
+    ```hot
+    message ::postmark::get/outbound-message-details(::postmark::get/GetOutboundMessageDetailsRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277"}))
+    message.Status
+    ```
+    """
 }
 fn
 (request: GetOutboundMessageDetailsRequest): GetOutboundMessageDetailsResponse {
@@ -383,7 +409,18 @@ GetOutboundMessageDumpResponse type {
 
 
 outbound-message-dump
-meta {doc: """Retrieve the raw source of an outbound message."""}
+meta {
+    doc: """
+    Retrieve the raw source of an outbound message.
+
+    **Example**
+
+    ```hot
+    dump ::postmark::get/outbound-message-dump(::postmark::get/GetOutboundMessageDumpRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277"}))
+    dump.Body
+    ```
+    """
+}
 fn
 (request: GetOutboundMessageDumpRequest): GetOutboundMessageDumpResponse {
   outbound-message-dump(request, {})
@@ -427,7 +464,17 @@ GetInboundMessageDetailsResponse type {
 
 inbound-message-details
 meta {
-    doc: """Retrieve full details of an inbound message including headers, attachments, and status."""
+    doc: """
+    Retrieve full details of an inbound message including headers,
+    attachments, and status.
+
+    **Example**
+
+    ```hot
+    message ::postmark::get/inbound-message-details(::postmark::get/GetInboundMessageDetailsRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277"}))
+    message.Subject
+    ```
+    """
 }
 fn
 (request: GetInboundMessageDetailsRequest): GetInboundMessageDetailsResponse {
@@ -455,7 +502,18 @@ GetOpensForSingleOutboundMessageResponse type {
 
 
 retrieve-message-opens
-meta {doc: """Retrieve open tracking events for a specific outbound message."""}
+meta {
+    doc: """
+    Retrieve open tracking events for a specific outbound message.
+
+    **Example**
+
+    ```hot
+    opens ::postmark::get/retrieve-message-opens(::postmark::get/GetOpensForSingleOutboundMessageRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277", count: "50", offset: "0"}))
+    opens.TotalCount
+    ```
+    """
+}
 fn
 (request: GetOpensForSingleOutboundMessageRequest): GetOpensForSingleOutboundMessageResponse {
   retrieve-message-opens(request, {})
@@ -482,7 +540,18 @@ GetClicksForSingleOutboundMessageResponse type {
 
 
 retrieve-message-clicks
-meta {doc: """Retrieve click tracking events for a specific outbound message."""}
+meta {
+    doc: """
+    Retrieve click tracking events for a specific outbound message.
+
+    **Example**
+
+    ```hot
+    clicks ::postmark::get/retrieve-message-clicks(::postmark::get/GetClicksForSingleOutboundMessageRequest({messageid: "792a3e9d-0078-40df-a6b0-fc78f87bf277", count: "50", offset: "0"}))
+    clicks.TotalCount
+    ```
+    """
+}
 fn
 (request: GetClicksForSingleOutboundMessageRequest): GetClicksForSingleOutboundMessageResponse {
   retrieve-message-clicks(request, {})
@@ -513,7 +582,18 @@ GetSingleTemplateResponse type {
 
 
 get-template
-meta {doc: """Retrieve a single template by its numeric ID or string alias."""}
+meta {
+    doc: """
+    Retrieve a single template by its numeric ID or string alias.
+
+    **Example**
+
+    ```hot
+    template ::postmark::get/get-template(::postmark::get/GetSingleTemplateRequest({template-id-or-alias: "welcome"}))
+    template.Subject
+    ```
+    """
+}
 fn
 (request: GetSingleTemplateRequest): GetSingleTemplateResponse {
   get-template(request, {})
@@ -555,7 +635,17 @@ GetOutboundOverviewStatisticsResponse type {
 
 get-outbound-overview
 meta {
-    doc: """Retrieve an overview of outbound statistics including sent, bounced, opens, clicks, and spam complaints."""
+    doc: """
+    Retrieve an overview of outbound statistics including sent, bounced,
+    opens, clicks, and spam complaints.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-outbound-overview(::postmark::get/GetOutboundOverviewStatisticsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Sent
+    ```
+    """
 }
 fn
 (request: GetOutboundOverviewStatisticsRequest): GetOutboundOverviewStatisticsResponse {
@@ -584,7 +674,17 @@ GetSentCountsResponse type {
 
 get-sent-counts
 meta {
-    doc: """Retrieve total sent email counts with daily breakdowns, optionally filtered by tag and date range."""
+    doc: """
+    Retrieve total sent email counts with daily breakdowns, optionally
+    filtered by tag and date range.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-sent-counts(::postmark::get/GetSentCountsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Days
+    ```
+    """
 }
 fn
 (request: GetSentCountsRequest): GetSentCountsResponse {
@@ -616,7 +716,17 @@ GetBounceCountsResponse type {
 
 get-bounce-counts
 meta {
-    doc: """Retrieve bounce counts broken down by type (hard, soft, SMTP error, transient) with daily breakdowns."""
+    doc: """
+    Retrieve bounce counts broken down by type (hard, soft, SMTP error,
+    transient) with daily breakdowns.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-bounce-counts(::postmark::get/GetBounceCountsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.HardBounce
+    ```
+    """
 }
 fn
 (request: GetBounceCountsRequest): GetBounceCountsResponse {
@@ -645,7 +755,17 @@ GetSpamComplaintsResponse type {
 
 get-spam-complaints
 meta {
-    doc: """Retrieve spam complaint counts with daily breakdowns, optionally filtered by tag and date range."""
+    doc: """
+    Retrieve spam complaint counts with daily breakdowns, optionally
+    filtered by tag and date range.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-spam-complaints(::postmark::get/GetSpamComplaintsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.SpamComplaint
+    ```
+    """
 }
 fn
 (request: GetSpamComplaintsRequest): GetSpamComplaintsResponse {
@@ -674,7 +794,17 @@ GetTrackedEmailCountsResponse type {
 
 get-tracked-email-counts
 meta {
-    doc: """Retrieve counts of emails with open/link tracking enabled, with daily breakdowns."""
+    doc: """
+    Retrieve counts of emails with open/link tracking enabled, with daily
+    breakdowns.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-tracked-email-counts(::postmark::get/GetTrackedEmailCountsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Tracked
+    ```
+    """
 }
 fn
 (request: GetTrackedEmailCountsRequest): GetTrackedEmailCountsResponse {
@@ -703,7 +833,18 @@ GetOutboundOpenCountsResponse type {
 
 
 get-email-open-counts
-meta {doc: """Retrieve email open counts (total and unique) with daily breakdowns."""}
+meta {
+    doc: """
+    Retrieve email open counts (total and unique) with daily breakdowns.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-email-open-counts(::postmark::get/GetOutboundOpenCountsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Unique
+    ```
+    """
+}
 fn
 (request: GetOutboundOpenCountsRequest): GetOutboundOpenCountsResponse {
   get-email-open-counts(request, {})
@@ -734,7 +875,17 @@ GetOutboundOpenCountsByPlatformResponse type {
 
 get-email-platform-usage
 meta {
-    doc: """Retrieve email open counts broken down by platform (Desktop, WebMail, Mobile, Unknown)."""
+    doc: """
+    Retrieve email open counts broken down by platform (Desktop, WebMail,
+    Mobile, Unknown).
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-email-platform-usage(::postmark::get/GetOutboundOpenCountsByPlatformRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Mobile
+    ```
+    """
 }
 fn
 (request: GetOutboundOpenCountsByPlatformRequest): GetOutboundOpenCountsByPlatformResponse {
@@ -765,7 +916,18 @@ GetOutboundOpenCountsByEmailClientResponse type {
 
 
 get-email-client-usage
-meta {doc: """Retrieve email open counts broken down by email client."""}
+meta {
+    doc: """
+    Retrieve email open counts broken down by email client.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-email-client-usage(::postmark::get/GetOutboundOpenCountsByEmailClientRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Days
+    ```
+    """
+}
 fn
 (request: GetOutboundOpenCountsByEmailClientRequest): GetOutboundOpenCountsByEmailClientResponse {
   get-email-client-usage(request, {})
@@ -793,7 +955,18 @@ GetOutboundClickCountsResponse type {
 
 
 get-click-counts
-meta {doc: """Retrieve click counts for tracked links in outbound messages."""}
+meta {
+    doc: """
+    Retrieve click counts for tracked links in outbound messages.
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-click-counts(::postmark::get/GetOutboundClickCountsRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Clicks
+    ```
+    """
+}
 fn
 (request: GetOutboundClickCountsRequest): GetOutboundClickCountsResponse {
   get-click-counts(request, {})
@@ -820,7 +993,16 @@ GetOutboundClickCountsByBrowserFamilyResponse type {
 
 get-browser-usage-by-family
 meta {
-    doc: """Retrieve click counts broken down by browser family (Chrome, Firefox, Safari, etc.)."""
+    doc: """
+    Retrieve click counts broken down by browser family (Chrome, Firefox,
+    Safari, etc.).
+
+    **Example**
+
+    ```hot
+    ::postmark::get/get-browser-usage-by-family(::postmark::get/GetOutboundClickCountsByBrowserFamilyRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    ```
+    """
 }
 fn
 (request: GetOutboundClickCountsByBrowserFamilyRequest): GetOutboundClickCountsByBrowserFamilyResponse {
@@ -852,7 +1034,17 @@ GetOutboundClickCountsByPlatformResponse type {
 
 get-browser-plaform-usage
 meta {
-    doc: """Retrieve click counts broken down by platform (Desktop, Mobile, WebMail, Unknown)."""
+    doc: """
+    Retrieve click counts broken down by platform (Desktop, Mobile, WebMail,
+    Unknown).
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-browser-plaform-usage(::postmark::get/GetOutboundClickCountsByPlatformRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.Desktop
+    ```
+    """
 }
 fn
 (request: GetOutboundClickCountsByPlatformRequest): GetOutboundClickCountsByPlatformResponse {
@@ -881,7 +1073,18 @@ GetOutboundClickCountsByLocationResponse type {
 
 
 get-clicks-by-body-location
-meta {doc: """Retrieve click counts broken down by body location (HTML vs Text)."""}
+meta {
+    doc: """
+    Retrieve click counts broken down by body location (HTML vs Text).
+
+    **Example**
+
+    ```hot
+    stats ::postmark::get/get-clicks-by-body-location(::postmark::get/GetOutboundClickCountsByLocationRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    stats.HTML
+    ```
+    """
+}
 fn
 (request: GetOutboundClickCountsByLocationRequest): GetOutboundClickCountsByLocationResponse {
   get-clicks-by-body-location(request, {})

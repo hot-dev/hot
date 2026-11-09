@@ -79,7 +79,28 @@ SendEmailBatchResponse type Vec<Map>
 
 
 send-batch-emails
-meta {doc: """Send a batch of emails in a single API call."""}
+meta {
+    doc: """
+    Send a batch of emails in a single API call.
+
+    **Example**
+
+    ```hot
+    results ::postmark::send/send-batch-emails(::postmark::send/SendEmailBatchRequest([
+        {From: "sender@example.com", To: "ada@example.com", Subject: "Hello", TextBody: "Hi Ada."},
+        {From: "sender@example.com", To: "alan@example.com", Subject: "Hello", TextBody: "Hi Alan."}
+    ]))
+
+    // One result per message, in order
+    first(results).MessageID
+
+    // With a tenant's server token
+    ::postmark::send/send-batch-emails([{From: "sender@example.com", To: "ada@example.com", Subject: "Hello", TextBody: "Hi Ada."}], {
+        server-token: ::hot::ctx/get("tenant.postmark.token")
+    })
+    ```
+    """
+}
 fn
 (request: SendEmailBatchRequest): SendEmailBatchResponse {
   send-batch-emails(request, {})
@@ -138,7 +159,23 @@ SendEmailWithTemplateResponse type {
 
 send-email-using-template
 meta {
-    doc: """Send an email using a pre-defined Postmark template, identified by TemplateId or TemplateAlias."""
+    doc: """
+    Send an email using a pre-defined Postmark template, identified by
+    TemplateId or TemplateAlias.
+
+    **Example**
+
+    ```hot
+    // Name the template by TemplateAlias or TemplateId
+    sent ::postmark::send/send-email-using-template({
+        TemplateAlias: "welcome",
+        TemplateModel: {name: "Ada"},
+        From: "sender@example.com",
+        To: "ada@example.com"
+    })
+    sent.MessageID
+    ```
+    """
 }
 fn
 (request: SendEmailWithTemplateRequest): SendEmailWithTemplateResponse {
@@ -166,7 +203,23 @@ SendEmailBatchWithTemplatesResponse type Vec<Map>
 
 
 send-batch-email-using-templates
-meta {doc: """Send a batch of emails using templates in a single API call."""}
+meta {
+    doc: """
+    Send a batch of emails using templates in a single API call.
+
+    **Example**
+
+    ```hot
+    results ::postmark::send/send-batch-email-using-templates({Messages: [
+        {TemplateAlias: "welcome", TemplateModel: {name: "Ada"}, From: "sender@example.com", To: "ada@example.com"},
+        {TemplateAlias: "welcome", TemplateModel: {name: "Alan"}, From: "sender@example.com", To: "alan@example.com"}
+    ]})
+
+    // One result per message, in order
+    first(results).MessageID
+    ```
+    """
+}
 fn
 (request: SendEmailBatchWithTemplatesRequest): SendEmailBatchWithTemplatesResponse {
   send-batch-email-using-templates(request, {})

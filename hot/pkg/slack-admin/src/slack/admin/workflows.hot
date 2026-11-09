@@ -38,6 +38,16 @@ meta {
 
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
     Cursor-paginated: pass `cursor` from `response_metadata.next_cursor`, or use `search-all`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    page ::workflows/search(::workflows/SearchRequest({query: "onboarding", source: "workflow_builder", limit: 50}))
+    page.total_found
+    page.workflows
+    ```
     """
 }
 fn
@@ -54,7 +64,18 @@ fn
 search-all
 meta {
     doc: """
-    Every `workflows` entry from `admin.workflows.search`, following `next_cursor` until the last page or `max-items` (default 1000). `request` sets the filters; its `cursor` is the starting point.
+    Every `workflows` entry from `admin.workflows.search`, following
+    `next_cursor` until the last page or `max-items` (default 1000).
+    `request` sets the filters; its `cursor` is the starting point.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    found ::workflows/search-all(::workflows/SearchRequest({app_id: "A0123ABCDEF"}), 500)
+    length(found)
+    ```
     """
 }
 fn
@@ -82,6 +103,14 @@ meta {
     admin.workflows.permissions.lookup - Who may run each workflow, by trigger.
 
     Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    ::workflows/permissions-lookup(::workflows/PermissionsLookupRequest({workflow_ids: ["Wf0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -103,6 +132,14 @@ meta {
     admin.workflows.collaborators.add - Add collaborators (up to 50 users) to workflows.
 
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    ::workflows/collaborators-add(::workflows/CollaboratorsAddRequest({workflow_ids: ["Wf0123ABCDEF"], collaborator_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -124,6 +161,14 @@ meta {
     admin.workflows.collaborators.remove - Remove collaborators from workflows.
 
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    ::workflows/collaborators-remove(::workflows/CollaboratorsRemoveRequest({workflow_ids: ["Wf0123ABCDEF"], collaborator_ids: ["U0123ABCDEF"]}))
+    ```
     """
 }
 fn
@@ -144,6 +189,14 @@ meta {
     admin.workflows.unpublish - Unpublish workflows.
 
     Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+
+    **Example**
+
+    ```hot
+    ::workflows ::slack::admin::workflows
+
+    ::workflows/unpublish(::workflows/UnpublishRequest({workflow_ids: ["Wf0123ABCDEF"]}))
+    ```
     """
 }
 fn

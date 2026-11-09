@@ -66,7 +66,9 @@ type {
     scope: Str?
 }
 
-retry-after-header fn (headers: Map): Dec? {
+retry-after-header
+meta {no-doc: true}
+fn (headers: Map): Dec? {
   value Str(or(get(headers, "retry-after"), ""))
   if(::re/is-match(value, "^[0-9]+(\\.[0-9]+)?$"), Dec(value), null)
 }
@@ -88,7 +90,17 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
 
 is-rate-limited
 meta {
-    doc: """True when `error` is a Discord 429. Wait `error.retry_after` seconds before retrying."""
+    doc: """
+    True when `error` is a Discord 429. Wait `error.retry_after` seconds
+    before retrying.
+
+    **Example**
+
+    ```hot
+    ::discord::api/is-rate-limited({status: 429, retry_after: 1.5})  // true
+    ::discord::api/is-rate-limited({status: 404})  // false
+    ```
+    """
 }
 fn (error: Any): Bool {
   and(is-map(error), eq(get(error, "status"), 429))
@@ -96,7 +108,22 @@ fn (error: Any): Bool {
 
 to-result
 meta {
-    doc: """Return the response body for a 2xx (`null` for 204 No Content), otherwise an `Err(HttpError)`. Exposed for testing; every endpoint uses it."""
+    doc: """
+    Return the response body for a 2xx (`null` for 204 No Content),
+    otherwise an `Err(HttpError)`. Exposed for testing; every endpoint uses
+    it.
+
+    **Example**
+
+    ```hot
+    ::discord::api/to-result(::hot::http/HttpResponse({status: 200, headers: {}, body: {id: "1"}}))  // {id: "1"}
+    ::discord::api/to-result(::hot::http/HttpResponse({status: 204, headers: {}, body: ""}))  // null
+
+    // A 429 carries the wait in retry_after
+    limited ::discord::api/to-result(::hot::http/HttpResponse({status: 429, headers: {}, body: {retry_after: 1.5, global: false}}))
+    if-err(limited, (e) { e.retry_after })  // 1.5
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -109,7 +136,17 @@ fn (response: Result): Any {
 
 to-ok
 meta {
-    doc: """Return `true` for a 2xx response, otherwise an `Err(HttpError)`. Used by endpoints that return 204 No Content."""
+    doc: """
+    Return `true` for a 2xx response, otherwise an `Err(HttpError)`. Used by
+    endpoints that return 204 No Content.
+
+    **Example**
+
+    ```hot
+    ::discord::api/to-ok(::hot::http/HttpResponse({status: 204, headers: {}, body: ""}))  // true
+    is-err(::discord::api/to-ok(::hot::http/HttpResponse({status: 403, headers: {}, body: {code: 50013}})))  // true
+    ```
+    """
 }
 fn (response: Result): Bool {
   cond {
@@ -158,7 +195,17 @@ fn (request: Any, path-keys: Vec<Str>): Map {
 
 query
 meta {
-    doc: """Build a `?a=1&b=2` query suffix from the non-null entries of `params` (URL-encoded); `""` when none are set."""
+    doc: """
+    Build a `?a=1&b=2` query suffix from the non-null entries of `params`
+    (URL-encoded); `""` when none are set.
+
+    **Example**
+
+    ```hot
+    ::discord::api/query({limit: 10, after: null})  // "?limit=10"
+    ::discord::api/query({after: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(params)
@@ -166,7 +213,16 @@ fn (params: Map): Str {
 
 seg
 meta {
-    doc: """URL-encode one path segment (ids, emoji). Use `token-seg` for tokens."""
+    doc: """
+    URL-encode one path segment (ids, emoji). Use `token-seg` for tokens.
+
+    **Example**
+
+    ```hot
+    ::discord::api/seg("a b")  // "a%20b"
+    ::discord::api/seg(123)  // "123"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -174,7 +230,16 @@ fn (value: Any): Str {
 
 token-seg
 meta {
-    doc: """URL-encode a webhook or interaction token for the path, and mask it in call records first. These routes carry their credential in the URL."""
+    doc: """
+    URL-encode a webhook or interaction token for the path, and mask it in
+    call records first. These routes carry their credential in the URL.
+
+    **Example**
+
+    ```hot
+    ::discord::api/token-seg("abc/def")  // "abc%2Fdef"
+    ```
+    """
 }
 fn (token: Str): Str {
   seg(::ctx/mark-secret(token))
@@ -186,6 +251,13 @@ meta {
     Encode a reaction emoji for the URL path. Pass a Unicode emoji as is
     (`"👍"`) or a custom emoji as `name:id`; already-encoded input
     (`"%F0%9F%91%8D"`) is passed through unchanged.
+
+    **Example**
+
+    ```hot
+    ::discord::api/emoji-segment("👍")  // "%F0%9F%91%8D"
+    ::discord::api/emoji-segment("%F0%9F%91%8D")  // "%F0%9F%91%8D"
+    ```
     """
 }
 fn (emoji: Str): Str {
@@ -194,7 +266,17 @@ fn (emoji: Str): Str {
 
 reason-headers
 meta {
-    doc: """`{X-Audit-Log-Reason: ...}` (URL-encoded, as Discord requires) when `reason` is set, otherwise `{}`."""
+    doc: """
+    `{X-Audit-Log-Reason: ...}` (URL-encoded, as Discord requires) when
+    `reason` is set, otherwise `{}`.
+
+    **Example**
+
+    ```hot
+    ::discord::api/reason-headers("Spam wave")  // {X-Audit-Log-Reason: "Spam%20wave"}
+    ::discord::api/reason-headers(null)  // {}
+    ```
+    """
 }
 fn (reason: Any): Map {
   if(is-empty(or(reason, "")), {}, {X-Audit-Log-Reason: ::uri/encode(reason)})
@@ -220,11 +302,15 @@ type {
     description: Str?
 }
 
-clean-filename fn (filename: Str): Str {
+clean-filename
+meta {no-doc: true}
+fn (filename: Str): Str {
   filename |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
 }
 
-file-part fn (boundary: Str, index: Int, file: Map): Bytes {
+file-part
+meta {no-doc: true}
+fn (boundary: Str, index: Int, file: Map): Bytes {
   name clean-filename(file.filename)
   content-type or(get(file, "content_type"), or(::hot::mime/from-path(file.filename), "application/octet-stream"))
   content if(is-bytes(file.content), file.content, Bytes(file.content))
@@ -237,7 +323,17 @@ file-part fn (boundary: Str, index: Int, file: Map): Bytes {
 
 attachments-for
 meta {
-    doc: """The `attachments` array describing `files` by index (`{id, filename, description?}`), for `payload_json`."""
+    doc: """
+    The `attachments` array describing `files` by index (`{id, filename,
+    description?}`), for `payload_json`.
+
+    **Example**
+
+    ```hot
+    ::discord::api/attachments-for([{filename: "a.png", description: "Logo"}, {filename: "b.txt"}])
+    // [{id: 0, filename: "a.png", description: "Logo"}, {id: 1, filename: "b.txt"}]
+    ```
+    """
 }
 fn (files: Vec<Map>): Vec<Map> {
   map-indexed(files, (i, f) {
@@ -251,6 +347,15 @@ meta {
     Build a Discord `multipart/form-data` body: the JSON payload as
     `payload_json`, then each file as `files[n]`. Built as Bytes so binary
     content survives. Exposed for testing; endpoints that take `files` use it.
+
+    **Example**
+
+    ```hot
+    body ::discord::api/multipart-body({content: "hi"}, [{filename: "a.txt", content: "x"}], "boundary")
+    text Str(body)
+    contains(text, "name=\"payload_json\"")  // true
+    contains(text, "name=\"files[0]\"; filename=\"a.txt\"")  // true
+    ```
     """
 }
 fn (payload: Map, files: Vec<Map>, boundary: Str): Bytes {
@@ -260,7 +365,9 @@ fn (payload: Map, files: Vec<Map>, boundary: Str): Bytes {
   concat(with-files, Bytes(`--${boundary}--\r\n`))
 }
 
-form-field fn (boundary: Str, name: Str, value: Any): Bytes {
+form-field
+meta {no-doc: true}
+fn (boundary: Str, name: Str, value: Any): Bytes {
   Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
 }
 
@@ -271,6 +378,15 @@ meta {
     entry of `fields`, then `file` under the part name `file-field`. Used by
     endpoints that take form fields instead of `payload_json` (sticker
     upload).
+
+    **Example**
+
+    ```hot
+    body ::discord::api/multipart-form({name: "shipit", tags: "rocket"}, "file", {filename: "a.png", content: "x"}, "boundary")
+    text Str(body)
+    contains(text, "name=\"tags\"")  // true
+    contains(text, "name=\"file\"; filename=\"a.png\"")  // true
+    ```
     """
 }
 fn (fields: Map, file-field: Str, file: Map, boundary: Str): Bytes {
@@ -291,13 +407,30 @@ fn (fields: Map, file-field: Str, file: Map, boundary: Str): Bytes {
 // Requests
 // ============================================================================
 
-non-blank fn (value: Any): Str? {
+non-blank
+meta {no-doc: true}
+fn (value: Any): Str? {
   if(is-str(value), if(is-empty(trim(value)), null, trim(value)), null)
 }
 
 resolve-from
 meta {
-    doc: """The one resolver, pure: `{token}` for a call from `opts` first, then `ctx-values` (a Map of context variables). An Err when no token is set, or when `token` is in `opts` but blank or null (that never falls back to context). Exposed for testing; `resolve` feeds it the context."""
+    doc: """
+    The one resolver, pure: `{token}` for a call from `opts` first, then
+    `ctx-values` (a Map of context variables). An Err when no token is set,
+    or when `token` is in `opts` but blank or null (that never falls back to
+    context). Exposed for testing; `resolve` feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::discord::api/resolve-from({}, {"discord.bot.token": "from-ctx"})  // {token: "from-ctx"}
+    ::discord::api/resolve-from({token: "from-opts"}, {"discord.bot.token": "from-ctx"})  // {token: "from-opts"}
+
+    // A blank token in opts never falls back to context
+    is-err(::discord::api/resolve-from({token: ""}, {"discord.bot.token": "from-ctx"}))  // true
+    ```
+    """
 }
 fn (opts: Map, ctx-values: Map): Map {
   opts-token non-blank(get(opts, "token"))
@@ -338,7 +471,21 @@ fn (opts: Map): Map {
 
 auth-headers
 meta {
-    doc: """The `Authorization` header for a call's `options`. With `auth: false` it's always `{}`: a `token` there is still checked and masked, but never sent. An Err when `resolve` has no usable token."""
+    doc: """
+    The `Authorization` header for a call's `options`. With `auth: false`
+    it's always `{}`: a `token` there is still checked and masked, but never
+    sent. An Err when `resolve` has no usable token.
+
+    **Example**
+
+    ```hot
+    headers ::discord::api/auth-headers({token: ::hot::ctx/get("discord.bot.token")})
+    headers.Authorization
+
+    // Token-in-path routes send no Authorization header
+    ::discord::api/auth-headers({auth: false})
+    ```
+    """
 }
 fn (options: Map): Map {
   has-token in("token", keys(options))
@@ -422,7 +569,18 @@ fn (method: Str, path: Str, options: Map): HttpRequest {
 
 send
 meta {
-    doc: """Build and send a call, then return `finish` of the response. `opts` is the caller's per-call credentials. An Err from building or from the transport comes back as is."""
+    doc: """
+    Build and send a call, then return `finish` of the response. `opts` is
+    the caller's per-call credentials. An Err from building or from the
+    transport comes back as is.
+
+    **Example**
+
+    ```hot
+    // Package internals: prefer call or call-ok
+    ::discord::api/send("GET", "/users/@me", {}, {}, ::discord::api/to-result)
+    ```
+    """
 }
 fn (method: Str, path: Str, options: Map, opts: Map, finish: Fn): Any {
   merged if(in("token", keys(opts)), {...options, token: get(opts, "token")}, options)
@@ -468,7 +626,19 @@ fn
 
 call-ok
 meta {
-    doc: """Like `call`, but returns `true` on success. For endpoints that answer 204 No Content."""
+    doc: """
+    Like `call`, but returns `true` on success. For endpoints that answer
+    204 No Content.
+
+    **Example**
+
+    ```hot
+    ::discord::api/call-ok("POST", "/channels/1100000000000000000/typing")
+
+    // With an audit-log reason and a per-call token
+    ::discord::api/call-ok("DELETE", "/channels/1100000000000000000", {reason: "Cleanup"}, {token: ::hot::ctx/get("tenant-b.discord.bot.token")})
+    ```
+    """
 }
 fn
 (method: Str, path: Str): Bool {
@@ -542,7 +712,9 @@ fn
 // Pagination
 // ============================================================================
 
-paginate-loop fn (fetch: Fn, next-cursor: Fn, page-size: Int, max-items: Int, cursor: Any, acc: Vec): Vec {
+paginate-loop
+meta {no-doc: true}
+fn (fetch: Fn, next-cursor: Fn, page-size: Int, max-items: Int, cursor: Any, acc: Vec): Vec {
   page fetch(cursor)
   cond {
     is-err(page) => { page }

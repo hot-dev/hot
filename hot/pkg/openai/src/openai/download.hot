@@ -15,7 +15,19 @@ DownloadFileResponse type {
 
 retrieve-file-content
 meta {
-    doc: """GET /files/{file_id}/content - Download the contents of an uploaded file."""
+    doc: """
+    GET /files/{file_id}/content - Download the contents of an uploaded
+    file.
+
+    **Example**
+
+    ```hot
+    contents ::openai::download/retrieve-file-content(::openai::download/DownloadFileRequest({
+      file-id: "file-abc123"
+    }))
+    contents.value
+    ```
+    """
 }
 fn
 (request: DownloadFileRequest): DownloadFileResponse {

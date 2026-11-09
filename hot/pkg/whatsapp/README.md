@@ -7,7 +7,7 @@ WhatsApp Business Cloud API bindings for Hot, calling Meta's Graph API directly 
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/whatsapp": "1.1.1"
+"hot.dev/whatsapp": "1.1.2"
 ```
 
 ## Per-call credentials

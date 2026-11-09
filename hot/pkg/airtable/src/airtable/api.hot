@@ -5,7 +5,9 @@ meta {
 
 ::ctx ::hot::ctx
 
-is-blank fn (value: Any): Bool {
+is-blank
+meta {no-doc: true}
+fn (value: Any): Bool {
   cond {
     is-str(value) => { is-empty(trim(value)) }
     => { true }
@@ -24,6 +26,14 @@ meta {
     stored credential is missing can't silently run on the project's
     credential. Nothing is written to ctx. Exposed for testing; `resolve`
     feeds it the context.
+
+    **Example**
+
+    ```hot
+    ::airtable::api/resolve-from({token: "token-a"}, {"airtable.token": "token-b"})  // {token: "token-a"}
+    ::airtable::api/resolve-from({}, {"airtable.token": "token-b"})  // {token: "token-b"}
+    is-err(::airtable::api/resolve-from({token: " "}, {"airtable.token": "token-b"}))  // true
+    ```
     """
 }
 fn (opts: Map, ctx-values: Map): Map {

@@ -510,7 +510,18 @@ ListAssistantsResponse type {
 
 list-assistants
 meta {
-    doc: """GET /assistants - List all assistants. Supports pagination with limit, order, after, and before parameters."""
+    doc: """
+    GET /assistants - List all assistants. Supports pagination with limit,
+    order, after, and before parameters.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-assistants({limit: "20", order: "desc"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListAssistantsRequest): ListAssistantsResponse {
@@ -541,7 +552,18 @@ ListBatchesResponse type {
 
 list-batch
 meta {
-    doc: """GET /batches - List all batches. Supports pagination with after and limit parameters."""
+    doc: """
+    GET /batches - List all batches. Supports pagination with after and
+    limit parameters.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-batch({limit: "20"})
+    map(page.data, %.status)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListBatchesRequest): ListBatchesResponse {
@@ -575,7 +597,22 @@ ListChatCompletionsResponse type {
 
 list-chat-completions
 meta {
-    doc: """GET /chat/completions - List stored chat completions. Supports filtering by model and metadata."""
+    doc: """
+    GET /chat/completions - List stored chat completions. Supports filtering
+    by model and metadata.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-chat-completions({
+      model: "gpt-4o-mini",
+      limit: "20",
+      order: "desc"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListChatCompletionsRequest): ListChatCompletionsResponse {
@@ -607,7 +644,19 @@ ListEvalsResponse type {
 
 
 list-evals
-meta {doc: """GET /evals - List all evaluations. Supports pagination and ordering."""}
+meta {
+    doc: """
+    GET /evals - List all evaluations. Supports pagination and ordering.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-evals({limit: "20", order: "desc", order-by: "created_at"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
+}
 fn
 (request: ListEvalsRequest): ListEvalsResponse {
   list-evals(request, {})
@@ -638,7 +687,19 @@ ListFilesResponse type {
 
 
 list-files
-meta {doc: """GET /files - List uploaded files. Supports filtering by purpose."""}
+meta {
+    doc: """
+    GET /files - List uploaded files. Supports filtering by purpose.
+
+    **Example**
+
+    ```hot
+    tenant {api-key: ::hot::ctx/get("tenant.openai.key")}
+    page ::openai::list/list-files({purpose: "assistants", limit: "20", order: "desc"}, tenant)
+    map(page.data, %.filename)
+    ```
+    """
+}
 fn
 (request: ListFilesRequest): ListFilesResponse {
   list-files(request, {})
@@ -671,7 +732,21 @@ ListFineTuningCheckpointPermissionsResponse type {
 
 list-checkpoint-permissions
 meta {
-    doc: """GET /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions - List checkpoint permissions"""
+    doc: """
+    GET /fine_tuning/checkpoints/{fine_tuned_model_checkpoint}/permissions -
+    List checkpoint permissions
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-checkpoint-permissions({
+      fine-tuned-model-checkpoint: "ft:gpt-4o-mini-2024-07-18:acme::abc123:ckpt-step-100",
+      limit: "20"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListFineTuningCheckpointPermissionsRequest): ListFineTuningCheckpointPermissionsResponse {
@@ -701,7 +776,18 @@ ListPaginatedFineTuningJobsResponse type {
 
 list-finetuning-jobs
 meta {
-    doc: """GET /fine_tuning/jobs - List all fine-tuning jobs. Supports pagination and metadata filtering."""
+    doc: """
+    GET /fine_tuning/jobs - List all fine-tuning jobs. Supports pagination
+    and metadata filtering.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-finetuning-jobs({limit: "10"})
+    map(page.data, %.status)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListPaginatedFineTuningJobsRequest): ListPaginatedFineTuningJobsResponse {
@@ -733,7 +819,21 @@ ListFineTuningJobCheckpointsResponse type {
 
 list-finetuning-checkpoints
 meta {
-    doc: """GET /fine_tuning/jobs/{fine_tuning_job_id}/checkpoints - List fine-tuning checkpoints"""
+    doc: """
+    GET /fine_tuning/jobs/{fine_tuning_job_id}/checkpoints - List
+    fine-tuning checkpoints
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-finetuning-checkpoints({
+      fine-tuning-job-id: "ftjob_abc123",
+      limit: "10"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListFineTuningJobCheckpointsRequest): ListFineTuningJobCheckpointsResponse {
@@ -763,7 +863,20 @@ ListFineTuningEventsResponse type {
 
 list-finetuning-events
 meta {
-    doc: """GET /fine_tuning/jobs/{fine_tuning_job_id}/events - List fine-tuning events"""
+    doc: """
+    GET /fine_tuning/jobs/{fine_tuning_job_id}/events - List fine-tuning
+    events
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-finetuning-events({
+      fine-tuning-job-id: "ftjob_abc123",
+      limit: "50"
+    })
+    map(page.data, %.message)
+    ```
+    """
 }
 fn
 (request: ListFineTuningEventsRequest): ListFineTuningEventsResponse {
@@ -797,7 +910,7 @@ meta {
     **Example**
 
     ```hot
-    models ::openai::list/list-models(ListModelsRequest({}))
+    models ::openai::list/list-models(::openai::list/ListModelsRequest({}))
     first-model first(models.data)
     first-model.id // => "gpt-4o-mini"
     ```
@@ -832,7 +945,19 @@ ListOrganizationCertificatesResponse type {
 
 
 list-organization-certificates
-meta {doc: """GET /organization/certificates - List organization certificates"""}
+meta {
+    doc: """
+    GET /organization/certificates - List organization certificates
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-organization-certificates({limit: "20", order: "desc"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
+}
 fn
 (request: ListOrganizationCertificatesRequest): ListOrganizationCertificatesResponse {
   list-organization-certificates(request, {})
@@ -864,7 +989,18 @@ ListProjectCertificatesResponse type {
 
 list-project-certificates
 meta {
-    doc: """GET /organization/projects/{project_id}/certificates - List project certificates"""
+    doc: """
+    GET /organization/projects/{project_id}/certificates - List project
+    certificates
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-project-certificates({project-id: "proj_abc123", limit: "20"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListProjectCertificatesRequest): ListProjectCertificatesResponse {
@@ -899,7 +1035,22 @@ ListInputItemsResponse type {
 
 list-input-items
 meta {
-    doc: """GET /responses/{response_id}/input_items - List input items for a response."""
+    doc: """
+    GET /responses/{response_id}/input_items - List input items for a
+    response.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-input-items({
+      response-id: "resp_abc123",
+      limit: "20",
+      order: "asc"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListInputItemsRequest): ListInputItemsResponse {
@@ -933,7 +1084,23 @@ ListMessagesResponse type {
 
 
 list-messages
-meta {doc: """GET /threads/{thread_id}/messages - List all messages in a thread."""}
+meta {
+    doc: """
+    GET /threads/{thread_id}/messages - List all messages in a thread.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-messages({
+      thread-id: "thread_abc123",
+      limit: "20",
+      order: "asc",
+      run-id: "run_abc123"
+    })
+    map(page.data, %.content)
+    ```
+    """
+}
 fn
 (request: ListMessagesRequest): ListMessagesResponse {
   list-messages(request, {})
@@ -965,7 +1132,18 @@ ListRunsResponse type {
 
 
 list-runs
-meta {doc: """GET /threads/{thread_id}/runs - List all runs in a thread."""}
+meta {
+    doc: """
+    GET /threads/{thread_id}/runs - List all runs in a thread.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-runs({thread-id: "thread_abc123", limit: "20", order: "desc"})
+    map(page.data, %.status)
+    ```
+    """
+}
 fn
 (request: ListRunsRequest): ListRunsResponse {
   list-runs(request, {})
@@ -1000,7 +1178,20 @@ ListRunStepsResponse type {
 
 list-run-steps
 meta {
-    doc: """GET /threads/{thread_id}/runs/{run_id}/steps - List all steps in a run."""
+    doc: """
+    GET /threads/{thread_id}/runs/{run_id}/steps - List all steps in a run.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-run-steps({
+      thread-id: "thread_abc123",
+      run-id: "run_abc123",
+      limit: "20"
+    })
+    map(page.data, %.type)
+    ```
+    """
 }
 fn
 (request: ListRunStepsRequest): ListRunStepsResponse {
@@ -1032,7 +1223,19 @@ ListVectorStoresResponse type {
 
 
 list-vector-stores
-meta {doc: """GET /vector_stores - List all vector stores. Supports pagination."""}
+meta {
+    doc: """
+    GET /vector_stores - List all vector stores. Supports pagination.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-vector-stores({limit: "20", order: "desc"})
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
+}
 fn
 (request: ListVectorStoresRequest): ListVectorStoresResponse {
   list-vector-stores(request, {})
@@ -1067,7 +1270,23 @@ ListFilesInVectorStoreBatchResponse type {
 
 list-vector-store-files-batch
 meta {
-    doc: """GET /vector_stores/{vector_store_id}/file_batches/{batch_id}/files - List vector store files in a batch"""
+    doc: """
+    GET /vector_stores/{vector_store_id}/file_batches/{batch_id}/files -
+    List vector store files in a batch
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-vector-store-files-batch({
+      vector-store-id: "vs_abc123",
+      batch-id: "vsfb_abc123",
+      limit: "20",
+      filter: "completed"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListFilesInVectorStoreBatchRequest): ListFilesInVectorStoreBatchResponse {
@@ -1102,7 +1321,22 @@ ListVectorStoreFilesResponse type {
 
 list-vector-store-files
 meta {
-    doc: """GET /vector_stores/{vector_store_id}/files - List all files in a vector store."""
+    doc: """
+    GET /vector_stores/{vector_store_id}/files - List all files in a vector
+    store.
+
+    **Example**
+
+    ```hot
+    page ::openai::list/list-vector-store-files({
+      vector-store-id: "vs_abc123",
+      limit: "20",
+      filter: "completed"
+    })
+    map(page.data, %.id)
+    page.has_more
+    ```
+    """
 }
 fn
 (request: ListVectorStoreFilesRequest): ListVectorStoreFilesResponse {

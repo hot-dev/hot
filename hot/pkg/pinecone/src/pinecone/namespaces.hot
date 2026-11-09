@@ -8,7 +8,20 @@ meta {
 list-namespaces
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """GET {host}/namespaces - One page of namespaces. `options`: `prefix`, `limit` (default 100), `paginationToken`. Returns `{namespaces: [{name, record_count}], pagination?: {next}, total_count}`; `record_count` is a decimal string."""
+    doc: """
+    GET {host}/namespaces - One page of namespaces. `options`: `prefix`,
+    `limit` (default 100), `paginationToken`. Returns `{namespaces: [{name,
+    record_count}], pagination?: {next}, total_count}`; `record_count` is a
+    decimal string.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    out ::pinecone::namespaces/list-namespaces(host, {prefix: "tenant-", limit: 50})
+    map(out.namespaces, %.name)
+    ```
+    """
 }
 fn
 (host: Str): Map {
@@ -28,7 +41,17 @@ fn
 describe-namespace
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """GET {host}/namespaces/{namespace} - One namespace: `{name, record_count, schema?, indexed_fields?}`."""
+    doc: """
+    GET {host}/namespaces/{namespace} - One namespace: `{name, record_count,
+    schema?, indexed_fields?}`.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    ::pinecone::namespaces/describe-namespace(host, "guides").record_count
+    ```
+    """
 }
 fn
 (host: Str, namespace: Str): Map {
@@ -41,7 +64,19 @@ fn
 create-namespace
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """POST {host}/namespaces - Create an empty namespace, optionally with a metadata `schema` (`{fields: {genre: {filterable: true}}}`) restricting which metadata fields are indexed. Namespaces are also created implicitly by the first upsert."""
+    doc: """
+    POST {host}/namespaces - Create an empty namespace, optionally with a
+    metadata `schema` (`{fields: {genre: {filterable: true}}}`) restricting
+    which metadata fields are indexed. Namespaces are also created
+    implicitly by the first upsert.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    ::pinecone::namespaces/create-namespace(host, "guides", {fields: {source: {filterable: true}}})
+    ```
+    """
 }
 fn
 (host: Str, name: Str): Map {
@@ -57,7 +92,17 @@ fn
 delete-namespace
 meta {
     ctx: {"pinecone.api.key": {required: false}},
-    doc: """DELETE {host}/namespaces/{namespace} - Delete a namespace and every record in it. Irreversible."""
+    doc: """
+    DELETE {host}/namespaces/{namespace} - Delete a namespace and every
+    record in it. Irreversible.
+
+    **Example**
+
+    ```hot
+    host ::pinecone::indexes/describe-index("docs").host
+    ::pinecone::namespaces/delete-namespace(host, "guides")
+    ```
+    """
 }
 fn
 (host: Str, namespace: Str): Any {

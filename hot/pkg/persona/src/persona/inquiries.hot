@@ -31,7 +31,20 @@ HOSTED_FLOW_SECRET_KEYS [
 
 template-attribute
 meta {
-    doc: """The create attribute for a template id: `itmplv_...` is `inquiry-template-version-id`, legacy `tmpl_...` is `template-id`, anything else (`itmpl_...`) is `inquiry-template-id`. Exposed for testing."""
+    doc: """
+    The create attribute for a template id: `itmplv_...` is
+    `inquiry-template-version-id`, legacy `tmpl_...` is `template-id`,
+    anything else (`itmpl_...`) is `inquiry-template-id`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/template-attribute("itmpl_1")  // {inquiry-template-id: "itmpl_1"}
+    ::persona::inquiries/template-attribute("itmplv_1")  // {inquiry-template-version-id: "itmplv_1"}
+    ::persona::inquiries/template-attribute("tmpl_1")  // {template-id: "tmpl_1"}
+    ```
+    """
 }
 fn (template-id: Str): Map {
   cond {
@@ -43,7 +56,16 @@ fn (template-id: Str): Map {
 
 create-body
 meta {
-    doc: """The JSON:API body for `create-inquiry`. Exposed for testing."""
+    doc: """
+    The JSON:API body for `create-inquiry`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/create-body("itmpl_1", {reference-id: "user-42"})
+    // {data: {attributes: {inquiry-template-id: "itmpl_1", reference-id: "user-42"}}}
+    ```
+    """
 }
 fn (template-id: Str, opts: Map): Map {
   ::api/document(null, {
@@ -61,7 +83,18 @@ fn (template-id: Str, opts: Map): Map {
 
 mark-hosted-flow-secrets
 meta {
-    doc: """Mask a response's session token and one-time links in call records and return the response unchanged. Each one lets anyone continue the user's verification. An Err passes through. Exposed for testing."""
+    doc: """
+    Mask a response's session token and one-time links in call records and
+    return the response unchanged. Each one lets anyone continue the user's
+    verification. An Err passes through. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    response ::persona::api/send("POST", "/inquiries/inq_123/resume", {}, null, {})
+    ::persona::inquiries/session-token(::persona::inquiries/mark-hosted-flow-secrets(response))
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -174,7 +207,17 @@ fn
 
 collect-inquiries
 meta {
-    doc: """Up to `limit` inquiries matching `filters` (see `list-inquiries`), following cursors."""
+    doc: """
+    Up to `limit` inquiries matching `filters` (see `list-inquiries`),
+    following cursors.
+
+    **Example**
+
+    ```hot
+    queue ::persona::inquiries/collect-inquiries({status: ["needs_review"]}, 500)
+    map(queue, %.id)
+    ```
+    """
 }
 fn
 (filters: Map, limit: Int): Vec {
@@ -215,7 +258,16 @@ fn
 
 update-inquiry
 meta {
-    doc: """PATCH /inquiries/{id} - Update `note`, `fields`, `tags` or `redirect-uri`. Unset keys are left alone."""
+    doc: """
+    PATCH /inquiries/{id} - Update `note`, `fields`, `tags` or
+    `redirect-uri`. Unset keys are left alone.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/update-inquiry("inq_123", {note: "Escalated by agent", tags: ["escalated"]})
+    ```
+    """
 }
 fn
 (inquiry-id: Str, attributes: Map): Map {
@@ -225,13 +277,27 @@ fn
   ::api/send("PATCH", `/inquiries/${seg(inquiry-id)}`, {}, ::api/document(null, attributes, {}), options)
 }
 
-action fn (inquiry-id: Str, name: Str, meta-block: Map, options: Map): Map {
+action
+meta {no-doc: true}
+fn (inquiry-id: Str, name: Str, meta-block: Map, options: Map): Map {
   ::api/send("POST", `/inquiries/${seg(inquiry-id)}/${name}`, {}, ::api/meta-document(meta-block), options)
 }
 
 approve-inquiry
 meta {
-    doc: """POST /inquiries/{id}/approve - Approve an inquiry, with an optional reviewer `comment`. Fires `inquiry.approved`."""
+    doc: """
+    POST /inquiries/{id}/approve - Approve an inquiry, with an optional
+    reviewer `comment`. Fires `inquiry.approved`.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/approve-inquiry("inq_123")
+
+    // With a reviewer comment and per-call options
+    ::persona::inquiries/approve-inquiry("inq_123", "Documents match.", {idempotency-key: "inq_123-approve"})
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Map {
@@ -246,7 +312,16 @@ fn
 
 decline-inquiry
 meta {
-    doc: """POST /inquiries/{id}/decline - Decline an inquiry, with an optional reviewer `comment`. Fires `inquiry.declined`."""
+    doc: """
+    POST /inquiries/{id}/decline - Decline an inquiry, with an optional
+    reviewer `comment`. Fires `inquiry.declined`.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/decline-inquiry("inq_123", "Document is expired.")
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Map {
@@ -261,7 +336,16 @@ fn
 
 mark-for-review
 meta {
-    doc: """POST /inquiries/{id}/mark-for-review - Move an inquiry to `needs_review` for a human. Not allowed once approved or declined."""
+    doc: """
+    POST /inquiries/{id}/mark-for-review - Move an inquiry to `needs_review`
+    for a human. Not allowed once approved or declined.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/mark-for-review("inq_123")
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Map {
@@ -273,7 +357,16 @@ fn
 
 expire-inquiry
 meta {
-    doc: """POST /inquiries/{id}/expire - Expire every session and cancel pending verifications. The inquiry can still be resumed."""
+    doc: """
+    POST /inquiries/{id}/expire - Expire every session and cancel pending
+    verifications. The inquiry can still be resumed.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/expire-inquiry("inq_123")
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Map {
@@ -310,7 +403,17 @@ fn
 
 session-token
 meta {
-    doc: """The `meta.session-token` of a create or resume response (any inflection), or null."""
+    doc: """
+    The `meta.session-token` of a create or resume response (any
+    inflection), or null.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/session-token({meta: {session-token: "sess_abc"}})  // "sess_abc"
+    ::persona::inquiries/session-token({meta: {}})  // null
+    ```
+    """
 }
 fn (doc: Any): Str? {
   m if(is-map(doc), get(doc, "meta"), null)
@@ -349,7 +452,16 @@ fn
 
 one-time-link
 meta {
-    doc: """The `meta.one-time-link` of a response (any inflection), or null."""
+    doc: """
+    The `meta.one-time-link` of a response (any inflection), or null.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/one-time-link({meta: {one_time_link: "https://inquiry.withpersona.com/verify?code=abc"}})
+    // "https://inquiry.withpersona.com/verify?code=abc"
+    ```
+    """
 }
 fn (doc: Any): Str? {
   m if(is-map(doc), get(doc, "meta"), null)
@@ -361,7 +473,16 @@ fn (doc: Any): Str? {
 
 redact-inquiry
 meta {
-    doc: """DELETE /inquiries/{id} - Permanently remove the inquiry's PII (child objects are redacted asynchronously). Cannot be undone."""
+    doc: """
+    DELETE /inquiries/{id} - Permanently remove the inquiry's PII (child
+    objects are redacted asynchronously). Cannot be undone.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/redact-inquiry("inq_123")
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Map {
@@ -373,7 +494,15 @@ fn
 
 add-tag
 meta {
-    doc: """POST /inquiries/{id}/add-tag - Add a tag by name."""
+    doc: """
+    POST /inquiries/{id}/add-tag - Add a tag by name.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/add-tag("inq_123", "escalated")
+    ```
+    """
 }
 fn
 (inquiry-id: Str, tag-name: Str): Map {
@@ -385,7 +514,15 @@ fn
 
 remove-tag
 meta {
-    doc: """POST /inquiries/{id}/remove-tag - Remove a tag by name."""
+    doc: """
+    POST /inquiries/{id}/remove-tag - Remove a tag by name.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/remove-tag("inq_123", "escalated")
+    ```
+    """
 }
 fn
 (inquiry-id: Str, tag-name: Str): Map {
@@ -397,7 +534,18 @@ fn
 
 print-inquiry
 meta {
-    doc: """GET /inquiries/{id}/print - The inquiry as a PDF (`Bytes`). It contains the user's PII and document images: store it like the originals, never log it."""
+    doc: """
+    GET /inquiries/{id}/print - The inquiry as a PDF (`Bytes`). It contains
+    the user's PII and document images: store it like the originals, never
+    log it.
+
+    **Example**
+
+    ```hot
+    pdf ::persona::inquiries/print-inquiry("inq_123")
+    length(pdf)
+    ```
+    """
 }
 fn
 (inquiry-id: Str): Bytes {
@@ -413,7 +561,17 @@ fn
 
 is-sandbox-key
 meta {
-    doc: """True when an API key is a sandbox key (`persona_sandbox_...`). Exposed for testing."""
+    doc: """
+    True when an API key is a sandbox key (`persona_sandbox_...`). Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/is-sandbox-key("persona_sandbox_abc")  // true
+    ::persona::inquiries/is-sandbox-key("persona_production_abc")  // false
+    ```
+    """
 }
 fn (api-key: Any): Bool {
   and(is-str(api-key), starts-with(or(api-key, ""), "persona_sandbox_"))
@@ -494,7 +652,9 @@ fn (template-id: Str, opts: Map): Str {
   link-with(params)
 }
 
-link-with fn (params: Vec): Str {
+link-with
+meta {no-doc: true}
+fn (params: Vec): Str {
   pairs map(filter(params, (p) { is-some(p[1]) }), (p) { `${::hot::uri/encode(p[0])}=${::hot::uri/encode(Str(p[1]))}` })
   `${::persona/HOSTED_FLOW_URL}?${join(pairs, "&")}`
 }
@@ -506,6 +666,13 @@ meta {
     `...?inquiry-id=inq_...&session-token=...`. Get the token from
     `resume-inquiry`. The link carries a session token: send it only to
     the user, and don't log it.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/resume-url("inq_123", "sess_abc")
+    // "https://inquiry.withpersona.com/verify?inquiry-id=inq_123&session-token=sess_abc"
+    ```
     """
 }
 fn (inquiry-id: Str, session-token: Str): Str {
@@ -518,7 +685,15 @@ fn (inquiry-id: Str, session-token: Str): Str {
 
 status
 meta {
-    doc: """An inquiry's `status` from a document or resource, or null."""
+    doc: """
+    An inquiry's `status` from a document or resource, or null.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/status({data: {id: "inq_1", type: "inquiry", attributes: {status: "approved"}}})  // "approved"
+    ```
+    """
 }
 fn (doc: Any): Str? {
   ::api/attr(doc, "status")
@@ -526,7 +701,19 @@ fn (doc: Any): Str? {
 
 is-done
 meta {
-    doc: """True when the end user has nothing left to do: the status is `completed`, `needs_review`, `approved`, `declined`, `failed` or `expired`. Use it after a webhook, or from a scheduled check, instead of waiting in a run."""
+    doc: """
+    True when the end user has nothing left to do: the status is
+    `completed`, `needs_review`, `approved`, `declined`, `failed` or
+    `expired`. Use it after a webhook, or from a scheduled check, instead of
+    waiting in a run.
+
+    **Example**
+
+    ```hot
+    ::persona::inquiries/is-done({data: {id: "inq_1", type: "inquiry", attributes: {status: "completed"}}})  // true
+    ::persona::inquiries/is-done({data: {id: "inq_2", type: "inquiry", attributes: {status: "pending"}}})  // false
+    ```
+    """
 }
 fn (doc: Any): Bool {
   in(or(status(doc), ""), DONE_STATUSES)

@@ -35,7 +35,17 @@ UNSUPPORTED-PROTOCOL-VERSION -32022
 
 encode-header-value
 meta {
-    doc: """Encode an MCP routing header value using the Base64 sentinel when plain ASCII is unsafe."""
+    doc: """
+    Encode an MCP routing header value using the Base64 sentinel when plain
+    ASCII is unsafe.
+
+    **Example**
+
+    ```hot
+    ::mcp::client/encode-header-value("search")  // "search"
+    ::mcp::client/encode-header-value(" padded")  // "=?base64?IHBhZGRlZA==?="
+    ```
+    """
 }
 fn (value: Str): Str {
   safe and(
@@ -46,7 +56,9 @@ fn (value: Str): Str {
   if(safe, value, `=?base64?${::base64/encode(Bytes(value))}?=`)
 }
 
-contains-x-mcp-header fn cond (value: Any): Bool {
+contains-x-mcp-header
+meta {no-doc: true}
+fn cond (value: Any): Bool {
   is-map(value) => {
     or(
       in("x-mcp-header", keys(value)),
@@ -58,7 +70,9 @@ contains-x-mcp-header fn cond (value: Any): Bool {
   => { false }
 }
 
-valid-header-suffix fn (value: Any): Bool {
+valid-header-suffix
+meta {no-doc: true}
+fn (value: Any): Bool {
   and(
     is-str(value),
     not(is-empty(value)),
@@ -66,7 +80,9 @@ valid-header-suffix fn (value: Any): Bool {
   )
 }
 
-property-header-analysis fn (schema: Any, path: Vec<Str>): Map {
+property-header-analysis
+meta {no-doc: true}
+fn (schema: Any, path: Vec<Str>): Map {
   cond {
     not(is-map(schema)) => {
       {valid: false, defs: [], reason: `Schema at '${join(path, ".")}' is not an object`}
@@ -134,7 +150,22 @@ property-header-analysis fn (schema: Any, path: Vec<Str>): Map {
 
 tool-header-analysis
 meta {
-    doc: """Validate and collect statically reachable `x-mcp-header` annotations from a tool."""
+    doc: """
+    Validate and collect statically reachable `x-mcp-header` annotations
+    from a tool.
+
+    **Example**
+
+    ```hot
+    tool ::mcp::types/Tool({name: "search", input-schema: {
+      type: "object",
+      properties: {region: {type: "string", "x-mcp-header": "Region"}}
+    }})
+    analysis ::mcp::client/tool-header-analysis(tool)
+    analysis.valid  // true
+    analysis.defs[0].suffix  // "Region"
+    ```
+    """
 }
 fn (tool: ::types/Tool): Map {
   schema or(tool.input-schema, {type: "object", properties: {}})
@@ -181,7 +212,22 @@ fn (tool: ::types/Tool): Map {
 }
 
 tool-parameter-headers
-meta {doc: """Build `Mcp-Param-*` headers for a modern HTTP tool call."""}
+meta {
+    doc: """
+    Build `Mcp-Param-*` headers for a modern HTTP tool call.
+
+    **Example**
+
+    ```hot
+    tool ::mcp::types/Tool({name: "search", input-schema: {
+      type: "object",
+      properties: {region: {type: "string", "x-mcp-header": "Region"}}
+    }})
+    ::mcp::client/tool-parameter-headers(tool, {region: "us-east"})
+    // {"Mcp-Param-Region": "us-east"}
+    ```
+    """
+}
 fn (tool: ::types/Tool, arguments: Map?): Map {
   analysis tool-header-analysis(tool)
   cond {
@@ -228,7 +274,27 @@ fn (tool: ::types/Tool, arguments: Map?): Map {
 }
 
 valid-tool-for-session
-meta {doc: """Return whether a tool definition is valid for the session transport."""}
+meta {
+    doc: """
+    Return whether a tool definition is valid for the session transport.
+
+    **Example**
+
+    ```hot
+    session ::mcp::types/Session({
+      url: "https://mcp.example.com/mcp",
+      protocol-version: "2026-07-28",
+      server-info: ::mcp::types/ServerInfo({name: "server", version: "1"}),
+      server-capabilities: ::mcp::types/ServerCapabilities({tools: {listChanged: true}}),
+      headers: {},
+      era: "modern",
+      client-info: ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    })
+    bad ::mcp::types/Tool({name: "bad", input-schema: {type: "object", "x-mcp-header": "Bad"}})
+    ::mcp::client/valid-tool-for-session(session, bad)  // false
+    ```
+    """
+}
 fn (session: ::types/Session, tool: ::types/Tool): Bool {
   or(ne(or(session.era, "legacy"), "modern"), tool-header-analysis(tool).valid)
 }
@@ -237,15 +303,21 @@ fn (session: ::types/Session, tool: ::types/Tool): Bool {
 // Connection negotiation
 // ============================================================================
 
-default-server-info fn (): ::types/ServerInfo {
+default-server-info
+meta {no-doc: true}
+fn (): ::types/ServerInfo {
   ::types/ServerInfo({name: "unknown", version: "unknown"})
 }
 
-default-server-capabilities fn (): ::types/ServerCapabilities {
+default-server-capabilities
+meta {no-doc: true}
+fn (): ::types/ServerCapabilities {
   ::types/ServerCapabilities({})
 }
 
-modern-params fn (params: Map?, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, version: Str, log-level: Str?): Map {
+modern-params
+meta {no-doc: true}
+fn (params: Map?, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, version: Str, log-level: Str?): Map {
   supplied or(params, {})
   supplied-meta get(supplied, "_meta", {})
   automatic {}
@@ -256,7 +328,9 @@ modern-params fn (params: Map?, client-info: ::types/ClientInfo, capabilities: :
   assoc(supplied, "_meta", merge(supplied-meta, automatic))
 }
 
-connect-legacy fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map): ::types/Session {
+connect-legacy
+meta {no-doc: true}
+fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map): ::types/Session {
   req ::rpc/request("initialize", {
     protocolVersion: LEGACY-PROTOCOL-VERSION,
     capabilities: or(untype(capabilities), {}),
@@ -272,7 +346,9 @@ connect-legacy fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::ty
   }
 }
 
-legacy-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, raw: HttpResponse, response: ::rpc-types/Response): ::types/Session {
+legacy-session
+meta {no-doc: true}
+fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, raw: HttpResponse, response: ::rpc-types/Response): ::types/Session {
   result response.result
   selected-version or(result.protocolVersion, LEGACY-PROTOCOL-VERSION)
   session-id or(
@@ -305,7 +381,9 @@ legacy-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::ty
   })
 }
 
-modern-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?, discovery: Map): ::types/Session {
+modern-session
+meta {no-doc: true}
+fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?, discovery: Map): ::types/Session {
   supported get(discovery, "supportedVersions", [])
   cond {
     not(in(MODERN-PROTOCOL-VERSION, supported)) => {
@@ -338,7 +416,21 @@ modern-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::ty
 
 response-json-rpc-message
 meta {
-    doc: """Extract a JSON-RPC message from JSON or buffered SSE transport responses."""
+    doc: """
+    Extract a JSON-RPC message from JSON or buffered SSE transport
+    responses.
+
+    **Example**
+
+    ```hot
+    response ::hot::http/HttpResponse({
+      status: 200,
+      headers: {"content-type": "application/json"},
+      body: {jsonrpc: "2.0", id: "call-1", result: {}}
+    })
+    ::mcp::client/response-json-rpc-message(response).id  // "call-1"
+    ```
+    """
 }
 fn (response: HttpResponse): Map? {
   cond {
@@ -353,7 +445,9 @@ fn (response: HttpResponse): Map? {
   }
 }
 
-modern-probe fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?): Map {
+modern-probe
+meta {no-doc: true}
+fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?): Map {
   params modern-params({}, client-info, capabilities, MODERN-PROTOCOL-VERSION, log-level)
   req ::rpc/request("server/discover", params)
   headers merge(base-headers, {
@@ -364,7 +458,9 @@ modern-probe fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::type
   if(is-err(raw), raw, classify-probe(raw))
 }
 
-classify-probe fn (raw: HttpResponse): Map {
+classify-probe
+meta {no-doc: true}
+fn (raw: HttpResponse): Map {
   body or(response-json-rpc-message(raw), {})
   error get(body, "error", null)
   error-code if(is-map(error), get(error, "code", null), null)
@@ -392,14 +488,32 @@ classify-probe fn (raw: HttpResponse): Map {
 connect
 meta {
     doc: """
-Connect to an MCP server.
+    Connect to an MCP server.
 
-The default `auto` mode probes the modern 2026-07-28 protocol with
-`server/discover` and falls back to the legacy initialize handshake only when
-the response is not a recognized modern response. Pass `ConnectionOptions`
-with `mode: "modern"` to pin modern behavior or `mode: "legacy"` to skip the
-probe. Caller headers are retained on every request.
-"""
+    The default `auto` mode probes the modern 2026-07-28 protocol with
+    `server/discover` and falls back to the legacy initialize handshake only when
+    the response is not a recognized modern response. Pass `ConnectionOptions`
+    with `mode: "modern"` to pin modern behavior or `mode: "legacy"` to skip the
+    probe. Caller headers are retained on every request.
+
+    **Example**
+
+    ```hot
+    ::types ::mcp::types
+    info ::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    session.protocol-version
+
+    // Pin the protocol and send a token on every request
+    options ::types/ConnectionOptions({
+      mode: "modern",
+      headers: {Authorization: `Bearer ${::hot::ctx/get("MCP_TOKEN")}`}
+    })
+    caps ::types/ClientCapabilities({elicitation: {form: {}}})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, caps, options)
+    session.server-info.name
+    ```
+    """
 }
 fn
 (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
@@ -457,11 +571,23 @@ fn
 initialize
 meta {
     doc: """
-Connect using the legacy initialize/initialized handshake.
+    Connect using the legacy initialize/initialized handshake.
 
-Use `connect` for automatic modern/legacy negotiation. The four-argument form
-accepts base HTTP headers such as Authorization.
-"""
+    Use `connect` for automatic modern/legacy negotiation. The four-argument form
+    accepts base HTTP headers such as Authorization.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/initialize("https://mcp.example.com/mcp", info, null)
+    session.session-id
+
+    // With base headers
+    headers {Authorization: `Bearer ${::hot::ctx/get("MCP_TOKEN")}`}
+    session ::mcp::client/initialize("https://mcp.example.com/mcp", info, null, headers)
+    ```
+    """
 }
 fn
 (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
@@ -475,11 +601,15 @@ fn
 // Request construction and dispatch
 // ============================================================================
 
-session-era fn (session: ::types/Session): Str {
+session-era
+meta {no-doc: true}
+fn (session: ::types/Session): Str {
   or(session.era, "legacy")
 }
 
-request-name fn cond (method: Str, params: Map): Str? {
+request-name
+meta {no-doc: true}
+fn cond (method: Str, params: Map): Str? {
   or(eq(method, "tools/call"), eq(method, "prompts/get")) => {
     get(params, "name", null)
   }
@@ -489,7 +619,27 @@ request-name fn cond (method: Str, params: Map): Str? {
 }
 
 request-context
-meta {doc: """Build the era-specific params and HTTP headers for an MCP request."""}
+meta {
+    doc: """
+    Build the era-specific params and HTTP headers for an MCP request.
+
+    **Example**
+
+    ```hot
+    session ::mcp::types/Session({
+      url: "https://mcp.example.com/mcp",
+      protocol-version: "2026-07-28",
+      server-info: ::mcp::types/ServerInfo({name: "server", version: "1"}),
+      server-capabilities: ::mcp::types/ServerCapabilities({tools: {listChanged: true}}),
+      headers: {},
+      era: "modern",
+      client-info: ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    })
+    context ::mcp::client/request-context(session, "tools/list", {}, null)
+    get(context.headers, "Mcp-Method")  // "tools/list"
+    ```
+    """
+}
 fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
   raw-params or(params, {})
   cond {
@@ -523,11 +673,27 @@ fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): M
 response-result
 meta {
     doc: """
-Return the MCP result carried by a JSON-RPC response.
+    Return the MCP result carried by a JSON-RPC response.
 
-A JSON-RPC error response is returned as the same Err, so callers can test it
-with `is-err` and read the server's message with `err-message`.
-"""
+    A JSON-RPC error response is returned as the same Err, so callers can test it
+    with `is-err` and read the server's message with `err-message`.
+
+    **Example**
+
+    ```hot
+    session ::mcp::types/Session({
+      url: "https://mcp.example.com/mcp",
+      protocol-version: "2026-07-28",
+      server-info: ::mcp::types/ServerInfo({name: "server", version: "1"}),
+      server-capabilities: ::mcp::types/ServerCapabilities({tools: {listChanged: true}}),
+      headers: {},
+      era: "modern",
+      client-info: ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    })
+    ::mcp::client/response-result(session, {result: {resultType: "complete"}})
+    // {resultType: "complete"}
+    ```
+    """
 }
 fn (session: ::types/Session, response: Result): Map {
   result if(is-err(response), response, or(response.result, {}))
@@ -550,10 +716,21 @@ fn (session: ::types/Session, response: Result): Map {
 session-request-with-tool
 meta {
     doc: """
-Send an MCP request, optionally using a Tool definition for `x-mcp-header` mirroring.
+    Send an MCP request, optionally using a Tool definition for `x-mcp-header` mirroring.
 
-Returns err() when the server answers with a JSON-RPC error.
-"""
+    Returns err() when the server answers with a JSON-RPC error.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    tool first(::mcp::tools/list(session))
+    params {name: tool.name, arguments: {}}
+    result ::mcp::client/session-request-with-tool(session, "tools/call", params, tool)
+    result.content
+    ```
+    """
 }
 fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
   context request-context(session, method, params, tool)
@@ -564,17 +741,41 @@ fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): M
 session-request
 meta {
     doc: """
-Send a request over an active MCP connection and return its result.
+    Send a request over an active MCP connection and return its result.
 
-Returns err() when the server answers with a JSON-RPC error.
-"""
+    Returns err() when the server answers with a JSON-RPC error.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    result ::mcp::client/session-request(session, "tools/list", {})
+    if(is-err(result), err-message(result), result.tools)
+    ```
+    """
 }
 fn (session: ::types/Session, method: Str, params: Map?): Map {
   session-request-with-tool(session, method, params, null)
 }
 
 session-request-stream-with-tool
-meta {doc: """Send a streaming MCP request with optional tool header metadata."""}
+meta {
+    doc: """
+    Send a streaming MCP request with optional tool header metadata.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    tool first(::mcp::tools/list(session))
+    params {name: tool.name, arguments: {}}
+    response ::mcp::client/session-request-stream-with-tool(session, "tools/call", params, tool)
+    for-each(response.body, (frame) { println(frame.data) })
+    ```
+    """
+}
 fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): StreamingHttpResponse {
   context request-context(session, method, params, tool)
   req ::rpc/request(method, context.params)
@@ -582,13 +783,38 @@ fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): S
 }
 
 session-request-stream
-meta {doc: """Send a streaming request over an active MCP connection."""}
+meta {
+    doc: """
+    Send a streaming request over an active MCP connection.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    response ::mcp::client/session-request-stream(session, "tools/call", {name: "analyze", arguments: {}})
+    for-each(response.body, (frame) { println(frame.data) })
+    ```
+    """
+}
 fn (session: ::types/Session, method: Str, params: Map?): StreamingHttpResponse {
   session-request-stream-with-tool(session, method, params, null)
 }
 
 mrtr-retry-params
-meta {doc: """Build MRTR retry params without leaking fields from an earlier round."""}
+meta {
+    doc: """
+    Build MRTR retry params without leaking fields from an earlier round.
+
+    **Example**
+
+    ```hot
+    previous {name: "deploy", requestState: "old"}
+    ::mcp::client/mrtr-retry-params(previous, {requestState: "new"}, {confirm: {action: "accept"}})
+    // {name: "deploy", inputResponses: {confirm: {action: "accept"}}, requestState: "new"}
+    ```
+    """
+}
 fn (params: Map?, result: Map, responses: Map?): Map {
   clean filter-keys(
     or(params, {}),
@@ -606,12 +832,23 @@ fn (params: Map?, result: Map, responses: Map?): Map {
 session-request-with-input
 meta {
     doc: """
-Fulfill modern Multi Round-Trip Requests.
+    Fulfill modern Multi Round-Trip Requests.
 
-`handler` receives each requested server-to-client request and returns its
-response. The original request is retried with a fresh JSON-RPC ID,
-`inputResponses`, and the opaque `requestState`.
-"""
+    `handler` receives each requested server-to-client request and returns its
+    response. The original request is retried with a fresh JSON-RPC ID,
+    `inputResponses`, and the opaque `requestState`.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    params {name: "deploy", arguments: {}}
+    result ::mcp::client/session-request-with-input(session, "tools/call", params, ask, 3)
+    result.content
+    ```
+    """
 }
 fn cond (session: ::types/Session, method: Str, params: Map?, handler: Fn, max-rounds: Int): Map {
   lte(max-rounds, 0) => {
@@ -648,7 +885,22 @@ fn cond (session: ::types/Session, method: Str, params: Map?, handler: Fn, max-r
 
 session-request-with-tool-input
 meta {
-    doc: """MRTR request helper that also mirrors a tool's `x-mcp-header` parameters."""
+    doc: """
+    MRTR request helper that also mirrors a tool's `x-mcp-header`
+    parameters.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    ask (request) { {action: "accept", content: {confirmed: true}} }
+    tool first(::mcp::tools/list(session))
+    params {name: tool.name, arguments: {}}
+    result ::mcp::client/session-request-with-tool-input(session, "tools/call", params, tool, ask, 3)
+    result.content
+    ```
+    """
 }
 fn cond (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool, handler: Fn, max-rounds: Int): Map {
   lte(max-rounds, 0) => {
@@ -687,10 +939,19 @@ fn cond (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool
 ping
 meta {
     doc: """
-Check server connectivity using discovery for modern MCP or ping for legacy MCP.
+    Check server connectivity using discovery for modern MCP or ping for legacy MCP.
 
-Returns err() when the server answers with a JSON-RPC error.
-"""
+    Returns err() when the server answers with a JSON-RPC error.
+
+    **Example**
+
+    ```hot
+    info ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    session ::mcp::client/connect("https://mcp.example.com/mcp", info, null)
+    alive ::mcp::client/ping(session)
+    if(is-err(alive), err-message(alive), alive)
+    ```
+    """
 }
 fn (session: ::types/Session): Bool {
   result if(

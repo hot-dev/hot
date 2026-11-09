@@ -33,6 +33,13 @@ meta {
     seconds. Zendesk sends ISO 8601 UTC (`2026-07-10T15:00:00Z`,
     optionally with fractional seconds); Unix seconds are accepted too.
     Returns null for anything else. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::webhooks/parse-timestamp("2026-07-10T15:00:00Z")  // 1783695600
+    ::zendesk::webhooks/parse-timestamp("yesterday")  // null
+    ```
     """
 }
 fn (value: Str): Int? {
@@ -71,7 +78,7 @@ meta {
     fn (request) {
       if(not(::zendesk::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-ticket-event(request.body))
+        {received: true, ticket: request.body})
     }
     ```
     """
@@ -109,7 +116,9 @@ fn
   }
 }
 
-timestamp-fresh fn (timestamp: Str, max-age-seconds: Int): Bool {
+timestamp-fresh
+meta {no-doc: true}
+fn (timestamp: Str, max-age-seconds: Int): Bool {
   seconds parse-timestamp(timestamp)
   cond {
     is-null(seconds) => { false }

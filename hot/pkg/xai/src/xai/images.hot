@@ -72,7 +72,7 @@ meta {
     **Example - URL response (default)**
 
     ```hot
-    response generate(CreateImageRequest({
+    response ::xai::images/generate(::xai::images/CreateImageRequest({
         prompt: "A futuristic city at sunset",
         model: "grok-imagine-image"
     }))
@@ -83,7 +83,7 @@ meta {
     **Example - Base64 response**
 
     ```hot
-    response generate(CreateImageRequest({
+    response ::xai::images/generate(::xai::images/CreateImageRequest({
         prompt: "A cat wearing a spacesuit",
         model: "grok-imagine-image",
         response_format: "b64_json"
@@ -126,24 +126,24 @@ meta {
     **Example**
 
     ```hot
-    result generate-to-file("uploads/city.png", "A futuristic city at sunset")
+    result ::xai::images/generate-to-file("uploads/city.png", "A futuristic city at sunset")
 
     match result {
-        AIMedia.Image => {
+        ::ai::media/AIMedia.Image => {
             result.media.file.path // => "uploads/city.png"
             result.media.file.size // => 123456
             result.prompt // => "A futuristic city at sunset"
             result.revised_prompt // => "A detailed futuristic city..."
         }
 
-        HttpError => { fail("Image generation failed") }
+        ::xai::api/HttpError => { fail("Image generation failed") }
     }
     ```
 
     **With options**
 
     ```hot
-    result generate-to-file("output/cat.png", CreateImageRequest({
+    result ::xai::images/generate-to-file("output/cat.png", ::xai::images/CreateImageRequest({
         prompt: "A cat wearing a spacesuit",
         quality: "hd",
         style: "vivid"
@@ -230,7 +230,7 @@ meta {
     **Example**
 
     ```hot
-    batch generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
+    batch ::xai::images/generate-batch-to-files("uploads/image-{n}.png", "A beautiful landscape", 3)
     // Generates: uploads/image-0.png, uploads/image-1.png, uploads/image-2.png
 
     batch.succeeded // => 3
@@ -333,11 +333,11 @@ meta {
     **Example**
 
     ```hot
-    url create-image("A sunset over mountains")
+    url ::xai::images/create-image("A sunset over mountains")
     // => "https://..."
 
     // With custom size
-    url create-image("A sunset over mountains", "512x512")
+    url ::xai::images/create-image("A sunset over mountains", "512x512")
     ```
     """
 }
@@ -386,7 +386,17 @@ fn (prompt: Str): Str | HttpError {
 
 parse-size
 meta {
-    doc: """Parse size string like "1024x1024" into a Map with width and height keys."""
+    doc: """
+    Parse size string like "1024x1024" into a Map with width and height
+    keys.
+
+    **Example**
+
+    ```hot
+    ::xai::images/parse-size("1024x768")  // {width: 1024, height: 768}
+    ::xai::images/parse-size(null)  // {width: null, height: null}
+    ```
+    """
 }
 fn (size: Str?): Map {
     cond {
@@ -408,7 +418,16 @@ fn (size: Str?): Map {
 
 detect-format
 meta {
-    doc: """Detect image format from file path extension. Returns the MIME minor type (e.g. "png") or null."""
+    doc: """
+    Detect image format from file path extension. Returns the MIME minor
+    type (e.g. "png") or null.
+
+    **Example**
+
+    ```hot
+    ::xai::images/detect-format("photo.png")  // "png"
+    ```
+    """
 }
 fn (path: Str): Str? {
     // Use ::hot::mime to get the minor type (e.g., "png" from "image/png")

@@ -47,7 +47,9 @@ meta {
 
 HttpResponse ::hot::http/HttpResponse
 
-ctx-key fn (): Str {
+ctx-key
+meta {no-doc: true}
+fn (): Str {
   key or(::ctx/get("xero.webhook.key"), "")
   if(is-empty(trim(Str(key))),
     fail("xero.webhook.key is not set. Add the webhook signing key in Context Variables to verify Xero webhooks.")
@@ -58,7 +60,20 @@ ctx-key fn (): Str {
 verify-request
 meta {
     ctx: {"xero.webhook.key": {required: false}},
-    doc: """True when `x-xero-signature` is the base64 HMAC-SHA256 of the raw body under the webhook key (constant-time compare). The 1-arity form reads `xero.webhook.key` and fails the run when it is unset; an explicit empty key returns false."""
+    doc: """
+    True when `x-xero-signature` is the base64 HMAC-SHA256 of the raw body
+    under the webhook key (constant-time compare). The 1-arity form reads
+    `xero.webhook.key` and fails the run when it is unset; an explicit empty
+    key returns false.
+
+    **Example**
+
+    ```hot
+    request {headers: {"x-xero-signature": "R3Vlc3M="}, body-raw: "{\"events\":[]}"}
+    key ::hot::ctx/get("xero.webhook.key")
+    ::xero::webhooks/verify-request(request, key)
+    ```
+    """
 }
 fn
 (request: Map): Bool {
@@ -77,7 +92,20 @@ fn
 
 respond
 meta {
-    doc: """The `HttpResponse` Xero expects: 200 with an empty body when the signature is valid, 401 with an empty body when it is not. Handles the intent-to-receive handshake and normal deliveries alike."""
+    doc: """
+    The `HttpResponse` Xero expects: 200 with an empty body when the
+    signature is valid, 401 with an empty body when it is not. Handles the
+    intent-to-receive handshake and normal deliveries alike.
+
+    **Example**
+
+    ```hot
+    request {headers: {"x-xero-signature": "R3Vlc3M="}, body-raw: "{\"events\":[]}"}
+    key ::hot::ctx/get("xero.webhook.key")
+    // Return this from the webhook handler
+    ::xero::webhooks/respond(request, key)
+    ```
+    """
 }
 fn
 (request: Map): HttpResponse {
@@ -87,7 +115,9 @@ fn
   HttpResponse({status: if(verify-request(request, webhook-key), 200, 401), body: ""})
 }
 
-normalize-event fn (e: Map): Map {
+normalize-event
+meta {no-doc: true}
+fn (e: Map): Map {
   filter-vals({
     resource-url: get(e, "resourceUrl"),
     resource-id: get(e, "resourceId"),
@@ -107,6 +137,15 @@ meta {
     `{resource-url, resource-id, event-date, event-type, event-category,
     tenant-id, tenant-type}`. `is-intent` is true for an
     intent-to-receive test delivery (no events). An Err for invalid JSON.
+
+    **Example**
+
+    ```hot
+    parsed ::xero::webhooks/parse-events({events: [{resourceId: "a1", eventType: "UPDATE", eventCategory: "INVOICE"}], firstEventSequence: 7, lastEventSequence: 7})
+    first(parsed.events).resource-id  // "a1"
+    parsed.is-intent  // false
+    ::xero::webhooks/parse-events("").is-intent  // true
+    ```
     """
 }
 fn (body: Any): Map {
@@ -141,6 +180,16 @@ meta {
     Verify and parse a delivery: `{verified, events, is-intent, response}`.
     `response` is what to return (200 valid, 401 invalid, both with an
     empty body); events are `[]` when the signature is invalid.
+
+    **Example**
+
+    ```hot
+    request {headers: {"x-xero-signature": "R3Vlc3M="}, body-raw: "{\"events\":[]}"}
+    key ::hot::ctx/get("xero.webhook.key")
+    received ::xero::webhooks/receive(request, key)
+    received.verified
+    received.events
+    ```
     """
 }
 fn

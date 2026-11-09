@@ -41,7 +41,17 @@ PACKAGE_AGENT "hot-dev-courtlistener-pkg/0.1 (+https://hot.dev)"
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::courtlistener::api/given("x")  // true
+    ::courtlistener::api/given("  ")  // false
+    ::courtlistener::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -51,7 +61,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -61,7 +73,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -77,7 +91,8 @@ meta {
     **Example**
 
     ```hot
-    cfg ::courtlistener::api/resolve({api-token: tenant.cl-token})
+    cfg ::courtlistener::api/resolve({api-token: ::hot::ctx/get("tenant.courtlistener-token")})
+    cfg.base-url
     ```
     """
 }
@@ -103,7 +118,16 @@ fn (opts: Map): Map {
 
 require-api-token
 meta {
-    doc: """The API token from resolved settings, or an Err naming where to set it."""
+    doc: """
+    The API token from resolved settings, or an Err naming where to set it.
+
+    **Example**
+
+    ```hot
+    cfg ::courtlistener::api/resolve({})
+    token ::courtlistener::api/require-api-token(cfg)
+    ```
+    """
 }
 fn (cfg: Map): Str {
   cond {
@@ -137,7 +161,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => { if(gt(length(body), 200), `${slice(body, 0, 200)}…`, body) }
     is-map(body) => {
@@ -148,7 +174,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-retry-after fn (headers: Map): Int? {
+retry-after
+meta {no-doc: true}
+fn (headers: Map): Int? {
   v get(headers, "retry-after")
   cond {
     is-null(v) => { null }
@@ -159,7 +187,18 @@ retry-after fn (headers: Map): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    e ::courtlistener::api/http-error({status: 429, headers: {retry-after: "60"}, body: {detail: "Request was throttled."}}, "https://www.courtlistener.com/api/rest/v4/dockets/1/")
+    e.message  // "courtlistener: HTTP 429: Request was throttled."
+    e.retry-after  // 60
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -177,7 +216,18 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 not-json-error
 meta {
-    doc: """An `HttpError` for a 2xx response that is not JSON, such as a maintenance page, which would otherwise read as an empty page. Exposed for testing."""
+    doc: """
+    An `HttpError` for a 2xx response that is not JSON, such as a
+    maintenance page, which would otherwise read as an empty page. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    e ::courtlistener::api/not-json-error({status: 200, headers: {}, body: "<html></html>"}, "https://www.courtlistener.com/api/rest/v4/dockets/1/")
+    e.status  // 200
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   HttpError({
@@ -193,7 +243,16 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 is-not-found
 meta {
-    doc: """True when `e` is an `HttpError` with status 404."""
+    doc: """
+    True when `e` is an `HttpError` with status 404.
+
+    **Example**
+
+    ```hot
+    ::courtlistener::api/is-not-found({status: 404})  // true
+    ::courtlistener::api/is-not-found({status: 429})  // false
+    ```
+    """
 }
 fn (e: Any): Bool {
   and(is-map(e), eq(get(e, "status"), 404))
@@ -205,7 +264,17 @@ fn (e: Any): Bool {
 
 query-string
 meta {
-    doc: """Build a `?a=1&b=2` suffix from a Map, dropping null and blank values (pure); `""` when nothing remains."""
+    doc: """
+    Build a `?a=1&b=2` suffix from a Map, dropping null and blank values
+    (pure); `""` when nothing remains.
+
+    **Example**
+
+    ```hot
+    ::courtlistener::api/query-string({court: "dcd", cursor: null})  // "?court=dcd"
+    ::courtlistener::api/query-string({cursor: null})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(filter-vals(params, given))
@@ -213,7 +282,15 @@ fn (params: Map): Str {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::courtlistener::api/path-segment("a b")  // "a%20b"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -225,6 +302,15 @@ meta {
     GET (or another method) a CourtListener URL with `headers`, returning
     the `HttpResponse` on 2xx or an Err carrying `HttpError`. A
     transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("courtlistener.api-token")
+    headers {Authorization: ::courtlistener/auth-header(token)}
+    response ::courtlistener::api/request("GET", "https://www.courtlistener.com/api/rest/v4/dockets/4214664/", headers)
+    response.status
+    ```
     """
 }
 fn (method: Str, url: Str, headers: Map): HttpResponse {
@@ -243,7 +329,17 @@ fn (method: Str, url: Str, headers: Map): HttpResponse {
 
 decode-body
 meta {
-    doc: """The decoded JSON of a 2xx response, or an Err carrying `HttpError` when the body is not JSON (pure). Exposed for testing."""
+    doc: """
+    The decoded JSON of a 2xx response, or an Err carrying `HttpError` when
+    the body is not JSON (pure). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::courtlistener::api/decode-body({status: 200, headers: {}, body: {count: 0}}, "https://www.courtlistener.com/api/rest/v4/dockets/1/")  // {count: 0}
+    is-err(::courtlistener::api/decode-body({status: 200, headers: {}, body: "<html></html>"}, "https://www.courtlistener.com/api/rest/v4/dockets/1/"))  // true
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): Any {
   body response.body
@@ -258,7 +354,19 @@ fn (response: HttpResponse, url: Str): Any {
 
 get-json
 meta {
-    doc: """GET a JSON resource and return the decoded body, or an Err carrying `HttpError`."""
+    doc: """
+    GET a JSON resource and return the decoded body, or an Err carrying
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("courtlistener.api-token")
+    headers {Authorization: ::courtlistener/auth-header(token)}
+    out ::courtlistener::api/get-json("https://www.courtlistener.com/api/rest/v4/dockets/4214664/", headers)
+    out.case_name
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   response request("GET", url, {Accept: "application/json", ...headers})
@@ -267,7 +375,18 @@ fn (url: Str, headers: Map): Any {
 
 get-json-or-null
 meta {
-    doc: """`get-json`, but a 404 gives null (no such record) instead of an Err."""
+    doc: """
+    `get-json`, but a 404 gives null (no such record) instead of an Err.
+
+    **Example**
+
+    ```hot
+    token ::hot::ctx/get("courtlistener.api-token")
+    headers {Authorization: ::courtlistener/auth-header(token)}
+    out ::courtlistener::api/get-json-or-null("https://www.courtlistener.com/api/rest/v4/dockets/1/", headers)
+    is-null(out)
+    ```
+    """
 }
 fn (url: Str, headers: Map): Any {
   out get-json(url, headers)

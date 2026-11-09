@@ -116,7 +116,15 @@ fn (): RunInfo {
 is-inline-run
 meta {
     core: true,
-    doc: """Is the run type a direct run type (vs. scheduled or event triggered)"""
+    doc: """
+    Is the run type a direct run type (vs. scheduled or event triggered)
+
+    **Example**
+
+    ```hot
+    mode if(is-inline-run(), "direct", "triggered")
+    ```
+    """
 }
 fn () {
     r info()
@@ -141,7 +149,7 @@ meta {
 
     ```hot
     // Use polling in local dev, webhooks in production
-    if(is-local-dev(), start-polling(), use-webhooks())
+    mode if(is-local-dev(), "polling", "webhooks")
     ```
     """
 }

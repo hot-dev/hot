@@ -16,7 +16,9 @@ ConfigError ::sentry::api/ConfigError
 // Sentry's bulk mutate accepts at most this many issue ids per request.
 MAX_BULK_IDS 1000
 
-issue-suffix fn (issue-id: Any): Str {
+issue-suffix
+meta {no-doc: true}
+fn (issue-id: Any): Str {
   `/issues/${::api/seg(issue-id)}/`
 }
 
@@ -66,7 +68,17 @@ fn
 
 list-all-issues
 meta {
-    doc: """Every issue matching `params`, following cursors (100 per request) up to `max` (default 1000)."""
+    doc: """
+    Every issue matching `params`, following cursors (100 per request) up to
+    `max` (default 1000).
+
+    **Example**
+
+    ```hot
+    issues ::sentry::issues/list-all-issues({project: "my-api", query: "is:unresolved level:error"}, 300)
+    map(issues, %.title)
+    ```
+    """
 }
 fn
 (params: Map): Vec {
@@ -84,7 +96,18 @@ fn
 
 get-issue
 meta {
-    doc: """GET /organizations/{org}/issues/{id}/ - One issue: title, culprit, status, level, counts, assignee, first/last seen."""
+    doc: """
+    GET /organizations/{org}/issues/{id}/ - One issue: title, culprit,
+    status, level, counts, assignee, first/last seen.
+
+    **Example**
+
+    ```hot
+    issue ::sentry::issues/get-issue("4501")
+    issue.title
+    issue.status
+    ```
+    """
 }
 fn
 (issue-id: Any): Map {
@@ -107,6 +130,13 @@ meta {
     `assignedTo` (`"user:<id>"`, `"team:<id>"`, a username or email; `""`
     unassigns), `priority` (`low`, `medium`, `high`), `hasSeen`,
     `isBookmarked`, `isSubscribed`, `isPublic`. Null fields are dropped.
+
+    **Example**
+
+    ```hot
+    issue ::sentry::issues/update-issue("4501", {priority: "high", isBookmarked: true})
+    issue.priority
+    ```
     """
 }
 fn
@@ -119,7 +149,20 @@ fn
 
 resolve-issue
 meta {
-    doc: """Mark an issue resolved. The 2-arity form resolves it in a release (`statusDetails.inRelease`), so a regression in a later release reopens it."""
+    doc: """
+    Mark an issue resolved. The 2-arity form resolves it in a release
+    (`statusDetails.inRelease`), so a regression in a later release reopens
+    it.
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/resolve-issue("4501")
+
+    // Reopen on a regression after this release
+    ::sentry::issues/resolve-issue("4501", "my-api@1.4.0")
+    ```
+    """
 }
 fn
 (issue-id: Any): Map {
@@ -137,7 +180,19 @@ fn
 
 ignore-issue
 meta {
-    doc: """Archive (ignore) an issue. The 2-arity form archives it for `minutes`, after which it returns."""
+    doc: """
+    Archive (ignore) an issue. The 2-arity form archives it for `minutes`,
+    after which it returns.
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/ignore-issue("4501")
+
+    // Archive for one hour
+    ::sentry::issues/ignore-issue("4501", 60)
+    ```
+    """
 }
 fn
 (issue-id: Any): Map {
@@ -155,7 +210,15 @@ fn
 
 unresolve-issue
 meta {
-    doc: """Reopen an issue."""
+    doc: """
+    Reopen an issue.
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/unresolve-issue("4501")
+    ```
+    """
 }
 fn
 (issue-id: Any): Map {
@@ -167,7 +230,19 @@ fn
 
 assign-issue
 meta {
-    doc: """Assign an issue: `"user:<id>"`, `"team:<id>"`, a username, or an email. Pass `""` to unassign."""
+    doc: """
+    Assign an issue: `"user:<id>"`, `"team:<id>"`, a username, or an email.
+    Pass `""` to unassign.
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/assign-issue("4501", "team:12")
+
+    // Unassign
+    ::sentry::issues/assign-issue("4501", "")
+    ```
+    """
 }
 fn
 (issue-id: Any, assignee: Str): Map {
@@ -179,7 +254,16 @@ fn
 
 bulk-query
 meta {
-    doc: """The query string for a bulk update: one `id=` per issue, plus optional `project`/`environment` filters. Exposed for testing."""
+    doc: """
+    The query string for a bulk update: one `id=` per issue, plus optional
+    `project`/`environment` filters. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sentry::issues/bulk-query(["4501", "4502"], {})  // "?id=4501&id=4502"
+    ```
+    """
 }
 fn (issue-ids: Vec, params: Map): Str {
   ::api/query({...untype(params), id: issue-ids})
@@ -227,6 +311,13 @@ meta {
     events, newest first. `params`: `full` (true for stack traces and
     breadcrumbs), `environment`, `statsPeriod` or `start`/`end`, `query`,
     `per_page`, `cursor`. Returns a `Page`.
+
+    **Example**
+
+    ```hot
+    page ::sentry::issues/list-issue-events("4501", {full: true, environment: "production", per_page: 10})
+    map(page.items, %.eventID)
+    ```
     """
 }
 fn
@@ -242,7 +333,18 @@ fn
 
 get-event
 meta {
-    doc: """GET /organizations/{org}/issues/{id}/events/{event_id}/ - One event of an issue, with stack trace `entries`, tags, and context. `event-id` may be `"latest"`, `"oldest"`, or `"recommended"`."""
+    doc: """
+    GET /organizations/{org}/issues/{id}/events/{event_id}/ - One event of
+    an issue, with stack trace `entries`, tags, and context. `event-id` may
+    be `"latest"`, `"oldest"`, or `"recommended"`.
+
+    **Example**
+
+    ```hot
+    event ::sentry::issues/get-event("4501", "recommended", {environment: "production"})
+    event.entries
+    ```
+    """
 }
 fn
 (issue-id: Any, event-id: Str): Map {
@@ -257,7 +359,17 @@ fn
 
 get-latest-event
 meta {
-    doc: """The issue's most recent event, including the stack trace entries. The 2-arity form filters by `environment`."""
+    doc: """
+    The issue's most recent event, including the stack trace entries. The
+    2-arity form filters by `environment`.
+
+    **Example**
+
+    ```hot
+    event ::sentry::issues/get-latest-event("4501", "production")
+    event.entries
+    ```
+    """
 }
 fn
 (issue-id: Any): Map {
@@ -279,7 +391,17 @@ fn
 
 list-comments
 meta {
-    doc: """GET /organizations/{org}/issues/{id}/comments/ - An issue's comments (notes), newest first: `[{id, data: {text}, user, dateCreated}]`."""
+    doc: """
+    GET /organizations/{org}/issues/{id}/comments/ - An issue's comments
+    (notes), newest first: `[{id, data: {text}, user, dateCreated}]`.
+
+    **Example**
+
+    ```hot
+    comments ::sentry::issues/list-comments("4501")
+    map(comments, %.data.text)
+    ```
+    """
 }
 fn
 (issue-id: Any): Vec {
@@ -295,6 +417,13 @@ meta {
     POST /organizations/{org}/issues/{id}/comments/ - Comment on an issue.
     Sentry attributes comments to a user, so this needs a user auth token
     (organization auth tokens are rejected with 403).
+
+    **Example**
+
+    ```hot
+    comment ::sentry::issues/add-comment("4501", "Fixed in the next deploy.")
+    comment.id
+    ```
     """
 }
 fn

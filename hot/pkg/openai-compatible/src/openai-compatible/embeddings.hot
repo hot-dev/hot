@@ -19,6 +19,15 @@ meta {
     doc: """
     The JSON body for an `EmbeddingsRequest`, with unset optionals omitted.
     Pure; exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::emb ::openai-compatible::embeddings
+
+    req ::emb/EmbeddingsRequest({model: "nomic-embed-text", input: "hello"})
+    ::emb/embeddings-body(req)  // {model: "nomic-embed-text", input: "hello"}
+    ```
     """
 }
 fn (request: EmbeddingsRequest): Map {

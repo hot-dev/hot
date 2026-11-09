@@ -7,7 +7,7 @@ Twilio API bindings for Hot: send SMS, MMS, and WhatsApp messages, place and con
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/twilio": "1.1.1"
+"hot.dev/twilio": "1.1.2"
 ```
 
 ## Setup

@@ -14,6 +14,17 @@ meta {
     only a session already present in `registered`; otherwise the first
     registered session is used. Returns null when no authorized session
     can be selected.
+
+    **Example**
+
+    ```hot
+    ::mcp ::ai::agent::mcp
+
+    sessions [::ai::session/Session({id: "s1"}), ::ai::session/Session({id: "s2"})]
+    ::mcp/select-session({session_id: "s2"}, sessions).id  // "s2"
+    ::mcp/select-session({}, sessions).id  // "s1"
+    ::mcp/select-session({session_id: "other"}, sessions)  // null
+    ```
     """
 }
 fn (params: Map, registered: Vec<Session>): Session? {
@@ -29,7 +40,20 @@ fn (params: Map, registered: Vec<Session>): Session? {
 }
 
 required-param
-meta { doc: "Return a required string parameter or an Err with a helpful message." }
+meta {
+    doc: """
+    Return a required string parameter or an Err with a helpful message.
+
+    **Example**
+
+    ```hot
+    ::mcp ::ai::agent::mcp
+
+    ::mcp/required-param({title: "Launch"}, "title")  // "Launch"
+    is-err(::mcp/required-param({}, "title"))  // true
+    ```
+    """
+}
 fn (params: Map, name: Str): Str {
     value or(get(params, name), "")
     cond {

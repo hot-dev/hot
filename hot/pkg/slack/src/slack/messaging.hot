@@ -65,7 +65,21 @@ ChatDeleteScheduledMessageResponse type {
 
 chat-delete-scheduled-message
 meta {
-    doc: """POST /chat.deleteScheduledMessage - Delete a pending scheduled message before it is sent. Requires the `scheduled_message_id` from the original schedule response."""
+    doc: """
+    POST /chat.deleteScheduledMessage - Delete a pending scheduled message
+    before it is sent. Requires the `scheduled_message_id` from the original
+    schedule response.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-delete-scheduled-message(::slack::messaging/ChatDeleteScheduledMessageRequest({
+      channel: "C1234567",
+      scheduled_message_id: "Q1234ABCD"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ChatDeleteScheduledMessageRequest): ChatDeleteScheduledMessageResponse {
@@ -137,7 +151,20 @@ ChatMeMessageResponse type {
 
 chat-me-message
 meta {
-    doc: """POST /chat.meMessage - Send a /me message. These appear as italicized action text (e.g., "_user is typing..._")."""
+    doc: """
+    POST /chat.meMessage - Send a /me message. These appear as italicized
+    action text (e.g., "_user is typing..._").
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-me-message(::slack::messaging/ChatMeMessageRequest({
+      channel: "C1234567",
+      text: "is deploying to production"
+    }))
+    response.ts
+    ```
+    """
 }
 fn
 (request: ChatMeMessageRequest): ChatMeMessageResponse {
@@ -171,7 +198,29 @@ ChatPostEphemeralResponse type {
 
 chat-post-ephemeral
 meta {
-    doc: """POST /chat.postEphemeral - Send an ephemeral message visible only to a specific user. The message disappears when the user navigates away. Requires both `channel` and `user` fields."""
+    doc: """
+    POST /chat.postEphemeral - Send an ephemeral message visible only to a
+    specific user. The message disappears when the user navigates away.
+    Requires both `channel` and `user` fields.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-post-ephemeral(::slack::messaging/ChatPostEphemeralRequest({
+      channel: "C1234567",
+      user: "U1234567",
+      text: "Only you can see this"
+    }))
+    response.message_ts
+
+    // With a per-call token
+    ::slack::messaging/chat-post-ephemeral(::slack::messaging/ChatPostEphemeralRequest({
+      channel: "C1234567",
+      user: "U1234567",
+      text: "Only you can see this"
+    }), {api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (request: ChatPostEphemeralRequest): ChatPostEphemeralResponse {
@@ -263,7 +312,24 @@ ChatScheduleMessageResponse type {
 
 chat-schedule-message
 meta {
-    doc: """POST /chat.scheduleMessage - Schedule a message for later. The `post_at` field is a Unix timestamp for when the message should be sent. Returns a `scheduled_message_id` that can be used to cancel it."""
+    doc: """
+    POST /chat.scheduleMessage - Schedule a message for later. The `post_at`
+    field is a Unix timestamp for when the message should be sent. Returns a
+    `scheduled_message_id` that can be used to cancel it.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-schedule-message(::slack::messaging/ChatScheduleMessageRequest({
+      channel: "C1234567",
+      post_at: 1798761600,
+      text: "Happy new year"
+    }))
+
+    // Keep this to cancel it with chat-delete-scheduled-message
+    response.scheduled_message_id
+    ```
+    """
 }
 fn
 (request: ChatScheduleMessageRequest): ChatScheduleMessageResponse {
@@ -292,7 +358,22 @@ ChatUnfurlResponse type {
 
 chat-unfurl
 meta {
-    doc: """POST /chat.unfurl - Provide custom unfurl behavior for URLs. Pass a map of URL-to-attachment pairs in `unfurls` to control how links are previewed."""
+    doc: """
+    POST /chat.unfurl - Provide custom unfurl behavior for URLs. Pass a map
+    of URL-to-attachment pairs in `unfurls` to control how links are
+    previewed.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-unfurl(::slack::messaging/ChatUnfurlRequest({
+      channel: "C1234567",
+      ts: "1234567890.123456",
+      unfurls: {"https://example.com/reports/42": {text: "Q3 report, 12 pages"}}
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ChatUnfurlRequest): ChatUnfurlResponse {
@@ -375,7 +456,21 @@ ChatScheduledMessagesListResponse type {
 
 chat-scheduled-messages-list
 meta {
-    doc: """POST /chat.scheduledMessages.list - List pending scheduled messages. Optionally filter by channel and time range. Supports cursor-based pagination."""
+    doc: """
+    POST /chat.scheduledMessages.list - List pending scheduled messages.
+    Optionally filter by channel and time range. Supports cursor-based
+    pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/chat-scheduled-messages-list(::slack::messaging/ChatScheduledMessagesListRequest({
+      channel: "C1234567",
+      limit: 50
+    }))
+    map(response.scheduled_messages, %.id)
+    ```
+    """
 }
 fn
 (request: ChatScheduledMessagesListRequest): ChatScheduledMessagesListResponse {
@@ -455,7 +550,22 @@ ReactionsGetResponse type {
 
 reactions-get
 meta {
-    doc: """GET /reactions.get - Get reactions for an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. Set `full: true` to include the complete reaction list."""
+    doc: """
+    GET /reactions.get - Get reactions for an item. Specify the item by
+    `channel` + `timestamp`, `file`, or `file_comment`. Set `full: true` to
+    include the complete reaction list.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reactions-get(::slack::messaging/ReactionsGetRequest({
+      channel: "C1234567",
+      timestamp: "1234567890.123456",
+      full: true
+    }))
+    response.message.reactions
+    ```
+    """
 }
 fn
 (request: ReactionsGetRequest): ReactionsGetResponse {
@@ -490,7 +600,20 @@ ReactionsListResponse type {
 
 reactions-list
 meta {
-    doc: """GET /reactions.list - List reactions made by a user. Returns items the user has reacted to. Supports cursor-based pagination."""
+    doc: """
+    GET /reactions.list - List reactions made by a user. Returns items the
+    user has reacted to. Supports cursor-based pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reactions-list(::slack::messaging/ReactionsListRequest({
+      user: "U1234567",
+      limit: 50
+    }))
+    response.items
+    ```
+    """
 }
 fn
 (request: ReactionsListRequest): ReactionsListResponse {
@@ -571,7 +694,23 @@ SearchMessagesResponse type {
 
 search-messages
 meta {
-    doc: """GET /search.messages - Search for messages matching a query. Supports Slack search syntax (e.g., "from:@user in:#channel"). Sort by `score` or `timestamp`."""
+    doc: """
+    GET /search.messages - Search for messages matching a query. Supports
+    Slack search syntax (e.g., "from:@user in:#channel"). Sort by `score` or
+    `timestamp`.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/search-messages(::slack::messaging/SearchMessagesRequest({
+      query: "deploy failed",
+      count: 20,
+      sort: "timestamp",
+      sort_dir: "desc"
+    }))
+    response.messages.matches
+    ```
+    """
 }
 fn
 (request: SearchMessagesRequest): SearchMessagesResponse {
@@ -605,7 +744,21 @@ RemindersAddResponse type {
 
 reminders-add
 meta {
-    doc: """POST /reminders.add - Create a reminder. The `time` can be a Unix timestamp or natural language (e.g., "in 15 minutes", "every Thursday"). Optionally set for another user."""
+    doc: """
+    POST /reminders.add - Create a reminder. The `time` can be a Unix
+    timestamp or natural language (e.g., "in 15 minutes", "every Thursday").
+    Optionally set for another user.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reminders-add(::slack::messaging/RemindersAddRequest({
+      text: "Review the launch checklist",
+      time: "in 15 minutes"
+    }))
+    response.reminder.id
+    ```
+    """
 }
 fn
 (request: RemindersAddRequest): RemindersAddResponse {
@@ -632,7 +785,19 @@ RemindersCompleteResponse type {
 
 reminders-complete
 meta {
-    doc: """POST /reminders.complete - Mark a reminder as complete. Pass the `reminder` ID."""
+    doc: """
+    POST /reminders.complete - Mark a reminder as complete. Pass the
+    `reminder` ID.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reminders-complete(::slack::messaging/RemindersCompleteRequest({
+      reminder: "Rm1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: RemindersCompleteRequest): RemindersCompleteResponse {
@@ -659,7 +824,19 @@ RemindersDeleteResponse type {
 
 reminders-delete
 meta {
-    doc: """POST /reminders.delete - Delete a reminder permanently. Pass the `reminder` ID."""
+    doc: """
+    POST /reminders.delete - Delete a reminder permanently. Pass the
+    `reminder` ID.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reminders-delete(::slack::messaging/RemindersDeleteRequest({
+      reminder: "Rm1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: RemindersDeleteRequest): RemindersDeleteResponse {
@@ -687,7 +864,19 @@ RemindersInfoResponse type {
 
 reminders-info
 meta {
-    doc: """GET /reminders.info - Get information about a reminder. Returns the reminder text, time, and completion status."""
+    doc: """
+    GET /reminders.info - Get information about a reminder. Returns the
+    reminder text, time, and completion status.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reminders-info(::slack::messaging/RemindersInfoRequest({
+      reminder: "Rm1234567"
+    }))
+    response.reminder.text
+    ```
+    """
 }
 fn
 (request: RemindersInfoRequest): RemindersInfoResponse {
@@ -714,7 +903,17 @@ RemindersListResponse type {
 
 reminders-list
 meta {
-    doc: """GET /reminders.list - List all reminders for the current user. Returns both pending and completed reminders."""
+    doc: """
+    GET /reminders.list - List all reminders for the current user. Returns
+    both pending and completed reminders.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/reminders-list(::slack::messaging/RemindersListRequest({}))
+    map(response.reminders, %.text)
+    ```
+    """
 }
 fn
 (request: RemindersListRequest): RemindersListResponse {
@@ -869,7 +1068,21 @@ StarsAddResponse type {
 
 stars-add
 meta {
-    doc: """POST /stars.add - Star an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. This API is deprecated but still available."""
+    doc: """
+    POST /stars.add - Star an item. Specify the item by `channel` +
+    `timestamp`, `file`, or `file_comment`. This API is deprecated but still
+    available.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/stars-add(::slack::messaging/StarsAddRequest({
+      channel: "C1234567",
+      timestamp: "1234567890.123456"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: StarsAddRequest): StarsAddResponse {
@@ -901,7 +1114,19 @@ StarsListResponse type {
 
 stars-list
 meta {
-    doc: """GET /stars.list - List starred items for the authenticated user. Results are paginated. This API is deprecated but still available."""
+    doc: """
+    GET /stars.list - List starred items for the authenticated user. Results
+    are paginated. This API is deprecated but still available.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/stars-list(::slack::messaging/StarsListRequest({
+      limit: 50
+    }))
+    response.items
+    ```
+    """
 }
 fn
 (request: StarsListRequest): StarsListResponse {
@@ -931,7 +1156,21 @@ StarsRemoveResponse type {
 
 stars-remove
 meta {
-    doc: """POST /stars.remove - Remove a star from an item. Specify the item by `channel` + `timestamp`, `file`, or `file_comment`. This API is deprecated but still available."""
+    doc: """
+    POST /stars.remove - Remove a star from an item. Specify the item by
+    `channel` + `timestamp`, `file`, or `file_comment`. This API is
+    deprecated but still available.
+
+    **Example**
+
+    ```hot
+    response ::slack::messaging/stars-remove(::slack::messaging/StarsRemoveRequest({
+      channel: "C1234567",
+      timestamp: "1234567890.123456"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: StarsRemoveRequest): StarsRemoveResponse {

@@ -47,7 +47,17 @@ LOCAL_KEYS ["parent-id", "content-created-at", "content-modified-at", "descripti
 
 to-bytes
 meta {
-    doc: """Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8 bytes, null is empty, and anything else is JSON-encoded."""
+    doc: """
+    Upload content as Bytes: Bytes pass through, a Str becomes its UTF-8
+    bytes, null is empty, and anything else is JSON-encoded.
+
+    **Example**
+
+    ```hot
+    length(::box::upload/to-bytes("hello"))  // 5
+    length(::box::upload/to-bytes(null))  // 0
+    ```
+    """
 }
 fn (content: Any): Bytes {
   cond {
@@ -60,7 +70,16 @@ fn (content: Any): Bytes {
 
 sha1-hex
 meta {
-    doc: """The SHA-1 of `content` as lowercase hex (Box's `sha1` field and the `Content-MD5` upload header, which Box uses for SHA-1)."""
+    doc: """
+    The SHA-1 of `content` as lowercase hex (Box's `sha1` field and the
+    `Content-MD5` upload header, which Box uses for SHA-1).
+
+    **Example**
+
+    ```hot
+    ::box::upload/sha1-hex("hello")  // "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+    ```
+    """
 }
 fn (content: Any): Str {
   ::hash/sha1(to-bytes(content))
@@ -68,7 +87,16 @@ fn (content: Any): Str {
 
 sha1-base64
 meta {
-    doc: """The SHA-1 of `content` as base64 of the raw digest, the form `Digest: sha=` takes."""
+    doc: """
+    The SHA-1 of `content` as base64 of the raw digest, the form `Digest:
+    sha=` takes.
+
+    **Example**
+
+    ```hot
+    ::box::upload/sha1-base64("hello")  // "qvTGHdzF6KLavt4PO0gs2a6pQ00="
+    ```
+    """
 }
 fn (content: Any): Str {
   ::b64/encode(::hex/decode(sha1-hex(content)))
@@ -76,21 +104,51 @@ fn (content: Any): Str {
 
 digest-header
 meta {
-    doc: """The `Digest` header value for a part or a whole file (pure): `sha=<base64 SHA-1>`."""
+    doc: """
+    The `Digest` header value for a part or a whole file (pure):
+    `sha=<base64 SHA-1>`.
+
+    **Example**
+
+    ```hot
+    ::box::upload/digest-header("hello")  // "sha=qvTGHdzF6KLavt4PO0gs2a6pQ00="
+    ```
+    """
 }
 fn (content: Any): Str {
   `sha=${sha1-base64(content)}`
 }
 
 new-boundary
-meta {doc: """A random multipart boundary, so file content cannot collide with it."""}
+meta {
+    doc: """
+    A random multipart boundary, so file content cannot collide with it.
+
+    **Example**
+
+    ```hot
+    starts-with(::box::upload/new-boundary(), "hot-box-")  // true
+    ```
+    """
+}
 fn (): Str {
   `hot-box-${::hot::random/random-string(32)}`
 }
 
 safe-filename
 meta {
-    doc: """A `filename` for the multipart header (pure): quotes, backslashes, CR and LF replaced with `_`. Box names the file from `attributes.name`, so this only labels the part."""
+    doc: """
+    A `filename` for the multipart header (pure): quotes, backslashes, CR
+    and LF replaced with `_`. Box names the file from `attributes.name`, so
+    this only labels the part.
+
+    **Example**
+
+    ```hot
+    ::box::upload/safe-filename("a\"b.txt")  // "a_b.txt"
+    ::box::upload/safe-filename("")  // "file"
+    ```
+    """
 }
 fn (name: Str): Str {
   cleaned ::hot::regex/replace-all(name, "[\"\\\\\\r\\n]", "_")
@@ -105,6 +163,15 @@ meta {
     `content_modified_at` (RFC 3339) from `opts.content-created-at` /
     `content-modified-at`, `description`, then any extra fields in
     `opts.attributes`. Nulls are dropped.
+
+    **Example**
+
+    ```hot
+    ::box::upload/upload-attributes("a.txt", "0", {description: "Notes"})  // {name: "a.txt", parent: {id: "0"}, description: "Notes"}
+
+    // A new version has no parent
+    ::box::upload/upload-attributes(null, null, {})  // {}
+    ```
     """
 }
 fn (name: Str?, parent-id: Str?, opts: Map): Map {
@@ -125,6 +192,14 @@ meta {
     `attributes` JSON part first (Box requires it before the file), then
     the `file` part. Content is concatenated as bytes, never interpolated
     into a string, so binary payloads survive.
+
+    **Example**
+
+    ```hot
+    body ::box::upload/build-multipart({name: "a.txt"}, "hi", "a.txt", "b1")
+    contains(Str(body), "name=\"attributes\"")  // true
+    ends-with(Str(body), "--b1--\r\n")  // true
+    ```
     """
 }
 fn (attributes: Map, content: Any, filename: Str, boundary: Str): Bytes {
@@ -135,7 +210,17 @@ fn (attributes: Map, content: Any, filename: Str, boundary: Str): Bytes {
 
 first-entry
 meta {
-    doc: """The file in an upload response (`{total_count, entries: [file]}`), or the response itself (pure)."""
+    doc: """
+    The file in an upload response (`{total_count, entries: [file]}`), or
+    the response itself (pure).
+
+    **Example**
+
+    ```hot
+    ::box::upload/first-entry({total_count: 1, entries: [{id: "1"}]})  // {id: "1"}
+    ::box::upload/first-entry({id: "2"})  // {id: "2"}
+    ```
+    """
 }
 fn (response: Any): Any {
   cond {
@@ -148,7 +233,9 @@ fn (response: Any): Any {
 // Simple uploads
 // ---------------------------------------------------------------------------
 
-send-multipart fn (path: Str, attributes: Map, bytes: Bytes, filename: Str, opts: Map): Map {
+send-multipart
+meta {no-doc: true}
+fn (path: Str, attributes: Map, bytes: Bytes, filename: Str, opts: Map): Map {
   boundary new-boundary()
   params ::box/query-params({fields: ::box/FILE_FIELDS}, opts, LOCAL_KEYS)
   headers {
@@ -161,7 +248,9 @@ send-multipart fn (path: Str, attributes: Map, bytes: Bytes, filename: Str, opts
   if(is-err(result), result, first-entry(result))
 }
 
-wants-chunked fn (bytes: Bytes, opts: Map): Bool {
+wants-chunked
+meta {no-doc: true}
+fn (bytes: Bytes, opts: Map): Bool {
   c get(opts, "chunked")
   cond {
     eq(c, true) => { true }
@@ -170,7 +259,9 @@ wants-chunked fn (bytes: Bytes, opts: Map): Bool {
   }
 }
 
-processing-error fn (upload: Map): Any {
+processing-error
+meta {no-doc: true}
+fn (upload: Map): Any {
   err(`box: Box is still assembling the upload (session ${upload.session-id}); call ::box::upload/finish-upload("${upload.session-id}", content) after ${or(upload.retry-after, 5)} seconds`)
 }
 
@@ -186,6 +277,7 @@ meta {
     file from that error, and `upload-version` replaces its content.
 
     ```hot
+    csv-text "name,total\nAna,12\n"
     file ::box::upload/upload-file("report.csv", csv-text, "12345")
     file.id
     ```
@@ -220,6 +312,17 @@ meta {
     new version). `opts.name` renames it at the same time;
     `opts.if-match` (the file's etag) fails with 412 when someone changed
     it first. Chunked from 20 MB. Returns the file.
+
+    **Example**
+
+    ```hot
+    file ::box::upload/upload-version("12345", "col1,col2\n1,2\n")
+    file.file_version.id
+
+    // Fails with 412 if someone changed it first
+    safe ::box::upload/upload-version("12345", "col1,col2\n3,4\n", {if-match: file.etag})
+    safe.etag
+    ```
     """
 }
 fn
@@ -256,13 +359,24 @@ fn
 
 preflight-body
 meta {
-    doc: """The preflight body (pure): `name`, `parent: {id}` (null for a new version) and `size` in bytes."""
+    doc: """
+    The preflight body (pure): `name`, `parent: {id}` (null for a new
+    version) and `size` in bytes.
+
+    **Example**
+
+    ```hot
+    ::box::upload/preflight-body("a.txt", "0", 10)  // {name: "a.txt", parent: {id: "0"}, size: 10}
+    ```
+    """
 }
 fn (name: Str?, parent-id: Str?, size: Int?): Map {
   ::box/compact({name: name, parent: ::box/parent-ref(parent-id), size: size})
 }
 
-preflight-result fn (response: Result): Map {
+preflight-result
+meta {no-doc: true}
+fn (response: Result): Map {
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { if(is-map(response.body), response.body, {}) }
@@ -277,6 +391,13 @@ meta {
     uploaded into `parent-id`: returns `{upload_url, upload_token}` when
     it can, or an `HttpError` (409 `item_name_in_use` with the conflict in
     `context-info`, 403 `storage_limit_exceeded`, `file_size_limit_exceeded`).
+
+    **Example**
+
+    ```hot
+    check ::box::upload/preflight-check("report.csv", "12345", 2048)
+    if(is-err(check), err-message(check), check.upload_url)
+    ```
     """
 }
 fn
@@ -289,7 +410,17 @@ fn
 
 preflight-version
 meta {
-    doc: """OPTIONS /files/{id}/content - the preflight check for a new version (optionally renamed). Answers as `preflight-check` does."""
+    doc: """
+    OPTIONS /files/{id}/content - the preflight check for a new version
+    (optionally renamed). Answers as `preflight-check` does.
+
+    **Example**
+
+    ```hot
+    check ::box::upload/preflight-version("12345", 2048, {name: "report-v2.csv"})
+    if(is-err(check), err-message(check), check.upload_url)
+    ```
+    """
 }
 fn
 (file-id: Str, size: Int): Map {
@@ -304,13 +435,24 @@ fn
 // Chunked upload sessions
 // ---------------------------------------------------------------------------
 
-session-path fn (session-id: Str): Str {
+session-path
+meta {no-doc: true}
+fn (session-id: Str): Str {
   `/files/upload_sessions/${::box/encode-id(session-id)}`
 }
 
 create-session-body
 meta {
-    doc: """The `POST /files/upload_sessions` body (pure): `folder_id`, `file_size`, `file_name`."""
+    doc: """
+    The `POST /files/upload_sessions` body (pure): `folder_id`, `file_size`,
+    `file_name`.
+
+    **Example**
+
+    ```hot
+    ::box::upload/create-session-body("0", "a.bin", 100)  // {folder_id: "0", file_size: 100, file_name: "a.bin"}
+    ```
+    """
 }
 fn (folder-id: Str, name: Str, size: Int): Map {
   {folder_id: folder-id, file_size: size, file_name: name}
@@ -323,6 +465,14 @@ meta {
     (`size` bytes, at least 20 MB). Returns Box's session: `id`,
     `part_size`, `total_parts`, `num_parts_processed`,
     `session_expires_at`, `session_endpoints`.
+
+    **Example**
+
+    ```hot
+    session ::box::upload/create-upload-session("12345", "video.mp4", 52428800)
+    session.id
+    session.part_size
+    ```
     """
 }
 fn
@@ -335,7 +485,17 @@ fn
 
 create-version-session
 meta {
-    doc: """POST /files/{id}/upload_sessions - open a chunked upload of a new version (`opts.name` renames the file)."""
+    doc: """
+    POST /files/{id}/upload_sessions - open a chunked upload of a new
+    version (`opts.name` renames the file).
+
+    **Example**
+
+    ```hot
+    session ::box::upload/create-version-session("12345", 52428800, {name: "video-v2.mp4"})
+    session.part_size
+    ```
+    """
 }
 fn
 (file-id: Str, size: Int): Map {
@@ -348,7 +508,17 @@ fn
 
 get-upload-session
 meta {
-    doc: """GET /files/upload_sessions/{id} - a session's state (`num_parts_processed`, `total_parts`, expiry)."""
+    doc: """
+    GET /files/upload_sessions/{id} - a session's state
+    (`num_parts_processed`, `total_parts`, expiry).
+
+    **Example**
+
+    ```hot
+    session ::box::upload/get-upload-session("F971964745A5CD0C001BBE4E58196BFD")
+    session.num_parts_processed
+    ```
+    """
 }
 fn
 (session-id: Str): Map {
@@ -360,7 +530,16 @@ fn
 
 part-range
 meta {
-    doc: """The `Content-Range` for a part (pure): bytes `offset` through `offset + size - 1` of `total`, e.g. `"bytes 0-8388607/52428800"`."""
+    doc: """
+    The `Content-Range` for a part (pure): bytes `offset` through `offset +
+    size - 1` of `total`, e.g. `"bytes 0-8388607/52428800"`.
+
+    **Example**
+
+    ```hot
+    ::box::upload/part-range(0, 8388608, 52428800)  // "bytes 0-8388607/52428800"
+    ```
+    """
 }
 fn (offset: Int, size: Int, total: Int): Str {
   `bytes ${offset}-${sub(add(offset, size), 1)}/${total}`
@@ -368,7 +547,16 @@ fn (offset: Int, size: Int, total: Int): Str {
 
 part-offsets
 meta {
-    doc: """The `[offset, size]` of every part of a `total`-byte file in `part-size` parts (pure): all `part-size` except a shorter last one."""
+    doc: """
+    The `[offset, size]` of every part of a `total`-byte file in `part-size`
+    parts (pure): all `part-size` except a shorter last one.
+
+    **Example**
+
+    ```hot
+    ::box::upload/part-offsets(10, 4)  // [[0, 4], [4, 4], [8, 2]]
+    ```
+    """
 }
 fn (total: Int, part-size: Int): Vec {
   p max(part-size, 1)
@@ -381,7 +569,18 @@ fn (total: Int, part-size: Int): Vec {
 
 part-headers
 meta {
-    doc: """The headers for uploading one part (pure): `Digest`, `Content-Range`, `Content-Type: application/octet-stream`."""
+    doc: """
+    The headers for uploading one part (pure): `Digest`, `Content-Range`,
+    `Content-Type: application/octet-stream`.
+
+    **Example**
+
+    ```hot
+    headers ::box::upload/part-headers(Bytes("hello"), 0, 5)
+    headers.Content-Range  // "bytes 0-4/5"
+    headers.Digest  // "sha=qvTGHdzF6KLavt4PO0gs2a6pQ00="
+    ```
+    """
 }
 fn (part: Bytes, offset: Int, total: Int): Map {
   {
@@ -398,6 +597,14 @@ meta {
     starting at `offset` of a `total`-byte file. Returns Box's part
     record `{part_id, offset, size, sha1}`, which `commit-upload-session`
     needs. Re-sending the same part is safe.
+
+    **Example**
+
+    ```hot
+    content Bytes("hello")
+    part ::box::upload/upload-part("F971964745A5CD0C001BBE4E58196BFD", content, 0, length(content))
+    part.part_id
+    ```
     """
 }
 fn
@@ -415,7 +622,18 @@ fn
 
 list-parts
 meta {
-    doc: """GET /files/upload_sessions/{id}/parts - one page of the parts Box has (`{entries, total_count, offset, limit}`; offset paging)."""
+    doc: """
+    GET /files/upload_sessions/{id}/parts - one page of the parts Box has
+    (`{entries, total_count, offset, limit}`; offset paging).
+
+    **Example**
+
+    ```hot
+    page ::box::upload/list-parts("F971964745A5CD0C001BBE4E58196BFD", {limit: 100})
+    page.total_count
+    page.entries
+    ```
+    """
 }
 fn
 (session-id: Str): Map {
@@ -427,7 +645,18 @@ fn
 }
 
 list-all-parts
-meta {doc: """Every part of a session (all offset pages), sorted by offset."""}
+meta {
+    doc: """
+    Every part of a session (all offset pages), sorted by offset.
+
+    **Example**
+
+    ```hot
+    parts ::box::upload/list-all-parts("F971964745A5CD0C001BBE4E58196BFD")
+    length(parts)
+    ```
+    """
+}
 fn
 (session-id: Str): Vec {
   list-all-parts(session-id, {})
@@ -439,7 +668,16 @@ fn
 
 sort-parts
 meta {
-    doc: """Parts sorted by `offset`, keeping only `part_id`, `offset`, `size`, `sha1` (the commit body's shape; pure)."""
+    doc: """
+    Parts sorted by `offset`, keeping only `part_id`, `offset`, `size`,
+    `sha1` (the commit body's shape; pure).
+
+    **Example**
+
+    ```hot
+    ::box::upload/sort-parts([{part_id: "b", offset: 4, extra: 1}, {part_id: "a", offset: 0}])  // [{part_id: "a", offset: 0}, {part_id: "b", offset: 4}]
+    ```
+    """
 }
 fn (parts: Vec): Vec {
   slim map(parts, (p) { filter-vals({part_id: p.part_id, offset: p.offset, size: p.size, sha1: p.sha1}, is-some) })
@@ -448,7 +686,16 @@ fn (parts: Vec): Vec {
 
 commit-body
 meta {
-    doc: """The commit body (pure): `parts` sorted by offset, plus optional `attributes` (e.g. `content_modified_at`, `description`)."""
+    doc: """
+    The commit body (pure): `parts` sorted by offset, plus optional
+    `attributes` (e.g. `content_modified_at`, `description`).
+
+    **Example**
+
+    ```hot
+    ::box::upload/commit-body([{part_id: "a", offset: 0, size: 5}], null)  // {parts: [{part_id: "a", offset: 0, size: 5}]}
+    ```
+    """
 }
 fn (parts: Vec, attributes: Map?): Map {
   ::box/compact({parts: sort-parts(parts), attributes: if(or(is-null(attributes), is-empty(or(attributes, {}))), null, attributes)})
@@ -484,6 +731,16 @@ meta {
     `digest` is `digest-header(whole-file-bytes)`. Returns a
     `ChunkedUpload` (`state: "processing"` on Box's 202). Options:
     `attributes`, `if-match` (for versions), credentials.
+
+    **Example**
+
+    ```hot
+    content Bytes("hello")
+    session-id "F971964745A5CD0C001BBE4E58196BFD"
+    parts ::box::upload/list-all-parts(session-id)
+    done ::box::upload/commit-upload-session(session-id, parts, ::box::upload/digest-header(content))
+    if(eq(done.state, "committed"), done.file.id, done.retry-after)
+    ```
     """
 }
 fn
@@ -507,7 +764,16 @@ fn
 
 abort-upload-session
 meta {
-    doc: """DELETE /files/upload_sessions/{id} - abort a session and discard its parts. Returns true."""
+    doc: """
+    DELETE /files/upload_sessions/{id} - abort a session and discard its
+    parts. Returns true.
+
+    **Example**
+
+    ```hot
+    ::box::upload/abort-upload-session("F971964745A5CD0C001BBE4E58196BFD")
+    ```
+    """
 }
 fn
 (session-id: Str): Bool {
@@ -518,7 +784,9 @@ fn
   if(is-err(result), result, true)
 }
 
-send-parts fn (session-id: Str, bytes: Bytes, offsets: Vec, index: Int, acc: Vec, opts: Map): Vec {
+send-parts
+meta {no-doc: true}
+fn (session-id: Str, bytes: Bytes, offsets: Vec, index: Int, acc: Vec, opts: Map): Vec {
   cond {
     gte(index, length(offsets)) => { acc }
     => {
@@ -535,7 +803,21 @@ send-parts fn (session-id: Str, bytes: Bytes, offsets: Vec, index: Int, acc: Vec
 
 upload-to-session
 meta {
-    doc: """Upload `content` into an open `session` (from `create-upload-session` / `create-version-session`) part by part, then commit. Returns a `ChunkedUpload`. A failed part aborts the session unless `opts.keep-session` is true."""
+    doc: """
+    Upload `content` into an open `session` (from `create-upload-session` /
+    `create-version-session`) part by part, then commit. Returns a
+    `ChunkedUpload`. A failed part aborts the session unless
+    `opts.keep-session` is true.
+
+    **Example**
+
+    ```hot
+    content Bytes("hello")
+    session ::box::upload/create-upload-session("12345", "a.bin", length(content))
+    done ::box::upload/upload-to-session(session, content, {keep-session: true})
+    done.state
+    ```
+    """
 }
 fn (session: Map, content: Any, opts: Map): ChunkedUpload {
   bytes to-bytes(content)
@@ -563,6 +845,7 @@ meta {
     `finish-upload` later.
 
     ```hot
+    big-bytes ::box::content/download-file("67890").bytes
     done ::box::upload/upload-chunked("12345", "video.mp4", big-bytes, {})
     if(eq(done.state, "committed"), done.file.id, done.session-id)
     ```
@@ -580,7 +863,19 @@ fn
 
 finish-upload
 meta {
-    doc: """Commit a session again after Box answered `processing`: lists its parts, recomputes the whole-file digest from `content`, and commits. Returns a `ChunkedUpload`."""
+    doc: """
+    Commit a session again after Box answered `processing`: lists its parts,
+    recomputes the whole-file digest from `content`, and commits. Returns a
+    `ChunkedUpload`.
+
+    **Example**
+
+    ```hot
+    content Bytes("hello")
+    done ::box::upload/finish-upload("F971964745A5CD0C001BBE4E58196BFD", content)
+    done.state
+    ```
+    """
 }
 fn
 (session-id: Str, content: Any): ChunkedUpload {

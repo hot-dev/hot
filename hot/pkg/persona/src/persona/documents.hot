@@ -44,7 +44,9 @@ fn
   ::api/send("GET", `/documents/${seg(document-id)}`, {}, null, options)
 }
 
-file-entry fn (key: Str, file: Any): Map? {
+file-entry
+meta {no-doc: true}
+fn (key: Str, file: Any): Map? {
   cond {
     not(is-map(file)) => { null }
     => {
@@ -61,7 +63,22 @@ file-entry fn (key: Str, file: Any): Map? {
 
 files
 meta {
-    doc: """The file metadata on a document, one entry per file: `{key, filename, byte-size, has-url}`. Signed URLs are deliberately left out so the result is safe to log or hand to an LLM; read a URL with `file-url` when you need to download. Exposed for testing."""
+    doc: """
+    The file metadata on a document, one entry per file: `{key, filename,
+    byte-size, has-url}`. Signed URLs are deliberately left out so the
+    result is safe to log or hand to an LLM; read a URL with `file-url` when
+    you need to download. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    doc {data: {type: "document/government-id", attributes: {
+      front-photo: {filename: "front.jpg", byte-size: 81234, url: "https://files.withpersona.com/front.jpg"}
+    }}}
+    ::persona::documents/files(doc)
+    // [{key: "front-photo", filename: "front.jpg", byte-size: 81234, has-url: true}]
+    ```
+    """
 }
 fn (doc: Any): Vec {
   entries reduce(FILE_KEYS, (acc, key) {
@@ -77,7 +94,22 @@ fn (doc: Any): Vec {
 
 file-url
 meta {
-    doc: """The signed URL of a document's file: `key` is `"files"`, `"files-normalized"`, `"front-photo"`, `"back-photo"` or `"selfie-photo"`, and `index` picks within a list (0 for single files). Null when absent. Treat the result as a secret."""
+    doc: """
+    The signed URL of a document's file: `key` is `"files"`,
+    `"files-normalized"`, `"front-photo"`, `"back-photo"` or
+    `"selfie-photo"`, and `index` picks within a list (0 for single files).
+    Null when absent. Treat the result as a secret.
+
+    **Example**
+
+    ```hot
+    doc {data: {type: "document/government-id", attributes: {
+      front-photo: {filename: "front.jpg", byte-size: 81234, url: "https://files.withpersona.com/front.jpg"}
+    }}}
+    ::persona::documents/file-url(doc, "front-photo", 0)  // "https://files.withpersona.com/front.jpg"
+    ::persona::documents/file-url(doc, "selfie-photo", 0)  // null
+    ```
+    """
 }
 fn (doc: Any, key: Str, index: Int): Str? {
   v ::api/attr(doc, key)
@@ -97,6 +129,15 @@ meta {
     `https://files.withpersona.com/` URLs (or other `withpersona.com`
     hosts) are fetched, and no API key is sent. On failure the Err says
     only the HTTP status: never the URL or the bytes.
+
+    **Example**
+
+    ```hot
+    doc ::persona::documents/get-document("doc_123")
+    url ::persona::documents/file-url(doc, "front-photo", 0)
+    image ::persona::documents/download-file(url)
+    length(image)
+    ```
     """
 }
 fn (url: Str): Bytes {
@@ -115,7 +156,17 @@ fn (url: Str): Bytes {
 
 is-persona-file-url
 meta {
-    doc: """True for an `https://` URL on `withpersona.com` or a subdomain. Exposed for testing."""
+    doc: """
+    True for an `https://` URL on `withpersona.com` or a subdomain. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::persona::documents/is-persona-file-url("https://files.withpersona.com/a.jpg")  // true
+    ::persona::documents/is-persona-file-url("https://example.com/a.jpg")  // false
+    ```
+    """
 }
 fn (url: Any): Bool {
   and(is-str(url), ::hot::regex/is-match(or(url, ""), "^https://([a-z0-9-]+\\.)*withpersona\\.com/"))

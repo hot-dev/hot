@@ -43,7 +43,17 @@ DOWNLOAD_URL_KEY "@microsoft.graph.downloadUrl"
 
 range-header
 meta {
-    doc: """An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"` (pure)."""
+    doc: """
+    An HTTP `Range` value for bytes `start`..`end` inclusive (`end` null for
+    "to the end"): `range-header(0, 1023)` is `"bytes=0-1023"` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::content/range-header(0, 1023)  // "bytes=0-1023"
+    ::microsoft::onedrive::content/range-header(1024, null)  // "bytes=1024-"
+    ```
+    """
 }
 fn (start: Int, end: Int?): Str {
   if(is-null(end), `bytes=${start}-`, `bytes=${start}-${end}`)
@@ -51,7 +61,17 @@ fn (start: Int, end: Int?): Str {
 
 download-ranges
 meta {
-    doc: """Split `size` bytes into inclusive `[start, end]` ranges of at most `chunk-size` bytes (pure): `download-ranges(10, 4)` is `[[0, 3], [4, 7], [8, 9]]`."""
+    doc: """
+    Split `size` bytes into inclusive `[start, end]` ranges of at most
+    `chunk-size` bytes (pure): `download-ranges(10, 4)` is `[[0, 3], [4, 7],
+    [8, 9]]`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::content/download-ranges(10, 4)  // [[0, 3], [4, 7], [8, 9]]
+    ```
+    """
 }
 fn (size: Int, chunk-size: Int): Vec {
   c max(chunk-size, 1)
@@ -64,7 +84,17 @@ fn (size: Int, chunk-size: Int): Vec {
 
 is-size-limit-error
 meta {
-    doc: """True when a request failed because the response exceeded `http.max-response-bytes`."""
+    doc: """
+    True when a request failed because the response exceeded
+    `http.max-response-bytes`.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::content/is-size-limit-error(err("response exceeds http.max-response-bytes"))  // true
+    ::microsoft::onedrive::content/is-size-limit-error("fine")  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   and(is-err(result), contains(err-message(result), "exceeds"))
@@ -76,7 +106,19 @@ fn (result: Result): Bool {
 
 item-and-url
 meta {
-    doc: """Fetch an item (following `remoteItem`) and its pre-authenticated `@microsoft.graph.downloadUrl`. Returns `{item, url}`; an Err for folders."""
+    doc: """
+    Fetch an item (following `remoteItem`) and its pre-authenticated
+    `@microsoft.graph.downloadUrl`. Returns `{item, url}`; an Err for
+    folders.
+
+    **Example**
+
+    ```hot
+    found ::microsoft::onedrive::content/item-and-url("/Reports/Q3.pdf", {})
+    found.url
+    found.item.size
+    ```
+    """
 }
 fn (item: Any, opts: Map): Map {
   found ::items/get-item(item, {...::od/creds(opts), drive: get(opts, "drive")})
@@ -91,7 +133,9 @@ fn (item: Any, opts: Map): Map {
   }
 }
 
-fetch-ranges fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
+fetch-ranges
+meta {no-doc: true}
+fn (url: Str, ranges: Vec, index: Int, acc: Bytes): Bytes {
   cond {
     gte(index, length(ranges)) => { acc }
     => {
@@ -114,6 +158,18 @@ meta {
     Download bytes `start`..`end` (inclusive) of a file with a Range
     request on its pre-authenticated download URL (Graph ignores Range on
     `/content`). Returns a `FileContent` with `source: "range"`.
+
+    **Example**
+
+    ```hot
+    // The first KiB
+    head ::microsoft::onedrive::content/download-range("/Reports/Q3.pdf", 0, 1023)
+    head.bytes
+
+    // From byte 1024 to the end of a file in another drive
+    tail ::microsoft::onedrive::content/download-range("01ABC", 1024, null, {drive: "b!xyz"})
+    tail.size
+    ```
     """
 }
 fn
@@ -144,6 +200,13 @@ meta {
     8 MiB; keep it under `http.max-response-bytes`) from its download URL
     and join them, so files larger than one response can be read. The
     whole file is still held in memory.
+
+    **Example**
+
+    ```hot
+    big ::microsoft::onedrive::content/download-chunked("/Video/launch.mp4", {chunk-size: 4194304})
+    big.size
+    ```
     """
 }
 fn
@@ -166,7 +229,9 @@ fn
   }
 }
 
-content-path fn (item: Any, opts: Map): Str {
+content-path
+meta {no-doc: true}
+fn (item: Any, opts: Map): Str {
   `${::od/item-path(if(is-map(item), ::od/remote-target(item), item), opts)}/content`
 }
 
@@ -209,7 +274,18 @@ fn
 }
 
 download-text
-meta {doc: """Download a file and decode it as UTF-8 text."""}
+meta {
+    doc: """
+    Download a file and decode it as UTF-8 text.
+
+    **Example**
+
+    ```hot
+    notes ::microsoft::onedrive::content/download-text("/Notes/todo.md")
+    split(notes, "\n")
+    ```
+    """
+}
 fn
 (item: Any): Str {
   download-text(item, {})
@@ -227,7 +303,17 @@ CONVERT_MIME {pdf: "application/pdf", html: "text/html", jpg: "image/jpeg", glb:
 
 convert-params
 meta {
-    doc: """The query parameters for a conversion (pure): `format`, plus `width` / `height` (required by Graph for `jpg`)."""
+    doc: """
+    The query parameters for a conversion (pure): `format`, plus `width` /
+    `height` (required by Graph for `jpg`).
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::content/convert-params("PDF", {})  // {format: "pdf"}
+    ::microsoft::onedrive::content/convert-params("jpg", {width: 800, height: 600})  // {format: "jpg", width: 800, height: 600}
+    ```
+    """
 }
 fn (format: Str, opts: Map): Map {
   f lowercase(format)
@@ -281,7 +367,18 @@ fn
 
 list-thumbnails
 meta {
-    doc: """GET {item}/thumbnails - thumbnail sets (`id`, `small`, `medium`, `large`, each `{url, width, height}`; the URLs are short-lived and pre-authenticated)."""
+    doc: """
+    GET {item}/thumbnails - thumbnail sets (`id`, `small`, `medium`,
+    `large`, each `{url, width, height}`; the URLs are short-lived and
+    pre-authenticated).
+
+    **Example**
+
+    ```hot
+    sets ::microsoft::onedrive::content/list-thumbnails("/Photos/team.jpg")
+    first(sets).medium.url
+    ```
+    """
 }
 fn
 (item: Any): Vec {
@@ -294,7 +391,19 @@ fn
 
 thumbnail
 meta {
-    doc: """Download one thumbnail image: `size` is `"small"`, `"medium"` (default) or `"large"`, from set `opts.set` (default `"0"`). Returns a `FileContent` with `source: "thumbnail"`."""
+    doc: """
+    Download one thumbnail image: `size` is `"small"`, `"medium"` (default)
+    or `"large"`, from set `opts.set` (default `"0"`). Returns a
+    `FileContent` with `source: "thumbnail"`.
+
+    **Example**
+
+    ```hot
+    thumb ::microsoft::onedrive::content/thumbnail("/Photos/team.jpg", "large")
+    thumb.mime-type
+    thumb.bytes
+    ```
+    """
 }
 fn
 (item: Any): FileContent {
@@ -333,6 +442,13 @@ meta {
     - `html`: Loop / Fluid / Whiteboard up to 2 MB convert; others as stored
     - `text`: textual files (`.txt`, `.md`, `.csv`, `.json`, `text/*`, ...)
       download; others are an error (extract text elsewhere)
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::content/read-plan({name: "Design.docx", size: 1024}, "pdf")  // {action: "convert", format: "pdf"}
+    ::microsoft::onedrive::content/read-plan({name: "Big.docx", size: 5000000}, "pdf")  // {action: "download", format: "original"}
+    ```
     """
 }
 fn (item: Map, format: Str?): Map {
@@ -358,7 +474,9 @@ fn (item: Map, format: Str?): Map {
   }
 }
 
-with-file fn (content: Result, item: Map, format: Str): FileContent {
+with-file
+meta {no-doc: true}
+fn (content: Result, item: Map, format: Str): FileContent {
   cond {
     is-err(content) => { content }
     => { FileContent({...untype(content), name: item.name, format: format, file: ::od/to-doc-file(item)}) }
@@ -426,7 +544,19 @@ fn
 
 read-document-text
 meta {
-    doc: """`read-document` returning just the text; an Err when the result is not textual (Office files, PDFs, images: extract text elsewhere)."""
+    doc: """
+    `read-document` returning just the text; an Err when the result is not
+    textual (Office files, PDFs, images: extract text elsewhere).
+
+    **Example**
+
+    ```hot
+    text ::microsoft::onedrive::content/read-document-text("/Notes/todo.md")
+
+    // From another drive
+    ::microsoft::onedrive::content/read-document-text("01ABC", {drive: "b!xyz"})
+    ```
+    """
 }
 fn
 (item: Any): Str {

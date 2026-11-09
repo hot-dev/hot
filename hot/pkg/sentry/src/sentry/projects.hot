@@ -10,7 +10,18 @@ Page ::sentry::api/Page
 
 list-projects
 meta {
-    doc: """GET /organizations/{org}/projects/ - One page of the organization's projects (`query`, `per_page`, `cursor`). Returns a `Page`."""
+    doc: """
+    GET /organizations/{org}/projects/ - One page of the organization's
+    projects (`query`, `per_page`, `cursor`). Returns a `Page`.
+
+    **Example**
+
+    ```hot
+    page ::sentry::projects/list-projects({per_page: 50})
+    map(page.items, %.slug)
+    page.next_cursor
+    ```
+    """
 }
 fn
 (): Page {
@@ -25,7 +36,17 @@ fn
 
 list-all-projects
 meta {
-    doc: """Every project in the organization, following cursors up to `max` (default 1000)."""
+    doc: """
+    Every project in the organization, following cursors up to `max`
+    (default 1000).
+
+    **Example**
+
+    ```hot
+    projects ::sentry::projects/list-all-projects()
+    map(projects, %.slug)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -43,7 +64,17 @@ fn
 
 get-project
 meta {
-    doc: """GET /projects/{org}/{project}/ - One project by slug or id: platform, teams, options."""
+    doc: """
+    GET /projects/{org}/{project}/ - One project by slug or id: platform,
+    teams, options.
+
+    **Example**
+
+    ```hot
+    project ::sentry::projects/get-project("my-api")
+    project.platform
+    ```
+    """
 }
 fn
 (project: Str): Map {
@@ -59,7 +90,17 @@ fn
 
 list-teams
 meta {
-    doc: """GET /organizations/{org}/teams/ - One page of teams (`query`, `detailed`, `per_page`, `cursor`). Returns a `Page`."""
+    doc: """
+    GET /organizations/{org}/teams/ - One page of teams (`query`,
+    `detailed`, `per_page`, `cursor`). Returns a `Page`.
+
+    **Example**
+
+    ```hot
+    page ::sentry::projects/list-teams({detailed: false})
+    map(page.items, %.slug)
+    ```
+    """
 }
 fn
 (): Page {
@@ -74,7 +115,17 @@ fn
 
 list-all-teams
 meta {
-    doc: """Every team in the organization, following cursors up to `max` (default 1000)."""
+    doc: """
+    Every team in the organization, following cursors up to `max` (default
+    1000).
+
+    **Example**
+
+    ```hot
+    teams ::sentry::projects/list-all-teams(200)
+    map(teams, %.slug)
+    ```
+    """
 }
 fn
 (): Vec {

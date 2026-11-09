@@ -10,13 +10,27 @@ meta {
 
 ::api ::plaid::api
 
-with-options fn (access-token: Str, options: Map?): Map {
+with-options
+meta {no-doc: true}
+fn (access-token: Str, options: Map?): Map {
   {access_token: access-token, options: options}
 }
 
 get-accounts
 meta {
-    doc: """POST /accounts/get: the Item's accounts with cached balances (free; may be hours old). Options: `account_ids`. Returns `{accounts, item, request_id}`."""
+    doc: """
+    POST /accounts/get: the Item's accounts with cached balances (free; may
+    be hours old). Options: `account_ids`. Returns `{accounts, item,
+    request_id}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::accounts/get-accounts(access-token, {account_ids: ["acc_123"]})
+    map(out.accounts, %.name)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {
@@ -36,6 +50,14 @@ meta {
     institution (slower, billed per call). Options: `account_ids`,
     `min_last_updated_datetime` (required for some institutions that only
     serve cached balances, as an ISO 8601 timestamp).
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::accounts/get-balances(access-token)
+    map(out.accounts, %.balances.available)
+    ```
     """
 }
 fn
@@ -51,7 +73,19 @@ fn
 
 get-auth
 meta {
-    doc: """POST /auth/get: account and routing numbers (`numbers.ach`, `eft`, `international`, `bacs`) for ACH and similar transfers. Options: `account_ids`. The response is sensitive: never log it."""
+    doc: """
+    POST /auth/get: account and routing numbers (`numbers.ach`, `eft`,
+    `international`, `bacs`) for ACH and similar transfers. Options:
+    `account_ids`. The response is sensitive: never log it.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::accounts/get-auth(access-token)
+    out.numbers.ach
+    ```
+    """
 }
 fn
 (access-token: Str): Map {
@@ -66,7 +100,19 @@ fn
 
 get-identity
 meta {
-    doc: """POST /identity/get: account owners' names, emails, phone numbers and addresses as the institution holds them. Options: `account_ids`. PII: never log it."""
+    doc: """
+    POST /identity/get: account owners' names, emails, phone numbers and
+    addresses as the institution holds them. Options: `account_ids`. PII:
+    never log it.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::accounts/get-identity(access-token)
+    map(out.accounts, %.owners)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {

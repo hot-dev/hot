@@ -36,7 +36,17 @@ meta {
 
 site-path
 meta {
-    doc: """The Graph path of a site by id: `/sites/{encoded id}` (pure). Site ids contain commas, which are encoded."""
+    doc: """
+    The Graph path of a site by id: `/sites/{encoded id}` (pure). Site ids
+    contain commas, which are encoded.
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint/site-path("contoso.sharepoint.com,1,2")
+    // "/sites/contoso.sharepoint.com%2C1%2C2"
+    ```
+    """
 }
 fn (site-id: Str): Str {
   `/sites/${::api/encode-segment(site-id)}`
@@ -44,7 +54,17 @@ fn (site-id: Str): Str {
 
 list-path
 meta {
-    doc: """The Graph path of a list by id or display name under a site: `/sites/{site}/lists/{list}` (pure)."""
+    doc: """
+    The Graph path of a list by id or display name under a site:
+    `/sites/{site}/lists/{list}` (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::sharepoint/list-path("contoso.sharepoint.com,1,2", "Team Tasks")
+    // "/sites/contoso.sharepoint.com%2C1%2C2/lists/Team%20Tasks"
+    ```
+    """
 }
 fn (site-id: Str, list: Str): Str {
   `${site-path(site-id)}/lists/${::api/encode-segment(list)}`

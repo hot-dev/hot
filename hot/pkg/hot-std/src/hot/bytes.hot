@@ -11,11 +11,11 @@ meta {
 
     ```hot
     // Big-endian (default)
-    to-int(Bytes([0, 0, 0, 16]))     // 16
-    to-int(Bytes([0, 16]))           // 16
+    ::hot::bytes/to-int(Bytes([0, 0, 0, 16]))     // 16
+    ::hot::bytes/to-int(Bytes([0, 16]))           // 16
 
     // Little-endian
-    to-int(Bytes([16, 0, 0, 0]), "le")  // 16
+    ::hot::bytes/to-int(Bytes([16, 0, 0, 0]), "le")  // 16
     ```
     """
 }
@@ -39,7 +39,7 @@ meta {
 
     ```hot
     // Unsigned interpretation
-    to-uint(Bytes([255, 255]))  // 65535 (not -1)
+    ::hot::bytes/to-uint(Bytes([255, 255]))  // 65535 (not -1)
     ```
     """
 }
@@ -62,11 +62,11 @@ meta {
 
     ```hot
     // Big-endian (default)
-    from-int(256, 2)        // Bytes([1, 0])
-    from-int(16, 4)         // Bytes([0, 0, 0, 16])
+    ::hot::bytes/from-int(256, 2)        // Bytes([1, 0])
+    ::hot::bytes/from-int(16, 4)         // Bytes([0, 0, 0, 16])
 
     // Little-endian
-    from-int(256, 2, "le")  // Bytes([0, 1])
+    ::hot::bytes/from-int(256, 2, "le")  // Bytes([0, 1])
     ```
     """
 }
@@ -88,11 +88,13 @@ meta {
     **Example**
 
     ```hot
-    crc32("hello")                  // 907060870
-    crc32(Bytes([72, 101, 108, 108, 111]))  // 907060870 (same)
+    ::hot::bytes/crc32("hello")                  // 907060870
+    ::hot::bytes/crc32(Bytes([72, 101, 108, 108, 111]))  // 907060870 (same)
 
     // Verify message integrity
-    message-crc crc32(message-bytes)
+    message-bytes Bytes([72, 105])
+    expected-crc 907060870
+    message-crc ::hot::bytes/crc32(message-bytes)
     eq(message-crc, expected-crc)
     ```
     """
@@ -110,7 +112,7 @@ meta {
     **Example**
 
     ```hot
-    to-str(Bytes([72, 105]))  // "Hi"
+    ::hot::bytes/to-str(Bytes([72, 105]))  // "Hi"
     ```
     """
 }
@@ -128,7 +130,7 @@ meta {
 
     ```hot
     data Bytes([1, 2, 3])
-    to-vec(data)  // [1, 2, 3]
+    ::hot::bytes/to-vec(data)  // [1, 2, 3]
     ```
     """
 }
@@ -152,10 +154,10 @@ meta {
     ```hot
     data Bytes([82, 0, 65, 66, 0])
 
-    index-of(data, 0)                    // 1 (first null byte)
-    index-of(data, 0, 2)                 // 4 (next null byte from index 2)
-    index-of(data, Bytes([65, 66]))      // 2
-    index-of(data, 99)                   // null (not found)
+    ::hot::bytes/index-of(data, 0)                    // 1 (first null byte)
+    ::hot::bytes/index-of(data, 0, 2)                 // 4 (next null byte from index 2)
+    ::hot::bytes/index-of(data, Bytes([65, 66]))      // 2
+    ::hot::bytes/index-of(data, 99)                   // null (not found)
     ```
     """
 }
@@ -181,7 +183,7 @@ meta {
     ```hot
     a Bytes([10, 255, 0])
     b Bytes([6, 15, 0])
-    xor(a, b)  // Bytes([12, 240, 0])
+    ::hot::bytes/xor(a, b)  // Bytes([12, 240, 0])
     ```
     """
 }
@@ -203,9 +205,9 @@ meta {
     **Example**
 
     ```hot
-    to-float(Bytes([63, 248, 0, 0, 0, 0, 0, 0]))        // 1.5 (f64)
-    to-float(Bytes([62, 128, 0, 0]))                     // 0.25 (f32)
-    to-float(Bytes([0, 0, 128, 62]), "le")               // 0.25 (f32, little-endian)
+    ::hot::bytes/to-float(Bytes([63, 248, 0, 0, 0, 0, 0, 0]))        // 1.5 (f64)
+    ::hot::bytes/to-float(Bytes([62, 128, 0, 0]))                     // 0.25 (f32)
+    ::hot::bytes/to-float(Bytes([0, 0, 128, 62]), "le")               // 0.25 (f32, little-endian)
     ```
     """
 }
@@ -233,9 +235,9 @@ meta {
     **Example**
 
     ```hot
-    from-float(1.5, 8)         // Bytes([63, 248, 0, 0, 0, 0, 0, 0])
-    from-float(0.25, 4)        // Bytes([62, 128, 0, 0])
-    from-float(2, 4, "le")     // Bytes([0, 0, 0, 64])
+    ::hot::bytes/from-float(1.5, 8)         // Bytes([63, 248, 0, 0, 0, 0, 0, 0])
+    ::hot::bytes/from-float(0.25, 4)        // Bytes([62, 128, 0, 0])
+    ::hot::bytes/from-float(2, 4, "le")     // Bytes([0, 0, 0, 64])
     ```
     """
 }

@@ -57,7 +57,20 @@ fn
 
 get-setup-intent
 meta {
-    doc: """GET /v1/setup_intents/{intent} - Retrieve a SetupIntent by ID. Optional `params` such as `{expand: ["payment_method"]}`."""
+    doc: """
+    GET /v1/setup_intents/{intent} - Retrieve a SetupIntent by ID. Optional
+    `params` such as `{expand: ["payment_method"]}`.
+
+    **Example**
+
+    ```hot
+    ::si ::stripe::setup-intents
+
+    intent ::si/get-setup-intent("seti_123", {expand: ["payment_method"]})
+    intent.status
+    intent.payment_method.card.last4
+    ```
+    """
 }
 fn
 (setup-intent: Str): Map {
@@ -84,7 +97,21 @@ UpdateSetupIntentRequest type {
 
 update-setup-intent
 meta {
-    doc: """POST /v1/setup_intents/{intent} - Update a SetupIntent that hasn't been confirmed."""
+    doc: """
+    POST /v1/setup_intents/{intent} - Update a SetupIntent that hasn't been
+    confirmed.
+
+    **Example**
+
+    ```hot
+    ::si ::stripe::setup-intents
+
+    ::si/update-setup-intent("seti_123", ::si/UpdateSetupIntentRequest({
+      customer: "cus_123",
+      metadata: {user_id: "42"}
+    }))
+    ```
+    """
 }
 fn
 (setup-intent: Str, request: UpdateSetupIntentRequest): Map {
@@ -131,7 +158,20 @@ fn
 
 cancel-setup-intent
 meta {
-    doc: """POST /v1/setup_intents/{intent}/cancel - Cancel a SetupIntent that hasn't succeeded. Optional `cancellation-reason`: "abandoned", "requested_by_customer", or "duplicate"."""
+    doc: """
+    POST /v1/setup_intents/{intent}/cancel - Cancel a SetupIntent that
+    hasn't succeeded. Optional `cancellation-reason`: "abandoned",
+    "requested_by_customer", or "duplicate".
+
+    **Example**
+
+    ```hot
+    ::si ::stripe::setup-intents
+
+    canceled ::si/cancel-setup-intent("seti_123", "abandoned")
+    canceled.status
+    ```
+    """
 }
 fn
 (setup-intent: Str): Map {
@@ -160,7 +200,19 @@ ListSetupIntentsRequest type {
 
 list-setup-intents
 meta {
-    doc: """GET /v1/setup_intents - List SetupIntents. Filter by `customer` or `payment_method`."""
+    doc: """
+    GET /v1/setup_intents - List SetupIntents. Filter by `customer` or
+    `payment_method`.
+
+    **Example**
+
+    ```hot
+    ::si ::stripe::setup-intents
+
+    page ::si/list-setup-intents(::si/ListSetupIntentsRequest({customer: "cus_123", limit: 10}))
+    statuses map(page.data, %.status)
+    ```
+    """
 }
 fn
 (): Map {

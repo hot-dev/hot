@@ -36,7 +36,7 @@ meta {
     fn (request) {
       if(not(::shopify::webhooks/verify-request(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-event(::shopify::webhooks/topic(request), request.body))
+        ::hot::http/HttpResponse({status: 200, body: ::shopify::webhooks/topic(request)}))
     }
     ```
     """
@@ -68,7 +68,18 @@ fn
 
 header
 meta {
-    doc: """A request header by name, case-insensitively (inbound header keys are lowercase; this also accepts maps with other casing). Returns `""` when absent."""
+    doc: """
+    A request header by name, case-insensitively (inbound header keys are
+    lowercase; this also accepts maps with other casing). Returns `""` when
+    absent.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/header({headers: {"X-Shopify-Topic": "orders/create"}}, "x-shopify-topic")  // "orders/create"
+    ::shopify::webhooks/header({headers: {}}, "x-shopify-topic")  // ""
+    ```
+    """
 }
 fn (request: Map, name: Str): Str {
   headers or(get(request, "headers"), {})
@@ -85,7 +96,15 @@ fn (request: Map, name: Str): Str {
 
 topic
 meta {
-    doc: """The delivery's topic from `X-Shopify-Topic`, e.g. `"orders/create"`."""
+    doc: """
+    The delivery's topic from `X-Shopify-Topic`, e.g. `"orders/create"`.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/topic({headers: {"x-shopify-topic": "orders/create"}})  // "orders/create"
+    ```
+    """
 }
 fn (request: Map): Str {
   header(request, "x-shopify-topic")
@@ -93,7 +112,16 @@ fn (request: Map): Str {
 
 shop-domain
 meta {
-    doc: """The sending shop from `X-Shopify-Shop-Domain`, e.g. `"acme.myshopify.com"`."""
+    doc: """
+    The sending shop from `X-Shopify-Shop-Domain`, e.g.
+    `"acme.myshopify.com"`.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/shop-domain({headers: {"x-shopify-shop-domain": "acme.myshopify.com"}})  // "acme.myshopify.com"
+    ```
+    """
 }
 fn (request: Map): Str {
   header(request, "x-shopify-shop-domain")
@@ -101,7 +129,16 @@ fn (request: Map): Str {
 
 webhook-id
 meta {
-    doc: """The per-delivery id from `X-Shopify-Webhook-Id`. Shopify retries failed deliveries with the same id, so record it to skip duplicates."""
+    doc: """
+    The per-delivery id from `X-Shopify-Webhook-Id`. Shopify retries failed
+    deliveries with the same id, so record it to skip duplicates.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/webhook-id({headers: {"x-shopify-webhook-id": "b54557e4"}})  // "b54557e4"
+    ```
+    """
 }
 fn (request: Map): Str {
   header(request, "x-shopify-webhook-id")
@@ -109,7 +146,17 @@ fn (request: Map): Str {
 
 event-id
 meta {
-    doc: """`X-Shopify-Event-Id`: shared by deliveries that came from the same merchant action across several subscriptions. For correlation, not dedupe."""
+    doc: """
+    `X-Shopify-Event-Id`: shared by deliveries that came from the same
+    merchant action across several subscriptions. For correlation, not
+    dedupe.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/event-id({headers: {"x-shopify-event-id": "98880550"}})  // "98880550"
+    ```
+    """
 }
 fn (request: Map): Str {
   header(request, "x-shopify-event-id")
@@ -117,7 +164,19 @@ fn (request: Map): Str {
 
 delivery
 meta {
-    doc: """All the routing headers at once: `{topic, shop-domain, webhook-id, event-id, api-version, triggered-at, name}` (`""` for absent ones)."""
+    doc: """
+    All the routing headers at once: `{topic, shop-domain, webhook-id,
+    event-id, api-version, triggered-at, name}` (`""` for absent ones).
+
+    **Example**
+
+    ```hot
+    info ::shopify::webhooks/delivery({headers: {"x-shopify-topic": "orders/create", "x-shopify-webhook-id": "b54557e4"}})
+    info.topic  // "orders/create"
+    info.webhook-id  // "b54557e4"
+    info.event-id  // ""
+    ```
+    """
 }
 fn (request: Map): Map {
   {
@@ -139,7 +198,18 @@ SUBSCRIPTION_FIELDS "id topic uri filter includeFields metafieldNamespaces forma
 
 build-subscription-input
 meta {
-    doc: """`WebhookSubscriptionInput` from a delivery `uri` (HTTPS URL, or a Pub/Sub / EventBridge URI) and options `filter`, `includeFields`, `metafieldNamespaces`, `format` (`JSON` or `XML`), `name`. Unset options are omitted. Exposed for testing."""
+    doc: """
+    `WebhookSubscriptionInput` from a delivery `uri` (HTTPS URL, or a
+    Pub/Sub / EventBridge URI) and options `filter`, `includeFields`,
+    `metafieldNamespaces`, `format` (`JSON` or `XML`), `name`. Unset options
+    are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/build-subscription-input("https://example.com/shopify/webhook", {format: "JSON", name: null})  // {uri: "https://example.com/shopify/webhook", format: "JSON"}
+    ```
+    """
 }
 fn (uri: Str, options: Map): Map {
   filter-vals({
@@ -193,7 +263,17 @@ fn
 
 list-subscriptions
 meta {
-    doc: """One page of the app's webhook subscriptions. Options: `first`, `after`, `topics` (Vec of topic enum values), `uri`. Returns `{nodes, pageInfo}`."""
+    doc: """
+    One page of the app's webhook subscriptions. Options: `first`, `after`,
+    `topics` (Vec of topic enum values), `uri`. Returns `{nodes, pageInfo}`.
+
+    **Example**
+
+    ```hot
+    page ::shopify::webhooks/list-subscriptions({topics: ["ORDERS_CREATE"]})
+    map(page.nodes, %.uri)
+    ```
+    """
 }
 fn
 (): Map {
@@ -218,7 +298,16 @@ fn
 
 delete-subscription
 meta {
-    doc: """Delete a webhook subscription by id (`webhookSubscriptionDelete`). Returns the deleted id."""
+    doc: """
+    Delete a webhook subscription by id (`webhookSubscriptionDelete`).
+    Returns the deleted id.
+
+    **Example**
+
+    ```hot
+    ::shopify::webhooks/delete-subscription("gid://shopify/WebhookSubscription/3")
+    ```
+    """
 }
 fn
 (id: Str): Str {

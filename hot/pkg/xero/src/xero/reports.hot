@@ -42,7 +42,9 @@ REPORTS [
 // Requests
 // ---------------------------------------------------------------------------
 
-check-name fn (name: Str): Str {
+check-name
+meta {no-doc: true}
+fn (name: Str): Str {
   cond {
     ::re/is-match(name, "^[A-Za-z]{2,64}$") => { name }
     => { err(`xero: invalid report name '${name}'`) }
@@ -51,7 +53,18 @@ check-name fn (name: Str): Str {
 
 run-report
 meta {
-    doc: """GET /Reports/{name} with `params`. Returns the first report (`ReportName`, `ReportTitles`, `ReportDate`, `Rows`, ...). Use `flatten-report` for records."""
+    doc: """
+    GET /Reports/{name} with `params`. Returns the first report
+    (`ReportName`, `ReportTitles`, `ReportDate`, `Rows`, ...). Use
+    `flatten-report` for records.
+
+    **Example**
+
+    ```hot
+    report ::xero::reports/run-report("ExecutiveSummary", {date: "2026-10-31"})
+    report.ReportName
+    ```
+    """
 }
 fn
 (name: Str): Map {
@@ -78,7 +91,21 @@ fn
 
 profit-and-loss
 meta {
-    doc: """The ProfitAndLoss report. Params: `fromDate`, `toDate`, `periods`, `timeframe`, `trackingCategoryID`, `trackingOptionID`, `standardLayout`, `paymentsOnly`."""
+    doc: """
+    The ProfitAndLoss report. Params: `fromDate`, `toDate`, `periods`,
+    `timeframe`, `trackingCategoryID`, `trackingOptionID`, `standardLayout`,
+    `paymentsOnly`.
+
+    **Example**
+
+    ```hot
+    pnl ::xero::reports/profit-and-loss({fromDate: "2026-07-01", toDate: "2026-09-30"})
+    ::xero::reports/flatten-report(pnl)
+
+    // Three months compared, cash basis
+    ::xero::reports/profit-and-loss({fromDate: "2026-09-01", toDate: "2026-09-30", periods: 2, timeframe: "MONTH", paymentsOnly: true})
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -90,7 +117,18 @@ fn
 
 balance-sheet
 meta {
-    doc: """The BalanceSheet report. Params: `date`, `periods`, `timeframe`, `trackingOptionID1`, `trackingOptionID2`, `standardLayout`, `paymentsOnly`."""
+    doc: """
+    The BalanceSheet report. Params: `date`, `periods`, `timeframe`,
+    `trackingOptionID1`, `trackingOptionID2`, `standardLayout`,
+    `paymentsOnly`.
+
+    **Example**
+
+    ```hot
+    sheet ::xero::reports/balance-sheet({date: "2026-09-30"})
+    sheet.ReportTitles
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -101,7 +139,18 @@ fn
 }
 
 trial-balance
-meta {doc: """The TrialBalance report. Params: `date`, `paymentsOnly`."""}
+meta {
+    doc: """
+    The TrialBalance report. Params: `date`, `paymentsOnly`.
+
+    **Example**
+
+    ```hot
+    report ::xero::reports/trial-balance({date: "2026-09-30"})
+    ::xero::reports/flatten-report(report)
+    ```
+    """
+}
 fn
 (params: Map): Map {
   run-report("TrialBalance", params, {})
@@ -112,7 +161,17 @@ fn
 
 aged-receivables
 meta {
-    doc: """The AgedReceivablesByContact report for one contact (Xero requires `contactId`). Params: `date`, `fromDate`, `toDate`."""
+    doc: """
+    The AgedReceivablesByContact report for one contact (Xero requires
+    `contactId`). Params: `date`, `fromDate`, `toDate`.
+
+    **Example**
+
+    ```hot
+    report ::xero::reports/aged-receivables("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69", {date: "2026-09-30"})
+    ::xero::reports/flatten-report(report)
+    ```
+    """
 }
 fn
 (contact-id: Str, params: Map): Map {
@@ -127,7 +186,17 @@ fn
 
 aged-payables
 meta {
-    doc: """The AgedPayablesByContact report for one contact (`contactId` required). Params: `date`, `fromDate`, `toDate`."""
+    doc: """
+    The AgedPayablesByContact report for one contact (`contactId` required).
+    Params: `date`, `fromDate`, `toDate`.
+
+    **Example**
+
+    ```hot
+    report ::xero::reports/aged-payables("6d2b51ce-0a4f-4a8b-9f7a-3c1e2d4b5a69", {date: "2026-09-30"})
+    ::xero::reports/flatten-report(report)
+    ```
+    """
 }
 fn
 (contact-id: Str, params: Map): Map {
@@ -142,7 +211,18 @@ fn
 
 bank-summary
 meta {
-    doc: """The BankSummary report: opening balance, cash received, cash spent and closing balance per bank account. Params: `fromDate`, `toDate`. The usual starting point for a bank reconciliation check."""
+    doc: """
+    The BankSummary report: opening balance, cash received, cash spent and
+    closing balance per bank account. Params: `fromDate`, `toDate`. The
+    usual starting point for a bank reconciliation check.
+
+    **Example**
+
+    ```hot
+    report ::xero::reports/bank-summary({fromDate: "2026-09-01", toDate: "2026-09-30"})
+    ::xero::reports/flatten-report(report)
+    ```
+    """
 }
 fn
 (params: Map): Map {
@@ -156,13 +236,24 @@ fn
 // Flattening (pure)
 // ---------------------------------------------------------------------------
 
-cell-values fn (cells: Any): Vec {
+cell-values
+meta {no-doc: true}
+fn (cells: Any): Vec {
   map(or(cells, []), (c) { Str(or(get(c, "Value"), "")) })
 }
 
 column-keys
 meta {
-    doc: """Column keys from a report's `Header` row: each header cell's text, else `col{i}`; repeated keys get `_{i}` appended."""
+    doc: """
+    Column keys from a report's `Header` row: each header cell's text, else
+    `col{i}`; repeated keys get `_{i}` appended.
+
+    **Example**
+
+    ```hot
+    ::xero::reports/column-keys({Rows: [{RowType: "Header", Cells: [{Value: ""}, {Value: "31 Oct 2026"}]}]})  // ["col0", "31 Oct 2026"]
+    ```
+    """
 }
 fn (report: Map): Vec {
   header find-first(or(get(report, "Rows"), []), (r) { eq(get(r, "RowType"), "Header") })
@@ -174,13 +265,17 @@ fn (report: Map): Vec {
   })
 }
 
-account-id fn (cells: Any): Str? {
+account-id
+meta {no-doc: true}
+fn (cells: Any): Str? {
   attrs mapcat(or(cells, []), (c) { or(get(c, "Attributes"), []) })
   hit find-first(attrs, (a) { eq(get(a, "Id"), "account") })
   if(is-map(hit), get(hit, "Value"), null)
 }
 
-record fn (row: Map, section: Str?, col-keys: Vec): Map {
+record
+meta {no-doc: true}
+fn (row: Map, section: Str?, col-keys: Vec): Map {
   cells cell-values(get(row, "Cells"))
   values reduce(range(0, min(length(col-keys), length(cells))), (acc, i) { assoc(acc, col-keys[i], cells[i]) }, {})
   filter-vals({
@@ -207,6 +302,21 @@ meta {
 
     Header rows are used for the keys, not returned. Amounts stay as Strs;
     `parse-amount` converts one.
+
+    **Example**
+
+    ```hot
+    report {Rows: [
+      {RowType: "Header", Cells: [{Value: ""}, {Value: "31 Oct 2026"}]},
+      {RowType: "Section", Title: "Income", Rows: [
+        {RowType: "Row", Cells: [{Value: "Sales"}, {Value: "1200.00"}]}
+      ]}
+    ]}
+    row first(::xero::reports/flatten-report(report))
+    row.section  // "Income"
+    row.label  // "Sales"
+    row.cells  // ["Sales", "1200.00"]
+    ```
     """
 }
 fn (report: Map): Vec {
@@ -226,7 +336,17 @@ fn (report: Map): Vec {
 
 parse-amount
 meta {
-    doc: """A report amount Str (`"1200.00"`, `"-35.50"`, `"1,200.00"`) as a Dec; null for blanks and non-numbers."""
+    doc: """
+    A report amount Str (`"1200.00"`, `"-35.50"`, `"1,200.00"`) as a Dec;
+    null for blanks and non-numbers.
+
+    **Example**
+
+    ```hot
+    ::xero::reports/parse-amount("1,200.00")  // 1200.0
+    ::xero::reports/parse-amount("n/a")  // null
+    ```
+    """
 }
 fn (value: Any): Dec? {
   text if(is-str(value), replace(trim(Str(value)), ",", ""), null)

@@ -16,7 +16,9 @@ meta {
 ::http ::hot::http
 FileContent ::microsoft::onedrive/FileContent
 
-version-path fn (item: Any, version-id: Str, opts: Map): Str {
+version-path
+meta {no-doc: true}
+fn (item: Any, version-id: Str, opts: Map): Str {
   `${::od/item-path(item, opts)}/versions/${::api/encode-segment(version-id)}`
 }
 
@@ -40,7 +42,18 @@ fn
 }
 
 get-version
-meta {doc: """GET {item}/versions/{version-id}."""}
+meta {
+    doc: """
+    GET {item}/versions/{version-id}.
+
+    **Example**
+
+    ```hot
+    v ::microsoft::onedrive::versions/get-version("/Contracts/MSA.docx", "3.0")
+    v.lastModifiedDateTime
+    ```
+    """
+}
 fn
 (item: Any, version-id: Str): Map {
   get-version(item, version-id, {})
@@ -51,7 +64,17 @@ fn
 
 download-version
 meta {
-    doc: """GET {item}/versions/{version-id}/content - the bytes of one version as a `FileContent` (`source: "version"`)."""
+    doc: """
+    GET {item}/versions/{version-id}/content - the bytes of one version as a
+    `FileContent` (`source: "version"`).
+
+    **Example**
+
+    ```hot
+    old ::microsoft::onedrive::versions/download-version("/Contracts/MSA.docx", "3.0")
+    old.bytes
+    ```
+    """
 }
 fn
 (item: Any, version-id: Str): FileContent {
@@ -69,7 +92,16 @@ fn
 
 restore-version
 meta {
-    doc: """POST {item}/versions/{version-id}/restoreVersion - make an earlier version current (creates a new version). Returns true."""
+    doc: """
+    POST {item}/versions/{version-id}/restoreVersion - make an earlier
+    version current (creates a new version). Returns true.
+
+    **Example**
+
+    ```hot
+    ::microsoft::onedrive::versions/restore-version("/Contracts/MSA.docx", "3.0")
+    ```
+    """
 }
 fn
 (item: Any, version-id: Str): Bool {

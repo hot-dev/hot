@@ -20,7 +20,19 @@ ConversationsArchiveResponse type {
 
 conversations-archive
 meta {
-    doc: """POST /conversations.archive - Archive a conversation. The channel will be read-only but its history is preserved."""
+    doc: """
+    POST /conversations.archive - Archive a conversation. The channel will
+    be read-only but its history is preserved.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-archive(::slack::channels/ConversationsArchiveRequest({
+      channel: "C1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ConversationsArchiveRequest): ConversationsArchiveResponse {
@@ -49,7 +61,20 @@ ConversationsCloseResponse type {
 
 conversations-close
 meta {
-    doc: """POST /conversations.close - Close a direct message or multi-person direct message. Returns `already_closed: true` if the conversation was not open."""
+    doc: """
+    POST /conversations.close - Close a direct message or multi-person
+    direct message. Returns `already_closed: true` if the conversation was
+    not open.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-close(::slack::channels/ConversationsCloseRequest({
+      channel: "C1234567"
+    }))
+    response.already_closed
+    ```
+    """
 }
 fn
 (request: ConversationsCloseRequest): ConversationsCloseResponse {
@@ -79,7 +104,27 @@ ConversationsCreateResponse type {
 
 conversations-create
 meta {
-    doc: """POST /conversations.create - Create a new channel. Set `is_private: true` for a private channel. Returns the new channel object."""
+    doc: """
+    POST /conversations.create - Create a new channel. Set `is_private:
+    true` for a private channel. Returns the new channel object.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-create(::slack::channels/ConversationsCreateRequest({
+      name: "project-apollo",
+      is_private: true
+    }))
+
+    // Slack reports failures such as name_taken in the body
+    if(response.ok, response.channel.id, response.error)
+
+    // With a per-call token
+    ::slack::channels/conversations-create(::slack::channels/ConversationsCreateRequest({
+      name: "project-apollo"
+    }), {api-key: ::hot::ctx/get("tenant-b.slack.api.key")})
+    ```
+    """
 }
 fn
 (request: ConversationsCreateRequest): ConversationsCreateResponse {
@@ -199,7 +244,20 @@ ConversationsInviteResponse type {
 
 conversations-invite
 meta {
-    doc: """POST /conversations.invite - Invite users to a conversation. Pass a comma-separated list of user IDs in the `users` field."""
+    doc: """
+    POST /conversations.invite - Invite users to a conversation. Pass a
+    comma-separated list of user IDs in the `users` field.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-invite(::slack::channels/ConversationsInviteRequest({
+      channel: "C1234567",
+      users: "U1234567,U2345678"
+    }))
+    response.channel.id
+    ```
+    """
 }
 fn
 (request: ConversationsInviteRequest): ConversationsInviteResponse {
@@ -228,7 +286,19 @@ ConversationsJoinResponse type {
 
 conversations-join
 meta {
-    doc: """POST /conversations.join - Join an existing conversation. Only works for public channels unless the bot has been invited."""
+    doc: """
+    POST /conversations.join - Join an existing conversation. Only works for
+    public channels unless the bot has been invited.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-join(::slack::channels/ConversationsJoinRequest({
+      channel: "C1234567"
+    }))
+    response.channel.name
+    ```
+    """
 }
 fn
 (request: ConversationsJoinRequest): ConversationsJoinResponse {
@@ -256,7 +326,20 @@ ConversationsKickResponse type {
 
 conversations-kick
 meta {
-    doc: """POST /conversations.kick - Remove a user from a conversation. Requires appropriate permissions in the channel."""
+    doc: """
+    POST /conversations.kick - Remove a user from a conversation. Requires
+    appropriate permissions in the channel.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-kick(::slack::channels/ConversationsKickRequest({
+      channel: "C1234567",
+      user: "U1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ConversationsKickRequest): ConversationsKickResponse {
@@ -283,7 +366,19 @@ ConversationsLeaveResponse type {
 
 conversations-leave
 meta {
-    doc: """POST /conversations.leave - Leave a conversation. The bot/user will no longer receive messages from this channel."""
+    doc: """
+    POST /conversations.leave - Leave a conversation. The bot/user will no
+    longer receive messages from this channel.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-leave(::slack::channels/ConversationsLeaveRequest({
+      channel: "C1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ConversationsLeaveRequest): ConversationsLeaveResponse {
@@ -359,7 +454,20 @@ ConversationsMarkResponse type {
 
 conversations-mark
 meta {
-    doc: """POST /conversations.mark - Set the read cursor in a channel. Pass the message `ts` to mark the conversation as read up to that point."""
+    doc: """
+    POST /conversations.mark - Set the read cursor in a channel. Pass the
+    message `ts` to mark the conversation as read up to that point.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-mark(::slack::channels/ConversationsMarkRequest({
+      channel: "C1234567",
+      ts: "1234567890.123456"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ConversationsMarkRequest): ConversationsMarkResponse {
@@ -435,7 +543,21 @@ ConversationsOpenResponse type {
 
 conversations-open
 meta {
-    doc: """POST /conversations.open - Open or resume a direct message or multi-person direct message. Pass either a `channel` ID or a comma-separated list of `users`. Set `prevent_creation: true` to avoid creating a new conversation."""
+    doc: """
+    POST /conversations.open - Open or resume a direct message or
+    multi-person direct message. Pass either a `channel` ID or a
+    comma-separated list of `users`. Set `prevent_creation: true` to avoid
+    creating a new conversation.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-open(::slack::channels/ConversationsOpenRequest({
+      users: "U1234567,U2345678"
+    }))
+    response.channel.id
+    ```
+    """
 }
 fn
 (request: ConversationsOpenRequest): ConversationsOpenResponse {
@@ -464,7 +586,20 @@ ConversationsRenameResponse type {
 
 conversations-rename
 meta {
-    doc: """POST /conversations.rename - Rename a conversation. Channel names must be lowercase, without spaces, and 80 characters or fewer."""
+    doc: """
+    POST /conversations.rename - Rename a conversation. Channel names must
+    be lowercase, without spaces, and 80 characters or fewer.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-rename(::slack::channels/ConversationsRenameRequest({
+      channel: "C1234567",
+      name: "project-artemis"
+    }))
+    response.channel.name
+    ```
+    """
 }
 fn
 (request: ConversationsRenameRequest): ConversationsRenameResponse {
@@ -500,7 +635,25 @@ ConversationsRepliesResponse type {
 
 conversations-replies
 meta {
-    doc: """GET /conversations.replies - Retrieve a thread of messages. Pass the parent message `ts` to fetch all replies in the thread. Supports cursor-based pagination."""
+    doc: """
+    GET /conversations.replies - Retrieve a thread of messages. Pass the
+    parent message `ts` to fetch all replies in the thread. Supports
+    cursor-based pagination.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-replies(::slack::channels/ConversationsRepliesRequest({
+      channel: "C1234567",
+      ts: "1234567890.123456",
+      limit: 100
+    }))
+    map(response.messages, %.text)
+
+    // Pass this as `cursor` to fetch the next page
+    response.response_metadata.next_cursor
+    ```
+    """
 }
 fn
 (request: ConversationsRepliesRequest): ConversationsRepliesResponse {
@@ -529,7 +682,20 @@ ConversationsSetPurposeResponse type {
 
 conversations-set-purpose
 meta {
-    doc: """POST /conversations.setPurpose - Set the purpose for a conversation. The purpose appears in the channel details panel."""
+    doc: """
+    POST /conversations.setPurpose - Set the purpose for a conversation. The
+    purpose appears in the channel details panel.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-set-purpose(::slack::channels/ConversationsSetPurposeRequest({
+      channel: "C1234567",
+      purpose: "Planning for Project Apollo"
+    }))
+    response.purpose
+    ```
+    """
 }
 fn
 (request: ConversationsSetPurposeRequest): ConversationsSetPurposeResponse {
@@ -558,7 +724,20 @@ ConversationsSetTopicResponse type {
 
 conversations-set-topic
 meta {
-    doc: """POST /conversations.setTopic - Set the topic for a conversation. The topic appears at the top of the channel."""
+    doc: """
+    POST /conversations.setTopic - Set the topic for a conversation. The
+    topic appears at the top of the channel.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-set-topic(::slack::channels/ConversationsSetTopicRequest({
+      channel: "C1234567",
+      topic: "Launch is Friday"
+    }))
+    response.topic
+    ```
+    """
 }
 fn
 (request: ConversationsSetTopicRequest): ConversationsSetTopicResponse {
@@ -585,7 +764,19 @@ ConversationsUnarchiveResponse type {
 
 conversations-unarchive
 meta {
-    doc: """POST /conversations.unarchive - Reverse archiving of a conversation. The channel will be restored and members can post messages again."""
+    doc: """
+    POST /conversations.unarchive - Reverse archiving of a conversation. The
+    channel will be restored and members can post messages again.
+
+    **Example**
+
+    ```hot
+    response ::slack::channels/conversations-unarchive(::slack::channels/ConversationsUnarchiveRequest({
+      channel: "C1234567"
+    }))
+    response.ok
+    ```
+    """
 }
 fn
 (request: ConversationsUnarchiveRequest): ConversationsUnarchiveResponse {

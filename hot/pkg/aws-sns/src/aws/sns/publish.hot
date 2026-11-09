@@ -47,11 +47,11 @@ meta {
 
     ```hot
     // Simple publish
-    result ::aws::sns::publish/publish(topic-arn, "Hello from Hot!")
+    result ::aws::sns::publish/publish("arn:aws:sns:us-east-1:123456789012:orders", "Hello from Hot!")
     result.message_id  // => "abc123-def456..."
 
     // Publish with subject (for email subscriptions)
-    result ::aws::sns::publish/publish(topic-arn, "Message body", {subject: "Alert"})
+    result ::aws::sns::publish/publish("arn:aws:sns:us-east-1:123456789012:orders", "Message body", {subject: "Alert"})
     ```
     """
 }
@@ -123,7 +123,7 @@ meta {
         {id: "msg2", message: "Second message"},
         {id: "msg3", message: "Third message"}
     ]
-    result ::aws::sns::publish/publish-batch(topic-arn, entries)
+    result ::aws::sns::publish/publish-batch("arn:aws:sns:us-east-1:123456789012:orders", entries)
     length(result.successful)  // => 3
     length(result.failed)      // => 0
     ```
@@ -203,7 +203,7 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::sns::publish/publish-with-attributes(topic-arn, "Order placed", {
+    result ::aws::sns::publish/publish-with-attributes("arn:aws:sns:us-east-1:123456789012:orders", "Order placed", {
         event_type: {DataType: "String", StringValue: "order"},
         priority: {DataType: "Number", StringValue: "1"}
     })
@@ -231,7 +231,7 @@ meta {
     **Example**
 
     ```hot
-    result ::aws::sns::publish/publish-json(topic-arn, {
+    result ::aws::sns::publish/publish-json("arn:aws:sns:us-east-1:123456789012:orders", {
         default: "Default notification",
         sqs: to-json({type: "notification", data: {order_id: "12345"}})
     })

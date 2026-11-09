@@ -37,7 +37,16 @@ fn
 
 user-path
 meta {
-    doc: """The Graph path for a user id or user principal name: `/users/{encoded}` (pure)."""
+    doc: """
+    The Graph path for a user id or user principal name: `/users/{encoded}`
+    (pure).
+
+    **Example**
+
+    ```hot
+    ::microsoft::graph::users/user-path("alex@contoso.com")  // "/users/alex%40contoso.com"
+    ```
+    """
 }
 fn (id-or-upn: Str): Str {
   `/users/${::api/encode-segment(id-or-upn)}`
@@ -45,7 +54,17 @@ fn (id-or-upn: Str): Str {
 
 get-user
 meta {
-    doc: """GET /users/{id | userPrincipalName}. `opts` takes OData options (`select`, `expand`) and credentials."""
+    doc: """
+    GET /users/{id | userPrincipalName}. `opts` takes OData options
+    (`select`, `expand`) and credentials.
+
+    **Example**
+
+    ```hot
+    user ::microsoft::graph::users/get-user("alex@contoso.com", {select: "id,mail"})
+    user.mail
+    ```
+    """
 }
 fn
 (id-or-upn: Str): Map {

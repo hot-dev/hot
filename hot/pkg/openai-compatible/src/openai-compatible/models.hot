@@ -47,7 +47,18 @@ fn (p: CompatibleProvider, model: Str): Str {
 
 get-model
 meta {
-    doc: """GET /models/{model}: one model's metadata, or an Err carrying `HttpError`. Not every provider implements it."""
+    doc: """
+    GET /models/{model}: one model's metadata, or an Err carrying
+    `HttpError`. Not every provider implements it.
+
+    **Example**
+
+    ```hot
+    p ::openai-compatible/openrouter()
+    model ::openai-compatible::models/get-model(p, "openrouter/openai/gpt-5.2")
+    model.id
+    ```
+    """
 }
 fn
 (p: CompatibleProvider, model: Str): Map {

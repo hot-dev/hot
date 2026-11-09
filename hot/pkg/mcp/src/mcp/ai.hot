@@ -9,12 +9,12 @@ meta {
 
     **Server configs**
 
-    A server is described by a Map with a required `url` field and an
-    optional `headers` map:
+    A server is described by a Map with a required `url` field and
+    optional `headers`, `mode`, and `log-level` fields:
 
     ```hot
     {url: "https://mcp.weather.example.com/mcp",
-     headers: {Authorization: `Bearer ${::hot::ctx/get(\"WEATHER_TOKEN\")}`}}
+     headers: {Authorization: `Bearer ${::hot::ctx/get("WEATHER_TOKEN")}`}}
     ```
 
     Any other keys are ignored.
@@ -35,7 +35,7 @@ meta {
 
     weather-config fn (): Map {
         {url: ::hot::ctx/get("WEATHER_MCP_URL"),
-         headers: {Authorization: `Bearer ${::hot::ctx/get(\"WEATHER_MCP_TOKEN\")}`}}
+         headers: {Authorization: `Bearer ${::hot::ctx/get("WEATHER_MCP_TOKEN")}`}}
     }
 
     tools ::ai-mcp/for-agent([
@@ -77,10 +77,17 @@ meta {
       label and the inner value is recursively resolved. The single
       key is recognized as "named" only when its value is a Map or Fn
       — single-key configs that happen to use a primitive value (e.g.
-      `{url: \"...\"}` is itself a multi-key map in practice; a literal
+      `{url: "..."}` is itself a multi-key map in practice; a literal
       `{onlykey: 1}` is treated as a config).
 
     Anything else fails with a clear error.
+
+    **Example**
+
+    ```hot
+    ::mcp::ai/resolve-spec({url: "https://mcp.example.com/mcp"}).name  // null
+    ::mcp::ai/resolve-spec({docs: {url: "https://mcp.example.com/mcp"}}).name  // "docs"
+    ```
     """
 }
 fn (spec: Any): Map {
@@ -115,13 +122,23 @@ fn (spec: Any): Map {
 validate-config
 meta {
     doc: """
-    Extract the `{url, headers}` slice the rest of the bridge needs.
+    Extract the `{url, headers, mode, log-level}` slice the rest of the
+    bridge needs.
 
-    Requires a non-empty Str `url`; `headers` is optional and defaults
-    to `{}`. Other keys on the input config are silently ignored.
+    Requires a non-empty Str `url`. `headers` defaults to `{}`, `mode`
+    to `"auto"`, and `log-level` to null. Other keys on the input config
+    are silently ignored.
 
     Fails with a single error pointing at the server label when the
     required shape isn't met.
+
+    **Example**
+
+    ```hot
+    config {url: "https://mcp.example.com/mcp", timeout: 30}
+    ::mcp::ai/validate-config({name: null, config: config}).url  // "https://mcp.example.com/mcp"
+    ::mcp::ai/validate-config({name: null, config: config}).mode  // "auto"
+    ```
     """
 }
 fn (resolved: Map): Map {
@@ -166,6 +183,24 @@ meta {
     The wrapped tool's `name` is the remote name unchanged; the chat
     layer is responsible for namespacing if it wants to disambiguate
     tools coming from multiple servers.
+
+    **Example**
+
+    ```hot
+    session ::mcp::types/Session({
+      url: "https://mcp.example.com/mcp",
+      protocol-version: "2026-07-28",
+      server-info: ::mcp::types/ServerInfo({name: "server", version: "1"}),
+      server-capabilities: ::mcp::types/ServerCapabilities({tools: {listChanged: true}}),
+      headers: {},
+      era: "modern",
+      client-info: ::mcp::types/ClientInfo({name: "my-app", version: "1.0.0"})
+    })
+    remote ::mcp::types/Tool({name: "get_weather", description: "Current weather"})
+    tool ::mcp::ai/wrap-remote-tool(session, remote)
+    tool.name  // "get_weather"
+    tool.pass-input  // true
+    ```
     """
 }
 fn (session: ::mcp-types/Session, remote: ::mcp-types/Tool): ::ai-tool/Tool {
@@ -196,8 +231,18 @@ meta {
     Connect to a single MCP server (lazy: this performs the network
     handshake) and return its tool list as `Vec<::ai::tool/Tool>`.
 
-    `config` must contain a `url` and may contain `headers`; other
-    keys are ignored (see `validate-config`).
+    `config` must contain a `url` and may contain `headers`, `mode`, and
+    `log-level`; other keys are ignored (see `validate-config`).
+
+    **Example**
+
+    ```hot
+    tools ::mcp::ai/from-server({
+      url: "https://mcp.example.com/mcp",
+      headers: {Authorization: `Bearer ${::hot::ctx/get("MCP_TOKEN")}`}
+    })
+    map(tools, %.name)
+    ```
     """
 }
 fn (config: Map): Vec<::ai-tool/Tool> {
@@ -231,10 +276,10 @@ meta {
     ::ai-tool ::ai::tool
 
     tools ::ai-mcp/for-agent([
-        () { {url: ::hot::ctx/get(\"WEATHER_MCP_URL\")} },
-        {time: {url: \"https://time.example.com/mcp\"}}
+        () { {url: ::hot::ctx/get("WEATHER_MCP_URL")} },
+        {time: {url: "https://time.example.com/mcp"}}
     ])
-    chat-tools concat(tools, ::ai-tool/for-agent([my-local-fn]))
+    chat-tools concat(tools, [::ai-tool/from-fn(::hot::hash/sha256)])
     ```
     """
 }
@@ -287,14 +332,15 @@ meta {
     ::ai-chat ::ai::chat
 
     base ::ai-chat/ChatOptions({
-        chat-fn: ::anthropic::messages/chat-with-tools,
+        // With hot.dev/anthropic installed:
+        // chat-fn: ::anthropic::chat-tools/chat-with-tools,
         model: "claude-sonnet-4-5",
-        tools: [::ai::tool/from-fn(local-add)],
+        tools: [::ai::tool/from-fn(::hot::hash/sha256)],
     })
 
     opts ::ai-mcp/options-with-mcp(base, [
-        () { {url: ::hot::ctx/get(\"WEATHER_MCP_URL\")} },
-        {time: {url: \"https://time.example.com/mcp\"}}
+        () { {url: ::hot::ctx/get("WEATHER_MCP_URL")} },
+        {time: {url: "https://time.example.com/mcp"}}
     ])
 
     answer ::ai-chat/run-loop(opts, "What's the weather in Portland?")

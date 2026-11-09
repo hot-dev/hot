@@ -10,6 +10,10 @@ meta {
     ```hot
     ::app ::github::app
 
+    app-id 12345
+    private-key-pem ::hot::ctx/get("acme.github-app-key")
+    installation-id 678
+
     token ::app/installation-token(app-id, private-key-pem, installation-id)
     // Tokens live ~1 hour. Set the runtime-minted secret for this run;
     // every ::github wrapper then authenticates with it.
@@ -36,7 +40,16 @@ TOKEN_TTL_MS 3300000
 
 build-app-claims
 meta {
-    doc: """Build the app JWT claims per GitHub's spec: `iat` 60s in the past (clock drift), `exp` at most 10 minutes out, `iss` = the App id."""
+    doc: """
+    Build the app JWT claims per GitHub's spec: `iat` 60s in the past (clock
+    drift), `exp` at most 10 minutes out, `iss` = the App id.
+
+    **Example**
+
+    ```hot
+    ::github::app/build-app-claims(12345).iss  // "12345"
+    ```
+    """
 }
 fn (app-id: Any): Map {
   now ::jwt/now-seconds()
@@ -49,7 +62,18 @@ fn (app-id: Any): Map {
 
 app-jwt
 meta {
-    doc: """Sign a GitHub App JWT (RS256) from the App id and its PEM private key (the `.pem` GitHub generates — PKCS#1 `BEGIN RSA PRIVATE KEY` — or a PKCS#8 conversion)."""
+    doc: """
+    Sign a GitHub App JWT (RS256) from the App id and its PEM private key
+    (the `.pem` GitHub generates — PKCS#1 `BEGIN RSA PRIVATE KEY` — or a
+    PKCS#8 conversion).
+
+    **Example**
+
+    ```hot
+    jwt ::github::app/app-jwt(12345, ::hot::ctx/get("acme.github-app-key"))
+    ::github::api/json("GET", "/app", {}, "", jwt).slug
+    ```
+    """
 }
 fn (app-id: Any, private-key-pem: Str): Str {
   ::ctx/mark-secret(private-key-pem)
@@ -59,7 +83,9 @@ fn (app-id: Any, private-key-pem: Str): Str {
 
 // Authenticate an App-level call with its JWT, keeping only the settings
 // of `opts`: an App call never uses a tenant's token.
-bearer-opts fn (bearer: Str, opts: Map): Map {
+bearer-opts
+meta {no-doc: true}
+fn (bearer: Str, opts: Map): Map {
   {token: bearer, base-url: get(opts, "base-url"), api-version: get(opts, "api-version")}
 }
 
@@ -76,6 +102,14 @@ meta {
     and `installation-id` in any function's `opts` instead. `opts` here
     takes `base-url` and `api-version`. The minted token is masked in the
     run's call records.
+
+    **Example**
+
+    ```hot
+    minted ::github::app/installation-token(12345, ::hot::ctx/get("acme.github-app-key"), 678)
+    ::hot::ctx/set-secret("github.token", minted.token)
+    minted.expires_at
+    ```
     """
 }
 fn
@@ -102,7 +136,19 @@ fn
 
 token-cache-key
 meta {
-    doc: """The context key an installation token is cached under: a SHA-256 of the App id, installation id, private key and API root, so neither the key nor any id appears in it."""
+    doc: """
+    The context key an installation token is cached under: a SHA-256 of the
+    App id, installation id, private key and API root, so neither the key
+    nor any id appears in it.
+
+    **Example**
+
+    ```hot
+    identity {app-id: 12345, installation-id: 678, private-key: "sample-key"}
+    key ::github::app/token-cache-key(identity, "https://api.github.com")
+    starts-with(key, "github.app-token.")  // true
+    ```
+    """
 }
 fn (identity: Map, base-url: Str): Str {
   material join([Str(identity.app-id), Str(identity.installation-id), identity.private-key, base-url], "\n")
@@ -111,7 +157,16 @@ fn (identity: Map, base-url: Str): Str {
 
 is-fresh
 meta {
-    doc: """True when a cache entry holds a token that has not reached its expiry."""
+    doc: """
+    True when a cache entry holds a token that has not reached its expiry.
+
+    **Example**
+
+    ```hot
+    ::github::app/is-fresh({token: "test-token", expires-at: 2000}, 1000)  // true
+    ::github::app/is-fresh({token: "test-token", expires-at: 2000}, 3000)  // false
+    ```
+    """
 }
 fn (entry: Any, now: Int): Bool {
   and(is-map(entry), is-some(get(entry, "token")), lt(now, or(get(entry, "expires-at"), 0)))
@@ -127,6 +182,18 @@ meta {
     flows can't pick up each other's token, and `github.token` is left
     alone. `settings` carries `base-url` and `api-version`. Returns the
     token, or the Err from signing or minting.
+
+    **Example**
+
+    ```hot
+    identity {
+      app-id: 12345,
+      private-key: ::hot::ctx/get("acme.github-app-key"),
+      installation-id: 678
+    }
+    token ::github::app/cached-installation-token(identity, ::github::api/settings-from({}))
+    ::github::users/get-user("octocat", {token: token}).login
+    ```
     """
 }
 fn (identity: Map, settings: Map): Str {
@@ -150,7 +217,17 @@ fn (identity: Map, settings: Map): Str {
 
 list-installations
 meta {
-    doc: """GET /app/installations - The installations of your App (authenticated with the app JWT)."""
+    doc: """
+    GET /app/installations - The installations of your App (authenticated
+    with the app JWT).
+
+    **Example**
+
+    ```hot
+    installations ::github::app/list-installations(12345, ::hot::ctx/get("acme.github-app-key"))
+    map(installations, %.account.login)
+    ```
+    """
 }
 fn
 (app-id: Any, private-key-pem: Str): Any {

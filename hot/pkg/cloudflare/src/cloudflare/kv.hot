@@ -16,11 +16,15 @@ HttpError ::cloudflare::api/HttpError
 
 namespaces-suffix "/storage/kv/namespaces"
 
-namespace-suffix fn (namespace-id: Str): Str {
+namespace-suffix
+meta {no-doc: true}
+fn (namespace-id: Str): Str {
   `${namespaces-suffix}/${::api/seg(namespace-id)}`
 }
 
-value-suffix fn (namespace-id: Str, key: Str): Str {
+value-suffix
+meta {no-doc: true}
+fn (namespace-id: Str, key: Str): Str {
   `${namespace-suffix(namespace-id)}/values/${::api/seg(key)}`
 }
 
@@ -30,7 +34,18 @@ value-suffix fn (namespace-id: Str, key: Str): Str {
 
 list-namespaces
 meta {
-    doc: """GET /accounts/{account_id}/storage/kv/namespaces - One page of namespaces (`page`, `per_page` up to 1000, `order`: `id`/`title`, `direction`). Returns a `ListPage`."""
+    doc: """
+    GET /accounts/{account_id}/storage/kv/namespaces - One page of
+    namespaces (`page`, `per_page` up to 1000, `order`: `id`/`title`,
+    `direction`). Returns a `ListPage`.
+
+    **Example**
+
+    ```hot
+    page ::cloudflare::kv/list-namespaces({per_page: 100, order: "title"})
+    map(page.result, %.title)
+    ```
+    """
 }
 fn
 (): ListPage {
@@ -45,7 +60,16 @@ fn
 
 list-all-namespaces
 meta {
-    doc: """Every namespace, following pages (1000 per request) up to `max` items (default 10000)."""
+    doc: """
+    Every namespace, following pages (1000 per request) up to `max` items
+    (default 10000).
+
+    **Example**
+
+    ```hot
+    map(::cloudflare::kv/list-all-namespaces(500), %.title)
+    ```
+    """
 }
 fn
 (): Vec {
@@ -63,7 +87,17 @@ fn
 
 create-namespace
 meta {
-    doc: """POST /accounts/{account_id}/storage/kv/namespaces - Create a namespace titled `title`. Returns `{id, title, supports_url_encoding}`."""
+    doc: """
+    POST /accounts/{account_id}/storage/kv/namespaces - Create a namespace
+    titled `title`. Returns `{id, title, supports_url_encoding}`.
+
+    **Example**
+
+    ```hot
+    created ::cloudflare::kv/create-namespace("sessions")
+    created.id
+    ```
+    """
 }
 fn
 (title: Str): Map {
@@ -75,7 +109,15 @@ fn
 
 delete-namespace
 meta {
-    doc: """DELETE a namespace and every key in it."""
+    doc: """
+    DELETE a namespace and every key in it.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::kv/delete-namespace("0f2ac74b498b48028cb68387c421e279")
+    ```
+    """
 }
 fn
 (namespace-id: Str): Any {
@@ -101,6 +143,7 @@ meta {
     **Example**
 
     ```hot
+    namespace-id "0f2ac74b498b48028cb68387c421e279"
     page ::cloudflare::kv/list-keys(namespace-id, {prefix: "session:", limit: 100})
     map(page.result, %.name)
     ```
@@ -119,7 +162,17 @@ fn
 
 list-all-keys
 meta {
-    doc: """Every key matching `params` (usually `{prefix}`), following cursors (1000 per request) up to `max` keys (default 10000)."""
+    doc: """
+    Every key matching `params` (usually `{prefix}`), following cursors
+    (1000 per request) up to `max` keys (default 10000).
+
+    **Example**
+
+    ```hot
+    keys-found ::cloudflare::kv/list-all-keys("0f2ac74b498b48028cb68387c421e279", {prefix: "session:"}, 5000)
+    map(keys-found, %.name)
+    ```
+    """
 }
 fn
 (namespace-id: Str): Vec {
@@ -151,6 +204,7 @@ meta {
     **Example**
 
     ```hot
+    namespace-id "0f2ac74b498b48028cb68387c421e279"
     png ::cloudflare::kv/read(namespace-id, "avatar:42")
     ```
     """
@@ -175,7 +229,15 @@ fn
 
 read-text
 meta {
-    doc: """A value decoded as UTF-8 text."""
+    doc: """
+    A value decoded as UTF-8 text.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::kv/read-text("0f2ac74b498b48028cb68387c421e279", "flag:checkout-v2")
+    ```
+    """
 }
 fn
 (namespace-id: Str, key: Str): Str {
@@ -191,7 +253,16 @@ fn
 
 read-json
 meta {
-    doc: """A value parsed as JSON (an Err when it is not valid JSON)."""
+    doc: """
+    A value parsed as JSON (an Err when it is not valid JSON).
+
+    **Example**
+
+    ```hot
+    settings ::cloudflare::kv/read-json("0f2ac74b498b48028cb68387c421e279", "settings")
+    settings.theme
+    ```
+    """
 }
 fn
 (namespace-id: Str, key: Str): Any {
@@ -207,7 +278,17 @@ fn
 
 read-metadata
 meta {
-    doc: """GET .../metadata/{key} - The JSON metadata stored with a key (null when none)."""
+    doc: """
+    GET .../metadata/{key} - The JSON metadata stored with a key (null when
+    none).
+
+    **Example**
+
+    ```hot
+    meta-data ::cloudflare::kv/read-metadata("0f2ac74b498b48028cb68387c421e279", "session:abc")
+    meta-data.user
+    ```
+    """
 }
 fn
 (namespace-id: Str, key: Str): Any {
@@ -217,7 +298,9 @@ fn
   ::api/account-json("GET", `${namespace-suffix(namespace-id)}/metadata/${::api/seg(key)}`, "", opts)
 }
 
-status-of fn (e: Any): Int? {
+status-of
+meta {no-doc: true}
+fn (e: Any): Int? {
   cond {
     is-map(e) => { get(e, "status") }
     => { null }
@@ -226,7 +309,18 @@ status-of fn (e: Any): Int? {
 
 is-not-found
 meta {
-    doc: """True when `result` is an Err for a missing key (HTTP 404). Use it to tell "absent" from real failures after `read`."""
+    doc: """
+    True when `result` is an Err for a missing key (HTTP 404). Use it to
+    tell "absent" from real failures after `read`.
+
+    **Example**
+
+    ```hot
+    missing err(::cloudflare::api/HttpError({status: 404, headers: {}, body: "", errors: [], message: "HTTP 404"}))
+    ::cloudflare::kv/is-not-found(missing)  // true
+    ::cloudflare::kv/is-not-found("value")  // false
+    ```
+    """
 }
 fn (result: Result): Bool {
   cond {
@@ -237,7 +331,17 @@ fn (result: Result): Bool {
 
 write-query
 meta {
-    doc: """The `?expiration_ttl=…&expiration=…` suffix for a write; unset options are omitted. Exposed for testing."""
+    doc: """
+    The `?expiration_ttl=…&expiration=…` suffix for a write; unset options
+    are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::kv/write-query({expiration_ttl: 3600})  // "?expiration_ttl=3600"
+    ::cloudflare::kv/write-query({})  // ""
+    ```
+    """
 }
 fn
 (options: Map): Str {
@@ -249,7 +353,18 @@ fn
 
 write-parts
 meta {
-    doc: """The multipart parts for a write that carries metadata: the `value` part (Str or Bytes) and a JSON `metadata` part. Exposed for testing."""
+    doc: """
+    The multipart parts for a write that carries metadata: the `value` part
+    (Str or Bytes) and a JSON `metadata` part. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    parts ::cloudflare::kv/write-parts("on", {user: "u_42"})
+    map(parts, %.name)  // ["value", "metadata"]
+    parts[1].value  // "{\"user\":\"u_42\"}"
+    ```
+    """
 }
 fn (value: Any, metadata: Any): Vec {
   [
@@ -273,8 +388,9 @@ meta {
     **Example**
 
     ```hot
+    namespace-id "0f2ac74b498b48028cb68387c421e279"
     ::cloudflare::kv/write(namespace-id, "flag:checkout-v2", "on")
-    ::cloudflare::kv/write(namespace-id, "session:abc", session-json, {expiration_ttl: 3600, metadata: {user: "u_42"}})
+    ::cloudflare::kv/write(namespace-id, "session:abc", to-json({cart: ["sku-1"]}), {expiration_ttl: 3600, metadata: {user: "u_42"}})
     ```
     """
 }
@@ -304,7 +420,15 @@ fn
 
 delete-key
 meta {
-    doc: """DELETE .../values/{key} - Remove a key (succeeds for absent keys too)."""
+    doc: """
+    DELETE .../values/{key} - Remove a key (succeeds for absent keys too).
+
+    **Example**
+
+    ```hot
+    ::cloudflare::kv/delete-key("0f2ac74b498b48028cb68387c421e279", "session:abc")
+    ```
+    """
 }
 fn
 (namespace-id: Str, key: Str): Any {
@@ -321,6 +445,16 @@ meta {
     is `{key, value, expiration_ttl?, expiration?, metadata?, base64?}`;
     `value` must be a string (set `base64: true` and base64-encode binary
     values). Returns `{successful_key_count, unsuccessful_keys}`.
+
+    **Example**
+
+    ```hot
+    out ::cloudflare::kv/write-bulk("0f2ac74b498b48028cb68387c421e279", [
+      {key: "flag:a", value: "on"},
+      {key: "session:abc", value: "{}", expiration_ttl: 3600}
+    ])
+    out.successful_key_count
+    ```
     """
 }
 fn
@@ -333,7 +467,15 @@ fn
 
 delete-bulk
 meta {
-    doc: """POST .../bulk/delete - Delete up to 10,000 keys in one request."""
+    doc: """
+    POST .../bulk/delete - Delete up to 10,000 keys in one request.
+
+    **Example**
+
+    ```hot
+    ::cloudflare::kv/delete-bulk("0f2ac74b498b48028cb68387c421e279", ["flag:a", "session:abc"])
+    ```
+    """
 }
 fn
 (namespace-id: Str, key-names: Vec<Str>): Map {

@@ -2,7 +2,7 @@
 
 hot.pkg.box {
   name: "hot.dev/box",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "Box Platform API v2.0 bindings for Hot: Client Credentials, JWT server auth and OAuth 2.0 with a store-backed keeper for Box's single-use refresh tokens; folder listing with marker paging, search, binary-safe downloads with Range chunking, multipart and chunked upload sessions, extracted-text representations, shared links, collaborations, versions, the Events API and admin logs, and webhooks v2 with signature verification.",
   author: "Hot Dev",
@@ -10,8 +10,8 @@ hot.pkg.box {
   license: "Apache-2.0",
   tags: ["documents"],
   deps: {
-    "hot.dev/jwt": "0.2.1",
-    "hot.dev/oauth2": "0.2.1"
+    "hot.dev/jwt": "0.2.2",
+    "hot.dev/oauth2": "0.2.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

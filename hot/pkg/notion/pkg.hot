@@ -2,7 +2,7 @@
 
 hot.pkg.notion {
   name: "hot.dev/notion",
-  version: "0.2.1",
+  version: "0.2.2",
   hot-min-version: "3.0.2",
   description: "Notion API bindings for Hot. Pages, databases with query filters, blocks, comments, users, and search — plus rich-text helpers.",
   author: "Hot Dev",

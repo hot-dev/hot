@@ -34,7 +34,16 @@ fn
 
 get-deal
 meta {
-    doc: """Fetch a deal by id; the 2-arity form selects `properties`."""
+    doc: """
+    Fetch a deal by id; the 2-arity form selects `properties`.
+
+    **Example**
+
+    ```hot
+    deal ::hubspot::deals/get-deal("12345", ["dealname", "amount"])
+    deal.properties.dealname
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -52,7 +61,15 @@ fn
 
 update-deal
 meta {
-    doc: """Update a deal's properties (e.g. `{dealstage: "closedwon"}`)."""
+    doc: """
+    Update a deal's properties (e.g. `{dealstage: "closedwon"}`).
+
+    **Example**
+
+    ```hot
+    ::hubspot::deals/update-deal("12345", {dealstage: "closedwon"})
+    ```
+    """
 }
 fn
 (id: Str, properties: Map): Map {
@@ -64,7 +81,21 @@ fn
 
 search-deals
 meta {
-    doc: """Search deals — see `::hubspot::objects/build-search-body` for the options."""
+    doc: """
+    Search deals — see `::hubspot::objects/build-search-body` for the
+    options.
+
+    **Example**
+
+    ```hot
+    out ::hubspot::deals/search-deals({
+      filters: [{propertyName: "dealstage", operator: "EQ", value: "closedwon"}],
+      properties: ["dealname", "amount"],
+      limit: 50
+    })
+    map(out.results, %.id)
+    ```
+    """
 }
 fn
 (options: Map): Map {
@@ -76,7 +107,15 @@ fn
 
 archive-deal
 meta {
-    doc: """Archive a deal (recycle bin, restorable for 90 days)."""
+    doc: """
+    Archive a deal (recycle bin, restorable for 90 days).
+
+    **Example**
+
+    ```hot
+    ::hubspot::deals/archive-deal("12345")
+    ```
+    """
 }
 fn
 (id: Str): Any {

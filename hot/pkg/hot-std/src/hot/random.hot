@@ -72,9 +72,13 @@ meta {
 
     ```hot
     // Compare secrets safely
+    user-token "tok_abc"
+    stored-token "tok_abc"
     is-valid secure-compare(user-token, stored-token)
 
     // Compare HMAC signatures
+    computed-sig "5d41402a"
+    received-sig "5d41402a"
     is-authentic secure-compare(computed-sig, received-sig)
     ```
     """

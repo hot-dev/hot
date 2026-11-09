@@ -17,11 +17,13 @@ meta {
     ```hot
     ::oauth ::box::oauth
 
-    url ::oauth/authorize-url(client-id, "https://app.example.com/oauth/box", state)
+    client-id ::hot::ctx/get("box.client.id")
+    url ::oauth/authorize-url(client-id, "https://app.example.com/oauth/box", "csrf-123")
 
     // callback handler:
-    tokens ::oauth/exchange-code(client-id, client-secret, request.query.code, "https://app.example.com/oauth/box")
-    ::box::auth/save-tokens(`user:${user-id}`, tokens)
+    code "code-from-the-callback-query"
+    tokens ::oauth/exchange-code(client-id, ::hot::ctx/get("box.client.secret"), code, "https://app.example.com/oauth/box")
+    ::box::auth/save-tokens("user:42", tokens)
     ```
     """
 }
@@ -77,6 +79,17 @@ meta {
     The 3-arity form takes the app keys from `opts` (`client-id`,
     `client-secret`) or the `box.client.id` / `box.client.secret` context
     variables.
+
+    **Example**
+
+    ```hot
+    tokens ::box::oauth/exchange-code(::hot::ctx/get("box.client.id"), ::hot::ctx/get("box.client.secret"), "code-from-callback", "https://app.example.com/oauth/box")
+    ::box::auth/save-tokens("user:42", tokens)
+
+    // App keys from context
+    tokens2 ::box::oauth/exchange-code("code-from-callback", "https://app.example.com/oauth/box", {})
+    tokens2.expires_in
+    ```
     """
 }
 fn
@@ -104,8 +117,9 @@ meta {
     2-arity form takes the app keys from `opts` or context.
 
     ```hot
-    tokens ::box::oauth/refresh-tokens(client-id, client-secret, saved.refresh_token)
-    save-for-user(user-id, tokens)   // your storage; do this first
+    saved ::box::auth/load-tokens("user:42")
+    tokens ::box::oauth/refresh-tokens(::hot::ctx/get("box.client.id"), ::hot::ctx/get("box.client.secret"), saved.refresh-token)
+    ::box::auth/save-tokens("user:42", tokens)   // do this first
     ::box::folders/list-items("0", {token: tokens.access_token})
     ```
     """
@@ -121,7 +135,17 @@ fn
 
 revoke-body
 meta {
-    doc: """The `/oauth2/revoke` form body (pure): `client_id`, `client_secret`, `token`."""
+    doc: """
+    The `/oauth2/revoke` form body (pure): `client_id`, `client_secret`,
+    `token`.
+
+    **Example**
+
+    ```hot
+    body ::box::oauth/revoke-body(::hot::ctx/get("box.client.id"), ::hot::ctx/get("box.client.secret"), ::hot::ctx/get("box.access.token"))
+    body.client_id
+    ```
+    """
 }
 fn (client-id: Str, client-secret: Str, token: Str): Map {
   {client_id: client-id, client_secret: client-secret, token: token}
@@ -129,7 +153,22 @@ fn (client-id: Str, client-secret: Str, token: Str): Map {
 
 revoke-token
 meta {
-    doc: """Revoke an access or refresh token (`POST /oauth2/revoke`; revoking either ends the session). Returns true, or a `TokenError`. Pair it with `::box::auth/forget-tokens` on disconnect. The 2-arity form takes the app keys from `opts` or context."""
+    doc: """
+    Revoke an access or refresh token (`POST /oauth2/revoke`; revoking
+    either ends the session). Returns true, or a `TokenError`. Pair it with
+    `::box::auth/forget-tokens` on disconnect. The 2-arity form takes the
+    app keys from `opts` or context.
+
+    **Example**
+
+    ```hot
+    ::box::oauth/revoke-token(::hot::ctx/get("box.client.id"), ::hot::ctx/get("box.client.secret"), ::hot::ctx/get("box.access.token"))
+
+    // App keys from context
+    ::box::oauth/revoke-token(::hot::ctx/get("box.access.token"), {})
+    ::box::auth/forget-tokens("tenant-42")
+    ```
+    """
 }
 fn
 (token: Str, opts: Map): Bool {

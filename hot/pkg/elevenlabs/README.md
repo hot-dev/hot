@@ -7,7 +7,7 @@ ElevenLabs API bindings for Hot: text-to-speech (full audio, character timestamp
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/elevenlabs": "0.1.1"
+"hot.dev/elevenlabs": "0.1.2"
 ```
 
 ## Setup

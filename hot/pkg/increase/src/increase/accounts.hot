@@ -42,7 +42,22 @@ fn
 
 get-account
 meta {
-    doc: """GET /accounts/{account_id}: retrieve an Account."""
+    doc: """
+    GET /accounts/{account_id}: retrieve an Account.
+
+    **Example**
+
+    ```hot
+    account ::increase::accounts/get-account("account_in71c4amph0vgo2qllky")
+    account.status
+
+    // Per-call credentials for another tenant.
+    ::increase::accounts/get-account("account_in71c4amph0vgo2qllky", {
+      api-key: ::hot::ctx/get("tenant-b.increase.api.key"),
+      environment: "production"
+    })
+    ```
+    """
 }
 fn
 (account-id: Str): Map {
@@ -81,7 +96,16 @@ fn
 
 update-account
 meta {
-    doc: """PATCH /accounts/{account_id}: rename an Account (`name`) or change a loan's `loan: {credit_limit}`."""
+    doc: """
+    PATCH /accounts/{account_id}: rename an Account (`name`) or change a
+    loan's `loan: {credit_limit}`.
+
+    **Example**
+
+    ```hot
+    ::increase::accounts/update-account("account_in71c4amph0vgo2qllky", {name: "Operating reserve"})
+    ```
+    """
 }
 fn
 (account-id: Str, params: Map): Map {
@@ -93,7 +117,17 @@ fn
 
 close-account
 meta {
-    doc: """POST /accounts/{account_id}/close: close an Account. Its balance must be zero. Irreversible; agents should get a person's approval first."""
+    doc: """
+    POST /accounts/{account_id}/close: close an Account. Its balance must be
+    zero. Irreversible; agents should get a person's approval first.
+
+    **Example**
+
+    ```hot
+    account ::increase::accounts/close-account("account_in71c4amph0vgo2qllky")
+    account.status
+    ```
+    """
 }
 fn
 (account-id: Str): Map {
@@ -114,7 +148,7 @@ meta {
 
     ```hot
     balance ::increase::accounts/get-balance("account_in71c4amph0vgo2qllky")
-    balance.available_balance   // => 100
+    balance.available_balance
     ```
     """
 }
@@ -141,6 +175,17 @@ meta {
     {debit_status: "allowed" | "blocked"}` and `inbound_checks: {status:
     "allowed" | "check_transfers_only"}`. The response holds the full
     account and routing numbers: don't log it.
+
+    **Example**
+
+    ```hot
+    number ::increase::accounts/create-account-number({
+      account_id: "account_in71c4amph0vgo2qllky",
+      name: "Rent payments",
+      inbound_ach: {debit_status: "blocked"}
+    }, {idempotency-key: "account-number-rent"})
+    number.id
+    ```
     """
 }
 fn
@@ -153,7 +198,17 @@ fn
 
 get-account-number
 meta {
-    doc: """GET /account_numbers/{account_number_id}: retrieve an Account Number (includes the full account and routing numbers)."""
+    doc: """
+    GET /account_numbers/{account_number_id}: retrieve an Account Number
+    (includes the full account and routing numbers).
+
+    **Example**
+
+    ```hot
+    number ::increase::accounts/get-account-number("account_number_v18nkfqm6afpsrvy82b2")
+    number.status
+    ```
+    """
 }
 fn
 (account-number-id: Str): Map {
@@ -165,7 +220,19 @@ fn
 
 list-account-numbers
 meta {
-    doc: """GET /account_numbers: one page of Account Numbers. Filters: `account_id`, `"status.in"` (`active`, `disabled`, `canceled`), `"ach_debit_status.in"`, `created_at`, `idempotency_key`, `limit`, `cursor`."""
+    doc: """
+    GET /account_numbers: one page of Account Numbers. Filters:
+    `account_id`, `"status.in"` (`active`, `disabled`, `canceled`),
+    `"ach_debit_status.in"`, `created_at`, `idempotency_key`, `limit`,
+    `cursor`.
+
+    **Example**
+
+    ```hot
+    page ::increase::accounts/list-account-numbers({account_id: "account_in71c4amph0vgo2qllky", "status.in": ["active"]})
+    map(page.data, %.id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -180,7 +247,17 @@ fn
 
 update-account-number
 meta {
-    doc: """PATCH /account_numbers/{account_number_id}: change `name`, `status` (`"active"`, `"disabled"`, `"canceled"`; canceling is permanent), `inbound_ach` or `inbound_checks`."""
+    doc: """
+    PATCH /account_numbers/{account_number_id}: change `name`, `status`
+    (`"active"`, `"disabled"`, `"canceled"`; canceling is permanent),
+    `inbound_ach` or `inbound_checks`.
+
+    **Example**
+
+    ```hot
+    ::increase::accounts/update-account-number("account_number_v18nkfqm6afpsrvy82b2", {status: "disabled"})
+    ```
+    """
 }
 fn
 (account-number-id: Str, params: Map): Map {
@@ -196,7 +273,19 @@ fn
 
 list-account-statements
 meta {
-    doc: """GET /account_statements: one page of monthly Account Statements. Filters: `account_id`, `statement_period_start: {after, before, on_or_after, on_or_before}`, `limit`, `cursor`. Each statement's `file_id` names the PDF (fetch it with `/files/{file_id}`)."""
+    doc: """
+    GET /account_statements: one page of monthly Account Statements.
+    Filters: `account_id`, `statement_period_start: {after, before,
+    on_or_after, on_or_before}`, `limit`, `cursor`. Each statement's
+    `file_id` names the PDF (fetch it with `/files/{file_id}`).
+
+    **Example**
+
+    ```hot
+    page ::increase::accounts/list-account-statements({account_id: "account_in71c4amph0vgo2qllky", limit: 12})
+    map(page.data, %.file_id)
+    ```
+    """
 }
 fn
 (): Map {
@@ -211,7 +300,17 @@ fn
 
 get-account-statement
 meta {
-    doc: """GET /account_statements/{account_statement_id}: retrieve an Account Statement."""
+    doc: """
+    GET /account_statements/{account_statement_id}: retrieve an Account
+    Statement.
+
+    **Example**
+
+    ```hot
+    statement ::increase::accounts/get-account-statement("account_statement_lkc03a4skm2k7f38vj15")
+    statement.ending_balance
+    ```
+    """
 }
 fn
 (account-statement-id: Str): Map {

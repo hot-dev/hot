@@ -12,25 +12,35 @@ DbResponse type {
   count: Int?
 }
 
-enc fn (value: Any): Str {
+enc
+meta {no-doc: true}
+fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
-query-param fn (name: Str, value: Any): Str {
+query-param
+meta {no-doc: true}
+fn (name: Str, value: Any): Str {
   if(is-some(value), `${enc(name)}=${enc(value)}`, "")
 }
 
-join-query fn (parts: Vec<Str>): Str {
+join-query
+meta {no-doc: true}
+fn (parts: Vec<Str>): Str {
   active filter(parts, not(is-empty(%)))
   join(active, "&")
 }
 
-append-query fn (path: Str, parts: Vec<Str>): Str {
+append-query
+meta {no-doc: true}
+fn (path: Str, parts: Vec<Str>): Str {
   query join-query(parts)
   if(is-empty(query), path, `${path}?${query}`)
 }
 
-filters-query fn (filters: Vec<Str>?): Str {
+filters-query
+meta {no-doc: true}
+fn (filters: Vec<Str>?): Str {
   cond {
     is-null(filters) => { "" }
     is-empty(filters) => { "" }
@@ -38,15 +48,21 @@ filters-query fn (filters: Vec<Str>?): Str {
   }
 }
 
-read-headers fn (schema: Str?): Map {
+read-headers
+meta {no-doc: true}
+fn (schema: Str?): Map {
   {} |> assoc-some("Accept-Profile", schema)
 }
 
-write-headers fn (schema: Str?): Map {
+write-headers
+meta {no-doc: true}
+fn (schema: Str?): Map {
   {} |> assoc-some("Content-Profile", schema)
 }
 
-parse-count fn (headers: Map): Int? {
+parse-count
+meta {no-doc: true}
+fn (headers: Map): Int? {
   raw or(get(headers, "content-range"), get(headers, "Content-Range"))
   cond {
     is-null(raw) => { null }
@@ -58,7 +74,9 @@ parse-count fn (headers: Map): Int? {
   }
 }
 
-db-response fn (response: Result): DbResponse {
+db-response
+meta {no-doc: true}
+fn (response: Result): DbResponse {
   cond {
     is-err(response) => { response }
     => {
@@ -72,7 +90,9 @@ db-response fn (response: Result): DbResponse {
   }
 }
 
-body-or-error fn (response: Result): Any {
+body-or-error
+meta {no-doc: true}
+fn (response: Result): Any {
   cond {
     is-err(response) => { response }
     not(::api/is-ok-response(response)) => { err(::api/HttpError(response)) }
@@ -80,11 +100,15 @@ body-or-error fn (response: Result): Any {
   }
 }
 
-table-path fn (table: Str): Str {
+table-path
+meta {no-doc: true}
+fn (table: Str): Str {
   `/rest/v1/${enc(table)}`
 }
 
-rpc-path fn (fn-name: Str): Str {
+rpc-path
+meta {no-doc: true}
+fn (fn-name: Str): Str {
   `/rest/v1/rpc/${enc(fn-name)}`
 }
 
@@ -147,7 +171,24 @@ fn
   body-or-error(select-response(request, opts))
 }
 
-select-as fn
+select-as
+meta {
+    doc: """
+    Like `select`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    orders ::db/select-as(::db/SelectRequest({table: "orders", limit: 20}), token)
+    length(orders)
+    ```
+    """
+}
+fn
 (request: SelectRequest, access-token: Str): Any {
   select-as(request, access-token, {})
 },
@@ -155,7 +196,26 @@ select-as fn
   body-or-error(select-response-as(request, access-token, opts))
 }
 
-select-service fn
+select-service
+meta {
+    doc: """
+    Like `select`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    orders ::db/select-service(::db/SelectRequest({table: "orders", limit: 20}))
+
+    // Another project, for this call only
+    tenant {url: "https://tenant-b.supabase.co", service-key: ::hot::ctx/get("tenant.service.key")}
+    tenant-orders ::db/select-service(::db/SelectRequest({table: "orders", limit: 20}), tenant)
+    ```
+    """
+}
+fn
 (request: SelectRequest): Any {
   select-service(request, {})
 },
@@ -163,7 +223,33 @@ select-service fn
   body-or-error(select-response-service(request, opts))
 }
 
-select-response fn
+select-response
+meta {
+    doc: """
+    Like `select`, but returns a `DbResponse`: `status`, `headers`, `body`,
+    and `count`, which is the total from the `Content-Range` header when the
+    request sets `count`. A non-2xx status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    page ::db/select-response(::db/SelectRequest({
+      table: "orders",
+      filters: [::f/eq("status", "open")],
+      count: "exact",
+      limit: 20
+    }))
+
+    // Total matching rows, across all pages
+    page.count
+    page.body
+    ```
+    """
+}
+fn
 (request: SelectRequest): DbResponse {
   select-response(request, {})
 },
@@ -171,7 +257,25 @@ select-response fn
   db-response(select-http-response(request, opts))
 }
 
-select-response-as fn
+select-response-as
+meta {
+    doc: """
+    Like `select-as`, but returns a `DbResponse` with `count`. See
+    `select-response`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    page ::db/select-response-as(::db/SelectRequest({table: "orders", count: "exact", limit: 20}), token)
+    page.count
+    page.body
+    ```
+    """
+}
+fn
 (request: SelectRequest, access-token: Str): DbResponse {
   select-response-as(request, access-token, {})
 },
@@ -179,7 +283,24 @@ select-response-as fn
   db-response(select-http-response-as(request, access-token, opts))
 }
 
-select-response-service fn
+select-response-service
+meta {
+    doc: """
+    Like `select-service`, but returns a `DbResponse` with `count`. See
+    `select-response`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    page ::db/select-response-service(::db/SelectRequest({table: "orders", count: "exact", limit: 20}))
+    page.count
+    page.body
+    ```
+    """
+}
+fn
 (request: SelectRequest): DbResponse {
   select-response-service(request, {})
 },
@@ -187,7 +308,9 @@ select-response-service fn
   db-response(select-http-response-service(request, opts))
 }
 
-select-path fn (request: SelectRequest): Str {
+select-path
+meta {no-doc: true}
+fn (request: SelectRequest): Str {
   select-param or(request.select, "*")
   append-query(table-path(request.table), [
     query-param("select", select-param),
@@ -198,7 +321,9 @@ select-path fn (request: SelectRequest): Str {
   ])
 }
 
-select-headers fn (request: SelectRequest): Map {
+select-headers
+meta {no-doc: true}
+fn (request: SelectRequest): Map {
   prefer if(is-some(request.count), `count=${untype(request.count)}`, null)
   accept if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null)
   read-headers(request.schema)
@@ -206,7 +331,24 @@ select-headers fn (request: SelectRequest): Map {
     |> assoc-some("Accept", accept)
 }
 
-select-http-response fn
+select-http-response
+meta {
+    doc: """
+    Like `select`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/select-http-response(::db/SelectRequest({table: "orders", limit: 20}))
+    response.status
+    response.headers
+    ```
+    """
+}
+fn
 (request: SelectRequest): ::api/HttpResponse {
   select-http-response(request, {})
 },
@@ -214,7 +356,24 @@ select-http-response fn
   ::api/request-raw("GET", select-path(request), select-headers(request), {}, opts)
 }
 
-select-http-response-as fn
+select-http-response-as
+meta {
+    doc: """
+    Like `select-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/select-http-response-as(::db/SelectRequest({table: "orders", limit: 20}), token)
+    response.status
+    ```
+    """
+}
+fn
 (request: SelectRequest, access-token: Str): ::api/HttpResponse {
   select-http-response-as(request, access-token, {})
 },
@@ -222,7 +381,23 @@ select-http-response-as fn
   ::api/request-raw-as("GET", select-path(request), select-headers(request), {}, access-token, opts)
 }
 
-select-http-response-service fn
+select-http-response-service
+meta {
+    doc: """
+    Like `select-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/select-http-response-service(::db/SelectRequest({table: "orders", limit: 20}))
+    response.status
+    ```
+    """
+}
+fn
 (request: SelectRequest): ::api/HttpResponse {
   select-http-response-service(request, {})
 },
@@ -281,7 +456,23 @@ fn
   body-or-error(insert-response(request, opts))
 }
 
-insert-as fn
+insert-as
+meta {
+    doc: """
+    Like `insert`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::db/insert-as(::db/InsertRequest({table: "orders", data: {sku: "X1", qty: 2}}), token)
+    ```
+    """
+}
+fn
 (request: InsertRequest, access-token: Str): Any {
   insert-as(request, access-token, {})
 },
@@ -289,7 +480,22 @@ insert-as fn
   body-or-error(insert-response-as(request, access-token, opts))
 }
 
-insert-service fn
+insert-service
+meta {
+    doc: """
+    Like `insert`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    ::db/insert-service(::db/InsertRequest({table: "orders", data: {sku: "X1", qty: 2}}))
+    ```
+    """
+}
+fn
 (request: InsertRequest): Any {
   insert-service(request, {})
 },
@@ -297,7 +503,24 @@ insert-service fn
   body-or-error(insert-response-service(request, opts))
 }
 
-insert-response fn
+insert-response
+meta {
+    doc: """
+    Like `insert`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/insert-response(::db/InsertRequest({table: "orders", data: {sku: "X1", qty: 2}}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: InsertRequest): ::api/HttpResponse {
   insert-response(request, {})
 },
@@ -305,7 +528,25 @@ insert-response fn
   ::api/request-raw("POST", insert-path(request), insert-headers(request), request.data, opts)
 }
 
-insert-response-as fn
+insert-response-as
+meta {
+    doc: """
+    Like `insert-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/insert-response-as(::db/InsertRequest({table: "orders", data: {sku: "X1", qty: 2}}), token)
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: InsertRequest, access-token: Str): ::api/HttpResponse {
   insert-response-as(request, access-token, {})
 },
@@ -313,7 +554,24 @@ insert-response-as fn
   ::api/request-raw-as("POST", insert-path(request), insert-headers(request), request.data, access-token, opts)
 }
 
-insert-response-service fn
+insert-response-service
+meta {
+    doc: """
+    Like `insert-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/insert-response-service(::db/InsertRequest({table: "orders", data: {sku: "X1", qty: 2}}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: InsertRequest): ::api/HttpResponse {
   insert-response-service(request, {})
 },
@@ -321,13 +579,17 @@ insert-response-service fn
   ::api/request-raw-service("POST", insert-path(request), insert-headers(request), request.data, opts)
 }
 
-insert-path fn (request: InsertRequest): Str {
+insert-path
+meta {no-doc: true}
+fn (request: InsertRequest): Str {
   append-query(table-path(request.table), [
     query-param("on_conflict", request.on-conflict)
   ])
 }
 
-insert-headers fn (request: InsertRequest): Map {
+insert-headers
+meta {no-doc: true}
+fn (request: InsertRequest): Map {
   should-return or(request.return, true)
   prefer-parts [
     if(should-return, "return=representation", "return=minimal")
@@ -380,7 +642,28 @@ fn
   body-or-error(update-response(request, opts))
 }
 
-update-as fn
+update-as
+meta {
+    doc: """
+    Like `update`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::db/update-as(::db/UpdateRequest({
+      table: "orders",
+      data: {status: "shipped"},
+      filters: [::f/eq("id", 42)]
+    }), token)
+    ```
+    """
+}
+fn
 (request: UpdateRequest, access-token: Str): Any {
   update-as(request, access-token, {})
 },
@@ -388,7 +671,27 @@ update-as fn
   body-or-error(update-response-as(request, access-token, opts))
 }
 
-update-service fn
+update-service
+meta {
+    doc: """
+    Like `update`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    ::db/update-service(::db/UpdateRequest({
+      table: "orders",
+      data: {status: "shipped"},
+      filters: [::f/eq("id", 42)]
+    }))
+    ```
+    """
+}
+fn
 (request: UpdateRequest): Any {
   update-service(request, {})
 },
@@ -396,7 +699,29 @@ update-service fn
   body-or-error(update-response-service(request, opts))
 }
 
-update-response fn
+update-response
+meta {
+    doc: """
+    Like `update`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    response ::db/update-response(::db/UpdateRequest({
+      table: "orders",
+      data: {status: "shipped"},
+      filters: [::f/eq("id", 42)]
+    }))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpdateRequest): ::api/HttpResponse {
   update-response(request, {})
 },
@@ -405,7 +730,30 @@ update-response fn
   ::api/request-raw("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, opts)
 }
 
-update-response-as fn
+update-response-as
+meta {
+    doc: """
+    Like `update-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/update-response-as(::db/UpdateRequest({
+      table: "orders",
+      data: {status: "shipped"},
+      filters: [::f/eq("id", 42)]
+    }), token)
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpdateRequest, access-token: Str): ::api/HttpResponse {
   update-response-as(request, access-token, {})
 },
@@ -414,7 +762,29 @@ update-response-as fn
   ::api/request-raw-as("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, access-token, opts)
 }
 
-update-response-service fn
+update-response-service
+meta {
+    doc: """
+    Like `update-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    response ::db/update-response-service(::db/UpdateRequest({
+      table: "orders",
+      data: {status: "shipped"},
+      filters: [::f/eq("id", 42)]
+    }))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpdateRequest): ::api/HttpResponse {
   update-response-service(request, {})
 },
@@ -423,16 +793,22 @@ update-response-service fn
   ::api/request-raw-service("PATCH", filtered-table-path(request.table, request.filters), mutation-headers(request.return, request.count, request.schema), request.data, opts)
 }
 
-validate-filters fn (filters: Vec<Str>, operation: Str): Bool {
+validate-filters
+meta {no-doc: true}
+fn (filters: Vec<Str>, operation: Str): Bool {
   if(is-empty(filters), fail(`filters are required for ${operation} to prevent full-table ${operation}s`))
   true
 }
 
-filtered-table-path fn (table: Str, filters: Vec<Str>): Str {
+filtered-table-path
+meta {no-doc: true}
+fn (table: Str, filters: Vec<Str>): Str {
   append-query(table-path(table), [filters-query(filters)])
 }
 
-mutation-headers fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
+mutation-headers
+meta {no-doc: true}
+fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
   should-return or(return-rows, true)
   prefer-parts [
     if(should-return, "return=representation", "return=minimal")
@@ -443,7 +819,9 @@ mutation-headers fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
     |> assoc("Prefer", join(prefer-parts, ", "))
 }
 
-delete-headers fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
+delete-headers
+meta {no-doc: true}
+fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
   should-return or(return-rows, false)
   prefer-parts [
     if(should-return, "return=representation", "return=minimal")
@@ -492,7 +870,24 @@ fn
   body-or-error(delete-response(request, opts))
 }
 
-delete-as fn
+delete-as
+meta {
+    doc: """
+    Like `delete`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::db/delete-as(::db/DeleteRequest({table: "orders", filters: [::f/eq("id", 42)]}), token)
+    ```
+    """
+}
+fn
 (request: DeleteRequest, access-token: Str): Any {
   delete-as(request, access-token, {})
 },
@@ -500,7 +895,23 @@ delete-as fn
   body-or-error(delete-response-as(request, access-token, opts))
 }
 
-delete-service fn
+delete-service
+meta {
+    doc: """
+    Like `delete`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    ::db/delete-service(::db/DeleteRequest({table: "orders", filters: [::f/eq("id", 42)]}))
+    ```
+    """
+}
+fn
 (request: DeleteRequest): Any {
   delete-service(request, {})
 },
@@ -508,7 +919,24 @@ delete-service fn
   body-or-error(delete-response-service(request, opts))
 }
 
-delete-response fn
+delete-response
+meta {
+    doc: """
+    Like `delete`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    response ::db/delete-response(::db/DeleteRequest({table: "orders", filters: [::f/eq("id", 42)]}))
+    response.status
+    ```
+    """
+}
+fn
 (request: DeleteRequest): ::api/HttpResponse {
   delete-response(request, {})
 },
@@ -517,7 +945,25 @@ delete-response fn
   ::api/request-raw("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, opts)
 }
 
-delete-response-as fn
+delete-response-as
+meta {
+    doc: """
+    Like `delete-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/delete-response-as(::db/DeleteRequest({table: "orders", filters: [::f/eq("id", 42)]}), token)
+    response.status
+    ```
+    """
+}
+fn
 (request: DeleteRequest, access-token: Str): ::api/HttpResponse {
   delete-response-as(request, access-token, {})
 },
@@ -526,7 +972,24 @@ delete-response-as fn
   ::api/request-raw-as("DELETE", filtered-table-path(request.table, request.filters), delete-headers(request.return, request.count, request.schema), {}, access-token, opts)
 }
 
-delete-response-service fn
+delete-response-service
+meta {
+    doc: """
+    Like `delete-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+    ::f ::supabase::filters
+
+    response ::db/delete-response-service(::db/DeleteRequest({table: "orders", filters: [::f/eq("id", 42)]}))
+    response.status
+    ```
+    """
+}
+fn
 (request: DeleteRequest): ::api/HttpResponse {
   delete-response-service(request, {})
 },
@@ -576,7 +1039,23 @@ fn
   body-or-error(upsert-response(request, opts))
 }
 
-upsert-as fn
+upsert-as
+meta {
+    doc: """
+    Like `upsert`, but as a signed-in user. `access-token` is the Bearer
+    token, so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::db/upsert-as(::db/UpsertRequest({table: "products", data: [{sku: "X1", price: 10}], on-conflict: "sku"}), token)
+    ```
+    """
+}
+fn
 (request: UpsertRequest, access-token: Str): Any {
   upsert-as(request, access-token, {})
 },
@@ -584,7 +1063,22 @@ upsert-as fn
   body-or-error(upsert-response-as(request, access-token, opts))
 }
 
-upsert-service fn
+upsert-service
+meta {
+    doc: """
+    Like `upsert`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    ::db/upsert-service(::db/UpsertRequest({table: "products", data: [{sku: "X1", price: 10}], on-conflict: "sku"}))
+    ```
+    """
+}
+fn
 (request: UpsertRequest): Any {
   upsert-service(request, {})
 },
@@ -592,7 +1086,24 @@ upsert-service fn
   body-or-error(upsert-response-service(request, opts))
 }
 
-upsert-response fn
+upsert-response
+meta {
+    doc: """
+    Like `upsert`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/upsert-response(::db/UpsertRequest({table: "products", data: [{sku: "X1", price: 10}], on-conflict: "sku"}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpsertRequest): ::api/HttpResponse {
   upsert-response(request, {})
 },
@@ -600,7 +1111,25 @@ upsert-response fn
   ::api/request-raw("POST", upsert-path(request), upsert-headers(request), request.data, opts)
 }
 
-upsert-response-as fn
+upsert-response-as
+meta {
+    doc: """
+    Like `upsert-as`, but returns the full `HttpResponse`. A non-2xx status
+    is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/upsert-response-as(::db/UpsertRequest({table: "products", data: [{sku: "X1", price: 10}], on-conflict: "sku"}), token)
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpsertRequest, access-token: Str): ::api/HttpResponse {
   upsert-response-as(request, access-token, {})
 },
@@ -608,7 +1137,24 @@ upsert-response-as fn
   ::api/request-raw-as("POST", upsert-path(request), upsert-headers(request), request.data, access-token, opts)
 }
 
-upsert-response-service fn
+upsert-response-service
+meta {
+    doc: """
+    Like `upsert-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/upsert-response-service(::db/UpsertRequest({table: "products", data: [{sku: "X1", price: 10}], on-conflict: "sku"}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: UpsertRequest): ::api/HttpResponse {
   upsert-response-service(request, {})
 },
@@ -616,13 +1162,17 @@ upsert-response-service fn
   ::api/request-raw-service("POST", upsert-path(request), upsert-headers(request), request.data, opts)
 }
 
-upsert-path fn (request: UpsertRequest): Str {
+upsert-path
+meta {no-doc: true}
+fn (request: UpsertRequest): Str {
   append-query(table-path(request.table), [
     query-param("on_conflict", request.on-conflict)
   ])
 }
 
-upsert-headers fn (request: UpsertRequest): Map {
+upsert-headers
+meta {no-doc: true}
+fn (request: UpsertRequest): Map {
   resolution cond {
       and(is-some(request.ignore-duplicates), request.ignore-duplicates) => { "resolution=ignore-duplicates" }
       => { "resolution=merge-duplicates" }
@@ -685,7 +1235,23 @@ fn
   body-or-error(rpc-response(request, opts))
 }
 
-rpc-as fn
+rpc-as
+meta {
+    doc: """
+    Like `rpc`, but as a signed-in user. `access-token` is the Bearer token,
+    so row level security applies as that user.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    ::db/rpc-as(::db/RpcRequest({fn-name: "add_them", params: {a: 1, b: 2}}), token)
+    ```
+    """
+}
+fn
 (request: RpcRequest, access-token: Str): Any {
   rpc-as(request, access-token, {})
 },
@@ -693,7 +1259,22 @@ rpc-as fn
   body-or-error(rpc-response-as(request, access-token, opts))
 }
 
-rpc-service fn
+rpc-service
+meta {
+    doc: """
+    Like `rpc`, with the service role key, which bypasses row level
+    security. Server-side only.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    ::db/rpc-service(::db/RpcRequest({fn-name: "add_them", params: {a: 1, b: 2}}))
+    ```
+    """
+}
+fn
 (request: RpcRequest): Any {
   rpc-service(request, {})
 },
@@ -701,7 +1282,24 @@ rpc-service fn
   body-or-error(rpc-response-service(request, opts))
 }
 
-rpc-response fn
+rpc-response
+meta {
+    doc: """
+    Like `rpc`, but returns the full `HttpResponse`. A non-2xx status is not
+    an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/rpc-response(::db/RpcRequest({fn-name: "add_them", params: {a: 1, b: 2}}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: RpcRequest): ::api/HttpResponse {
   rpc-response(request, {})
 },
@@ -709,7 +1307,25 @@ rpc-response fn
   ::api/request-raw("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), opts)
 }
 
-rpc-response-as fn
+rpc-response-as
+meta {
+    doc: """
+    Like `rpc-as`, but returns the full `HttpResponse`. A non-2xx status is
+    not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    token ::hot::ctx/get("supabase.user.token")
+    response ::db/rpc-response-as(::db/RpcRequest({fn-name: "add_them", params: {a: 1, b: 2}}), token)
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: RpcRequest, access-token: Str): ::api/HttpResponse {
   rpc-response-as(request, access-token, {})
 },
@@ -717,7 +1333,24 @@ rpc-response-as fn
   ::api/request-raw-as("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), access-token, opts)
 }
 
-rpc-response-service fn
+rpc-response-service
+meta {
+    doc: """
+    Like `rpc-service`, but returns the full `HttpResponse`. A non-2xx
+    status is not an Err: check `status`.
+
+    **Example**
+
+    ```hot
+    ::db ::supabase::db
+
+    response ::db/rpc-response-service(::db/RpcRequest({fn-name: "add_them", params: {a: 1, b: 2}}))
+    response.status
+    response.body
+    ```
+    """
+}
+fn
 (request: RpcRequest): ::api/HttpResponse {
   rpc-response-service(request, {})
 },
@@ -725,7 +1358,9 @@ rpc-response-service fn
   ::api/request-raw-service("POST", rpc-path(request.fn-name), rpc-headers(request), or(request.params, {}), opts)
 }
 
-rpc-headers fn (request: RpcRequest): Map {
+rpc-headers
+meta {no-doc: true}
+fn (request: RpcRequest): Map {
   prefer if(is-some(request.count), `count=${untype(request.count)}`, null)
   accept if(and(is-some(request.single), request.single), "application/vnd.pgrst.object+json", null)
   write-headers(request.schema)

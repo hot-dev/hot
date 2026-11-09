@@ -17,7 +17,8 @@ meta {
     - `::google::slides::content` - pure readers over a fetched
       presentation: slide titles, text, speaker notes, placeholders
 
-    Every function has an options arity taking an `opts` Map. Slides
+    Every function that calls the API has an options arity taking an
+    `opts` Map. Slides
     parameters use the API's own names (`fields`, `writeControl`);
     credential keys (`token`, `refresh-token`, `service-account`,
     `subject`, `scopes`, `retry`) are handled by `google-core` and
@@ -55,7 +56,16 @@ FILE_SCOPE "https://www.googleapis.com/auth/drive.file"
 api-root
 meta {
     ctx: {"google.slides.api-root": {required: false, secret: false}},
-    doc: """The API root, `https://slides.googleapis.com` unless the `google.slides.api-root` context variable points at a proxy or emulator."""
+    doc: """
+    The API root, `https://slides.googleapis.com` unless the
+    `google.slides.api-root` context variable points at a proxy or emulator.
+
+    **Example**
+
+    ```hot
+    ::google::slides/api-root()  // "https://slides.googleapis.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("google.slides.api-root")
@@ -64,7 +74,20 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Slides v1 URL: `/v1/presentations` + `path` with non-null `params`. `url("/abc:batchUpdate")`."""
+    doc: """
+    A Slides v1 URL: `/v1/presentations` + `path` with non-null `params`.
+    `url("/abc:batchUpdate")`.
+
+    **Example**
+
+    ```hot
+    ::google::slides/url("/abc:batchUpdate")
+    // "https://slides.googleapis.com/v1/presentations/abc:batchUpdate"
+
+    ::google::slides/url("/abc", {fields: "title"})
+    // "https://slides.googleapis.com/v1/presentations/abc?fields=title"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -75,7 +98,17 @@ fn
 }
 
 encode-id
-meta {doc: """URL-encode a presentation or page id for a path segment."""}
+meta {
+    doc: """
+    URL-encode a presentation or page id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::google::slides/encode-id("a/b")  // "a%2Fb"
+    ```
+    """
+}
 fn (id: Str): Str {
   ::uri/encode(id)
 }
@@ -87,6 +120,20 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::google::slides/query-params({fields: "title"}, {token: "ya29.abc", fields: "slides"})
+    // {fields: "slides"}
+
+    // Null in opts drops a default
+    ::google::slides/query-params({fields: "title"}, {fields: null})  // {}
+
+    // local-keys are removed too
+    ::google::slides/query-params({}, {fields: "title", insertionIndex: 1}, ["insertionIndex"])
+    // {fields: "title"}
+    ```
     """
 }
 fn
@@ -100,7 +147,16 @@ fn
 
 creds
 meta {
-    doc: """The google-core part of `opts` (credentials, scopes, retry), passed through to `::google::api`."""
+    doc: """
+    The google-core part of `opts` (credentials, scopes, retry), passed
+    through to `::google::api`.
+
+    **Example**
+
+    ```hot
+    ::google::slides/creds({token: "ya29.abc", fields: "title"})  // {token: "ya29.abc"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::api/credential-opts(opts)
@@ -108,7 +164,17 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::google::api/json` with this package's conventions: credential opts and a JSON (or empty) body."""
+    doc: """
+    `::google::api/json` with this package's conventions: credential opts
+    and a JSON (or empty) body.
+
+    **Example**
+
+    ```hot
+    // Package internals: prefer the functions in ::google::slides::presentations
+    ::google::slides/json(::google::slides/READ_SCOPE, "GET", ::google::slides/url("/abc"), "", {})
+    ```
+    """
 }
 fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::api/json(scope, method, full-url, {}, body, creds(opts))
@@ -116,7 +182,16 @@ fn (scope: Str, method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (Slides bodies never carry JSON null for unset fields)."""
+    doc: """
+    Drop null values from a request body (Slides bodies never carry JSON
+    null for unset fields).
+
+    **Example**
+
+    ```hot
+    ::google::slides/compact({title: "Q3 review", locale: null})  // {title: "Q3 review"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)

@@ -11,7 +11,9 @@ meta {
 
 ::api ::plaid::api
 
-require-sandbox fn
+require-sandbox
+meta {no-doc: true}
+fn
 (): Bool {
   require-sandbox({})
 },
@@ -70,6 +72,14 @@ meta {
     `webhook_type` (e.g. `"TRANSACTIONS"`, `"ITEM"`; Plaid infers it
     when omitted), `new_transactions` (how many to generate for
     `SYNC_UPDATES_AVAILABLE`). Returns `{webhook_fired}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    out ::plaid::sandbox/fire-webhook(access-token, "SYNC_UPDATES_AVAILABLE", {new_transactions: 5})
+    out.webhook_fired
+    ```
     """
 }
 fn
@@ -96,7 +106,18 @@ fn
 
 reset-login
 meta {
-    doc: """POST /sandbox/item/reset_login: put a sandbox Item into `ITEM_LOGIN_REQUIRED` to test Link update mode. Returns `{reset_login: true}`."""
+    doc: """
+    POST /sandbox/item/reset_login: put a sandbox Item into
+    `ITEM_LOGIN_REQUIRED` to test Link update mode. Returns `{reset_login:
+    true}`.
+
+    **Example**
+
+    ```hot
+    access-token ::hot::ctx/get("plaid.access-token")
+    ::plaid::sandbox/reset-login(access-token)
+    ```
+    """
 }
 fn
 (access-token: Str): Map {

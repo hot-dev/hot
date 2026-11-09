@@ -17,13 +17,25 @@ meta {
 
 ::api ::zendesk::api
 
-base-path fn (ticket-id: Any): Str {
+base-path
+meta {no-doc: true}
+fn (ticket-id: Any): Str {
   `/tickets/${::api/path-segment(ticket-id)}/side_conversations`
 }
 
 list-side-conversations
 meta {
-    doc: """GET /tickets/{id}/side_conversations - A ticket's side conversations: `{side_conversations}`."""
+    doc: """
+    GET /tickets/{id}/side_conversations - A ticket's side conversations:
+    `{side_conversations}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::side-conversations/list-side-conversations(35436)
+    map(out.side_conversations, %.subject)
+    ```
+    """
 }
 fn
 (ticket-id: Any): Any {
@@ -35,7 +47,17 @@ fn
 
 get-side-conversation
 meta {
-    doc: """GET /tickets/{id}/side_conversations/{side_conversation_id} - One side conversation."""
+    doc: """
+    GET /tickets/{id}/side_conversations/{side_conversation_id} - One side
+    conversation.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::side-conversations/get-side-conversation(35436, "8566255a-b5ff-11ec")
+    out.side_conversation.state
+    ```
+    """
 }
 fn
 (ticket-id: Any, side-conversation-id: Str): Any {
@@ -47,7 +69,17 @@ fn
 
 build-message
 meta {
-    doc: """Build a `{message: {subject?, body, to?, ...options}}` body; `options` may add `html_body`, `attachment_ids`, `external_ids`. Unset parts are omitted. Exposed for testing."""
+    doc: """
+    Build a `{message: {subject?, body, to?, ...options}}` body; `options`
+    may add `html_body`, `attachment_ids`, `external_ids`. Unset parts are
+    omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::side-conversations/build-message("Order 1042", "Can you confirm?", [{email: "ops@vendor.example"}], {})  // {message: {subject: "Order 1042", body: "Can you confirm?", to: [{email: "ops@vendor.example"}]}}
+    ```
+    """
 }
 fn (subject: Str?, body: Str, to: Vec?, options: Map): Map {
   {message: ::api/compact({...options, subject: subject, body: body, to: to})}
@@ -61,7 +93,7 @@ meta {
     **Example**
 
     ```hot
-    ::zendesk::side-conversations/create-side-conversation(ticket-id,
+    ::zendesk::side-conversations/create-side-conversation(35436,
       "Order 1042: shipping address",
       "Can you confirm the address on file for this order?",
       [{email: "fulfilment@vendor.example", name: "Vendor fulfilment"}])
@@ -81,7 +113,18 @@ fn
 
 reply-to-side-conversation
 meta {
-    doc: """POST /tickets/{id}/side_conversations/{side_conversation_id}/reply - Add a message to a side conversation. `options`: `to` (participants to add), `html_body`, `attachment_ids`."""
+    doc: """
+    POST /tickets/{id}/side_conversations/{side_conversation_id}/reply - Add
+    a message to a side conversation. `options`: `to` (participants to add),
+    `html_body`, `attachment_ids`.
+
+    **Example**
+
+    ```hot
+    ::zendesk::side-conversations/reply-to-side-conversation(35436, "8566255a-b5ff-11ec", "Any update on this?")
+    ::zendesk::side-conversations/reply-to-side-conversation(35436, "8566255a-b5ff-11ec", "Looping in billing.", {to: [{email: "billing@vendor.example"}]})
+    ```
+    """
 }
 fn
 (ticket-id: Any, side-conversation-id: Str, body: Str): Any {
@@ -98,7 +141,16 @@ fn
 
 update-side-conversation
 meta {
-    doc: """PUT /tickets/{id}/side_conversations/{side_conversation_id} - Change `state` ("open"/"closed") or `subject`."""
+    doc: """
+    PUT /tickets/{id}/side_conversations/{side_conversation_id} - Change
+    `state` ("open"/"closed") or `subject`.
+
+    **Example**
+
+    ```hot
+    ::zendesk::side-conversations/update-side-conversation(35436, "8566255a-b5ff-11ec", {subject: "Order 1042: resolved"})
+    ```
+    """
 }
 fn
 (ticket-id: Any, side-conversation-id: Str, changes: Map): Any {
@@ -110,7 +162,15 @@ fn
 
 close-side-conversation
 meta {
-    doc: """Close a side conversation (`state: "closed"`)."""
+    doc: """
+    Close a side conversation (`state: "closed"`).
+
+    **Example**
+
+    ```hot
+    ::zendesk::side-conversations/close-side-conversation(35436, "8566255a-b5ff-11ec")
+    ```
+    """
 }
 fn
 (ticket-id: Any, side-conversation-id: Str): Any {

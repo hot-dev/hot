@@ -2,7 +2,7 @@
 
 hot.pkg.un-sanctions {
   name: "hot.dev/un-sanctions",
-  version: "0.1.1",
+  version: "0.1.2",
   hot-min-version: "3.0.2",
   description: "The UN Security Council Consolidated List for Hot: downloads the free XML file and parses it into Listing records. Only fetches and parses: it does not screen names and stores nothing.",
   author: "Hot Dev",

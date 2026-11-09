@@ -133,7 +133,9 @@ type {
     system-override: Str?,
 }
 
-now-secs fn (): Int {
+now-secs
+meta {no-doc: true}
+fn (): Int {
     ::rt/now-epoch-secs()
 }
 
@@ -144,6 +146,15 @@ meta {
     `value` as-is. Avoids `or(false, true)` returning `true` — `or`
     treats `false` as falsy in Hot, so it's the wrong primitive for
     boolean opts with `true` defaults.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+
+    ::chat-turn/bool-default(null, true)  // true
+    ::chat-turn/bool-default(false, true)  // false
+    ```
     """
 }
 fn (value: Bool?, fallback: Bool): Bool {
@@ -155,7 +166,26 @@ fn (value: Bool?, fallback: Bool): Bool {
 
 reply-payload
 meta {
-    doc: "Normalize `{session_id, message_id}` for stream emits."
+    doc: """
+    Normalize `{session_id, message_id}` for stream emits.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::att ::ai::agent::attachments
+    ::session ::ai::session
+
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "s1"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "Hello",
+        attachments: [::att/Attachment({name: "a.txt", type: "text/plain", size: 5})],
+        payload: {message_id: "m1"},
+    })
+    ::chat-turn/reply-payload(input)  // {session_id: "s1", message_id: "m1"}
+    ```
+    """
 }
 fn (input: TurnInput): Map {
     p or(input.payload, {})
@@ -167,7 +197,27 @@ fn (input: TurnInput): Map {
 
 user-body
 meta {
-    doc: "Compose the text we persist for a user turn (raw text + attachment summary)."
+    doc: """
+    Compose the text we persist for a user turn (raw text + attachment
+    summary).
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::att ::ai::agent::attachments
+    ::session ::ai::session
+
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "s1"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "Hello",
+        attachments: [::att/Attachment({name: "a.txt", type: "text/plain", size: 5})],
+        payload: {message_id: "m1"},
+    })
+    ::chat-turn/user-body(input)  // "Hello\nAttachments:\n- a.txt (text/plain, 5B)"
+    ```
+    """
 }
 fn (input: TurnInput): Str {
     atts or(input.attachments, [])
@@ -179,7 +229,26 @@ fn (input: TurnInput): Str {
 
 user-prompt
 meta {
-    doc: "Compose the user prompt sent to the LLM (raw text + attachment block)."
+    doc: """
+    Compose the user prompt sent to the LLM (raw text + attachment block).
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::att ::ai::agent::attachments
+    ::session ::ai::session
+
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "s1"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "Hello",
+        attachments: [::att/Attachment({name: "a.txt", type: "text/plain", size: 5})],
+        payload: {message_id: "m1"},
+    })
+    ::chat-turn/user-prompt(input)  // "Hello\n\n\nAttachments:\n- a.txt (text/plain, 5B)"
+    ```
+    """
 }
 fn (input: TurnInput): Str {
     atts or(input.attachments, [])
@@ -201,6 +270,28 @@ meta {
 
     Returns `null`. Errors during persistence are swallowed so a
     transient store failure doesn't kill the reply.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::runtime ::ai::agent::runtime
+    ::session ::ai::session
+
+    cfg ::chat-turn/TurnConfig({
+        rt: ::runtime/create-runtime("team-agent"),
+        agent-name: "team-agent",
+        stream-label: "team-agent",
+        chat-opts: ::ai::chat/ChatOptions({model: "claude-sonnet-4-5"}),
+        system-base: "You are a helpful teammate.",
+    })
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "slack:C123"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "The launch moved to Friday.",
+    })
+    ::chat-turn/persist-user-turn(cfg, input)
+    ```
     """
 }
 fn (cfg: TurnConfig, input: TurnInput): Null {
@@ -238,6 +329,28 @@ meta {
 
     The record's metadata always carries `role: "assistant"`. Skipped
     silently when `text` is empty.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::runtime ::ai::agent::runtime
+    ::session ::ai::session
+
+    cfg ::chat-turn/TurnConfig({
+        rt: ::runtime/create-runtime("team-agent"),
+        agent-name: "team-agent",
+        stream-label: "team-agent",
+        chat-opts: ::ai::chat/ChatOptions({model: "claude-sonnet-4-5"}),
+        system-base: "You are a helpful teammate.",
+    })
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "slack:C123"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "The launch moved to Friday.",
+    })
+    ::chat-turn/persist-assistant-turn(cfg, input, "Noted. Friday it is.")
+    ```
     """
 }
 fn (cfg: TurnConfig, input: TurnInput, text: Str): Null {
@@ -270,6 +383,29 @@ meta {
     before** the current turn is persisted, then appends a heading +
     context block to `cfg.system-base` via
     `::ai::rag/with-memory-block`.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::runtime ::ai::agent::runtime
+    ::session ::ai::session
+
+    cfg ::chat-turn/TurnConfig({
+        rt: ::runtime/create-runtime("team-agent"),
+        agent-name: "team-agent",
+        stream-label: "team-agent",
+        chat-opts: ::ai::chat/ChatOptions({model: "claude-sonnet-4-5"}),
+        system-base: "You are a helpful teammate.",
+    })
+    input ::chat-turn/TurnInput({
+        session: ::session/Session({id: "slack:C123"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "The launch moved to Friday.",
+    })
+    system ::chat-turn/build-system(cfg, input)
+    ::ai::agent::render/truncate-text(system, 200, " [more]")
+    ```
     """
 }
 fn (cfg: TurnConfig, input: TurnInput): Str {
@@ -281,6 +417,7 @@ fn (cfg: TurnConfig, input: TurnInput): Str {
 
 stream-llm
 meta {
+    no-doc: true,
     doc: """
     Run the configured LLM with token-level streaming forwarded to the
     agent reply stream. Internal helper — `run-chat-turn` orchestrates.
@@ -317,6 +454,30 @@ meta {
 
     Returns `{ok: true, text: <final-text>}`. The handler can return
     this directly.
+
+    **Example**
+
+    ```hot
+    ::chat-turn ::ai::agent::chat-turn
+    ::runtime ::ai::agent::runtime
+    ::session ::ai::session
+
+    cfg ::chat-turn/TurnConfig({
+        rt: ::runtime/create-runtime("team-agent"),
+        agent-name: "team-agent",
+        stream-label: "team-agent",
+        chat-opts: ::ai::chat/ChatOptions({model: "claude-sonnet-4-5"}),
+        system-base: "You are a helpful teammate.",
+    })
+    result ::chat-turn/run-chat-turn(cfg, ::chat-turn/TurnInput({
+        session: ::session/Session({id: "slack:C123"}),
+        sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
+        text: "When is the launch?",
+        payload: {message_id: "m1"},
+        recall-opts: {limit: 3, min-score: 0.5},
+    }))
+    result.text
+    ```
     """
 }
 fn (cfg: TurnConfig, input: TurnInput): Map {

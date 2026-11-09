@@ -20,7 +20,17 @@ ROLES ["editor", "viewer", "previewer", "uploader", "previewer uploader", "viewe
 
 item-path
 meta {
-    doc: """`/files/{id}` or `/folders/{id}` for an item type (pure), or an Err for any other type."""
+    doc: """
+    `/files/{id}` or `/folders/{id}` for an item type (pure), or an Err for
+    any other type.
+
+    **Example**
+
+    ```hot
+    ::box::sharing/item-path("file", "123")  // "/files/123"
+    ::box::sharing/item-path("folder", "456")  // "/folders/456"
+    ```
+    """
 }
 fn (item-type: Str, item-id: Str): Str {
   cond {
@@ -43,6 +53,12 @@ meta {
     characters with a number, capital or symbol), `vanity-name`,
     `unshared-at` (RFC 3339 expiry), `can-download`, `can-preview`,
     `can-edit` (Bools). Unset keys are omitted.
+
+    **Example**
+
+    ```hot
+    ::box::sharing/shared-link-settings({access: "open", can-download: true})  // {access: "open", permissions: {can_download: true}}
+    ```
     """
 }
 fn (opts: Map): Map {
@@ -93,7 +109,18 @@ fn
 }
 
 get-shared-link
-meta {doc: """The item's `shared_link` (null when it has none)."""}
+meta {
+    doc: """
+    The item's `shared_link` (null when it has none).
+
+    **Example**
+
+    ```hot
+    link ::box::sharing/get-shared-link("file", "12345")
+    link.url
+    ```
+    """
+}
 fn
 (item-type: Str, item-id: Str): Map? {
   get-shared-link(item-type, item-id, {})
@@ -111,7 +138,18 @@ fn
 
 remove-shared-link
 meta {
-    doc: """Remove an item's shared link. This is the one place box sends a JSON null on purpose: Box removes a link with `{"shared_link": null}`. Returns the item."""
+    doc: """
+    Remove an item's shared link. This is the one place box sends a JSON
+    null on purpose: Box removes a link with `{"shared_link": null}`.
+    Returns the item.
+
+    **Example**
+
+    ```hot
+    item ::box::sharing/remove-shared-link("folder", "12345")
+    item.id
+    ```
+    """
 }
 fn
 (item-type: Str, item-id: Str): Map {
@@ -130,7 +168,17 @@ fn
 
 boxapi-header
 meta {
-    doc: """The `BoxApi` header value for shared-link access (pure): `shared_link=<url>` plus `&shared_link_password=<pw>` when a password is given, in the raw form Box documents (no URL encoding)."""
+    doc: """
+    The `BoxApi` header value for shared-link access (pure):
+    `shared_link=<url>` plus `&shared_link_password=<pw>` when a password is
+    given, in the raw form Box documents (no URL encoding).
+
+    **Example**
+
+    ```hot
+    ::box::sharing/boxapi-header("https://app.box.com/s/abc", null)  // "shared_link=https://app.box.com/s/abc"
+    ```
+    """
 }
 fn (shared-link: Str, password: Str?): Str {
   ::hot::ctx/mark-secret(password)
@@ -140,7 +188,23 @@ fn (shared-link: Str, password: Str?): Str {
 
 get-shared-item
 meta {
-    doc: """GET /shared_items - the file or folder behind a shared link (any Box user's link, not only your own). Pass the password for protected links. The returned id works with the other functions when you add `{boxapi: ::box::sharing/boxapi-header(link, password)}` to their opts."""
+    doc: """
+    GET /shared_items - the file or folder behind a shared link (any Box
+    user's link, not only your own). Pass the password for protected links.
+    The returned id works with the other functions when you add `{boxapi:
+    ::box::sharing/boxapi-header(link, password)}` to their opts.
+
+    **Example**
+
+    ```hot
+    item ::box::sharing/get-shared-item("https://app.box.com/s/abc")
+    item.id
+
+    // A protected link
+    locked ::box::sharing/get-shared-item("https://app.box.com/s/def", ::hot::ctx/get("box.shared-link.password"))
+    locked.name
+    ```
+    """
 }
 fn
 (shared-link: Str): Map {
@@ -161,20 +225,49 @@ fn
 
 user-by-email
 meta {
-    doc: """An `accessible_by` for a user by email (pure). Box invites addresses that have no Box account yet."""
+    doc: """
+    An `accessible_by` for a user by email (pure). Box invites addresses
+    that have no Box account yet.
+
+    **Example**
+
+    ```hot
+    ::box::sharing/user-by-email("ana@example.com")  // {type: "user", login: "ana@example.com"}
+    ```
+    """
 }
 fn (email: Str): Map {
   {type: "user", login: email}
 }
 
 user-by-id
-meta {doc: """An `accessible_by` for a Box user id (pure)."""}
+meta {
+    doc: """
+    An `accessible_by` for a Box user id (pure).
+
+    **Example**
+
+    ```hot
+    ::box::sharing/user-by-id("123")  // {type: "user", id: "123"}
+    ```
+    """
+}
 fn (user-id: Str): Map {
   {type: "user", id: user-id}
 }
 
 group-by-id
-meta {doc: """An `accessible_by` for a Box group id (pure)."""}
+meta {
+    doc: """
+    An `accessible_by` for a Box group id (pure).
+
+    **Example**
+
+    ```hot
+    ::box::sharing/group-by-id("456")  // {type: "group", id: "456"}
+    ```
+    """
+}
 fn (group-id: Str): Map {
   {type: "group", id: group-id}
 }
@@ -187,6 +280,14 @@ meta {
     `role` (`editor`, `viewer`, `previewer`, `uploader`, `previewer
     uploader`, `viewer uploader`, `co-owner`), plus optional
     `is-access-only`, `can-view-path` (folders), `expires-at` (RFC 3339).
+
+    **Example**
+
+    ```hot
+    body ::box::sharing/collaboration-body("folder", "123", {type: "user", id: "9"}, "viewer", {can-view-path: true})
+    body.item  // {type: "folder", id: "123"}
+    body.can_view_path  // true
+    ```
     """
 }
 fn (item-type: Str, item-id: Str, accessible-by: Map, role: Str, opts: Map): Map {
@@ -231,7 +332,19 @@ fn
 
 list-collaborations
 meta {
-    doc: """GET /files/{id}/collaborations (or /folders/{id}/collaborations) - one page of an item's collaborations (marker paging: `{entries, next_marker}`; `limit` up to 1000). Pending invites are included."""
+    doc: """
+    GET /files/{id}/collaborations (or /folders/{id}/collaborations) - one
+    page of an item's collaborations (marker paging: `{entries,
+    next_marker}`; `limit` up to 1000). Pending invites are included.
+
+    **Example**
+
+    ```hot
+    page ::box::sharing/list-collaborations("folder", "12345", {limit: 100})
+    page.entries
+    page.next_marker
+    ```
+    """
 }
 fn
 (item-type: Str, item-id: Str): Map {
@@ -249,7 +362,18 @@ fn
 }
 
 list-all-collaborations
-meta {doc: """Every collaboration on an item (all marker pages)."""}
+meta {
+    doc: """
+    Every collaboration on an item (all marker pages).
+
+    **Example**
+
+    ```hot
+    collabs ::box::sharing/list-all-collaborations("folder", "12345")
+    map(collabs, %.role)
+    ```
+    """
+}
 fn
 (item-type: Str, item-id: Str): Vec {
   list-all-collaborations(item-type, item-id, {})
@@ -260,7 +384,18 @@ fn
 
 update-collaboration
 meta {
-    doc: """PUT /collaborations/{id} - change `role`, `status` (`accepted` / `rejected` for pending invites), `expires_at` or `can_view_path`. Null values are dropped."""
+    doc: """
+    PUT /collaborations/{id} - change `role`, `status` (`accepted` /
+    `rejected` for pending invites), `expires_at` or `can_view_path`. Null
+    values are dropped.
+
+    **Example**
+
+    ```hot
+    collab ::box::sharing/update-collaboration("789", {role: "editor"})
+    collab.role
+    ```
+    """
 }
 fn
 (collaboration-id: Str, changes: Map): Map {
@@ -271,7 +406,17 @@ fn
 }
 
 remove-collaboration
-meta {doc: """DELETE /collaborations/{id} - remove a collaboration. Returns true."""}
+meta {
+    doc: """
+    DELETE /collaborations/{id} - remove a collaboration. Returns true.
+
+    **Example**
+
+    ```hot
+    ::box::sharing/remove-collaboration("789")
+    ```
+    """
+}
 fn
 (collaboration-id: Str): Bool {
   remove-collaboration(collaboration-id, {})

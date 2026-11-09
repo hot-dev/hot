@@ -84,13 +84,24 @@ ITEM_FIELDS "id,type,name,size,sha1,etag,sequence_id,file_version,parent,created
 // URL and parameter helpers (shared by the sub-namespaces)
 // ---------------------------------------------------------------------------
 
-is-blank fn (value: Any): Bool {
+is-blank
+meta {no-doc: true}
+fn (value: Any): Bool {
   or(is-null(value), and(is-str(value), is-empty(trim(value))))
 }
 
 api-root
 meta {
-    doc: """The API root, `https://api.box.com` unless the `box.api-root` context variable points at a proxy or test server."""
+    doc: """
+    The API root, `https://api.box.com` unless the `box.api-root` context
+    variable points at a proxy or test server.
+
+    **Example**
+
+    ```hot
+    ::box/api-root()  // "https://api.box.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("box.api-root")
@@ -99,7 +110,16 @@ fn (): Str {
 
 upload-root
 meta {
-    doc: """The upload root, `https://upload.box.com` unless the `box.upload-root` context variable overrides it."""
+    doc: """
+    The upload root, `https://upload.box.com` unless the `box.upload-root`
+    context variable overrides it.
+
+    **Example**
+
+    ```hot
+    ::box/upload-root()  // "https://upload.box.com"
+    ```
+    """
 }
 fn (): Str {
   root ::ctx/get("box.upload-root")
@@ -108,7 +128,17 @@ fn (): Str {
 
 url
 meta {
-    doc: """A Box API v2.0 URL: `path` (e.g. `"/files/123"`) plus non-null `params` as a query string (see `::box::api/with-query`)."""
+    doc: """
+    A Box API v2.0 URL: `path` (e.g. `"/files/123"`) plus non-null `params`
+    as a query string (see `::box::api/with-query`).
+
+    **Example**
+
+    ```hot
+    ::box/url("/files/123")  // "https://api.box.com/2.0/files/123"
+    ::box/url("/folders/0/items", {limit: 100})  // "https://api.box.com/2.0/folders/0/items?limit=100"
+    ```
+    """
 }
 fn
 (path: Str): Str {
@@ -119,7 +149,17 @@ fn
 }
 
 upload-url
-meta {doc: """A Box upload URL (`https://upload.box.com/api/2.0...`) with `params`."""}
+meta {
+    doc: """
+    A Box upload URL (`https://upload.box.com/api/2.0...`) with `params`.
+
+    **Example**
+
+    ```hot
+    ::box/upload-url("/files/content")  // "https://upload.box.com/api/2.0/files/content"
+    ```
+    """
+}
 fn
 (path: Str): Str {
   upload-url(path, {})
@@ -129,7 +169,18 @@ fn
 }
 
 encode-id
-meta {doc: """URL-encode an id for a path segment."""}
+meta {
+    doc: """
+    URL-encode an id for a path segment.
+
+    **Example**
+
+    ```hot
+    ::box/encode-id("a b")  // "a%20b"
+    ::box/encode-id(12345)  // "12345"
+    ```
+    """
+}
 fn (id: Any): Str {
   ::uri/encode(Str(id))
 }
@@ -141,6 +192,15 @@ meta {
     parameters in `opts` (credential keys and the function's own
     `local-keys` are removed), with nulls dropped. Pass a key as null in
     `opts` to drop a default.
+
+    **Example**
+
+    ```hot
+    ::box/query-params({limit: 100}, {limit: 50, as-user: "123"})  // {limit: 50}
+
+    // A null drops a default; local keys are left out
+    ::box/query-params({limit: 100, fields: "id"}, {fields: null, chunked: true}, ["chunked"])  // {limit: 100}
+    ```
     """
 }
 fn
@@ -154,7 +214,16 @@ fn
 
 creds
 meta {
-    doc: """The credential part of `opts` (credentials, `as-user`, `retry`), passed through to `::box::api`."""
+    doc: """
+    The credential part of `opts` (credentials, `as-user`, `retry`), passed
+    through to `::box::api`.
+
+    **Example**
+
+    ```hot
+    ::box/creds({limit: 50, as-user: "123", retry: false})  // {as-user: "123", retry: false}
+    ```
+    """
 }
 fn (opts: Map): Map {
   ::box::api/credential-opts(opts)
@@ -162,7 +231,21 @@ fn (opts: Map): Map {
 
 json
 meta {
-    doc: """`::box::api/json` with this package's conventions: credential opts and a JSON or empty body."""
+    doc: """
+    `::box::api/json` with this package's conventions: credential opts and a
+    JSON or empty body.
+
+    **Example**
+
+    ```hot
+    me ::box/json("GET", ::box/url("/users/me"), "", {})
+    me.login
+
+    // A per-call token, and a JSON body
+    folder ::box/json("POST", ::box/url("/folders"), {name: "Reports", parent: {id: "0"}}, {token: ::hot::ctx/get("box.access.token")})
+    folder.id
+    ```
+    """
 }
 fn (method: Str, full-url: Str, body: Any, opts: Map): Any {
   ::box::api/json(method, full-url, {}, body, creds(opts))
@@ -170,7 +253,16 @@ fn (method: Str, full-url: Str, body: Any, opts: Map): Any {
 
 compact
 meta {
-    doc: """Drop null values from a request body (unset optionals are never sent as JSON null)."""
+    doc: """
+    Drop null values from a request body (unset optionals are never sent as
+    JSON null).
+
+    **Example**
+
+    ```hot
+    ::box/compact({name: "a.txt", description: null})  // {name: "a.txt"}
+    ```
+    """
 }
 fn (body: Map): Map {
   filter-vals(untype(body), is-some)
@@ -181,7 +273,18 @@ HEADER_KEYS ["if-match", "if-none-match", "boxapi"]
 
 condition-headers
 meta {
-    doc: """The conditional / shared-link headers in `opts` (pure): `if-match` (an etag: the write fails with 412 if the item changed), `if-none-match`, and `boxapi` (`shared_link=<url>&shared_link_password=<pw>` for items reached through a shared link)."""
+    doc: """
+    The conditional / shared-link headers in `opts` (pure): `if-match` (an
+    etag: the write fails with 412 if the item changed), `if-none-match`,
+    and `boxapi` (`shared_link=<url>&shared_link_password=<pw>` for items
+    reached through a shared link).
+
+    **Example**
+
+    ```hot
+    ::box/condition-headers({if-match: "3", limit: 10})  // {if-match: "3"}
+    ```
+    """
 }
 fn (opts: Map): Map {
   reduce(HEADER_KEYS, (acc, k) {
@@ -191,14 +294,37 @@ fn (opts: Map): Map {
 }
 
 json-with
-meta {doc: """`json` with extra headers (for `if-match` and friends)."""}
+meta {
+    doc: """
+    `json` with extra headers (for `if-match` and friends).
+
+    **Example**
+
+    ```hot
+    // Fails with 412 when the file changed since etag "3"
+    headers ::box/condition-headers({if-match: "3"})
+    file ::box/json-with("PUT", ::box/url("/files/12345"), headers, {name: "Renamed.pdf"}, {})
+    file.etag
+    ```
+    """
+}
 fn (method: Str, full-url: Str, headers: Map, body: Any, opts: Map): Any {
   ::box::api/json(method, full-url, headers, body, creds(opts))
 }
 
 parent-ref
 meta {
-    doc: """The `{id}` reference Box uses for a parent folder, or null for a null id."""
+    doc: """
+    The `{id}` reference Box uses for a parent folder, or null for a null
+    id.
+
+    **Example**
+
+    ```hot
+    ::box/parent-ref("123")  // {id: "123"}
+    ::box/parent-ref(null)  // null
+    ```
+    """
 }
 fn (folder-id: Any): Map? {
   if(is-blank(folder-id), null, {id: Str(folder-id)})
@@ -206,7 +332,17 @@ fn (folder-id: Any): Map? {
 
 to-int
 meta {
-    doc: """Parse an Int from an Int or a decimal Str, or null (never halts on bad input)."""
+    doc: """
+    Parse an Int from an Int or a decimal Str, or null (never halts on bad
+    input).
+
+    **Example**
+
+    ```hot
+    ::box/to-int("42")  // 42
+    ::box/to-int("soon")  // null
+    ```
+    """
 }
 fn (value: Any): Int? {
   ::box::api/parse-int(value)
@@ -272,7 +408,18 @@ type {
 
 mime-for
 meta {
-    doc: """The MIME type for a Box item (pure): folders and web links get `FOLDER_MIME` / `WEB_LINK_MIME`; files get one from their name's extension, else `application/octet-stream`."""
+    doc: """
+    The MIME type for a Box item (pure): folders and web links get
+    `FOLDER_MIME` / `WEB_LINK_MIME`; files get one from their name's
+    extension, else `application/octet-stream`.
+
+    **Example**
+
+    ```hot
+    ::box/mime-for({type: "file", name: "report.pdf"})  // "application/pdf"
+    ::box/mime-for({type: "folder", name: "Reports"})  // "inode/directory"
+    ```
+    """
 }
 fn (item: Map): Str {
   cond {
@@ -288,7 +435,17 @@ fn (item: Map): Str {
 
 web-url
 meta {
-    doc: """The Box web app link for an item: `https://app.box.com/file/{id}`, `/folder/{id}` or `/web_link/{id}`."""
+    doc: """
+    The Box web app link for an item: `https://app.box.com/file/{id}`,
+    `/folder/{id}` or `/web_link/{id}`.
+
+    **Example**
+
+    ```hot
+    ::box/web-url({type: "folder", id: "123"})  // "https://app.box.com/folder/123"
+    ::box/web-url({type: "file", id: "456"})  // "https://app.box.com/file/456"
+    ```
+    """
 }
 fn (item: Map): Str? {
   cond {
@@ -301,7 +458,17 @@ fn (item: Map): Str? {
 
 is-trashed
 meta {
-    doc: """True when a Box item is in the trash or deleted: `trashed_at` is set or `item_status` is `trashed` / `deleted`."""
+    doc: """
+    True when a Box item is in the trash or deleted: `trashed_at` is set or
+    `item_status` is `trashed` / `deleted`.
+
+    **Example**
+
+    ```hot
+    ::box/is-trashed({item_status: "active"})  // false
+    ::box/is-trashed({trashed_at: "2026-11-01T00:00:00Z"})  // true
+    ```
+    """
 }
 fn (item: Map): Bool {
   or(is-some(item.trashed_at), in(item.item_status, ["trashed", "deleted"]))
@@ -309,7 +476,20 @@ fn (item: Map): Bool {
 
 to-doc-file
 meta {
-    doc: """Normalise a Box file, folder or web-link item (from `get-file`, folder items, search, events) into a `DocFile`. Missing fields become null/false."""
+    doc: """
+    Normalise a Box file, folder or web-link item (from `get-file`, folder
+    items, search, events) into a `DocFile`. Missing fields become
+    null/false.
+
+    **Example**
+
+    ```hot
+    file ::box/to-doc-file({type: "file", id: "123", name: "notes.txt", size: "10", etag: "2", parent: {id: "0"}})
+    file.mime-type  // "text/plain"
+    file.parents  // ["0"]
+    file.version  // "2"
+    ```
+    """
 }
 fn (item: Map): DocFile {
   parent item.parent
@@ -342,7 +522,17 @@ fn (item: Map): DocFile {
 }
 
 to-doc-files
-meta {doc: """`to-doc-file` over a Vec of Box items."""}
+meta {
+    doc: """
+    `to-doc-file` over a Vec of Box items.
+
+    **Example**
+
+    ```hot
+    map(::box/to-doc-files([{type: "folder", id: "1", name: "Docs"}]), %.mime-type)  // ["inode/directory"]
+    ```
+    """
+}
 fn (items: Vec): Vec {
   map(items, to-doc-file)
 }
@@ -386,7 +576,16 @@ type {
 
 base-mime
 meta {
-    doc: """A Content-Type without parameters, lowercased: `"text/plain; charset=utf-8"` becomes `"text/plain"`."""
+    doc: """
+    A Content-Type without parameters, lowercased: `"text/plain;
+    charset=utf-8"` becomes `"text/plain"`.
+
+    **Example**
+
+    ```hot
+    ::box/base-mime("Text/Plain; charset=utf-8")  // "text/plain"
+    ```
+    """
 }
 fn (content-type: Str?): Str? {
   cond {
@@ -397,7 +596,17 @@ fn (content-type: Str?): Str? {
 
 is-textual-mime
 meta {
-    doc: """True when content of this MIME type is text: `text/*`, JSON, XML, SVG, JavaScript, YAML, NDJSON and `+json` / `+xml` types."""
+    doc: """
+    True when content of this MIME type is text: `text/*`, JSON, XML, SVG,
+    JavaScript, YAML, NDJSON and `+json` / `+xml` types.
+
+    **Example**
+
+    ```hot
+    ::box/is-textual-mime("application/json; charset=utf-8")  // true
+    ::box/is-textual-mime("application/pdf")  // false
+    ```
+    """
 }
 fn (mime-type: Str?): Bool {
   m or(base-mime(mime-type), "")
@@ -410,7 +619,19 @@ fn (mime-type: Str?): Bool {
 }
 
 content-from-bytes
-meta {doc: """Build a `FileContent` from raw bytes and their MIME type."""}
+meta {
+    doc: """
+    Build a `FileContent` from raw bytes and their MIME type.
+
+    **Example**
+
+    ```hot
+    content ::box/content-from-bytes("123", Bytes("hello"), "text/plain", "download")
+    content.text  // "hello"
+    content.size  // 5
+    ```
+    """
+}
 fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
   mime base-mime(mime-type)
   FileContent({
@@ -429,7 +650,16 @@ fn (file-id: Str, bytes: Bytes, mime-type: Str?, source: Str): FileContent {
 
 response-bytes
 meta {
-    doc: """The exact body of an HTTP response: `body-bytes`, or the UTF-8 bytes of a Str body, or empty."""
+    doc: """
+    The exact body of an HTTP response: `body-bytes`, or the UTF-8 bytes of
+    a Str body, or empty.
+
+    **Example**
+
+    ```hot
+    Str(::box/response-bytes({status: 200, body: "hello"}))  // "hello"
+    ```
+    """
 }
 fn (response: Map): Bytes {
   raw get(response, "body-bytes")
@@ -442,7 +672,17 @@ fn (response: Map): Bytes {
 
 content-text
 meta {
-    doc: """The text of a `FileContent`: its `text`, or the UTF-8 decoding of `bytes` (invalid sequences become U+FFFD)."""
+    doc: """
+    The text of a `FileContent`: its `text`, or the UTF-8 decoding of
+    `bytes` (invalid sequences become U+FFFD).
+
+    **Example**
+
+    ```hot
+    ::box/content-text({text: "hello", bytes: Bytes([])})  // "hello"
+    ::box/content-text({bytes: Bytes("hi")})  // "hi"
+    ```
+    """
 }
 fn (content: Map): Str {
   if(is-some(content.text), content.text, Str(content.bytes))

@@ -56,7 +56,26 @@ fn (params: Map, opts: Map): Map {
 
 create-payment-order-async
 meta {
-    doc: """POST /api/payment_orders/create_async: queue a payment order for creation (for large batches); returns `{object_id, object_type, status}`. Same body and idempotency requirement as `create-payment-order`; follow `payment_order.created` webhooks for the result."""
+    doc: """
+    POST /api/payment_orders/create_async: queue a payment order for
+    creation (for large batches); returns `{object_id, object_type,
+    status}`. Same body and idempotency requirement as
+    `create-payment-order`; follow `payment_order.created` webhooks for the
+    result.
+
+    **Example**
+
+    ```hot
+    queued ::modern-treasury::payment-orders/create-payment-order-async({
+      type: "ach",
+      direction: "credit",
+      amount: 10000,
+      originating_account_id: "0f8e3719-3dfd-4613-9bbf-c0333781b59f",
+      receiving_account_id: "5acec2ef-987b-4260-aa97-b719eeb0a8d5"
+    }, {idempotency-key: "invoice-42-payout"})
+    queued.object_id
+    ```
+    """
 }
 fn (params: Map, opts: Map): Map {
   ::api/move-money("/api/payment_orders/create_async", params, REQUIRED, opts, "create-payment-order-async")
@@ -64,7 +83,19 @@ fn (params: Map, opts: Map): Map {
 
 get-payment-order
 meta {
-    doc: """GET /api/payment_orders/{id}: retrieve a payment order, with its `status` (`needs_approval`, `approved`, `processing`, `sent`, `completed`, `returned`, `reversed`, `cancelled`, `failed`, `denied`, ...)."""
+    doc: """
+    GET /api/payment_orders/{id}: retrieve a payment order, with its
+    `status` (`needs_approval`, `approved`, `processing`, `sent`,
+    `completed`, `returned`, `reversed`, `cancelled`, `failed`, `denied`,
+    ...).
+
+    **Example**
+
+    ```hot
+    order ::modern-treasury::payment-orders/get-payment-order("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a")
+    order.status
+    ```
+    """
 }
 fn
 (payment-order-id: Str): Map {
@@ -104,7 +135,18 @@ fn
 
 update-payment-order
 meta {
-    doc: """PATCH /api/payment_orders/{id}: change a payment order that hasn't been sent (`amount`, `effective_date`, `description`, `metadata`, `receiving_account_id`, ...), or its `status`. Use `approve-payment-order` and `cancel-payment-order` for status changes."""
+    doc: """
+    PATCH /api/payment_orders/{id}: change a payment order that hasn't been
+    sent (`amount`, `effective_date`, `description`, `metadata`,
+    `receiving_account_id`, ...), or its `status`. Use
+    `approve-payment-order` and `cancel-payment-order` for status changes.
+
+    **Example**
+
+    ```hot
+    ::modern-treasury::payment-orders/update-payment-order("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a", {description: "Invoice 42, corrected"})
+    ```
+    """
 }
 fn
 (payment-order-id: Str, params: Map): Map {
@@ -116,7 +158,20 @@ fn
 
 approve-payment-order
 meta {
-    doc: """Approve a payment order in `needs_approval` (`PATCH {status: "approved"}`), releasing it to be sent. Agents must not approve on their own: leave it to a person, in the Modern Treasury dashboard or through your own approval step that calls this. The API key needs approval permission."""
+    doc: """
+    Approve a payment order in `needs_approval` (`PATCH {status:
+    "approved"}`), releasing it to be sent. Agents must not approve on their
+    own: leave it to a person, in the Modern Treasury dashboard or through
+    your own approval step that calls this. The API key needs approval
+    permission.
+
+    **Example**
+
+    ```hot
+    // Call this only from a step where a person has approved the order
+    ::modern-treasury::payment-orders/approve-payment-order("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a")
+    ```
+    """
 }
 fn
 (payment-order-id: Str): Map {
@@ -128,7 +183,17 @@ fn
 
 cancel-payment-order
 meta {
-    doc: """Cancel a payment order that hasn't been sent (`PATCH {status: "cancelled"}`)."""
+    doc: """
+    Cancel a payment order that hasn't been sent (`PATCH {status:
+    "cancelled"}`).
+
+    **Example**
+
+    ```hot
+    order ::modern-treasury::payment-orders/cancel-payment-order("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a")
+    order.status
+    ```
+    """
 }
 fn
 (payment-order-id: Str): Map {
@@ -151,6 +216,13 @@ meta {
     `"incorrect_receiving_account"`, `"date_earlier_than_intended"` or
     `"date_later_than_intended"`. `params`: `metadata`,
     `ledger_transaction`. Moves money: needs an `idempotency-key`.
+
+    **Example**
+
+    ```hot
+    reversal ::modern-treasury::payment-orders/create-reversal("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a", "duplicate", {metadata: {ticket: "1042"}}, {idempotency-key: "reverse-invoice-42"})
+    reversal.status
+    ```
     """
 }
 fn (payment-order-id: Str, reason: Str, params: Map, opts: Map): Map {
@@ -159,7 +231,17 @@ fn (payment-order-id: Str, reason: Str, params: Map, opts: Map): Map {
 
 get-reversal
 meta {
-    doc: """GET /api/payment_orders/{id}/reversals/{reversal_id}: retrieve a reversal."""
+    doc: """
+    GET /api/payment_orders/{id}/reversals/{reversal_id}: retrieve a
+    reversal.
+
+    **Example**
+
+    ```hot
+    reversal ::modern-treasury::payment-orders/get-reversal("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a", "2c8f1b7e-d5a4-4963-b0e7-81f3c6a9d204")
+    reversal.status
+    ```
+    """
 }
 fn
 (payment-order-id: Str, reversal-id: Str): Map {
@@ -171,7 +253,17 @@ fn
 
 list-reversals
 meta {
-    doc: """GET /api/payment_orders/{id}/reversals: one page of a payment order's reversals."""
+    doc: """
+    GET /api/payment_orders/{id}/reversals: one page of a payment order's
+    reversals.
+
+    **Example**
+
+    ```hot
+    page ::modern-treasury::payment-orders/list-reversals("8c0f4c1e-2b6f-4d7e-9b1a-3f2e8d4c5b6a")
+    map(page.items, %.id)
+    ```
+    """
 }
 fn
 (payment-order-id: Str): Map {

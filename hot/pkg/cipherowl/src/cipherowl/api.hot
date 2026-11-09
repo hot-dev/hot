@@ -71,7 +71,17 @@ STATUS_HINTS {
 
 header
 meta {
-    doc: """A header value by name, case-insensitively; null when absent. Exposed for testing."""
+    doc: """
+    A header value by name, case-insensitively; null when absent. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/header({"Retry-After": "30"}, "retry-after")  // "30"
+    ::cipherowl::api/header({}, "retry-after")  // null
+    ```
+    """
 }
 fn (headers: Any, name: Str): Str? {
   hs if(is-map(headers), headers, {})
@@ -88,7 +98,17 @@ fn (headers: Any, name: Str): Str? {
 
 retry-after
 meta {
-    doc: """Parse `Retry-After` as whole seconds; null when absent or an HTTP date. Never errs. Exposed for testing."""
+    doc: """
+    Parse `Retry-After` as whole seconds; null when absent or an HTTP date.
+    Never errs. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/retry-after({"retry-after": "30"})  // 30
+    ::cipherowl::api/retry-after({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"})  // null
+    ```
+    """
 }
 fn (headers: Any): Int? {
   value header(headers, "retry-after")
@@ -101,7 +121,18 @@ fn (headers: Any): Int? {
 
 error-detail
 meta {
-    doc: """CipherOwl's own error text: `body.message` (or `body.error`) for JSON errors, the trimmed text for plain-text gateway errors, else null. Exposed for testing."""
+    doc: """
+    CipherOwl's own error text: `body.message` (or `body.error`) for JSON
+    errors, the trimmed text for plain-text gateway errors, else null.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/error-detail({message: "unsupported chain"})  // "unsupported chain"
+    ::cipherowl::api/error-detail("  Bad Gateway  ")  // "Bad Gateway"
+    ```
+    """
 }
 fn (body: Any): Str? {
   cond {
@@ -117,7 +148,16 @@ fn (body: Any): Str? {
 
 error-message
 meta {
-    doc: """The readable `message`: status, its usual meaning and the retry delay. Never includes request data or the response body. Exposed for testing."""
+    doc: """
+    The readable `message`: status, its usual meaning and the retry delay.
+    Never includes request data or the response body. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/error-message(429, 30)  // "cipherowl: request failed with HTTP 429: rate limited; retry after 30s"
+    ```
+    """
 }
 fn (status: Int, retry: Int?): Str {
   hint get(STATUS_HINTS, Str(status))
@@ -145,7 +185,17 @@ fn (response: HttpResponse): HttpError {
 
 is-status
 meta {
-    doc: """True when `e` is a CipherOwl `HttpError` with this status (e.g. 404 for no override, 409 for a version conflict, 429 for rate limiting)."""
+    doc: """
+    True when `e` is a CipherOwl `HttpError` with this status (e.g. 404 for
+    no override, 409 for a version conflict, 429 for rate limiting).
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/is-status({status: 404}, 404)  // true
+    ::cipherowl::api/is-status({status: 429}, 404)  // false
+    ```
+    """
 }
 fn (e: Any, status: Int): Bool {
   cond {
@@ -168,6 +218,13 @@ meta {
     the class, while reports need the class (see
     `::cipherowl::risk/chain-class`). Errs when empty or not a
     lowercase identifier. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/validate-chain(" EVM ")  // "evm"
+    is-err(::cipherowl::api/validate-chain(""))  // true
+    ```
     """
 }
 fn (chain: Str): Str {
@@ -180,7 +237,20 @@ fn (chain: Str): Str {
 
 validate-network
 meta {
-    doc: """A network key (e.g. `ethereum_mainnet`, `bitcoin_mainnet`, `tron_mainnet`; aliases like `ethereum` resolve server-side), trimmed. Errs when empty or when given the chain family `evm`, which the docs say is not accepted. The live list is `::cipherowl::onchain/list-networks()`. Exposed for testing."""
+    doc: """
+    A network key (e.g. `ethereum_mainnet`, `bitcoin_mainnet`,
+    `tron_mainnet`; aliases like `ethereum` resolve server-side), trimmed.
+    Errs when empty or when given the chain family `evm`, which the docs say
+    is not accepted. The live list is
+    `::cipherowl::onchain/list-networks()`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/validate-network("ethereum_mainnet")  // "ethereum_mainnet"
+    is-err(::cipherowl::api/validate-network("evm"))  // true
+    ```
+    """
 }
 fn (network: Str): Str {
   n trim(network)
@@ -199,6 +269,13 @@ meta {
     (checksummed or lowercase), as documented; other chains are checked
     only for being non-empty and free of whitespace. The Err never
     includes the address. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/validate-address("evm", "0x0000000000000000000000000000000000000001")  // "0x0000000000000000000000000000000000000001"
+    is-err(::cipherowl::api/validate-address("evm", "0x123"))  // true
+    ```
     """
 }
 fn (chain: Str, address: Str): Str {
@@ -215,7 +292,17 @@ fn (chain: Str, address: Str): Str {
 
 check-addresses
 meta {
-    doc: """Validate every address for a chain (see `validate-address`): the trimmed addresses, or the first Err. Exposed for testing."""
+    doc: """
+    Validate every address for a chain (see `validate-address`): the trimmed
+    addresses, or the first Err. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/check-addresses("evm", [" 0x0000000000000000000000000000000000000001 "])  // ["0x0000000000000000000000000000000000000001"]
+    is-err(::cipherowl::api/check-addresses("evm", ["0x123"]))  // true
+    ```
+    """
 }
 fn (chain: Str, addresses: Vec): Vec {
   bad filter(addresses, (a) { is-err(validate-address(chain, Str(or(a, "")))) })
@@ -227,7 +314,18 @@ fn (chain: Str, addresses: Vec): Vec {
 
 normalize-band
 meta {
-    doc: """A `riskBand` in plain words: `"Severe Risk"` → `"severe"`, likewise `low`, `medium`, `high`. Null for a missing or unrecognized band (never guessed). Exposed for testing."""
+    doc: """
+    A `riskBand` in plain words: `"Severe Risk"` → `"severe"`, likewise
+    `low`, `medium`, `high`. Null for a missing or unrecognized band (never
+    guessed). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/normalize-band("Severe Risk")  // "severe"
+    ::cipherowl::api/normalize-band("Unknown")  // null
+    ```
+    """
 }
 fn (band: Any): Str? {
   word if(is-str(band), lowercase(trim(::re/replace-all(Str(band), "(?i)\\s*risk\\s*$", ""))), "")
@@ -236,7 +334,19 @@ fn (band: Any): Str? {
 
 number-or-null
 meta {
-    doc: """A finite number from an Int, a Dec, or a numeric Str (CipherOwl sends some numbers as strings); null for anything else, including the string `"Infinity"` that a directly flagged address reports. Never errs. Exposed for testing."""
+    doc: """
+    A finite number from an Int, a Dec, or a numeric Str (CipherOwl sends
+    some numbers as strings); null for anything else, including the string
+    `"Infinity"` that a directly flagged address reports. Never errs.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/number-or-null("42.5")  // 42.5
+    ::cipherowl::api/number-or-null("Infinity")  // null
+    ```
+    """
 }
 fn (value: Any): Any {
   cond {
@@ -248,7 +358,17 @@ fn (value: Any): Any {
 
 with-requested-chain
 meta {
-    doc: """A response body with `requested-chain` added: CipherOwl echoes the chain class (`evm`), not the chain you asked for (`base`), so this keeps the ask. Exposed for testing."""
+    doc: """
+    A response body with `requested-chain` added: CipherOwl echoes the chain
+    class (`evm`), not the chain you asked for (`base`), so this keeps the
+    ask. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/with-requested-chain({chain: "evm"}, "Base")  // {chain: "evm", requested-chain: "base"}
+    ```
+    """
 }
 fn (body: Any, chain: Str): Any {
   if(is-map(body), {...body, requested-chain: lowercase(trim(chain))}, body)
@@ -256,7 +376,17 @@ fn (body: Any, chain: Str): Any {
 
 validate-hops
 meta {
-    doc: """`hops` when null or an Int from 0 to 8; otherwise an Err. Exposed for testing."""
+    doc: """
+    `hops` when null or an Int from 0 to 8; otherwise an Err. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/validate-hops(3)  // 3
+    is-err(::cipherowl::api/validate-hops(9))  // true
+    ```
+    """
 }
 fn (hops: Any): Int? {
   cond {
@@ -274,6 +404,14 @@ meta {
     segments of `[a-z0-9_]`, at most 256 characters, e.g.
     `acme.compliance.apac`; anything else is an Err (CipherOwl would
     answer 400). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/normalize-reference("Acme.Withdrawals")  // "acme.withdrawals"
+    ::cipherowl::api/normalize-reference("  ")  // null
+    is-err(::cipherowl::api/normalize-reference("not valid"))  // true
+    ```
     """
 }
 fn (reference: Any): Str? {
@@ -292,7 +430,16 @@ fn (reference: Any): Str? {
 
 seg
 meta {
-    doc: """Percent-encode one path segment (an address, network, pool id or case id)."""
+    doc: """
+    Percent-encode one path segment (an address, network, pool id or case
+    id).
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/seg("a/b")  // "a%2Fb"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
@@ -300,7 +447,18 @@ fn (value: Any): Str {
 
 query
 meta {
-    doc: """A `?a=1&b=2` suffix from the non-null entries of `params` (URL-encoded; booleans as `true`/`false`); `""` when none are set."""
+    doc: """
+    A `?a=1&b=2` suffix from the non-null entries of `params` (URL-encoded;
+    booleans as `true`/`false`); `""` when none are set.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/query({hops: 2, config: null})  // "?hops=2"
+    ::cipherowl::api/query({trackAlert: false})  // "?trackAlert=false"
+    ::cipherowl::api/query({})  // ""
+    ```
+    """
 }
 fn (params: Map): Str {
   ::uri/query-string(map-vals(params, (v) {
@@ -314,7 +472,16 @@ fn (params: Map): Str {
 
 compact
 meta {
-    doc: """Drop null-valued keys, recursively through nested maps and vectors, so unset optionals are omitted. Exposed for testing."""
+    doc: """
+    Drop null-valued keys, recursively through nested maps and vectors, so
+    unset optionals are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/compact({a: 1, b: null, c: {d: null}})  // {a: 1, c: {}}
+    ```
+    """
 }
 fn (value: Any): Any {
   match value {
@@ -326,7 +493,17 @@ fn (value: Any): Any {
 
 response-body
 meta {
-    doc: """Normalize a decoded 2xx body: empty text becomes null. Exposed for testing."""
+    doc: """
+    Normalize a decoded 2xx body: empty text becomes null. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/response-body("   ")  // null
+    ::cipherowl::api/response-body({ok: true})  // {ok: true}
+    ```
+    """
 }
 fn (body: Any): Any {
   match body {
@@ -366,7 +543,7 @@ meta {
     **Example**
 
     ```hot
-    tenant {client-id: "tenant-client", client-secret: "tenant-secret"}
+    tenant {client-id: ::hot::ctx/get("tenant.client.id"), client-secret: ::hot::ctx/get("tenant.client.secret")}
     ::cipherowl::screening/screen-address("evm", "0x0000000000000000000000000000000000000001", {}, tenant)
     ```
     """
@@ -419,7 +596,19 @@ fn
 
 build-request
 meta {
-    doc: """The `HttpRequest` for one call: `base-url + path`, `Authorization: Bearer`, `Accept: application/json`, and a JSON body (nulls dropped) when `body` is not `""`. Exposed for testing."""
+    doc: """
+    The `HttpRequest` for one call: `base-url + path`, `Authorization:
+    Bearer`, `Accept: application/json`, and a JSON body (nulls dropped)
+    when `body` is not `""`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    token ::cipherowl::auth/access-token({})
+    request ::cipherowl::api/build-request("GET", "/api/chain-capabilities/v1", "", token, ::cipherowl/BASE_URL)
+    request.url
+    ```
+    """
 }
 fn (method: Str, path: Str, body: Any, token: Str, base-url: Str): HttpRequest {
   has-body and(is-some(body), ne(body, ""))
@@ -437,7 +626,9 @@ fn (method: Str, path: Str, body: Any, token: Str, base-url: Str): HttpRequest {
   })
 }
 
-send-once fn (method: Str, path: Str, body: Any, token: Str, base-url: Str): HttpResponse {
+send-once
+meta {no-doc: true}
+fn (method: Str, path: Str, body: Any, token: Str, base-url: Str): HttpResponse {
   first-try ::hot::http/request(build-request(method, path, body, token, base-url))
   cond {
     // One immediate retry, only for a GET whose connection failed.
@@ -457,6 +648,17 @@ meta {
     (Hot has no sleep): the `HttpError` carries `retry-after`, so let a
     handler or schedule `retry` policy re-run the work. `opts` as for
     `resolve`.
+
+    **Example**
+
+    ```hot
+    // The raw response, when you need its status or headers
+    response ::cipherowl::api/send("GET", "/api/chain-capabilities/v1", "")
+    response.status
+
+    // Prefer request unless you need that: it decodes the body and maps errors
+    ::cipherowl::api/unwrap(response)
+    ```
     """
 }
 fn
@@ -484,7 +686,18 @@ fn
 
 unwrap
 meta {
-    doc: """The decoded body of a 2xx response (null when empty), the Err of a failed transport, or `err(HttpError)` for a non-2xx response."""
+    doc: """
+    The decoded body of a 2xx response (null when empty), the Err of a
+    failed transport, or `err(HttpError)` for a non-2xx response.
+
+    **Example**
+
+    ```hot
+    HttpResponse ::hot::http/HttpResponse
+    ::cipherowl::api/unwrap(HttpResponse({status: 200, headers: {}, body: {ok: true}}))  // {ok: true}
+    is-err(::cipherowl::api/unwrap(HttpResponse({status: 404, headers: {}, body: {message: "not found"}})))  // true
+    ```
+    """
 }
 fn (response: Result): Any {
   cond {
@@ -521,7 +734,19 @@ fn
 
 call
 meta {
-    doc: """Run a request spec `{method, path, body?}` (as the `*-request` builders return) through `request`. A spec that is an Err (a validation failure) is returned as is, without a request."""
+    doc: """
+    Run a request spec `{method, path, body?}` (as the `*-request` builders
+    return) through `request`. A spec that is an Err (a validation failure)
+    is returned as is, without a request.
+
+    **Example**
+
+    ```hot
+    spec ::cipherowl::cases/list-cases-request({excludeClosed: true, pageSize: 25})
+    page ::cipherowl::api/call(spec)
+    page.totalCount
+    ```
+    """
 }
 fn
 (spec: Result): Any {
@@ -540,7 +765,17 @@ fn
 
 next-page-token
 meta {
-    doc: """The `nextPageToken` of a page, or null when it is absent or empty (no more pages). Exposed for testing."""
+    doc: """
+    The `nextPageToken` of a page, or null when it is absent or empty (no
+    more pages). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cipherowl::api/next-page-token({nextPageToken: "abc"})  // "abc"
+    ::cipherowl::api/next-page-token({nextPageToken: ""})  // null
+    ```
+    """
 }
 fn (page: Any): Str? {
   t if(is-map(page), get(page, "nextPageToken"), null)
@@ -549,7 +784,20 @@ fn (page: Any): Str? {
 
 collect-pages
 meta {
-    doc: """Follow page tokens, concatenating each page's `key` Vec, until `limit` items, an empty page, or no `nextPageToken`. `fetch` takes the token (null for the first page) and returns one page. Exposed for testing; the `list-all-*` helpers use it."""
+    doc: """
+    Follow page tokens, concatenating each page's `key` Vec, until `limit`
+    items, an empty page, or no `nextPageToken`. `fetch` takes the token
+    (null for the first page) and returns one page. Exposed for testing; the
+    `list-all-*` helpers use it.
+
+    **Example**
+
+    ```hot
+    fetch (token) { if(is-null(token), {items: [1, 2], nextPageToken: "p2"}, {items: [3]}) }
+    ::cipherowl::api/collect-pages(fetch, "items", null, 10, [])  // [1, 2, 3]
+    ::cipherowl::api/collect-pages(fetch, "items", null, 2, [])  // [1, 2]
+    ```
+    """
 }
 fn (fetch: Fn, key: Str, token: Str?, limit: Int, acc: Vec): Vec {
   page fetch(token)

@@ -134,3 +134,51 @@ meta ["test"] fn () {
     text parse-ocr-output("pdf", "some noise")
     assert-eq("", text)
 }
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::tesseract/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::tesseract/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::tesseract/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::tesseract/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::tesseract/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::tesseract/shell-quote("a\nb"))
+    assert-eq("''", ::tesseract/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::tesseract/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::tesseract/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::tesseract/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::tesseract/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::tesseract/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::tesseract/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::tesseract/file-ext("hot://uploads/a.x y"))
+}

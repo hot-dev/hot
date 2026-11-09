@@ -54,7 +54,17 @@ meta {
 
 given
 meta {
-    doc: """True for a non-null value that is not a blank string."""
+    doc: """
+    True for a non-null value that is not a blank string.
+
+    **Example**
+
+    ```hot
+    ::openfigi::api/given("IBM")  // true
+    ::openfigi::api/given("  ")  // false
+    ::openfigi::api/given(null)  // false
+    ```
+    """
 }
 fn (v: Any): Bool {
   match v {
@@ -64,7 +74,9 @@ fn (v: Any): Bool {
   }
 }
 
-pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
+pick
+meta {no-doc: true}
+fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   from-opts get(opts, key)
   from-ctx ::ctx/get(ctx-key)
   cond {
@@ -74,7 +86,9 @@ pick fn (opts: Map, key: Str, ctx-key: Str, default: Any): Any {
   }
 }
 
-strip-slash fn (url: Str): Str {
+strip-slash
+meta {no-doc: true}
+fn (url: Str): Str {
   ::re/replace-all(url, "/+$", "")
 }
 
@@ -89,7 +103,7 @@ meta {
     **Example**
 
     ```hot
-    cfg ::openfigi::api/resolve({api-key: tenant.figi-key})
+    cfg ::openfigi::api/resolve({api-key: ::hot::ctx/get("tenant.figi-key")})
     cfg.limits.jobs-per-request   // 100
     ```
     """
@@ -142,7 +156,9 @@ type {
     message: Str
 }
 
-body-detail fn (body: Any): Str? {
+body-detail
+meta {no-doc: true}
+fn (body: Any): Str? {
   cond {
     is-str(body) => {
       text trim(body)
@@ -158,7 +174,9 @@ body-detail fn (body: Any): Str? {
   }
 }
 
-header-seconds fn (headers: Map, name: Str): Int? {
+header-seconds
+meta {no-doc: true}
+fn (headers: Map, name: Str): Int? {
   v get(headers, name)
   cond {
     is-null(v) => { null }
@@ -169,7 +187,20 @@ header-seconds fn (headers: Map, name: Str): Int? {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    url "https://api.openfigi.com/v3/search"
+    response ::hot::http/HttpResponse({status: 429, headers: {"retry-after": "7"}, body: "Rate limit reached."})
+    e ::openfigi::api/http-error(response, url)
+    e.retry-after  // 7
+    e.message  // "openfigi: HTTP 429: Rate limit reached."
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   headers or(response.headers, {})
@@ -191,7 +222,17 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 auth-headers
 meta {
-    doc: """`{X-OPENFIGI-APIKEY: key}` when resolved settings carry a key, else `{}` (pure)."""
+    doc: """
+    `{X-OPENFIGI-APIKEY: key}` when resolved settings carry a key, else `{}`
+    (pure).
+
+    **Example**
+
+    ```hot
+    // With a key the Map holds X-OPENFIGI-APIKEY. Without one it is empty.
+    ::openfigi::api/auth-headers({api-key: null})  // {}
+    ```
+    """
 }
 fn (cfg: Map): Map {
   if(given(cfg.api-key), {"X-OPENFIGI-APIKEY": cfg.api-key}, {})
@@ -199,13 +240,23 @@ fn (cfg: Map): Map {
 
 path-segment
 meta {
-    doc: """Percent-encode one path segment."""
+    doc: """
+    Percent-encode one path segment.
+
+    **Example**
+
+    ```hot
+    ::openfigi::api/path-segment("a b")  // "a%20b"
+    ```
+    """
 }
 fn (value: Any): Str {
   ::uri/encode(Str(value))
 }
 
-decode fn (body: Any): Any {
+decode
+meta {no-doc: true}
+fn (body: Any): Any {
   cond {
     is-str(body) => {
       text trim(body)
@@ -221,6 +272,16 @@ meta {
     Send `method` to `${cfg.base-url}${path}` and return the decoded JSON
     body on 2xx, or an Err carrying `HttpError`. A non-null `body` is
     sent as JSON. A transport failure passes through as its own Err.
+
+    **Example**
+
+    ```hot
+    ::api ::openfigi::api
+
+    cfg ::api/resolve({})
+    out ::api/request(cfg, "GET", "/mapping/values/idType", null)
+    out.values
+    ```
     """
 }
 fn (cfg: Map, method: Str, path: Str, body: Any): Any {

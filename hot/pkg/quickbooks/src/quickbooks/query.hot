@@ -49,7 +49,16 @@ MAX_PAGES 10000
 
 escape-string
 meta {
-    doc: """Escape a string for a single-quoted query literal: `\` becomes `\\` and `'` becomes `\'`."""
+    doc: """
+    Escape a string for a single-quoted query literal: `\` becomes `\\` and
+    `'` becomes `\'`.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/escape-string("O'Brien")  // "O\\'Brien"
+    ```
+    """
 }
 fn (value: Str): Str {
   replace(replace(value, "\\", "\\\\"), "'", "\\'")
@@ -63,6 +72,15 @@ meta {
     quoted numbers, which QuickBooks compares numerically; Bools are
     `true` / `false`; a Vec gives an `in` list `('a', 'b')`. Null is an
     Err.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/literal("O'Brien")  // "'O\\'Brien'"
+    ::quickbooks::query/literal(12.5)  // "'12.5'"
+    ::quickbooks::query/literal(true)  // "true"
+    ::quickbooks::query/literal(["a", "b"])  // "('a', 'b')"
+    ```
     """
 }
 fn (value: Any): Str {
@@ -84,7 +102,18 @@ fn (value: Any): Str {
 
 field
 meta {
-    doc: """Check a field name (`DisplayName`, `MetaData.LastUpdatedTime`, `CustomerRef`): letters, digits, `_` and dots only. Returns it, or an Err."""
+    doc: """
+    Check a field name (`DisplayName`, `MetaData.LastUpdatedTime`,
+    `CustomerRef`): letters, digits, `_` and dots only. Returns it, or an
+    Err.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/field("MetaData.LastUpdatedTime")  // "MetaData.LastUpdatedTime"
+    is-err(::quickbooks::query/field("Id; drop"))  // true
+    ```
+    """
 }
 fn (name: Str): Str {
   cond {
@@ -147,7 +176,18 @@ fn
 
 clause
 meta {
-    doc: """One condition for `select-from`: a `[field, op, value]` Vec becomes `condition(field, op, value)`; a Str passes through. Anything else is an Err."""
+    doc: """
+    One condition for `select-from`: a `[field, op, value]` Vec becomes
+    `condition(field, op, value)`; a Str passes through. Anything else is an
+    Err.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/clause(["Balance", ">", 0])  // "Balance > '0'"
+    ::quickbooks::query/clause("Active = true")  // "Active = true"
+    ```
+    """
 }
 fn (c: Any): Str {
   cond {
@@ -157,7 +197,9 @@ fn (c: Any): Str {
   }
 }
 
-select-clause fn (columns: Str, entity: Str, conditions: Vec, order-by: Str?): Str {
+select-clause
+meta {no-doc: true}
+fn (columns: Str, entity: Str, conditions: Vec, order-by: Str?): Str {
   checked field(entity)
   bad find-first(conditions, (c) { is-err(clause(c)) })
   order-ok or(is-null(order-by), ::re/is-match(trim(or(order-by, "")), "^[A-Za-z][A-Za-z0-9_.]*( (?i:asc|desc))?$"))
@@ -175,7 +217,17 @@ select-clause fn (columns: Str, entity: Str, conditions: Vec, order-by: Str?): S
 
 has-paging
 meta {
-    doc: """True when a query already has STARTPOSITION or MAXRESULTS (case-insensitive)."""
+    doc: """
+    True when a query already has STARTPOSITION or MAXRESULTS
+    (case-insensitive).
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/has-paging("select * from Invoice maxresults 10")  // true
+    ::quickbooks::query/has-paging("select * from Invoice")  // false
+    ```
+    """
 }
 fn (query: Str): Bool {
   ::re/is-match(query, "(?i)\\b(startposition|maxresults)\\b")
@@ -183,7 +235,17 @@ fn (query: Str): Bool {
 
 with-paging
 meta {
-    doc: """Append `STARTPOSITION {start} MAXRESULTS {max}` to a query (pure). `max` is clamped to 1..1000."""
+    doc: """
+    Append `STARTPOSITION {start} MAXRESULTS {max}` to a query (pure). `max`
+    is clamped to 1..1000.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/with-paging("select * from Invoice", 101, 100)
+    // "select * from Invoice STARTPOSITION 101 MAXRESULTS 100"
+    ```
+    """
 }
 fn (query: Str, start: Int, max-results: Int): Str {
   size min(max(max-results, 1), ::quickbooks/MAX_RESULTS)
@@ -192,7 +254,17 @@ fn (query: Str, start: Int, max-results: Int): Str {
 
 entity-of
 meta {
-    doc: """The entity a query selects from (`select * from Invoice where ...` gives `"Invoice"`), or null."""
+    doc: """
+    The entity a query selects from (`select * from Invoice where ...` gives
+    `"Invoice"`), or null.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/entity-of("select * from Invoice where Balance > '0'")  // "Invoice"
+    ::quickbooks::query/entity-of("not a query")  // null
+    ```
+    """
 }
 fn (query: Str): Str? {
   m ::re/capture(query, "(?i)\\bfrom\\s+([A-Za-z][A-Za-z0-9_]*)")
@@ -215,7 +287,19 @@ type {
 
 to-page
 meta {
-    doc: """Turn a query response body into a `Page` (pure). Finds the rows under `QueryResponse` whatever the key's case."""
+    doc: """
+    Turn a query response body into a `Page` (pure). Finds the rows under
+    `QueryResponse` whatever the key's case.
+
+    **Example**
+
+    ```hot
+    body {QueryResponse: {Invoice: [{Id: "130"}], startPosition: 1, maxResults: 1}}
+    page ::quickbooks::query/to-page(body, "Invoice")
+    page.items  // [{Id: "130"}]
+    page.max-results  // 1
+    ```
+    """
 }
 fn (body: Map, entity: Str?): Page {
   qr or(get(body, "QueryResponse"), {})
@@ -236,7 +320,18 @@ fn (body: Map, entity: Str?): Page {
 
 next-start
 meta {
-    doc: """The STARTPOSITION after a page of `count` rows fetched from `start` with page size `size`, or null when that page was the last (short or empty). Pure."""
+    doc: """
+    The STARTPOSITION after a page of `count` rows fetched from `start` with
+    page size `size`, or null when that page was the last (short or empty).
+    Pure.
+
+    **Example**
+
+    ```hot
+    ::quickbooks::query/next-start(1, 100, 100)  // 101
+    ::quickbooks::query/next-start(101, 100, 40)  // null
+    ```
+    """
 }
 fn (start: Int, size: Int, count: Int): Int? {
   if(or(eq(count, 0), lt(count, size)), null, add(start, count))
@@ -252,6 +347,15 @@ meta {
     Run a query and return one `Page`. Add STARTPOSITION / MAXRESULTS to
     the query yourself, or use `query-page` / `query-all`. Without
     MAXRESULTS QuickBooks returns at most 100 rows.
+
+    **Example**
+
+    ```hot
+    page ::quickbooks::query/query("select * from Customer where Active = true MAXRESULTS 50")
+    map(page.items, %.DisplayName)
+
+    ::quickbooks::query/query("select * from Vendor", {realm-id: "9341453"})
+    ```
     """
 }
 fn
@@ -265,7 +369,18 @@ fn
 
 query-page
 meta {
-    doc: """Run `q` for one page from `start` (1-based) of up to `max-results` rows (at most 1000)."""
+    doc: """
+    Run `q` for one page from `start` (1-based) of up to `max-results` rows
+    (at most 1000).
+
+    **Example**
+
+    ```hot
+    page ::quickbooks::query/query-page("select * from Invoice orderby TxnDate", 101, 100)
+    page.start-position
+    length(page.items)
+    ```
+    """
 }
 fn
 (q: Str, start: Int, max-results: Int): Page {
@@ -278,7 +393,9 @@ fn
   }
 }
 
-collect-loop fn (q: Str, start: Int, size: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
+collect-loop
+meta {no-doc: true}
+fn (q: Str, start: Int, size: Int, limit: Int?, acc: Vec, pages: Int, opts: Map): Vec {
   page query-page(q, start, size, opts)
   cond {
     is-err(page) => { page }
@@ -302,6 +419,16 @@ meta {
     (null for no limit). The first failing page's Err is returned. Each
     page is one API call (and, under the Intuit App Partner Program, one
     metered CorePlus call), so narrow the query with a `where` clause.
+
+    **Example**
+
+    ```hot
+    rows ::quickbooks::query/query-all("select * from Invoice where Balance > '0'")
+    length(rows)
+
+    // At most 2500 rows, for one company
+    ::quickbooks::query/query-all("select * from Customer", 2500, {realm-id: "9341453"})
+    ```
     """
 }
 fn
@@ -323,7 +450,17 @@ fn
 
 count-rows
 meta {
-    doc: """`select count(*) from {entity} where ...`: the number of matching rows (`totalCount`)."""
+    doc: """
+    `select count(*) from {entity} where ...`: the number of matching rows
+    (`totalCount`).
+
+    **Example**
+
+    ```hot
+    open-count ::quickbooks::query/count-rows("Invoice", [["Balance", ">", 0]])
+    gt(open-count, 0)
+    ```
+    """
 }
 fn
 (entity: Str, conditions: Vec): Int {

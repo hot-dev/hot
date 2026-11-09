@@ -31,7 +31,21 @@ TXN_TYPES ["finance", "kyc", "travelRule", "userPlatformEvent"]
 
 validate-txn
 meta {
-    doc: """Check the fields Sumsub requires before sending: `txnId`, `type`, and `applicant` (a Map; `{}` is fine for an existing applicant); `info` for `finance` and `travelRule`. Returns the compacted payload or an Err that names the missing field (never its value). Exposed for testing."""
+    doc: """
+    Check the fields Sumsub requires before sending: `txnId`, `type`, and
+    `applicant` (a Map; `{}` is fine for an existing applicant); `info` for
+    `finance` and `travelRule`. Returns the compacted payload or an Err that
+    names the missing field (never its value). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/validate-txn({txnId: "t1", type: "kyc", applicant: {}, props: null})
+    // {txnId: "t1", type: "kyc", applicant: {}}
+
+    is-err(::sumsub::kyt/validate-txn({type: "kyc", applicant: {}}))  // true
+    ```
+    """
 }
 fn (txn: Map): Map {
   body ::api/compact(untype(txn))
@@ -58,6 +72,13 @@ meta {
     cryptoParams?}`), `applicant` and `counterparty` (`{type,
     externalUserId?, fullName, paymentMethod: {type, accountId},
     institutionInfo?, ...}`), `props`. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    txn {txnId: "wd-1001", type: "kyc", applicant: {}}
+    ::sumsub::kyt/submit-request("abc", txn).path  // "/resources/applicants/abc/kyt/txns/-/data"
+    ```
     """
 }
 fn (applicant-id: Str, txn: Map): Map {
@@ -100,7 +121,21 @@ fn
 
 submit-new-applicant-request
 meta {
-    doc: """The spec for submitting a transaction when the applicant may not exist yet (`POST /resources/applicants/-/kyt/txns/-/data?levelName=`). `txn.applicant.externalUserId` and `txn.applicant.fullName` are required; the transaction attaches to an existing applicant with that id or creates one. Exposed for testing."""
+    doc: """
+    The spec for submitting a transaction when the applicant may not exist
+    yet (`POST /resources/applicants/-/kyt/txns/-/data?levelName=`).
+    `txn.applicant.externalUserId` and `txn.applicant.fullName` are
+    required; the transaction attaches to an existing applicant with that id
+    or creates one. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    txn {txnId: "wd-1001", type: "kyc", applicant: {externalUserId: "user-42", fullName: "Ada Lovelace"}}
+    ::sumsub::kyt/submit-new-applicant-request("basic-kyc-level", txn).path
+    // "/resources/applicants/-/kyt/txns/-/data?levelName=basic-kyc-level"
+    ```
+    """
 }
 fn (level-name: Str?, txn: Map): Map {
   body validate-txn(txn)
@@ -116,7 +151,24 @@ fn (level-name: Str?, txn: Map): Map {
 
 submit-transaction-for-user
 meta {
-    doc: """Submit a transaction keyed by `applicant.externalUserId`, creating the applicant on `level-name` when it does not exist (null to let Sumsub pick the default)."""
+    doc: """
+    Submit a transaction keyed by `applicant.externalUserId`, creating the
+    applicant on `level-name` when it does not exist (null to let Sumsub
+    pick the default).
+
+    **Example**
+
+    ```hot
+    txn ::sumsub::kyt/submit-transaction-for-user("basic-kyc-level", {
+      txnId: "wd-1001",
+      type: "finance",
+      txnDate: "2026-11-01 12:00:00+0000",
+      info: {direction: "out", amount: 2500, currencyCode: "USD", currencyType: "fiat"},
+      applicant: {externalUserId: "user-42", fullName: "Ada Lovelace"}
+    })
+    txn.id
+    ```
+    """
 }
 fn
 (level-name: Str?, txn: Map): Map {
@@ -128,7 +180,18 @@ fn
 
 get-transaction
 meta {
-    doc: """Fetch a transaction by Sumsub's id: scoring, review and Travel Rule status."""
+    doc: """
+    Fetch a transaction by Sumsub's id: scoring, review and Travel Rule
+    status.
+
+    **Example**
+
+    ```hot
+    txn ::sumsub::kyt/get-transaction("65f0c1e2a3b4c5d6e7f81234")
+    txn.scoringResult.action
+    ::sumsub::decisions/review-outcome(txn).outcome
+    ```
+    """
 }
 fn
 (txn-id: Str): Map {
@@ -140,14 +203,33 @@ fn
 
 txn-id-path
 meta {
-    doc: """The path for a transaction addressed by your own `txnId`. Exposed for testing."""
+    doc: """
+    The path for a transaction addressed by your own `txnId`. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/txn-id-path("wd-1001")  // "/resources/kyt/txns/-;data.txnId=wd-1001/one"
+    ```
+    """
 }
 fn (txn-id: Str): Str {
   `/resources/kyt/txns/-;data.txnId=${seg(txn-id)}/one`
 }
 
 get-transaction-by-txn-id
-meta {doc: """Fetch a transaction by the `txnId` you submitted."""}
+meta {
+    doc: """
+    Fetch a transaction by the `txnId` you submitted.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/get-transaction-by-txn-id("wd-1001").review
+    ```
+    """
+}
 fn
 (txn-id: Str): Map {
   get-transaction-by-txn-id(txn-id, {})
@@ -158,7 +240,16 @@ fn
 
 review-transaction
 meta {
-    doc: """Approve (`"GREEN"`) or reject (`"RED"`) a transaction that is on hold. Returns the transaction."""
+    doc: """
+    Approve (`"GREEN"`) or reject (`"RED"`) a transaction that is on hold.
+    Returns the transaction.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/review-transaction("65f0c1e2a3b4c5d6e7f81234", "GREEN")
+    ```
+    """
 }
 fn
 (txn-id: Str, review-answer: Str): Map {
@@ -173,7 +264,16 @@ fn
 
 rescore-transaction
 meta {
-    doc: """Re-run your rules on a transaction (at most 200 times). Returns the transaction."""
+    doc: """
+    Re-run your rules on a transaction (at most 200 times). Returns the
+    transaction.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/rescore-transaction("65f0c1e2a3b4c5d6e7f81234").score
+    ```
+    """
 }
 fn
 (txn-id: Str): Map {
@@ -185,7 +285,16 @@ fn
 
 set-payment-txn-id
 meta {
-    doc: """Attach the on-chain hash (or payment-system id) to a transaction after it settles."""
+    doc: """
+    Attach the on-chain hash (or payment-system id) to a transaction after
+    it settles.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/set-payment-txn-id("65f0c1e2a3b4c5d6e7f81234", "0xabc123")
+    ```
+    """
 }
 fn
 (txn-id: Str, payment-txn-id: Str): Map {
@@ -196,7 +305,17 @@ fn
 }
 
 delete-transaction
-meta {doc: """Delete a transaction. Returns `{deleted: 1}`."""}
+meta {
+    doc: """
+    Delete a transaction. Returns `{deleted: 1}`.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/delete-transaction("65f0c1e2a3b4c5d6e7f81234").deleted
+    ```
+    """
+}
 fn
 (txn-id: Str): Map {
   delete-transaction(txn-id, {})
@@ -218,7 +337,17 @@ TRAVEL_RULE_STATUSES [
 
 travel-rule-status
 meta {
-    doc: """A transaction's Travel Rule status (`travelRuleInfo.status`), or null when it is not a Travel Rule transfer. Pure."""
+    doc: """
+    A transaction's Travel Rule status (`travelRuleInfo.status`), or null
+    when it is not a Travel Rule transfer. Pure.
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/travel-rule-status({travelRuleInfo: {status: "completed"}})  // "completed"
+    ::sumsub::kyt/travel-rule-status({})  // null
+    ```
+    """
 }
 fn (txn: Any): Str? {
   get-in(txn, ["travelRuleInfo", "status"])
@@ -226,7 +355,16 @@ fn (txn: Any): Str? {
 
 confirm-wallet-ownership
 meta {
-    doc: """Record whether the applicant confirmed owning the wallet for a Travel Rule transfer (`confirmed` true or false)."""
+    doc: """
+    Record whether the applicant confirmed owning the wallet for a Travel
+    Rule transfer (`confirmed` true or false).
+
+    **Example**
+
+    ```hot
+    ::sumsub::kyt/confirm-wallet-ownership("65f0c1e2a3b4c5d6e7f81234", true)
+    ```
+    """
 }
 fn
 (txn-id: Str, confirmed: Bool): Map {

@@ -25,7 +25,20 @@ meta {
 
 status-decision
 meta {
-    doc: """Normalize a business status: `approved` → approved, `rejected` → declined, `in_review` → needs-review, `open`/`pending`/`in_audit` → pending, anything else → needs-review (a new status is never read as an approval)."""
+    doc: """
+    Normalize a business status: `approved` → approved, `rejected` →
+    declined, `in_review` → needs-review, `open`/`pending`/`in_audit` →
+    pending, anything else → needs-review (a new status is never read as an
+    approval).
+
+    **Example**
+
+    ```hot
+    ::middesk::decisions/status-decision("rejected")  // "declined"
+    ::middesk::decisions/status-decision("in_audit")  // "pending"
+    ::middesk::decisions/status-decision("something_new")  // "needs-review"
+    ```
+    """
 }
 fn (status: Any): Str {
   s Str(or(status, ""))
@@ -44,7 +57,21 @@ fn (status: Any): Str {
 
 review-tasks
 meta {
-    doc: """The business's review tasks as `{key, category, label, sub_label, status, message}` (sources dropped), sorted by category then key. Exposed for testing."""
+    doc: """
+    The business's review tasks as `{key, category, label, sub_label,
+    status, message}` (sources dropped), sorted by category then key.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    tasks ::middesk::decisions/review-tasks({review: {tasks: [
+      {key: "tin", category: "tin", label: "TIN Match", status: "success", sources: []},
+      {key: "name", category: "name", label: "Business Name", status: "failure", sources: []}
+    ]}})
+    map(tasks, %.key)  // ["name", "tin"]
+    ```
+    """
 }
 fn (business: Map): Vec {
   review get(business, "review")
@@ -62,11 +89,15 @@ fn (business: Map): Vec {
   sort-by(slim, (t) { `${or(t.category, "")}|${or(t.key, "")}|${or(t.label, "")}` })
 }
 
-tasks-with-status fn (tasks: Vec, status: Str): Vec {
+tasks-with-status
+meta {no-doc: true}
+fn (tasks: Vec, status: Str): Vec {
   filter(tasks, (t) { eq(t.status, status) })
 }
 
-brief fn (t: Map): Map {
+brief
+meta {no-doc: true}
+fn (t: Map): Map {
   filter-vals({key: t.key, label: t.label, sub_label: t.sub_label, message: t.message}, is-some)
 }
 
@@ -76,7 +107,20 @@ brief fn (t: Map): Map {
 
 tin-result
 meta {
-    doc: """The TIN match without the TIN: `{verified, mismatch, unknown, issued, error}` (null fields dropped), or null when no TIN was checked. Exposed for testing."""
+    doc: """
+    The TIN match without the TIN: `{verified, mismatch, unknown, issued,
+    error}` (null fields dropped), or null when no TIN was checked. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::decisions/tin-result({tin: {tin: "123410000", verified: true, mismatch: false}})
+    // {verified: true, mismatch: false}
+
+    ::middesk::decisions/tin-result({})  // null
+    ```
+    """
 }
 fn (business: Map): Map? {
   tin get(business, "tin")
@@ -96,7 +140,19 @@ fn (business: Map): Map? {
 
 watchlist-hits
 meta {
-    doc: """The number of watchlist hits: `watchlist.hit_count` when present, else the total `results` across `watchlist.lists`. 0 when there is no watchlist. Exposed for testing."""
+    doc: """
+    The number of watchlist hits: `watchlist.hit_count` when present, else
+    the total `results` across `watchlist.lists`. 0 when there is no
+    watchlist. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::decisions/watchlist-hits({watchlist: {hit_count: 2}})  // 2
+    ::middesk::decisions/watchlist-hits({watchlist: {lists: [{results: [{}, {}, {}]}]}})  // 3
+    ::middesk::decisions/watchlist-hits({})  // 0
+    ```
+    """
 }
 fn (business: Map): Int {
   w get(business, "watchlist")
@@ -112,7 +168,20 @@ fn (business: Map): Int {
 
 registration-summary
 meta {
-    doc: """Secretary of State registrations: `{count, active, inactive, states}` with states sorted and distinct. Exposed for testing."""
+    doc: """
+    Secretary of State registrations: `{count, active, inactive, states}`
+    with states sorted and distinct. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::middesk::decisions/registration-summary({registrations: [
+      {status: "active", state: "TX"},
+      {status: "inactive", state: "CA"}
+    ]})
+    // {count: 2, active: 1, inactive: 1, states: ["CA", "TX"]}
+    ```
+    """
 }
 fn (business: Map): Map {
   regs filter(or(get(business, "registrations"), []), is-map)
@@ -125,12 +194,16 @@ fn (business: Map): Map {
   }
 }
 
-count-of fn (business: Map, key: Str): Int {
+count-of
+meta {no-doc: true}
+fn (business: Map, key: Str): Int {
   v get(business, key)
   if(is-vec(v), length(v), 0)
 }
 
-order-summary fn (business: Map): Vec {
+order-summary
+meta {no-doc: true}
+fn (business: Map): Vec {
   orders filter(or(get(business, "orders"), []), is-map)
   sort-by(map(orders, (o) { {product: or(get(o, "product"), get(o, "package")), status: get(o, "status")} }), (o) {
     `${or(o.product, "")}|${or(o.status, "")}`
@@ -212,7 +285,22 @@ fn (business: Map): Map {
 
 reasons
 meta {
-    doc: """Short reasons for a summary, sorted: one per failed or warning task (`"failure tin: TIN Match - Not Found"`), plus `"watchlist hits: N"` when there are hits."""
+    doc: """
+    Short reasons for a summary, sorted: one per failed or warning task
+    (`"failure tin: TIN Match - Not Found"`), plus `"watchlist hits: N"`
+    when there are hits.
+
+    **Example**
+
+    ```hot
+    ::middesk::decisions/reasons({
+      failed: [{key: "tin", label: "TIN Match", sub_label: "Not Found"}],
+      warnings: [],
+      watchlist-hits: 1
+    })
+    // ["failure tin: TIN Match - Not Found", "watchlist hits: 1"]
+    ```
+    """
 }
 fn (summary: Map): Vec<Str> {
   line (prefix, t) {

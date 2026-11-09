@@ -20,6 +20,7 @@ meta {
 
     todo ::issues/list-issues({filter: {state: {type: {eq: "unstarted"}}}, first: 20})
 
+    team ::linear::teams/get-team-by-key("ENG")
     issue ::issues/create-issue(team.id, "Rate limit the export endpoint", {
       description: "Seen 429s from the reporting job.",
       priority: 2

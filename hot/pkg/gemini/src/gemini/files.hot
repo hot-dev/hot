@@ -72,7 +72,7 @@ meta {
     **Example**
 
     ```hot
-    file ::gemini::files/get(FilesGetRequest({
+    file ::gemini::files/get(::gemini::files/FilesGetRequest({
         name: "files/abc123"
     }))
 
@@ -111,7 +111,7 @@ meta {
     **Example**
 
     ```hot
-    ::gemini::files/delete(FilesDeleteRequest({
+    ::gemini::files/delete(::gemini::files/FilesDeleteRequest({
         name: "files/abc123"
     }))
     ```
@@ -148,7 +148,7 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::files/list(FilesListRequest({
+    result ::gemini::files/list(::gemini::files/FilesListRequest({
         page-size: "10",
         page-token: ""
     }))
@@ -188,7 +188,7 @@ meta {
     **Example**
 
     ```hot
-    result ::gemini::files/upload(FilesUploadRequest({
+    result ::gemini::files/upload(::gemini::files/FilesUploadRequest({
         file: "path/to/document.pdf",
         metadata: {displayName: "My Document"}
     }))

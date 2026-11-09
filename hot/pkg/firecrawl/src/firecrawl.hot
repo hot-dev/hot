@@ -83,6 +83,13 @@ meta {
     `includeSubdomains`, `ignoreQueryParameters`. Returns `{links:
     [{url, title?, description?}]}`; feed the interesting ones to
     `scrape` or `batch-scrape`.
+
+    **Example**
+
+    ```hot
+    site ::firecrawl/map-site("https://firecrawl.dev", {search: "pricing", limit: 20})
+    map(site.links, (link) { link.url })
+    ```
     """
 }
 fn
@@ -143,6 +150,18 @@ meta {
     `webhook` (`{url, events?, metadata?}`; verify deliveries with
     `::firecrawl::webhooks/verify-request`). Returns `{id, url}`; check on
     it later with `get-crawl` / `get-crawl-all` and `is-done`.
+
+    **Example**
+
+    ```hot
+    job ::firecrawl/crawl("https://docs.firecrawl.dev", {
+      limit: 25,
+      includePaths: ["^/features/.*"],
+      scrapeOptions: {formats: ["markdown"]}
+    })
+    // save job.id, then check on it from a later run
+    job.id
+    ```
     """
 }
 fn
@@ -165,6 +184,13 @@ meta {
     "scraping", "completed", "failed", or "cancelled". Results arrive in
     pages of about 10MB; `next` is set while more remain. Use
     `get-crawl-all` to follow every page.
+
+    **Example**
+
+    ```hot
+    status ::firecrawl/get-crawl("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    `${status.completed} of ${status.total} pages`
+    ```
     """
 }
 fn
@@ -178,7 +204,19 @@ fn
 get-crawl-all
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /crawl/{id}, following `next` - The current status with `data` holding the documents from every page fetched so far. While the crawl is still running, `next` stays set when the cursor has caught up with the crawler."""
+    doc: """
+    GET /crawl/{id}, following `next` - The current status with `data`
+    holding the documents from every page fetched so far. While the crawl is
+    still running, `next` stays set when the cursor has caught up with the
+    crawler.
+
+    **Example**
+
+    ```hot
+    site ::firecrawl/get-crawl-all("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    if(::firecrawl/is-done(site), map(site.data, (doc) { doc.metadata.sourceURL }), [])
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -191,7 +229,17 @@ fn
 cancel-crawl
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """DELETE /crawl/{id} - Cancel a running crawl. Returns `{status: "cancelled"}`."""
+    doc: """
+    DELETE /crawl/{id} - Cancel a running crawl. Returns `{status:
+    "cancelled"}`.
+
+    **Example**
+
+    ```hot
+    result ::firecrawl/cancel-crawl("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    result.status
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -204,7 +252,17 @@ fn
 get-crawl-errors
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /crawl/{id}/errors - Pages that failed (`errors: [{id, timestamp, url, error}]`) and URLs blocked by robots.txt (`robotsBlocked`)."""
+    doc: """
+    GET /crawl/{id}/errors - Pages that failed (`errors: [{id, timestamp,
+    url, error}]`) and URLs blocked by robots.txt (`robotsBlocked`).
+
+    **Example**
+
+    ```hot
+    report ::firecrawl/get-crawl-errors("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    map(report.errors, (e) { `${e.url}: ${e.error}` })
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -217,7 +275,17 @@ fn
 list-active-crawls
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /crawl/active - The team's running crawls: `{crawls: [{id, teamId, url, options}]}`."""
+    doc: """
+    GET /crawl/active - The team's running crawls: `{crawls: [{id, teamId,
+    url, options}]}`.
+
+    **Example**
+
+    ```hot
+    active ::firecrawl/list-active-crawls()
+    map(active.crawls, (c) { c.url })
+    ```
+    """
 }
 fn
 (): Map {
@@ -266,7 +334,17 @@ fn
 get-batch-scrape
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /batch/scrape/{id} - One status page, shaped like `get-crawl`: `{status, total, completed, creditsUsed, next?, data}`."""
+    doc: """
+    GET /batch/scrape/{id} - One status page, shaped like `get-crawl`:
+    `{status, total, completed, creditsUsed, next?, data}`.
+
+    **Example**
+
+    ```hot
+    status ::firecrawl/get-batch-scrape("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    `${status.completed} of ${status.total} URLs`
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -279,7 +357,17 @@ fn
 get-batch-scrape-all
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /batch/scrape/{id}, following `next` - The current status with `data` from every page fetched so far."""
+    doc: """
+    GET /batch/scrape/{id}, following `next` - The current status with
+    `data` from every page fetched so far.
+
+    **Example**
+
+    ```hot
+    pages ::firecrawl/get-batch-scrape-all("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    if(::firecrawl/is-done(pages), map(pages.data, (doc) { doc.markdown }), [])
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -292,7 +380,17 @@ fn
 cancel-batch-scrape
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """DELETE /batch/scrape/{id} - Cancel a running batch scrape. Returns `{status: "cancelled"}`."""
+    doc: """
+    DELETE /batch/scrape/{id} - Cancel a running batch scrape. Returns
+    `{status: "cancelled"}`.
+
+    **Example**
+
+    ```hot
+    result ::firecrawl/cancel-batch-scrape("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    result.status
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -305,7 +403,17 @@ fn
 get-batch-scrape-errors
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /batch/scrape/{id}/errors - Failed URLs (`errors: [{id, timestamp, url, error}]`) and `robotsBlocked`."""
+    doc: """
+    GET /batch/scrape/{id}/errors - Failed URLs (`errors: [{id, timestamp,
+    url, error}]`) and `robotsBlocked`.
+
+    **Example**
+
+    ```hot
+    report ::firecrawl/get-batch-scrape-errors("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    map(report.errors, (e) { e.url })
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -353,7 +461,18 @@ fn
 get-extract
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /extract/{id} - Extraction status: `{status, data, expiresAt, tokensUsed?}`; `status` is "processing", "completed", "failed", or "cancelled"."""
+    doc: """
+    GET /extract/{id} - Extraction status: `{status, data, expiresAt,
+    tokensUsed?}`; `status` is "processing", "completed", "failed", or
+    "cancelled".
+
+    **Example**
+
+    ```hot
+    out ::firecrawl/get-extract("0b5e6c1a-3d2f-4a7e-9c11-2f8a6d4b7e90")
+    if(::firecrawl/is-done(out), out.data, null)
+    ```
+    """
 }
 fn
 (id: Str): Map {
@@ -401,7 +520,21 @@ fn (job: Map): Bool {
 credit-usage
 meta {
     ctx: {"firecrawl.api.key": {required: false}},
-    doc: """GET /team/credit-usage - Remaining credits: `{remainingCredits, planCredits, billingPeriodStart, billingPeriodEnd}`. Free, so it doubles as a key check."""
+    doc: """
+    GET /team/credit-usage - Remaining credits: `{remainingCredits,
+    planCredits, billingPeriodStart, billingPeriodEnd}`. Free, so it doubles
+    as a key check.
+
+    **Example**
+
+    ```hot
+    usage ::firecrawl/credit-usage()
+    usage.remainingCredits
+
+    // Check another tenant's key, from context
+    ::firecrawl/credit-usage({api-key: ::hot::ctx/get("tenant.firecrawl.key")})
+    ```
+    """
 }
 fn
 (): Map {

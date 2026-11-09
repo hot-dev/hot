@@ -40,25 +40,106 @@ type {
 // ============================================================================
 
 tell
-meta { doc: "Send a targeted message to a specific agent's inbox." }
+meta {
+    doc: """
+    Send a targeted message to a specific agent's inbox.
+
+    **Example**
+
+    ```hot
+    ::bus ::ai::bus
+    session ::ai::session/Session({id: "slack:C123"})
+    sender ::ai::session/Identity({id: "u1", name: "Ada"})
+    ::bus/tell(::ai::message/AgentMessage({
+        session: session,
+        sender: sender,
+        from-agent: "triage",
+        to-agent: "billing",
+        content: "Refund request for order 42."
+    }))
+    ```
+    """
+}
 fn (msg: AgentMessage): Map {
     send(`agent:${msg.to-agent}:inbox`, msg)
 }
 
 broadcast
-meta { doc: "Broadcast a message to all listening agents." }
+meta {
+    doc: """
+    Broadcast a message to all listening agents.
+
+    **Example**
+
+    ```hot
+    ::bus ::ai::bus
+    session ::ai::session/Session({id: "slack:C123"})
+    sender ::ai::session/Identity({id: "u1", name: "Ada"})
+    ::bus/broadcast(::bus/BroadcastMessage({
+        session: session,
+        sender: sender,
+        from-agent: "triage",
+        topic: "incident",
+        data: {severity: "high"}
+    }))
+    ```
+    """
+}
 fn (msg: BroadcastMessage): Map {
     send("agents:broadcast", msg)
 }
 
 collaborate
-meta { doc: "Send a collaboration request. Responses arrive at `req.reply-event`." }
+meta {
+    doc: """
+    Send a collaboration request. Responses arrive at `req.reply-event`.
+
+    **Example**
+
+    ```hot
+    ::bus ::ai::bus
+    session ::ai::session/Session({id: "slack:C123"})
+    sender ::ai::session/Identity({id: "u1", name: "Ada"})
+    ::bus/collaborate(::bus/CollaborationRequest({
+        session: session,
+        sender: sender,
+        from-agent: "triage",
+        question: "Has order 42 shipped?",
+        reply-event: "agent:triage:answers",
+        correlation-id: "c-1"
+    }))
+    ```
+    """
+}
 fn (req: CollaborationRequest): Map {
     send("agents:collaborate", req)
 }
 
 respond
-meta { doc: "Respond to a collaboration request." }
+meta {
+    doc: """
+    Respond to a collaboration request.
+
+    **Example**
+
+    ```hot
+    ::bus ::ai::bus
+    session ::ai::session/Session({id: "slack:C123"})
+    sender ::ai::session/Identity({id: "u1", name: "Ada"})
+    req ::bus/CollaborationRequest({
+        session: session,
+        sender: sender,
+        from-agent: "triage",
+        question: "Has order 42 shipped?",
+        reply-event: "agent:triage:answers",
+        correlation-id: "c-1"
+    })
+
+    // Sends the answer to req.reply-event with the same correlation-id
+    ::bus/respond(req, "Yes, it shipped on Monday.")
+    ```
+    """
+}
 fn (req: CollaborationRequest, answer: Str): Map {
     send(req.reply-event, {
         session: req.session,

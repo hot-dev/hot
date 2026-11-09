@@ -42,13 +42,13 @@ meta ["test"] fn () {
 test-input-copy-command-hot-url
 meta ["test"] fn () {
     command input-copy-command("hot://uploads/audio.wav", "/data/in.wav")
-    assert-eq("hotbox cp 'hot://uploads/audio.wav' /data/in.wav", command)
+    assert-eq("hotbox cp hot://uploads/audio.wav /data/in.wav", command)
 }
 
 test-input-copy-command-local-file
 meta ["test"] fn () {
     command input-copy-command("/tmp/audio.wav", "/data/in.wav")
-    assert-eq("cp '/tmp/audio.wav' /data/in.wav", command)
+    assert-eq("cp /tmp/audio.wav /data/in.wav", command)
 }
 
 // ============================================================================
@@ -201,4 +201,67 @@ meta ["test"] fn () {
     assert-eq("0.2", opts.temperature)
     assert-eq("custom:whisper", opts.image)
     assert-eq("large", opts.size)
+}
+
+// ----------------------------------------------------------------------------
+// Shell quoting
+// ----------------------------------------------------------------------------
+
+test-shell-quote-leaves-safe-values-alone
+meta ["test"]
+fn () {
+    assert-eq("hot://uploads/a-b_c.mp3", ::whisper/shell-quote("hot://uploads/a-b_c.mp3"))
+    assert-eq("frame-%03d.png", ::whisper/shell-quote("frame-%03d.png"))
+}
+
+test-shell-quote-wraps-metacharacters
+meta ["test"]
+fn () {
+    assert-eq("'a b'", ::whisper/shell-quote("a b"))
+    assert-eq("'x; rm -rf y'", ::whisper/shell-quote("x; rm -rf y"))
+    assert-eq("'$(id)'", ::whisper/shell-quote("$(id)"))
+    assert-eq("'a\nb'", ::whisper/shell-quote("a\nb"))
+    assert-eq("''", ::whisper/shell-quote(""))
+}
+
+test-shell-quote-escapes-single-quotes
+meta ["test"]
+fn () {
+    assert-eq("'it'\\''s'", ::whisper/shell-quote("it's"))
+    assert-eq("'x'\\''; id; '\\'''", ::whisper/shell-quote("x'; id; '"))
+}
+
+test-join-args-quotes-each-token
+meta ["test"]
+fn () {
+    assert-eq("--a b 'c d' 'e;f'", ::whisper/join-args(["--a", "b", "c d", "e;f"]))
+}
+
+test-file-ext-without-a-dot-falls-back
+meta ["test"]
+fn () {
+    assert-eq("bin", ::whisper/file-ext("hot://uploads/noext"))
+}
+
+test-file-ext-refuses-shell-text
+meta ["test"]
+fn () {
+    assert-eq("bin", ::whisper/file-ext("hot://uploads/a.mp3;curl evil"))
+    assert-eq("bin", ::whisper/file-ext("hot://uploads/a.$(id)"))
+    assert-eq("bin", ::whisper/file-ext("hot://uploads/a.x y"))
+}
+
+test-input-copy-command-quotes-hostile-input
+meta ["test"]
+fn () {
+    assert-eq("hotbox cp 'hot://a'\\''; id; '\\''.wav' /data/in.wav", ::whisper/input-copy-command("hot://a'; id; '.wav", "/data/in.wav"))
+    assert-eq("cp '/tmp/$(id).wav' /data/in.wav", ::whisper/input-copy-command("/tmp/$(id).wav", "/data/in.wav"))
+}
+
+test-transcribe-args-keep-the-prompt-as-one-quoted-token
+meta ["test"]
+fn () {
+    opts TranscribeOpts({initial-prompt: "Hello there; rm -rf x"})
+    s join-args(build-transcribe-args("/a.mp3", "/o", opts))
+    assert(ends-with(s, "--initial_prompt 'Hello there; rm -rf x'"), s)
 }

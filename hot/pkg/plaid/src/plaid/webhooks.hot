@@ -33,7 +33,17 @@ KEY_CACHE_TTL_SECONDS 86400
 
 verification-token
 meta {
-    doc: """The JWT from the `Plaid-Verification` header (looked up case-insensitively), or `""` when absent."""
+    doc: """
+    The JWT from the `Plaid-Verification` header (looked up
+    case-insensitively), or `""` when absent.
+
+    **Example**
+
+    ```hot
+    ::plaid::webhooks/verification-token({headers: {Plaid-Verification: " abc "}})  // "abc"
+    ::plaid::webhooks/verification-token({headers: {}})  // ""
+    ```
+    """
 }
 fn (request: Map): Str {
   headers or(get(request, "headers"), {})
@@ -49,7 +59,17 @@ fn (request: Map): Str {
 
 token-key-id
 meta {
-    doc: """Decode the token header (without verifying it), require `alg` ES256, and return its `kid`. Errs otherwise. Exposed for testing."""
+    doc: """
+    Decode the token header (without verifying it), require `alg` ES256, and
+    return its `kid`. Errs otherwise. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    // The token's header is {"alg":"ES256","kid":"k1"}
+    ::plaid::webhooks/token-key-id("eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.e30.c2ln")  // "k1"
+    ```
+    """
 }
 fn (token: Str): Str {
   decoded ::jwt/decode(token)
@@ -68,7 +88,20 @@ fn (token: Str): Str {
 
 body-hash-matches
 meta {
-    doc: """True when `claimed` (the `request_body_sha256` claim) equals the hex SHA-256 of the raw body, compared in constant time. Hash the body exactly as received: Plaid's JSON uses 2-space indentation, and any reformatting breaks the match. Exposed for testing."""
+    doc: """
+    True when `claimed` (the `request_body_sha256` claim) equals the hex
+    SHA-256 of the raw body, compared in constant time. Hash the body
+    exactly as received: Plaid's JSON uses 2-space indentation, and any
+    reformatting breaks the match. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    hash ::hot::hash/sha256("{}")
+    ::plaid::webhooks/body-hash-matches("{}", hash)  // true
+    ::plaid::webhooks/body-hash-matches("{ }", hash)  // false
+    ```
+    """
 }
 fn (raw-body: Str | Bytes, claimed: Any): Bool {
   cond {
@@ -80,7 +113,19 @@ fn (raw-body: Str | Bytes, claimed: Any): Bool {
 
 check-key
 meta {
-    doc: """Reject a JWK that isn't an ES256 / P-256 key, lacks `x`/`y`, or whose `expired_at` (Unix seconds) has passed. Returns true or an Err. Exposed for testing."""
+    doc: """
+    Reject a JWK that isn't an ES256 / P-256 key, lacks `x`/`y`, or whose
+    `expired_at` (Unix seconds) has passed. Returns true or an Err. Exposed
+    for testing.
+
+    **Example**
+
+    ```hot
+    jwk {alg: "ES256", crv: "P-256", x: "x", y: "y"}
+    ::plaid::webhooks/check-key(jwk, 1793000000)  // true
+    is-err(::plaid::webhooks/check-key({...jwk, expired_at: 1}, 1793000000))  // true
+    ```
+    """
 }
 fn (jwk: Map, now: Int): Bool {
   alg get(jwk, "alg")
@@ -97,7 +142,16 @@ fn (jwk: Map, now: Int): Bool {
 
 verify-options
 meta {
-    doc: """Options for `::jwt/verify-es256`: `max-age` 300 seconds (Plaid's five minutes) and no extra leeway, overridable. Exposed for testing."""
+    doc: """
+    Options for `::jwt/verify-es256`: `max-age` 300 seconds (Plaid's five
+    minutes) and no extra leeway, overridable. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::plaid::webhooks/verify-options({leeway: 5})  // {max-age: 300, leeway: 5}
+    ```
+    """
 }
 fn (options: Map): Map {
   {max-age: MAX_AGE_SECONDS, leeway: 0, ...options}
@@ -110,6 +164,15 @@ meta {
     `verify-token(token, x, y, options)` returns the claims or an Err,
     like `::jwt/verify-es256`. Exposed so the header, key, iat and body
     checks can be tested with a stub verifier.
+
+    **Example**
+
+    ```hot
+    token "eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.e30.c2ln"
+    stub (t, x, y, o) { {iat: 1793000000, request_body_sha256: ::hot::hash/sha256("{}")} }
+    request {headers: {plaid-verification: token}, body-raw: "{}"}
+    ::plaid::webhooks/check-webhook-with(request, {kid: "k1", x: "x", y: "y"}, {now: 1793000010}, stub).iat  // 1793000000
+    ```
     """
 }
 fn (request: Map, jwk: Map, options: Map, verify-token: Fn): Map {
@@ -154,6 +217,17 @@ meta {
     claims, or an Err saying what failed. Options: `max-age` (seconds,
     default 300), `leeway` (seconds of clock skew, default 0), `now`
     (Unix seconds, for tests).
+
+    **Example**
+
+    ```hot
+    check (request) {
+      kid ::plaid::webhooks/token-key-id(::plaid::webhooks/verification-token(request))
+      jwk ::plaid::webhooks/cached-verification-key(kid)
+      claims ::plaid::webhooks/check-webhook(request, jwk, {leeway: 5})
+      if-err(claims, (reason) { ::hot::http/HttpResponse({status: 401, body: reason}) })
+    }
+    ```
     """
 }
 fn
@@ -170,7 +244,17 @@ fn
 
 get-verification-key
 meta {
-    doc: """POST /webhook_verification_key/get: the JWK for a `kid`, uncached. Returns the `key` map."""
+    doc: """
+    POST /webhook_verification_key/get: the JWK for a `kid`, uncached.
+    Returns the `key` map.
+
+    **Example**
+
+    ```hot
+    key ::plaid::webhooks/get-verification-key("6c5516e1-92dc-479e-a8ff-5a51992e0001")
+    ::plaid::webhooks/check-key(key, ::hot::time/epoch-seconds())
+    ```
+    """
 }
 fn
 (key-id: Str): Map {
@@ -183,7 +267,17 @@ fn
 
 cached-verification-key
 meta {
-    doc: """The JWK for a `kid`, from a persistent store cache (refetched after a day). Falls back to an uncached fetch when stores aren't available."""
+    doc: """
+    The JWK for a `kid`, from a persistent store cache (refetched after a
+    day). Falls back to an uncached fetch when stores aren't available.
+
+    **Example**
+
+    ```hot
+    key ::plaid::webhooks/cached-verification-key("6c5516e1-92dc-479e-a8ff-5a51992e0001")
+    key.expired_at
+    ```
+    """
 }
 fn
 (key-id: Str): Map {
@@ -242,11 +336,13 @@ meta {
     fn (request) {
       if(not(::plaid::webhooks/verify-webhook(request)),
         ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
-        handle-event(request.body))
+        ::plaid::webhooks/event(request))
     }
 
     // With a tenant's credentials, fetching and caching the key
-    ::plaid::webhooks/verify-webhook(request, null, {}, {client-id: "tenant-id", secret: "tenant-secret"})
+    tenant-check (request) {
+      ::plaid::webhooks/verify-webhook(request, null, {}, {client-id: ::hot::ctx/get("tenant.plaid.client-id"), secret: ::hot::ctx/get("tenant.plaid.secret")})
+    }
     ```
     """
 }
@@ -306,7 +402,19 @@ fn
 
 event
 meta {
-    doc: """The routing fields of a webhook body: `{webhook_type, webhook_code, item_id, environment, error}` (null for absent ones). Call after verifying."""
+    doc: """
+    The routing fields of a webhook body: `{webhook_type, webhook_code,
+    item_id, environment, error}` (null for absent ones). Call after
+    verifying.
+
+    **Example**
+
+    ```hot
+    body {webhook_type: "TRANSACTIONS", webhook_code: "SYNC_UPDATES_AVAILABLE", item_id: "item_123"}
+    ::plaid::webhooks/event({body: body}).webhook_code  // "SYNC_UPDATES_AVAILABLE"
+    ::plaid::webhooks/event({body: body}).error  // null
+    ```
+    """
 }
 fn (request: Map): Map {
   body request.body

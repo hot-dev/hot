@@ -2,7 +2,7 @@
 
 hot.pkg.pandoc {
   name: "hot.dev/pandoc",
-  version: "1.1.0",
+  version: "1.1.1",
   hot-min-version: "1.2.4",
   description: "Pandoc document conversion via Hot Box containers. Convert between Markdown, HTML, PDF, DOCX, and many more formats.",
   author: "Hot Dev",

@@ -18,7 +18,19 @@ type {
 }
 
 text-reply
-meta { doc: "Build a plain text Reply." }
+meta {
+    doc: """
+    Build a plain text Reply.
+
+    **Example**
+
+    ```hot
+    reply ::ai::agent::render/text-reply("Done.")
+    reply.text  // "Done."
+    reply.format  // "plain"
+    ```
+    """
+}
 fn (text: Str): Reply {
     Reply({
         text: text,
@@ -30,7 +42,18 @@ fn (text: Str): Reply {
 
 truncate-text
 meta {
-    doc: "Truncate text to `max-chars`, appending `suffix` when truncation occurs."
+    doc: """
+    Truncate text to `max-chars`, appending `suffix` when truncation occurs.
+
+    **Example**
+
+    ```hot
+    ::render ::ai::agent::render
+
+    ::render/truncate-text("Hello world", 5, " [more]")  // "Hello [more]"
+    ::render/truncate-text("Hello", 5, " [more]")  // "Hello"
+    ```
+    """
 }
 fn (text: Str, max-chars: Int, suffix: Str): Str {
     cond {
@@ -40,7 +63,20 @@ fn (text: Str, max-chars: Int, suffix: Str): Str {
 }
 
 with-sources
-meta { doc: "Attach source records to a Reply." }
+meta {
+    doc: """
+    Attach source records to a Reply.
+
+    **Example**
+
+    ```hot
+    ::render ::ai::agent::render
+
+    reply ::render/with-sources(::render/text-reply("See the runbook."), [{title: "Runbook"}])
+    reply.sources  // [{title: "Runbook"}]
+    ```
+    """
+}
 fn (reply: Reply, sources: Vec): Reply {
     Reply({...untype(reply), sources: sources})
 }

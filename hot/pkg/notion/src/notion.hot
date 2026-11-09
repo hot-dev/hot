@@ -19,6 +19,9 @@ meta {
     ::pages ::notion::pages
     ::databases ::notion::databases
 
+    parent-page-id "59833787-2cf9-4fdf-8782-e53db20768a5"
+    db-id "d9824bdc-8445-4327-be8b-5b47500af6ce"
+
     page ::pages/create-page(parent-page-id, "Meeting notes 2026-07-09", [
       ::notion/paragraph("Attendees: Curt, Ada."),
       ::notion/heading(2, "Decisions"),
@@ -41,7 +44,16 @@ NOTION_VERSION "2022-06-28"
 
 rich-text
 meta {
-    doc: """Wrap plain text as a Notion rich-text array (the shape every text-bearing property and block wants)."""
+    doc: """
+    Wrap plain text as a Notion rich-text array (the shape every
+    text-bearing property and block wants).
+
+    **Example**
+
+    ```hot
+    ::notion/rich-text("Hello")  // [{type: "text", text: {content: "Hello"}}]
+    ```
+    """
 }
 fn (text: Str): Vec {
   [{type: "text", text: {content: text}}]
@@ -49,7 +61,15 @@ fn (text: Str): Vec {
 
 paragraph
 meta {
-    doc: """A paragraph block from plain text."""
+    doc: """
+    A paragraph block from plain text.
+
+    **Example**
+
+    ```hot
+    ::notion/paragraph("Hello").paragraph.rich_text[0].text.content  // "Hello"
+    ```
+    """
 }
 fn (text: Str): Map {
   {object: "block", type: "paragraph", paragraph: {rich_text: rich-text(text)}}
@@ -57,7 +77,15 @@ fn (text: Str): Map {
 
 heading
 meta {
-    doc: """A heading block: level 1, 2, or 3."""
+    doc: """
+    A heading block: level 1, 2, or 3.
+
+    **Example**
+
+    ```hot
+    ::notion/heading(2, "Decisions").type  // "heading_2"
+    ```
+    """
 }
 fn (level: Int, text: Str): Map {
   cond {
@@ -69,7 +97,15 @@ fn (level: Int, text: Str): Map {
 
 bullet
 meta {
-    doc: """A bulleted list item block from plain text."""
+    doc: """
+    A bulleted list item block from plain text.
+
+    **Example**
+
+    ```hot
+    ::notion/bullet("Ship it").type  // "bulleted_list_item"
+    ```
+    """
 }
 fn (text: Str): Map {
   {object: "block", type: "bulleted_list_item", bulleted_list_item: {rich_text: rich-text(text)}}
@@ -77,7 +113,16 @@ fn (text: Str): Map {
 
 to-do
 meta {
-    doc: """A to-do block from plain text (unchecked by default)."""
+    doc: """
+    A to-do block from plain text (unchecked by default).
+
+    **Example**
+
+    ```hot
+    ::notion/to-do("Ship it").to_do.checked  // false
+    ::notion/to-do("Shipped", true).to_do.checked  // true
+    ```
+    """
 }
 fn
 (text: Str): Map {
@@ -89,7 +134,17 @@ fn
 
 plain-text
 meta {
-    doc: """Extract the plain text from a rich-text array (the inverse of `rich-text`) — handy when reading pages and blocks."""
+    doc: """
+    Extract the plain text from a rich-text array (the inverse of
+    `rich-text`) — handy when reading pages and blocks.
+
+    **Example**
+
+    ```hot
+    ::notion/plain-text(::notion/rich-text("Hello"))  // "Hello"
+    ::notion/plain-text([{plain_text: "Hi "}, {plain_text: "there"}])  // "Hi there"
+    ```
+    """
 }
 fn (rich: Vec): Str {
   join(map(rich, (r) { or(get(r, "plain_text"), get(or(get(r, "text"), {}), "content", "")) }), "")

@@ -63,7 +63,17 @@ meta {
 
 is-text-type
 meta {
-    doc: "Return true when `mime` is in `text-extractable-types`. Case-insensitive, ignores any `;charset=…` suffix."
+    doc: """
+    Return true when `mime` is in `text-extractable-types`.
+    Case-insensitive, ignores any `;charset=…` suffix.
+
+    **Example**
+
+    ```hot
+    ::ai::agent::attachments/is-text-type("Text/Markdown; charset=utf-8")  // true
+    ::ai::agent::attachments/is-text-type("image/png")  // false
+    ```
+    """
 }
 fn (mime: Str?): Bool {
     cond {
@@ -111,6 +121,15 @@ meta {
     (`content-text`) and snake_case (`content_text`) keys, mirroring
     the JSON conventions Hot Chat and most webhooks use. Returns
     `null` when the input is not a map.
+
+    **Example**
+
+    ```hot
+    att ::ai::agent::attachments/from-map({filename: "notes.md", mime: "text/markdown", content_text: "# Notes"})
+    att.name  // "notes.md"
+    att.type  // "text/markdown"
+    att.content-text  // "# Notes"
+    ```
     """
 }
 fn (raw: Any): Attachment? {
@@ -132,6 +151,7 @@ fn (raw: Any): Attachment? {
 
 get-text-content
 meta {
+    no-doc: true,
     doc: "Internal: dig out an explicit text payload from raw, supporting kebab- and snake-case."
 }
 fn (raw: Map): Str? {
@@ -145,6 +165,14 @@ meta {
     when it's already a list) into a `Vec<Attachment>`. Drops
     malformed entries silently so a single bad attachment never sinks
     a request.
+
+    **Example**
+
+    ```hot
+    atts ::ai::agent::attachments/from-body({attachments: [{name: "a.txt", text: "hi"}, "not a map"]})
+    length(atts)  // 1
+    atts[0].name  // "a.txt"
+    ```
     """
 }
 fn (body: Any): Vec<Attachment> {
@@ -165,6 +193,16 @@ meta {
     Return decoded text for an attachment, or `null` when nothing is
     extractable. Caps decoded length at `max-bytes` to bound prompt
     cost.
+
+    **Example**
+
+    ```hot
+    ::att ::ai::agent::attachments
+
+    att ::att/Attachment({name: "a.txt", type: "text/plain", size: 5, content-base64: "aGVsbG8="})
+    ::att/decoded-text(att, 1024)  // "hello"
+    ::att/decoded-text(att, 2)  // "he\n…[truncated]"
+    ```
     """
 }
 fn (att: Attachment, max-bytes: Int): Str? {
@@ -185,6 +223,7 @@ fn (att: Attachment, max-bytes: Int): Str? {
 
 truncate-text
 meta {
+    no-doc: true,
     doc: "Internal: hard-truncate `text` to `max-bytes` characters. Appends an ellipsis marker when the cap was hit."
 }
 fn (text: Str, max-bytes: Int): Str {
@@ -199,6 +238,17 @@ meta {
     doc: """
     Return decoded text for a single attachment. Convenience wrapper
     over `decoded-text` using `DEFAULT_MAX_BYTES_PER_FILE`.
+
+    **Example**
+
+    ```hot
+    ::att ::ai::agent::attachments
+
+    text-att ::att/Attachment({name: "a.txt", type: "text/plain", size: 5, content-text: "hello"})
+    image-att ::att/Attachment({name: "a.png", type: "image/png", size: 5, content-base64: "aGVsbG8="})
+    ::att/extract-text(text-att)  // "hello"
+    ::att/extract-text(image-att)  // null
+    ```
     """
 }
 fn
@@ -211,6 +261,16 @@ meta {
     Markdown bullet list, one entry per attachment, suitable for
     memory storage and lightweight prompt context. Returns the empty
     string when there are no attachments.
+
+    **Example**
+
+    ```hot
+    ::att ::ai::agent::attachments
+
+    att ::att/Attachment({name: "a.txt", type: "text/plain", size: 5})
+    ::att/summarize([att])  // "\nAttachments:\n- a.txt (text/plain, 5B)"
+    ::att/summarize([])  // ""
+    ```
     """
 }
 fn (atts: Vec<Attachment>): Str {
@@ -247,6 +307,16 @@ meta {
     `total-cap` bounds the combined byte budget across all
     attachments; once exhausted, remaining attachments are listed
     by name only.
+
+    **Example**
+
+    ```hot
+    ::att ::ai::agent::attachments
+
+    att ::att/Attachment({name: "a.txt", type: "text/plain", size: 2, content-text: "hi"})
+    ::att/weave-into-prompt("Review this.", [att])  // "Review this.\n\n<attachment name=\"a.txt\" type=\"text/plain\">\nhi\n</attachment>"
+    ::att/weave-into-prompt("Review this.", [att], 0)  // "Review this.\n\n\nReferenced (not inlined): a.txt"
+    ```
     """
 }
 fn
@@ -271,6 +341,7 @@ fn
 
 weave-folder
 meta {
+    no-doc: true,
     doc: "Internal: builds the reducer used by weave-into-prompt to honor a total byte cap."
 }
 fn (total-cap: Int): Fn {
@@ -312,7 +383,10 @@ fn (total-cap: Int): Fn {
 }
 
 escape-attr
-meta { doc: "Internal: escape a value for use in pseudo-XML attachment attributes." }
+meta {
+    no-doc: true,
+    doc: "Internal: escape a value for use in pseudo-XML attachment attributes."
+}
 fn (value: Str?): Str {
     or(value, "")
         |> replace("&", "&amp;")

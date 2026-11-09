@@ -10,7 +10,9 @@ meta {
 // default for bookings and keeps responses small.
 DEFAULT_PAGE_SIZE 100
 
-v fn (): Str { ::cal-com/VERSION_BOOKINGS }
+v
+meta {no-doc: true}
+fn (): Str { ::cal-com/VERSION_BOOKINGS }
 
 create-booking
 meta {
@@ -53,6 +55,12 @@ meta {
     `beforeUpdatedAt` (ISO 8601), `sortStart`/`sortEnd`/`sortCreated`
     ("asc"/"desc"), `take` and `skip`. Nulls are dropped and Vecs are
     comma-joined. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/build-list-query({take: 50, attendeeName: null})  // "?take=50"
+    ```
     """
 }
 fn (options: Map): Str {
@@ -96,6 +104,13 @@ meta {
     empty page, or `pagination.hasNextPage` false. Each request asks for
     at most the remaining count. Exposed for testing; `list-all-bookings`
     uses it.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/collect-pages((options) { {data: [1, 2], pagination: {hasNextPage: false}} }, {}, 0, 10, [])  // [1, 2]
+    ::cal-com::bookings/collect-pages((options) { {data: [1, 2], pagination: {hasNextPage: true}} }, {}, 0, 1, [])  // [1]
+    ```
     """
 }
 fn (fetch: Fn, options: Map, skip: Int, limit: Int, acc: Vec): Vec {
@@ -144,7 +159,16 @@ fn
 
 get-booking
 meta {
-    doc: """GET /bookings/{uid} - One booking by uid."""
+    doc: """
+    GET /bookings/{uid} - One booking by uid.
+
+    **Example**
+
+    ```hot
+    booking ::cal-com::bookings/get-booking(::cal-com::usersID)
+    booking.status
+    ```
+    """
 }
 fn
 (uid: Str): Any {
@@ -156,7 +180,17 @@ fn
 
 confirm-booking
 meta {
-    doc: """POST /bookings/{uid}/confirm - Confirm a booking that is waiting for approval (event types that require confirmation). Must be called by the booking's owner."""
+    doc: """
+    POST /bookings/{uid}/confirm - Confirm a booking that is waiting for
+    approval (event types that require confirmation). Must be called by the
+    booking's owner.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/confirm-booking(::cal-com::usersID)
+    ```
+    """
 }
 fn
 (uid: Str): Any {
@@ -168,7 +202,16 @@ fn
 
 decline-booking
 meta {
-    doc: """POST /bookings/{uid}/decline - Decline a booking that is waiting for approval, optionally with a `reason` the attendee sees."""
+    doc: """
+    POST /bookings/{uid}/decline - Decline a booking that is waiting for
+    approval, optionally with a `reason` the attendee sees.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/decline-booking(::cal-com::usersID, "Outside our service area.")
+    ```
+    """
 }
 fn
 (uid: Str): Any {
@@ -191,6 +234,15 @@ meta {
     takes a reason; the Map form takes the API's body: `cancellationReason`,
     `cancelSubsequentBookings` (recurring), or `seatUid` (cancel one seat
     of a seated booking).
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/cancel-booking(::cal-com::usersID, "The customer asked to cancel.")
+
+    // One seat of a seated booking
+    ::cal-com::bookings/cancel-booking(::cal-com::usersID, {seatUid: "seat_1"})
+    ```
     """
 }
 fn
@@ -211,6 +263,13 @@ meta {
     (UTC ISO 8601). `options`: `reschedulingReason`, `rescheduledBy`
     (email), `seatUid` (seated bookings). Returns the new booking; the old
     uid is cancelled.
+
+    **Example**
+
+    ```hot
+    moved ::cal-com::bookings/reschedule-booking(::cal-com::usersID, "2026-07-11T15:00:00Z", {reschedulingReason: "Conflict on the original day."})
+    moved.uid
+    ```
     """
 }
 fn
@@ -226,7 +285,18 @@ fn
 
 build-absent-body
 meta {
-    doc: """Build the mark-absent body: `host` (Bool, optional) and `attendees` as `[{email, absent}]` from a list of absent attendee emails. Unset parts are omitted. Exposed for testing."""
+    doc: """
+    Build the mark-absent body: `host` (Bool, optional) and `attendees` as
+    `[{email, absent}]` from a list of absent attendee emails. Unset parts
+    are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::cal-com::bookings/build-absent-body(true, ["ada@example.com"])  // {host: true, attendees: [{email: "ada@example.com", absent: true}]}
+    ::cal-com::bookings/build-absent-body(null, [])  // {}
+    ```
+    """
 }
 fn (host: Bool?, absent-emails: Vec): Map {
   attendees map(absent-emails, (email) { {email: email, absent: true} })
@@ -248,8 +318,8 @@ meta {
     **Example**
 
     ```hot
-    ::cal-com::bookings/mark-absent(booking.uid, ["ada@example.com"])
-    ::cal-com::bookings/mark-absent(booking.uid, {host: true})
+    ::cal-com::bookings/mark-absent("bk_abc123", ["ada@example.com"])
+    ::cal-com::bookings/mark-absent("bk_abc123", {host: true})
     ```
     """
 }

@@ -30,7 +30,9 @@ BILL_TYPES ["hr", "s", "hjres", "sjres", "hconres", "sconres", "hres", "sres"]
 LIST_KEYS ["bills", "actions", "summaries", "textVersions"]
 
 // Errors are returned, not consumed: consuming an Err would halt the run.
-with-key fn (opts: Map, f: Fn): Any {
+with-key
+meta {no-doc: true}
+fn (opts: Map, f: Fn): Any {
   cfg ::api/resolve(opts)
   cond {
     is-err(cfg) => { cfg }
@@ -41,7 +43,9 @@ with-key fn (opts: Map, f: Fn): Any {
   }
 }
 
-congress-get fn (path: Str, params: Map, opts: Map): Any {
+congress-get
+meta {no-doc: true}
+fn (path: Str, params: Map, opts: Map): Any {
   with-key(opts, (cfg, key) {
     ::api/get-json(`${cfg.base-url}${path}${::api/query-string({format: "json", ...params})}`, {X-Api-Key: key})
   })
@@ -49,7 +53,17 @@ congress-get fn (path: Str, params: Map, opts: Map): Any {
 
 page-params
 meta {
-    doc: """`limit` (capped at 250) and `offset` from `opts`, omitted when unset (pure)."""
+    doc: """
+    `limit` (capped at 250) and `offset` from `opts` (pure). Unset values
+    stay null and drop out of the query string.
+
+    **Example**
+
+    ```hot
+    ::congress-gov/page-params({limit: 500, offset: 250})  // {limit: 250, offset: 250}
+    ::congress-gov/page-params({})  // {limit: null, offset: null}
+    ```
+    """
 }
 fn (opts: Map): Map {
   limit get(opts, "limit")
@@ -58,7 +72,18 @@ fn (opts: Map): Map {
 
 update-params
 meta {
-    doc: """`fromDateTime` and `toDateTime` from `opts.from-date-time` and `opts.to-date-time`, in `YYYY-MM-DDT00:00:00Z` form, omitted when unset (pure). They filter on the record's update date."""
+    doc: """
+    `fromDateTime` and `toDateTime` from `opts.from-date-time` and
+    `opts.to-date-time`, in `YYYY-MM-DDT00:00:00Z` form (pure). Unset values
+    stay null and drop out of the query string. They filter on the record's
+    update date.
+
+    **Example**
+
+    ```hot
+    ::congress-gov/update-params({from-date-time: "2026-11-01T00:00:00Z"}).fromDateTime  // "2026-11-01T00:00:00Z"
+    ```
+    """
 }
 fn (opts: Map): Map {
   {fromDateTime: get(opts, "from-date-time"), toDateTime: get(opts, "to-date-time")}
@@ -70,7 +95,17 @@ fn (opts: Map): Map {
 
 bill-type
 meta {
-    doc: """Normalize a bill type to the path form: `"HR"` → `"hr"`. An Err for anything but hr, s, hjres, sjres, hconres, sconres, hres or sres."""
+    doc: """
+    Normalize a bill type to the path form: `"HR"` → `"hr"`. An Err for
+    anything but hr, s, hjres, sjres, hconres, sconres, hres or sres.
+
+    **Example**
+
+    ```hot
+    ::congress-gov/bill-type("HR")  // "hr"
+    is-err(::congress-gov/bill-type("bogus"))  // true
+    ```
+    """
 }
 fn (value: Any): Str {
   t lowercase(trim(Str(value)))
@@ -80,7 +115,9 @@ fn (value: Any): Str {
   }
 }
 
-whole-number fn (label: Str, value: Any): Str {
+whole-number
+meta {no-doc: true}
+fn (label: Str, value: Any): Str {
   s trim(Str(value))
   cond {
     ::re/is-match(s, "^[1-9]\\d*$") => { s }
@@ -118,7 +155,9 @@ fn (congress: Any, kind: Any, number: Any): Str {
 // Bills
 // ---------------------------------------------------------------------------
 
-list-bills fn (congress: Any, kind: Any, opts: Map): Map {
+list-bills
+meta {no-doc: true}
+fn (congress: Any, kind: Any, opts: Map): Map {
   path bill-path(congress, kind, null)
   cond {
     is-err(path) => { path }
@@ -196,7 +235,9 @@ fn
   }
 }
 
-bill-sub fn (congress: Any, kind: Any, number: Any, sub: Str, params: Map, opts: Map): Map {
+bill-sub
+meta {no-doc: true}
+fn (congress: Any, kind: Any, number: Any, sub: Str, params: Map, opts: Map): Map {
   path bill-path(congress, kind, number)
   cond {
     is-err(path) => { path }
@@ -211,6 +252,13 @@ meta {
     request}`. Each action has `actionDate`, `text`, `type`, `actionCode`
     and `sourceSystem`. `opts`: `limit`, `offset`, `from-date-time`,
     `to-date-time`, plus `api-key`.
+
+    **Example**
+
+    ```hot
+    page ::congress-gov/actions(117, "hr", 3076, {limit: 50})
+    map(page.actions, %.text)
+    ```
     """
 }
 fn
@@ -253,6 +301,13 @@ meta {
     request}`. Each summary has `actionDate`, `actionDesc`, `updateDate`,
     `versionCode` and `text`, which is HTML. `opts`: `limit`, `offset`,
     plus `api-key`.
+
+    **Example**
+
+    ```hot
+    page ::congress-gov/summaries(117, "hr", 3076)
+    last(page.summaries).text
+    ```
     """
 }
 fn
@@ -269,7 +324,17 @@ fn
 
 page-items
 meta {
-    doc: """The rows of a list response, whichever endpoint it came from; `[]` when there are none (pure)."""
+    doc: """
+    The rows of a list response, whichever endpoint it came from; `[]` when
+    there are none (pure).
+
+    **Example**
+
+    ```hot
+    ::congress-gov/page-items({bills: [{number: "3076"}], pagination: {count: 1}})  // [{number: "3076"}]
+    ::congress-gov/page-items({})  // []
+    ```
+    """
 }
 fn (page: Any): Vec {
   p or(page, {})
@@ -284,6 +349,13 @@ meta {
     `pagination.next`, or null on the last page (pure). The row count
     can't be used for this: the text endpoint has returned more rows than
     `limit` asked for.
+
+    **Example**
+
+    ```hot
+    ::congress-gov/next-offset({pagination: {next: "https://api.congress.gov/v3/bill?offset=250&limit=250"}})  // 250
+    ::congress-gov/next-offset({pagination: {}})  // null
+    ```
     """
 }
 fn (page: Any): Int? {
@@ -297,7 +369,9 @@ fn (page: Any): Int? {
   }
 }
 
-collect-pages fn (fetch: Fn, offset: Int, limit: Int, acc: Vec): Any {
+collect-pages
+meta {no-doc: true}
+fn (fetch: Fn, offset: Int, limit: Int, acc: Vec): Any {
   page fetch(offset)
   cond {
     is-err(page) => { page }

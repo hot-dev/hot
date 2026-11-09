@@ -25,7 +25,9 @@ type {
     message: Str
 }
 
-body-snippet fn (body: Any): Str {
+body-snippet
+meta {no-doc: true}
+fn (body: Any): Str {
   text match body {
     Null => { "" }
     Str => { body }
@@ -38,7 +40,20 @@ body-snippet fn (body: Any): Str {
 
 http-error
 meta {
-    doc: """Build an `HttpError` from a non-2xx response. Exposed for testing; every request uses it."""
+    doc: """
+    Build an `HttpError` from a non-2xx response. Exposed for testing; every
+    request uses it.
+
+    **Example**
+
+    ```hot
+    url "https://example.test/x"
+    response ::hot::http/HttpResponse({status: 404, headers: {}, body: "not here"})
+    e ::ofac::http/http-error(response, url)
+    e.status  // 404
+    e.message  // "HTTP 404 from https://example.test/x: not here"
+    ```
+    """
 }
 fn (response: HttpResponse, url: Str): HttpError {
   snippet body-snippet(response.body)
@@ -53,7 +68,18 @@ fn (response: HttpResponse, url: Str): HttpError {
 
 body-text
 meta {
-    doc: """The response body as text: the decoded string when Hot kept it as one, otherwise the body bytes decoded as UTF-8 (a CSV served as `application/octet-stream`, or a body that happened to parse as JSON)."""
+    doc: """
+    The response body as text: the decoded string when Hot kept it as one,
+    otherwise the body bytes decoded as UTF-8 (a CSV served as
+    `application/octet-stream`, or a body that happened to parse as JSON).
+
+    **Example**
+
+    ```hot
+    ::ofac::http/body-text({body: "a,b"})  // "a,b"
+    ::ofac::http/body-text({body: [1, 2], body-bytes: Bytes("[1,2]")})  // "[1,2]"
+    ```
+    """
 }
 fn (response: Any): Str {
   body get(response, "body")
@@ -69,7 +95,26 @@ fn (response: Any): Str {
 
 request
 meta {
-    doc: """One request with the package User-Agent. Returns the `HttpResponse` on 2xx, or an Err carrying `HttpError` (transport failures pass through as their own Err)."""
+    doc: """
+    One request with the package User-Agent. Returns the `HttpResponse` on
+    2xx, or an Err carrying `HttpError` (transport failures pass through as
+    their own Err).
+
+    **Example**
+
+    ```hot
+    ::http ::ofac::http
+
+    // Lists the published files. An Err carries HttpError on a non-2xx status.
+    response ::http/request(
+      "POST",
+      "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/SdnList",
+      {Content-Type: "application/json", Accept: "application/json"},
+      "{}"
+    )
+    response.body
+    ```
+    """
 }
 fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
   response ::hot::http/request(HttpRequest({
@@ -87,7 +132,18 @@ fn (method: Str, url: Str, headers: Map, body: Any): HttpResponse {
 
 get-text
 meta {
-    doc: """GET a file as text: the body as a Str, or an Err."""
+    doc: """
+    GET a file as text: the body as a Str, or an Err.
+
+    **Example**
+
+    ```hot
+    csv ::ofac::http/get-text(::ofac/export-url("SDN.CSV"))
+
+    // Parse it with the other files, or inspect the text
+    length(csv)
+    ```
+    """
 }
 fn (url: Str): Str {
   response request("GET", url, {}, "")

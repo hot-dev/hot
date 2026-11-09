@@ -13,7 +13,19 @@ RequestOptions ::stripe::api/RequestOptions
 
 get-payment-method
 meta {
-    doc: """GET /v1/payment_methods/{payment_method} - Retrieve a PaymentMethod by ID."""
+    doc: """
+    GET /v1/payment_methods/{payment_method} - Retrieve a PaymentMethod by
+    ID.
+
+    **Example**
+
+    ```hot
+    ::pm ::stripe::payment-methods
+
+    method ::pm/get-payment-method("pm_123")
+    method.card.last4
+    ```
+    """
 }
 fn
 (payment-method: Str): Map {
@@ -47,7 +59,20 @@ fn
 
 detach-payment-method
 meta {
-    doc: """POST /v1/payment_methods/{payment_method}/detach - Detach a PaymentMethod from its customer. The PaymentMethod cannot be used for payments afterwards."""
+    doc: """
+    POST /v1/payment_methods/{payment_method}/detach - Detach a
+    PaymentMethod from its customer. The PaymentMethod cannot be used for
+    payments afterwards.
+
+    **Example**
+
+    ```hot
+    ::pm ::stripe::payment-methods
+
+    detached ::pm/detach-payment-method("pm_123")
+    detached.customer
+    ```
+    """
 }
 fn
 (payment-method: Str): Map {
@@ -67,7 +92,22 @@ UpdatePaymentMethodRequest type {
 
 update-payment-method
 meta {
-    doc: """POST /v1/payment_methods/{payment_method} - Update a PaymentMethod attached to a customer. `card` accepts `exp_month`/`exp_year` updates; `allow_redisplay` is "always", "limited", or "unspecified"."""
+    doc: """
+    POST /v1/payment_methods/{payment_method} - Update a PaymentMethod
+    attached to a customer. `card` accepts `exp_month`/`exp_year` updates;
+    `allow_redisplay` is "always", "limited", or "unspecified".
+
+    **Example**
+
+    ```hot
+    ::pm ::stripe::payment-methods
+
+    ::pm/update-payment-method("pm_123", ::pm/UpdatePaymentMethodRequest({
+      card: {exp_month: 12, exp_year: 2030},
+      billing_details: {name: "Alice Smith"}
+    }))
+    ```
+    """
 }
 fn
 (payment-method: Str, request: UpdatePaymentMethodRequest): Map {
@@ -88,7 +128,19 @@ ListPaymentMethodsRequest type {
 
 list-payment-methods
 meta {
-    doc: """GET /v1/customers/{customer}/payment_methods - List a customer's PaymentMethods. Optionally filter by `type` (e.g. "card")."""
+    doc: """
+    GET /v1/customers/{customer}/payment_methods - List a customer's
+    PaymentMethods. Optionally filter by `type` (e.g. "card").
+
+    **Example**
+
+    ```hot
+    ::pm ::stripe::payment-methods
+
+    page ::pm/list-payment-methods("cus_123", ::pm/ListPaymentMethodsRequest({type: "card"}))
+    last-fours map(page.data, %.card.last4)
+    ```
+    """
 }
 fn
 (customer: Str): Map {

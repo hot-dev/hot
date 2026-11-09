@@ -6,7 +6,7 @@ bindings.
 
 ```hot
 hot.project.my-app.deps {
-    "hot.dev/sftp": "0.1.1"
+    "hot.dev/sftp": "0.1.2"
 }
 ```
 

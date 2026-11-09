@@ -53,7 +53,19 @@ GetGuildPreviewRequest type {
 
 get-guild-preview
 meta {
-    doc: """GET /guilds/{guild_id}/preview - Public preview of a guild the bot is in or a discoverable guild: name, icon, emojis, features and counts."""
+    doc: """
+    GET /guilds/{guild_id}/preview - Public preview of a guild the bot is in
+    or a discoverable guild: name, icon, emojis, features and counts.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    preview ::guilds/get-guild-preview(::guilds/GetGuildPreviewRequest({guild_id: "1000000000000000000"}))
+    preview.approximate_member_count
+    ```
+    """
 }
 fn
 (request: GetGuildPreviewRequest): Map {
@@ -163,7 +175,23 @@ ListGuildMembersRequest type {
 
 list-guild-members
 meta {
-    doc: """GET /guilds/{guild_id}/members - Up to `limit` (1-1000, default 1) members ordered by user id; page with `after`, or use `list-all-guild-members`. Needs the privileged GUILD_MEMBERS intent."""
+    doc: """
+    GET /guilds/{guild_id}/members - Up to `limit` (1-1000, default 1)
+    members ordered by user id; page with `after`, or use
+    `list-all-guild-members`. Needs the privileged GUILD_MEMBERS intent.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    members ::guilds/list-guild-members(::guilds/ListGuildMembersRequest({
+      guild_id: "1000000000000000000",
+      limit: 100
+    }))
+    map(members, %.user.username)
+    ```
+    """
 }
 fn
 (request: ListGuildMembersRequest): Vec<Map> {
@@ -313,7 +341,23 @@ ModifyCurrentMemberRequest type {
 
 modify-current-member
 meta {
-    doc: """PATCH /guilds/{guild_id}/members/@me - Change the bot's own per-guild `nick`, `avatar`, `banner` (data URIs) or `bio`. Only fields you set are sent; list fields in `clear` to reset them."""
+    doc: """
+    PATCH /guilds/{guild_id}/members/@me - Change the bot's own per-guild
+    `nick`, `avatar`, `banner` (data URIs) or `bio`. Only fields you set are
+    sent; list fields in `clear` to reset them.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/modify-current-member(::guilds/ModifyCurrentMemberRequest({
+      guild_id: "1000000000000000000",
+      nick: "Deploy Bot",
+      reason: "Clearer name"
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyCurrentMemberRequest): Map {
@@ -342,7 +386,23 @@ RemoveGuildMemberRoleRequest type {
 
 add-guild-member-role
 meta {
-    doc: """PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Give a member a role. Needs MANAGE_ROLES."""
+    doc: """
+    PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Give a member
+    a role. Needs MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/add-guild-member-role(::guilds/AddGuildMemberRoleRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      role_id: "1900000000000000000",
+      reason: "Joined on-call"
+    }))
+    ```
+    """
 }
 fn
 (request: AddGuildMemberRoleRequest): Bool {
@@ -354,7 +414,23 @@ fn
 
 remove-guild-member-role
 meta {
-    doc: """DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Take a role from a member. Needs MANAGE_ROLES."""
+    doc: """
+    DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id} - Take a
+    role from a member. Needs MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/remove-guild-member-role(::guilds/RemoveGuildMemberRoleRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      role_id: "1900000000000000000",
+      reason: "Left on-call"
+    }))
+    ```
+    """
 }
 fn
 (request: RemoveGuildMemberRoleRequest): Bool {
@@ -372,7 +448,22 @@ RemoveGuildMemberRequest type {
 
 remove-guild-member
 meta {
-    doc: """DELETE /guilds/{guild_id}/members/{user_id} - Kick a member. Needs KICK_MEMBERS."""
+    doc: """
+    DELETE /guilds/{guild_id}/members/{user_id} - Kick a member. Needs
+    KICK_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/remove-guild-member(::guilds/RemoveGuildMemberRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      reason: "Repeated spam"
+    }))
+    ```
+    """
 }
 fn
 (request: RemoveGuildMemberRequest): Bool {
@@ -392,7 +483,19 @@ GetGuildRolesRequest type {
 
 get-guild-roles
 meta {
-    doc: """GET /guilds/{guild_id}/roles - Every role in a guild. The @everyone role's id is the guild id."""
+    doc: """
+    GET /guilds/{guild_id}/roles - Every role in a guild. The @everyone
+    role's id is the guild id.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    roles ::guilds/get-guild-roles(::guilds/GetGuildRolesRequest({guild_id: "1000000000000000000"}), {token: ::hot::ctx/get("tenant-b.discord.bot.token")})
+    map(roles, %.name)
+    ```
+    """
 }
 fn
 (request: GetGuildRolesRequest): Vec<Map> {
@@ -409,7 +512,21 @@ GetGuildRoleRequest type {
 
 get-guild-role
 meta {
-    doc: """GET /guilds/{guild_id}/roles/{role_id} - One role."""
+    doc: """
+    GET /guilds/{guild_id}/roles/{role_id} - One role.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    role ::guilds/get-guild-role(::guilds/GetGuildRoleRequest({
+      guild_id: "1000000000000000000",
+      role_id: "1900000000000000000"
+    }))
+    role.permissions
+    ```
+    """
 }
 fn
 (request: GetGuildRoleRequest): Map {
@@ -481,7 +598,25 @@ ModifyGuildRoleRequest type {
 
 modify-guild-role
 meta {
-    doc: """PATCH /guilds/{guild_id}/roles/{role_id} - Change a role. Only fields you set are sent; `clear: ["icon"]` removes the role icon. Needs MANAGE_ROLES."""
+    doc: """
+    PATCH /guilds/{guild_id}/roles/{role_id} - Change a role. Only fields
+    you set are sent; `clear: ["icon"]` removes the role icon. Needs
+    MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/modify-guild-role(::guilds/ModifyGuildRoleRequest({
+      guild_id: "1000000000000000000",
+      role_id: "1900000000000000000",
+      name: "Incident lead",
+      mentionable: true,
+      clear: ["icon"]
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyGuildRoleRequest): Map {
@@ -502,7 +637,23 @@ ModifyGuildRolePositionsRequest type {
 
 modify-guild-role-positions
 meta {
-    doc: """PATCH /guilds/{guild_id}/roles - Reorder roles. `positions` is `[{id, position}]`. Returns every role. Needs MANAGE_ROLES."""
+    doc: """
+    PATCH /guilds/{guild_id}/roles - Reorder roles. `positions` is `[{id,
+    position}]`. Returns every role. Needs MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    roles ::guilds/modify-guild-role-positions(::guilds/ModifyGuildRolePositionsRequest({
+      guild_id: "1000000000000000000",
+      positions: [{id: "1900000000000000000", position: 3}],
+      reason: "Above the bot roles"
+    }))
+    map(roles, %.name)
+    ```
+    """
 }
 fn
 (request: ModifyGuildRolePositionsRequest): Vec<Map> {
@@ -523,7 +674,22 @@ DeleteGuildRoleRequest type {
 
 delete-guild-role
 meta {
-    doc: """DELETE /guilds/{guild_id}/roles/{role_id} - Delete a role. Needs MANAGE_ROLES."""
+    doc: """
+    DELETE /guilds/{guild_id}/roles/{role_id} - Delete a role. Needs
+    MANAGE_ROLES.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/delete-guild-role(::guilds/DeleteGuildRoleRequest({
+      guild_id: "1000000000000000000",
+      role_id: "1900000000000000000",
+      reason: "Unused"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteGuildRoleRequest): Bool {
@@ -546,7 +712,23 @@ GetGuildBansRequest type {
 
 get-guild-bans
 meta {
-    doc: """GET /guilds/{guild_id}/bans - Bans (`{user, reason}`), up to `limit` (1-1000). Page with `before`/`after` user ids, or use `get-all-guild-bans`. Needs BAN_MEMBERS."""
+    doc: """
+    GET /guilds/{guild_id}/bans - Bans (`{user, reason}`), up to `limit`
+    (1-1000). Page with `before`/`after` user ids, or use
+    `get-all-guild-bans`. Needs BAN_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    bans ::guilds/get-guild-bans(::guilds/GetGuildBansRequest({
+      guild_id: "1000000000000000000",
+      limit: 100
+    }))
+    map(bans, %.reason)
+    ```
+    """
 }
 fn
 (request: GetGuildBansRequest): Vec<Map> {
@@ -560,7 +742,17 @@ fn
 
 get-all-guild-bans
 meta {
-    doc: """Every ban in a guild (up to `max-items`, default 10000), paging 1000 at a time with `after`."""
+    doc: """
+    Every ban in a guild (up to `max-items`, default 10000), paging 1000 at
+    a time with `after`.
+
+    **Example**
+
+    ```hot
+    bans ::discord::guilds/get-all-guild-bans("1000000000000000000", 5000)
+    map(bans, %.user.id)
+    ```
+    """
 }
 fn
 (guild-id: Str): Vec<Map> {
@@ -585,7 +777,22 @@ GetGuildBanRequest type {
 
 get-guild-ban
 meta {
-    doc: """GET /guilds/{guild_id}/bans/{user_id} - One ban; a 404 `Err` means the user is not banned."""
+    doc: """
+    GET /guilds/{guild_id}/bans/{user_id} - One ban; a 404 `Err` means the
+    user is not banned.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ban ::guilds/get-guild-ban(::guilds/GetGuildBanRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000"
+    }))
+    if-err(ban, "not banned")
+    ```
+    """
 }
 fn
 (request: GetGuildBanRequest): Map {
@@ -642,7 +849,22 @@ RemoveGuildBanRequest type {
 
 remove-guild-ban
 meta {
-    doc: """DELETE /guilds/{guild_id}/bans/{user_id} - Unban a user. Needs BAN_MEMBERS."""
+    doc: """
+    DELETE /guilds/{guild_id}/bans/{user_id} - Unban a user. Needs
+    BAN_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/remove-guild-ban(::guilds/RemoveGuildBanRequest({
+      guild_id: "1000000000000000000",
+      user_id: "1300000000000000000",
+      reason: "Appeal accepted"
+    }))
+    ```
+    """
 }
 fn
 (request: RemoveGuildBanRequest): Bool {
@@ -661,7 +883,24 @@ BulkGuildBanRequest type {
 
 bulk-guild-ban
 meta {
-    doc: """POST /guilds/{guild_id}/bulk-ban - Ban up to 200 users at once. Returns `{banned_users, failed_users}`. Needs BAN_MEMBERS and MANAGE_GUILD."""
+    doc: """
+    POST /guilds/{guild_id}/bulk-ban - Ban up to 200 users at once. Returns
+    `{banned_users, failed_users}`. Needs BAN_MEMBERS and MANAGE_GUILD.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    result ::guilds/bulk-guild-ban(::guilds/BulkGuildBanRequest({
+      guild_id: "1000000000000000000",
+      user_ids: ["1300000000000000000", "1300000000000000001"],
+      delete_message_seconds: 3600,
+      reason: "Raid accounts"
+    }))
+    result.failed_users
+    ```
+    """
 }
 fn
 (request: BulkGuildBanRequest): Map {
@@ -684,7 +923,18 @@ ListGuildEmojisRequest type {
 
 list-guild-emojis
 meta {
-    doc: """GET /guilds/{guild_id}/emojis - The guild's custom emoji."""
+    doc: """
+    GET /guilds/{guild_id}/emojis - The guild's custom emoji.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    emojis ::guilds/list-guild-emojis(::guilds/ListGuildEmojisRequest({guild_id: "1000000000000000000"}))
+    map(emojis, %.name)
+    ```
+    """
 }
 fn
 (request: ListGuildEmojisRequest): Vec<Map> {
@@ -701,7 +951,21 @@ GetGuildEmojiRequest type {
 
 get-guild-emoji
 meta {
-    doc: """GET /guilds/{guild_id}/emojis/{emoji_id} - One custom emoji."""
+    doc: """
+    GET /guilds/{guild_id}/emojis/{emoji_id} - One custom emoji.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    emoji ::guilds/get-guild-emoji(::guilds/GetGuildEmojiRequest({
+      guild_id: "1000000000000000000",
+      emoji_id: "2300000000000000000"
+    }))
+    emoji.name
+    ```
+    """
 }
 fn
 (request: GetGuildEmojiRequest): Map {
@@ -721,7 +985,24 @@ CreateGuildEmojiRequest type {
 
 create-guild-emoji
 meta {
-    doc: """POST /guilds/{guild_id}/emojis - Create a custom emoji. `image` is a data URI (max 256 KiB); `roles` limits who may use it. Needs CREATE_GUILD_EXPRESSIONS."""
+    doc: """
+    POST /guilds/{guild_id}/emojis - Create a custom emoji. `image` is a
+    data URI (max 256 KiB); `roles` limits who may use it. Needs
+    CREATE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    emoji ::guilds/create-guild-emoji(::guilds/CreateGuildEmojiRequest({
+      guild_id: "1000000000000000000",
+      name: "shipit",
+      image: `data:image/png;base64,${::hot::base64/encode(::hot::file/read-file-bytes("shipit.png"))}`
+    }))
+    emoji.id
+    ```
+    """
 }
 fn
 (request: CreateGuildEmojiRequest): Map {
@@ -745,7 +1026,24 @@ ModifyGuildEmojiRequest type {
 
 modify-guild-emoji
 meta {
-    doc: """PATCH /guilds/{guild_id}/emojis/{emoji_id} - Rename an emoji or change its `roles`; `clear: ["roles"]` opens it to everyone. Needs MANAGE_GUILD_EXPRESSIONS."""
+    doc: """
+    PATCH /guilds/{guild_id}/emojis/{emoji_id} - Rename an emoji or change
+    its `roles`; `clear: ["roles"]` opens it to everyone. Needs
+    MANAGE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/modify-guild-emoji(::guilds/ModifyGuildEmojiRequest({
+      guild_id: "1000000000000000000",
+      emoji_id: "2300000000000000000",
+      name: "ship_it",
+      clear: ["roles"]
+    }))
+    ```
+    """
 }
 fn
 (request: ModifyGuildEmojiRequest): Map {
@@ -766,7 +1064,22 @@ DeleteGuildEmojiRequest type {
 
 delete-guild-emoji
 meta {
-    doc: """DELETE /guilds/{guild_id}/emojis/{emoji_id} - Delete a custom emoji. Needs MANAGE_GUILD_EXPRESSIONS."""
+    doc: """
+    DELETE /guilds/{guild_id}/emojis/{emoji_id} - Delete a custom emoji.
+    Needs MANAGE_GUILD_EXPRESSIONS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/delete-guild-emoji(::guilds/DeleteGuildEmojiRequest({
+      guild_id: "1000000000000000000",
+      emoji_id: "2300000000000000000",
+      reason: "Retired"
+    }))
+    ```
+    """
 }
 fn
 (request: DeleteGuildEmojiRequest): Bool {
@@ -788,7 +1101,23 @@ GetGuildPruneCountRequest type {
 
 get-guild-prune-count
 meta {
-    doc: """GET /guilds/{guild_id}/prune - How many members a prune of inactive (`days`, 1-30, default 7) members would remove. Needs MANAGE_GUILD and KICK_MEMBERS."""
+    doc: """
+    GET /guilds/{guild_id}/prune - How many members a prune of inactive
+    (`days`, 1-30, default 7) members would remove. Needs MANAGE_GUILD and
+    KICK_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    estimate ::guilds/get-guild-prune-count(::guilds/GetGuildPruneCountRequest({
+      guild_id: "1000000000000000000",
+      days: 30
+    }))
+    estimate.pruned
+    ```
+    """
 }
 fn
 (request: GetGuildPruneCountRequest): Map {
@@ -809,7 +1138,24 @@ BeginGuildPruneRequest type {
 
 begin-guild-prune
 meta {
-    doc: """POST /guilds/{guild_id}/prune - Kick members inactive for `days`. Set `compute_prune_count: false` on large guilds. Returns `{pruned}`. Needs MANAGE_GUILD and KICK_MEMBERS."""
+    doc: """
+    POST /guilds/{guild_id}/prune - Kick members inactive for `days`. Set
+    `compute_prune_count: false` on large guilds. Returns `{pruned}`. Needs
+    MANAGE_GUILD and KICK_MEMBERS.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    ::guilds/begin-guild-prune(::guilds/BeginGuildPruneRequest({
+      guild_id: "1000000000000000000",
+      days: 30,
+      compute_prune_count: false,
+      reason: "Quarterly cleanup"
+    }))
+    ```
+    """
 }
 fn
 (request: BeginGuildPruneRequest): Map {
@@ -879,7 +1225,19 @@ GetGuildInvitesRequest type {
 
 get-guild-invites
 meta {
-    doc: """GET /guilds/{guild_id}/invites - Every invite in a guild, with metadata. Needs MANAGE_GUILD or VIEW_AUDIT_LOG."""
+    doc: """
+    GET /guilds/{guild_id}/invites - Every invite in a guild, with metadata.
+    Needs MANAGE_GUILD or VIEW_AUDIT_LOG.
+
+    **Example**
+
+    ```hot
+    ::guilds ::discord::guilds
+
+    invites ::guilds/get-guild-invites(::guilds/GetGuildInvitesRequest({guild_id: "1000000000000000000"}))
+    map(invites, %.code)
+    ```
+    """
 }
 fn
 (request: GetGuildInvitesRequest): Vec<Map> {

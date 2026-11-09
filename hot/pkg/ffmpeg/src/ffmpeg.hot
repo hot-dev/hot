@@ -60,7 +60,7 @@ meta {
     - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
     - `quality` — Quality 1–31, lower is better (default: `2`)
     - `output` — Output `hot://` URL (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments
+    - `extra-args` — Additional ffmpeg arguments, one token per element
     - `image` — Custom Docker image with ffmpeg (default: `jrottenberg/ffmpeg:7-alpine`)
     - `size` — Box size override (default: `"small"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
@@ -94,7 +94,7 @@ meta {
     - `preset` — Encoding preset, e.g. `"fast"`, `"medium"`, `"slow"`
     - `crf` — Constant Rate Factor 0–51 (default: 23 for x264)
     - `output` — Output `hot://` URL (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments
+    - `extra-args` — Additional ffmpeg arguments, one token per element
     - `image` — Custom Docker image with ffmpeg
     - `size` — Box size override (default: `"medium"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
@@ -127,7 +127,7 @@ meta {
     - `sample-rate` — Sample rate in Hz, e.g. `44100`, `48000`
     - `channels` — Number of channels: `1` for mono, `2` for stereo
     - `output` — Output `hot://` URL (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments
+    - `extra-args` — Additional ffmpeg arguments, one token per element
     - `image` — Custom Docker image with ffmpeg
     - `size` — Box size override (default: `"small"`)
     - `timeout` — Execution timeout in seconds (default: `300`)
@@ -159,7 +159,7 @@ meta {
     - `format` — Output format: `"jpg"`, `"png"`, `"webp"` (default: `"jpg"`)
     - `quality` — Quality 1-31, lower is better (default: `2`)
     - `output-prefix` — Output `hot://` directory/prefix (default: auto-generated)
-    - `extra-args` — Additional ffmpeg arguments appended before the output pattern
+    - `extra-args` — Additional ffmpeg arguments, one token per element appended before the output pattern
     - `keyframes-only` — When true, pass `-skip_frame nokey` before input so only decodable keyframes are extracted (default: `false`)
     - `image` — Custom Docker image with ffmpeg
     - `size` — Box size override (default: `"medium"`)
@@ -188,7 +188,16 @@ type {
 
 build-thumbnail-args
 meta {
-    doc: "Build ffmpeg CLI arguments for thumbnail extraction."
+    doc: """
+    Build ffmpeg CLI arguments for thumbnail extraction.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/build-thumbnail-args("in.mp4", "out.jpg", "00:00:05", 320, null, 2, null)
+    // ["-y", "-i", "in.mp4", "-ss", "00:00:05", "-vframes", "1", "-q:v", "2", "-vf", "scale=320:-1", "out.jpg"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, time: Str, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?): Vec<Str> {
     base ["-y", "-i", input-path, "-ss", time, "-vframes", "1", "-q:v", Str(quality)]
@@ -214,7 +223,16 @@ fn (input-path: Str, output-path: Str, time: Str, width: Int?, height: Int?, qua
 
 build-transcode-args
 meta {
-    doc: "Build ffmpeg CLI arguments for video transcoding."
+    doc: """
+    Build ffmpeg CLI arguments for video transcoding.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/build-transcode-args("in.mov", "out.mp4", {format: "mp4", codec: "libx264", crf: 23, resolution: "1280x720"})
+    // ["-y", "-i", "in.mov", "-c:v", "libx264", "-crf", "23", "-vf", "scale=1280:720", "out.mp4"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, opts: TranscodeOpts): Vec<Str> {
     base ["-y", "-i", input-path]
@@ -245,7 +263,16 @@ fn (input-path: Str, output-path: Str, opts: TranscodeOpts): Vec<Str> {
 
 build-extract-audio-args
 meta {
-    doc: "Build ffmpeg CLI arguments for audio extraction."
+    doc: """
+    Build ffmpeg CLI arguments for audio extraction.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/build-extract-audio-args("in.mp4", "out.wav", "128k", 16000, 1, null)
+    // ["-y", "-i", "in.mp4", "-vn", "-b:a", "128k", "-ar", "16000", "-ac", "1", "out.wav"]
+    ```
+    """
 }
 fn (input-path: Str, output-path: Str, bitrate: Str, sample-rate: Int?, channels: Int?, extra-args: Vec<Str>?): Vec<Str> {
     base ["-y", "-i", input-path, "-vn", "-b:a", bitrate]
@@ -258,7 +285,16 @@ fn (input-path: Str, output-path: Str, bitrate: Str, sample-rate: Int?, channels
 
 build-extract-frames-args
 meta {
-    doc: "Build ffmpeg CLI arguments for multi-frame image extraction."
+    doc: """
+    Build ffmpeg CLI arguments for multi-frame image extraction.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/build-extract-frames-args("in.webm", "frame-%03d.jpg", "1/2", "5", null, 320, null, 2, null, false)
+    // ["-y", "-i", "in.webm", "-vf", "trim=start=5,fps=1/2,scale=320:-1", "-q:v", "2", "frame-%03d.jpg"]
+    ```
+    """
 }
 fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?, width: Int?, height: Int?, quality: Int, extra-args: Vec<Str>?, keyframes-only: Bool?): Vec<Str> {
     input-args cond {
@@ -308,7 +344,16 @@ fn (input-path: Str, output-pattern: Str, fps: Str, start: Str?, duration: Int?,
 
 build-probe-args
 meta {
-    doc: "Build ffprobe CLI arguments for media probing."
+    doc: """
+    Build ffprobe CLI arguments for media probing.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/build-probe-args("in.mp4")
+    // ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "in.mp4"]
+    ```
+    """
 }
 fn (input-path: Str): Vec<Str> {
     ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", input-path]
@@ -320,7 +365,16 @@ fn (input-path: Str): Vec<Str> {
 
 parse-probe-output
 meta {
-    doc: "Parse ffprobe JSON output into a structured Map."
+    doc: """
+    Parse ffprobe JSON output into a structured Map.
+
+    **Example**
+
+    ```hot
+    ::ffmpeg/parse-probe-output("{\"format\": {\"duration\": \"12.5\"}}").format.duration  // "12.5"
+    ::ffmpeg/parse-probe-output(null)  // {}
+    ```
+    """
 }
 fn (stdout: Str?): Map {
     text or(stdout, "") |> trim()
@@ -331,7 +385,9 @@ fn (stdout: Str?): Map {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -341,16 +397,35 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
+    cond {
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
+    }
 }
 
-run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
+}
+
+run-ffmpeg-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     info ::box/start({
         image: img,
@@ -362,7 +437,9 @@ run-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     ::task/await(info.id)
 }
 
-start-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+start-ffmpeg-box
+meta {no-doc: true}
+fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     ::box/start({
         image: img,
@@ -373,7 +450,9 @@ start-ffmpeg-box fn (script: Str, box-size: Str, image: Str?, timeout: Int): Map
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -426,7 +505,7 @@ fn (input: Str): Map {
     in-path `/data/input.${ext}`
 
     probe-args join-args(build-probe-args(in-path))
-    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffprobe ${probe-args}`
 
     result run-ffmpeg-box(script, "small", null, 300)
     checked check-box-result(result, "ffprobe")
@@ -437,7 +516,7 @@ fn (input: Str): Map {
     in-path `/data/input.${ext}`
 
     probe-args join-args(build-probe-args(in-path))
-    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffprobe ${probe-args}`
 
     result run-ffmpeg-box(script, "small", image, 300)
     checked check-box-result(result, "ffprobe")
@@ -487,7 +566,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     ffmpeg-args join-args(build-thumbnail-args(in-path, out-path, time, opts.width, opts.height, quality, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -556,7 +635,7 @@ fn (input: Str): Map {
         opts.extra-args,
         opts.keyframes-only,
     ))
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
+    script `mkdir -p ${out-dir} && hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${shell-quote(format)}; do name=$(basename "$f"); hotbox cp "$f" ${shell-quote(concat(output-prefix, "/"))}"$name"; done && ls -1 ${out-dir}/*.${shell-quote(format)} | wc -l`
 
     box-size or(opts.size, "medium")
     result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -620,7 +699,7 @@ fn (input: Str, opts: TranscodeOpts): Map {
     out-path `/data/output.${opts.format}`
 
     ffmpeg-args join-args(build-transcode-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "medium")
     result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -674,7 +753,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     ffmpeg-args join-args(build-extract-audio-args(in-path, out-path, bitrate, opts.sample-rate, opts.channels, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     result run-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -719,7 +798,21 @@ fn (): Map {
 
 start-probe
 meta {
-    doc: "Start a probe task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start a probe task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/start-probe("hot://uploads/video.mp4")
+
+    // Do other work, then collect the result
+    result ::hot::task/await(info.id)
+    media ::ffmpeg/parse-probe-output(result.stdout)
+    media.format.duration
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str): Map {
@@ -727,14 +820,27 @@ fn (input: Str): Map {
     in-path `/data/input.${ext}`
 
     probe-args join-args(build-probe-args(in-path))
-    script `hotbox cp '${input}' ${in-path} && ffprobe ${probe-args}`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffprobe ${probe-args}`
 
     start-ffmpeg-box(script, "small", null, 300)
 }
 
 start-thumbnail
 meta {
-    doc: "Start a thumbnail extraction task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start a thumbnail extraction task without awaiting. Returns TaskInfo for
+    use with ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/start-thumbnail("hot://uploads/video.mp4", {time: "00:00:10", width: 320})
+
+    result ::hot::task/await(info.id)
+    result.status
+    info.data.output  // The hot:// URL the thumbnail is written to
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str): Map {
@@ -756,7 +862,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     ffmpeg-args join-args(build-thumbnail-args(in-path, out-path, time, opts.width, opts.height, quality, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -765,7 +871,23 @@ fn (input: Str): Map {
 
 start-extract-frames
 meta {
-    doc: "Start multi-frame image extraction without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start multi-frame image extraction without awaiting. Returns TaskInfo
+    for use with ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/start-extract-frames("hot://uploads/window.webm", {
+        fps: "1",
+        output-prefix: "hot://media/window-1/frames"
+    })
+
+    // stdout is the frame count. Files are frame-001.jpg, frame-002.jpg and so on under the prefix.
+    result ::hot::task/await(info.id)
+    Int(trim(result.stdout))
+    ```
+    """,
     box: {min-size: "medium"}
 }
 fn (input: Str): Map {
@@ -808,7 +930,7 @@ fn (input: Str): Map {
         opts.extra-args,
         opts.keyframes-only,
     ))
-    script `mkdir -p ${out-dir} && hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${format}; do name=$(basename "$f"); hotbox cp "$f" '${output-prefix}/'$name; done && ls -1 ${out-dir}/*.${format} | wc -l`
+    script `mkdir -p ${out-dir} && hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && for f in ${out-dir}/*.${shell-quote(format)}; do name=$(basename "$f"); hotbox cp "$f" ${shell-quote(concat(output-prefix, "/"))}"$name"; done && ls -1 ${out-dir}/*.${shell-quote(format)} | wc -l`
 
     box-size or(opts.size, "medium")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -817,7 +939,20 @@ fn (input: Str): Map {
 
 start-transcode
 meta {
-    doc: "Start a transcode task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start a transcode task without awaiting. Returns TaskInfo for use with
+    ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/start-transcode("hot://uploads/video.mov", {format: "mp4", codec: "libx264"})
+
+    result ::hot::task/await(info.id)
+    result.status
+    info.data.output  // The hot:// URL the video is written to
+    ```
+    """,
     box: {min-size: "medium"}
 }
 fn (input: Str, opts: TranscodeOpts): Map {
@@ -829,7 +964,7 @@ fn (input: Str, opts: TranscodeOpts): Map {
     out-path `/data/output.${opts.format}`
 
     ffmpeg-args join-args(build-transcode-args(in-path, out-path, opts))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "medium")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
@@ -838,7 +973,20 @@ fn (input: Str, opts: TranscodeOpts): Map {
 
 start-extract-audio
 meta {
-    doc: "Start an audio extraction task without awaiting. Returns TaskInfo for use with ::hot::task/await.",
+    doc: """
+    Start an audio extraction task without awaiting. Returns TaskInfo for
+    use with ::hot::task/await.
+
+    **Example**
+
+    ```hot
+    info ::ffmpeg/start-extract-audio("hot://uploads/video.mp4", {format: "wav", channels: 1})
+
+    result ::hot::task/await(info.id)
+    result.status
+    info.data.output  // The hot:// URL the audio is written to
+    ```
+    """,
     box: {min-size: "small"}
 }
 fn (input: Str): Map {
@@ -859,7 +1007,7 @@ fn (input: Str): Map {
     out-path `/data/output.${format}`
 
     ffmpeg-args join-args(build-extract-audio-args(in-path, out-path, bitrate, opts.sample-rate, opts.channels, opts.extra-args))
-    script `hotbox cp '${input}' ${in-path} && ffmpeg ${ffmpeg-args} && hotbox cp ${out-path} '${hot-output}'`
+    script `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)} && ffmpeg ${ffmpeg-args} && hotbox cp ${shell-quote(out-path)} ${shell-quote(hot-output)}`
 
     box-size or(opts.size, "small")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))

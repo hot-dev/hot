@@ -23,7 +23,17 @@ DEFAULT_TOLERANCE_SECONDS 300
 
 parse-signature-header
 meta {
-    doc: """Parse a Stripe-Signature header into `{t: Str, v1: Vec<Str>}`. Multiple `v1` entries can be present after a signing secret roll; unknown schemes (e.g. `v0`) are ignored."""
+    doc: """
+    Parse a Stripe-Signature header into `{t: Str, v1: Vec<Str>}`. Multiple
+    `v1` entries can be present after a signing secret roll; unknown schemes
+    (e.g. `v0`) are ignored.
+
+    **Example**
+
+    ```hot
+    ::stripe::webhooks/parse-signature-header("t=1492774577,v1=5257a869,v0=6ffbb59b")  // {t: "1492774577", v1: ["5257a869"]}
+    ```
+    """
 }
 fn (header: Str): Map {
   parts split(header, ",")
@@ -39,7 +49,9 @@ fn (header: Str): Map {
 }
 
 // The bytes Stripe signed: `${t}.` followed by the verbatim body.
-signed-payload fn (timestamp: Str, raw-body: Str | Bytes): Str | Bytes {
+signed-payload
+meta {no-doc: true}
+fn (timestamp: Str, raw-body: Str | Bytes): Str | Bytes {
   if(is-bytes(raw-body), concat(Bytes(`${timestamp}.`), raw-body), `${timestamp}.${raw-body}`)
 }
 
@@ -203,7 +215,20 @@ fn
 
 get-webhook-endpoint
 meta {
-    doc: """GET /v1/webhook_endpoints/{webhook_endpoint} - Retrieve a webhook endpoint by ID."""
+    doc: """
+    GET /v1/webhook_endpoints/{webhook_endpoint} - Retrieve a webhook
+    endpoint by ID.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::stripe::webhooks
+
+    endpoint ::webhooks/get-webhook-endpoint("we_123")
+    endpoint.status
+    endpoint.enabled_events
+    ```
+    """
 }
 fn
 (webhook-endpoint: Str): Map {
@@ -224,7 +249,19 @@ UpdateWebhookEndpointRequest type {
 
 update-webhook-endpoint
 meta {
-    doc: """POST /v1/webhook_endpoints/{webhook_endpoint} - Update a webhook endpoint. Set `disabled: true` to pause deliveries."""
+    doc: """
+    POST /v1/webhook_endpoints/{webhook_endpoint} - Update a webhook
+    endpoint. Set `disabled: true` to pause deliveries.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::stripe::webhooks
+
+    // Pause deliveries
+    ::webhooks/update-webhook-endpoint("we_123", ::webhooks/UpdateWebhookEndpointRequest({disabled: true}))
+    ```
+    """
 }
 fn
 (webhook-endpoint: Str, request: UpdateWebhookEndpointRequest): Map {
@@ -236,7 +273,19 @@ fn
 
 delete-webhook-endpoint
 meta {
-    doc: """DELETE /v1/webhook_endpoints/{webhook_endpoint} - Delete a webhook endpoint."""
+    doc: """
+    DELETE /v1/webhook_endpoints/{webhook_endpoint} - Delete a webhook
+    endpoint.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::stripe::webhooks
+
+    result ::webhooks/delete-webhook-endpoint("we_123")
+    result.deleted
+    ```
+    """
 }
 fn
 (webhook-endpoint: Str): Map {
@@ -248,7 +297,19 @@ fn
 
 list-webhook-endpoints
 meta {
-    doc: """GET /v1/webhook_endpoints - List your webhook endpoints. Optional `params`: `limit`, `starting_after`, `ending_before`."""
+    doc: """
+    GET /v1/webhook_endpoints - List your webhook endpoints. Optional
+    `params`: `limit`, `starting_after`, `ending_before`.
+
+    **Example**
+
+    ```hot
+    ::webhooks ::stripe::webhooks
+
+    page ::webhooks/list-webhook-endpoints({limit: 20})
+    urls map(page.data, %.url)
+    ```
+    """
 }
 fn
 (): Map {

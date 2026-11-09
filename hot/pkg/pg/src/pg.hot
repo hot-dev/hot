@@ -22,7 +22,7 @@ meta {
 
     ```hot
     conn ::pg/connect({host: "localhost", port: 5432, user: "postgres",
-                       password: "secret", database: "app"})
+                       password: ::hot::ctx/get("pg.password"), database: "app"})
 
     users ::pg/query(conn, "SELECT id, email FROM users WHERE active = $1", [true])
 
@@ -111,7 +111,7 @@ meta {
 
     ```hot
     conn ::pg/connect({user: "postgres", database: "postgres"})
-    if-err(conn, (e) { ... fall back ... })
+    if-err(conn, (e) { println(`Cannot connect: ${e}`) })
     ```
 
     See `PgOptions` for the accepted fields.
@@ -147,7 +147,9 @@ fn (options: Map): PgConnection {
 
 // Try (or require) a TLS upgrade before the startup message. Returns `true`
 // when the socket is ready (secured or plaintext as allowed), else an Err.
-negotiate-ssl fn (socket, ssl-mode: Str, host: Str, tls-opts: Map): Any {
+negotiate-ssl
+meta {no-doc: true}
+fn (socket, ssl-mode: Str, host: Str, tls-opts: Map): Any {
     cond {
         eq(ssl-mode, "disable") => { true }
         => {
@@ -173,7 +175,9 @@ negotiate-ssl fn (socket, ssl-mode: Str, host: Str, tls-opts: Map): Any {
 
 // Read backend messages until ReadyForQuery, building the connection.
 // Returns the PgConnection map, or an Err from an ErrorResponse.
-startup-loop fn (socket, user: Str, password: Str, conn: Map): Map {
+startup-loop
+meta {no-doc: true}
+fn (socket, user: Str, password: Str, conn: Map): Map {
     msg ::wire/read-message(socket)
     cond {
         eq(msg.type, "R") => {
@@ -213,7 +217,9 @@ startup-loop fn (socket, user: Str, password: Str, conn: Map): Map {
 // skipped. Returns `{rows, command}` on success. On an ErrorResponse the
 // stream is drained to ReadyForQuery, then an Err with the PostgreSQL
 // error fields is returned.
-collect-results fn (socket, fields: Vec, rows: Vec, command: Str, error): Map {
+collect-results
+meta {no-doc: true}
+fn (socket, fields: Vec, rows: Vec, command: Str, error): Map {
     msg ::wire/read-message(socket)
     cond {
         eq(msg.type, "T") => {
@@ -243,7 +249,9 @@ collect-results fn (socket, fields: Vec, rows: Vec, command: Str, error): Map {
     }
 }
 
-run-collect fn (socket): Map {
+run-collect
+meta {no-doc: true}
+fn (socket): Map {
     collect-results(socket, [], [], "", null)
 }
 
@@ -251,7 +259,9 @@ run-collect fn (socket): Map {
 // Extended-protocol parameter binding (text format)
 // ---------------------------------------------------------------------------
 
-encode-param fn (value: Any): Bytes {
+encode-param
+meta {no-doc: true}
+fn (value: Any): Bytes {
     cond {
         is-null(value) => { ::wire/int32(-1) }
         is-bytes(value) => {
@@ -271,7 +281,9 @@ encode-param fn (value: Any): Bytes {
 }
 
 // Build Parse + Bind + Describe + Execute + Sync for a parameterized query.
-build-extended fn (sql: Str, params: Vec): Bytes {
+build-extended
+meta {no-doc: true}
+fn (sql: Str, params: Vec): Bytes {
     parse ::wire/frame("P", concat(::wire/cstring(""), ::wire/cstring(sql), ::wire/int16(0)))
     param-bytes reduce(params, (acc, p) { concat(acc, encode-param(p)) }, Bytes([]))
     bind ::wire/frame("B", concat(
@@ -305,6 +317,7 @@ meta {
     **Example**
 
     ```hot
+    conn ::pg/connect({user: "postgres", database: "postgres"})
     ::pg/query(conn, "SELECT id, email FROM users")
     ::pg/query(conn, "SELECT * FROM users WHERE id = $1", [42])
     ```
@@ -331,6 +344,7 @@ meta {
     **Example**
 
     ```hot
+    conn ::pg/connect({user: "postgres", database: "postgres"})
     user ::pg/query-one(conn, "SELECT * FROM users WHERE id = $1", [42])
     ```
     """
@@ -353,8 +367,9 @@ meta {
     **Example**
 
     ```hot
-    ::pg/execute(conn, "UPDATE users SET active = $1 WHERE id = $2", [false, 42])
-    // {command: "UPDATE 1", rows-affected: 1}
+    conn ::pg/connect({user: "postgres", database: "postgres"})
+    out ::pg/execute(conn, "UPDATE users SET active = $1 WHERE id = $2", [false, 42])
+    out.rows-affected
     ```
     """
 }
@@ -376,7 +391,9 @@ fn
 
 // CommandComplete tags look like "INSERT 0 5", "UPDATE 3", "DELETE 2",
 // "SELECT 7". The row count is the final whitespace-delimited token.
-parse-affected fn (command: Str): Int {
+parse-affected
+meta {no-doc: true}
+fn (command: Str): Int {
     parts split(command, " ")
     last-part last(parts)
     if(::hot::regex/is-match(last-part, "^[0-9]+$"), Int(last-part), 0)
@@ -391,6 +408,7 @@ meta {
     **Example**
 
     ```hot
+    conn ::pg/connect({user: "postgres", database: "postgres"})
     ::pg/close(conn)
     ```
     """

@@ -20,7 +20,19 @@ ListTemplatesRequest type {
 
 list-templates-url
 meta {
-    doc: """The list URL with only the set filters, each URL-encoded; `fields` is comma-joined. Exposed for testing."""
+    doc: """
+    The list URL with only the set filters, each URL-encoded; `fields` is
+    comma-joined. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    req ::templates/ListTemplatesRequest({waba_id: "102938475610", limit: 20})
+    ::templates/list-templates-url(req, {api-version: "v25.0"})  // "https://graph.facebook.com/v25.0/102938475610/message_templates?limit=20"
+    ```
+    """
 }
 fn
 (request: ListTemplatesRequest): Str {
@@ -75,7 +87,19 @@ fn
 
 next-cursor
 meta {
-    doc: """The `after` cursor for the next page of a Graph API list response, or null on the last page (Graph omits `paging.next` there)."""
+    doc: """
+    The `after` cursor for the next page of a Graph API list response, or
+    null on the last page (Graph omits `paging.next` there).
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    ::templates/next-cursor({paging: {next: "https://graph.facebook.com/next", cursors: {after: "CURSOR"}}})  // "CURSOR"
+    ::templates/next-cursor({paging: {cursors: {after: "CURSOR"}}})  // null
+    ```
+    """
 }
 fn (response: Map): Str? {
   paging get(response, "paging")
@@ -95,7 +119,18 @@ GetTemplateRequest type {
 
 get-template
 meta {
-    doc: """GET /{template-id} - Get one message template by id."""
+    doc: """
+    GET /{template-id} - Get one message template by id.
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    template ::templates/get-template(::templates/GetTemplateRequest({template_id: "1234567890"}))
+    template.status
+    ```
+    """
 }
 fn
 (request: GetTemplateRequest): Map {
@@ -164,7 +199,21 @@ EditTemplateRequest type {
 
 edit-template
 meta {
-    doc: """POST /{template-id} - Edit an existing message template. Only approved or rejected templates can be edited. Editing resubmits for approval."""
+    doc: """
+    POST /{template-id} - Edit an existing message template. Only approved
+    or rejected templates can be edited. Editing resubmits for approval.
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    ::templates/edit-template(::templates/EditTemplateRequest({
+      template_id: "1234567890",
+      components: [{type: "BODY", text: "Your order {{1}} is on its way."}]
+    }))
+    ```
+    """
 }
 fn
 (request: EditTemplateRequest): Map {
@@ -186,7 +235,19 @@ DeleteTemplateRequest type {
 
 delete-templates-url
 meta {
-    doc: """The delete URL: `name` always, `hsm_id` when set, both URL-encoded. Exposed for testing."""
+    doc: """
+    The delete URL: `name` always, `hsm_id` when set, both URL-encoded.
+    Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    req ::templates/DeleteTemplateRequest({waba_id: "102938475610", name: "order_update", hsm_id: "99"})
+    ::templates/delete-templates-url(req, {api-version: "v25.0"})  // "https://graph.facebook.com/v25.0/102938475610/message_templates?name=order_update&hsm_id=99"
+    ```
+    """
 }
 fn
 (request: DeleteTemplateRequest): Str {
@@ -199,7 +260,24 @@ fn
 
 delete-template
 meta {
-    doc: """DELETE /{waba-id}/message_templates - Delete a message template by name. If `hsm_id` (the template id) is provided, only that template is deleted; otherwise every template with that name (all languages) is deleted. Returns `{success: true}`."""
+    doc: """
+    DELETE /{waba-id}/message_templates - Delete a message template by name.
+    If `hsm_id` (the template id) is provided, only that template is
+    deleted; otherwise every template with that name (all languages) is
+    deleted. Returns `{success: true}`.
+
+    **Example**
+
+    ```hot
+    ::templates ::whatsapp::templates
+
+    result ::templates/delete-template(::templates/DeleteTemplateRequest({
+      waba_id: "102938475610",
+      name: "order_update"
+    }))
+    result.success
+    ```
+    """
 }
 fn
 (request: DeleteTemplateRequest): Map {

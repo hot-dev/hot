@@ -7,7 +7,7 @@ Telegram Bot API bindings for Hot: send text, photos, documents, audio, video, v
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/telegram": "1.1.1"
+"hot.dev/telegram": "1.1.2"
 ```
 
 ## Setup

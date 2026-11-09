@@ -1,5 +1,6 @@
 ::mysql::wire ns
 meta {
+    no-doc: true,
     doc: """
     MySQL client/server protocol framing: packets, length-encoded
     values, and cursor-style payload readers. Internal to the `mysql`

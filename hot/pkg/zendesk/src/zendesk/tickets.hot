@@ -23,6 +23,14 @@ meta {
     `::zendesk::api/next-after`), `sort` (`id`, `updated_at`,
     `created_at`, `status`, ...; prefix `-` for descending),
     `external_id`. Use `list-all-tickets` to collect several pages.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::tickets/list-tickets({page_size: 50, sort: "-updated_at"})
+    next-page ::zendesk::tickets/list-tickets({page_size: 50, after: ::zendesk::api/next-after(page)})
+    map(page.tickets, %.subject)
+    ```
     """
 }
 fn
@@ -38,7 +46,17 @@ fn
 
 list-all-tickets
 meta {
-    doc: """Collect up to `limit` tickets across cursor pages. Returns a Vec. For syncing every ticket that changed, prefer `export-tickets`."""
+    doc: """
+    Collect up to `limit` tickets across cursor pages. Returns a Vec. For
+    syncing every ticket that changed, prefer `export-tickets`.
+
+    **Example**
+
+    ```hot
+    tickets ::zendesk::tickets/list-all-tickets(500, {sort: "-updated_at"})
+    length(tickets)
+    ```
+    """
 }
 fn
 (limit: Int): Vec {
@@ -53,7 +71,16 @@ fn
 
 get-ticket
 meta {
-    doc: """GET /tickets/{id} - One ticket: `{ticket}`."""
+    doc: """
+    GET /tickets/{id} - One ticket: `{ticket}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/get-ticket(35436)
+    out.ticket.status
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -65,7 +92,17 @@ fn
 
 show-many-tickets
 meta {
-    doc: """GET /tickets/show_many?ids= - Up to 100 tickets by id in one call: `{tickets}`."""
+    doc: """
+    GET /tickets/show_many?ids= - Up to 100 tickets by id in one call:
+    `{tickets}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/show-many-tickets([35436, 35437])
+    map(out.tickets, %.id)
+    ```
+    """
 }
 fn
 (ids: Vec): Any {
@@ -77,7 +114,16 @@ fn
 
 build-create-body
 meta {
-    doc: """Build the create body `{ticket: {subject, comment: {body}, ...options}}`. Unset options are omitted. Exposed for testing."""
+    doc: """
+    Build the create body `{ticket: {subject, comment: {body},
+    ...options}}`. Unset options are omitted. Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/build-create-body("Login down", "500s on /login", {priority: "urgent"})  // {ticket: {priority: "urgent", subject: "Login down", comment: {body: "500s on /login"}}}
+    ```
+    """
 }
 fn (subject: Str, body: Str, options: Map): Map {
   {ticket: ::api/compact({...options, subject: subject, comment: {body: body}})}
@@ -92,6 +138,18 @@ meta {
     `requester` (`{name, email}`) or `requester_id`, `assignee_id`,
     `group_id`, `organization_id`, `custom_fields` (`[{id, value}]`),
     `external_id`. Returns `{ticket, audit}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/create-ticket("Login page down", "Customers report 500s on /login.", {
+      priority: "urgent",
+      type: "incident",
+      requester: {name: "Ada Lovelace", email: "ada@example.com"},
+      tags: ["login", "outage"]
+    })
+    out.ticket.id
+    ```
     """
 }
 fn
@@ -107,7 +165,19 @@ fn
 
 update-ticket
 meta {
-    doc: """PUT /tickets/{id} - Update ticket fields (`status`, `priority`, `assignee_id`, `group_id`, `tags` (replaces), `custom_fields`, `comment`, ...). Unset fields are omitted. Add `safe_update: true` and `updated_stamp` to fail with 409 on a concurrent change."""
+    doc: """
+    PUT /tickets/{id} - Update ticket fields (`status`, `priority`,
+    `assignee_id`, `group_id`, `tags` (replaces), `custom_fields`,
+    `comment`, ...). Unset fields are omitted. Add `safe_update: true` and
+    `updated_stamp` to fail with 409 on a concurrent change.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/update-ticket(35436, {status: "pending", priority: "high"})
+    out.ticket.status
+    ```
+    """
 }
 fn
 (id: Any, changes: Map): Any {
@@ -119,7 +189,16 @@ fn
 
 delete-ticket
 meta {
-    doc: """DELETE /tickets/{id} - Move a ticket to Deleted tickets (recoverable for 30 days). Returns null."""
+    doc: """
+    DELETE /tickets/{id} - Move a ticket to Deleted tickets (recoverable for
+    30 days). Returns null.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/delete-ticket(35436)
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -135,7 +214,18 @@ fn
 
 build-comment-body
 meta {
-    doc: """Comment update body `{ticket: {comment: {body, public, ...options}}}`. `options`: `author_id`, `html_body` (sent instead of the plain body when set), `uploads` (attachment tokens). Exposed for testing."""
+    doc: """
+    Comment update body `{ticket: {comment: {body, public, ...options}}}`.
+    `options`: `author_id`, `html_body` (sent instead of the plain body when
+    set), `uploads` (attachment tokens). Exposed for testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/build-comment-body("Thanks", true, {})  // {ticket: {comment: {body: "Thanks", public: true}}}
+    ::zendesk::tickets/build-comment-body("Thanks", false, {html_body: "<p>Thanks</p>"})  // {ticket: {comment: {html_body: "<p>Thanks</p>", public: false}}}
+    ```
+    """
 }
 fn (body: Str, public: Bool, options: Map): Map {
   text if(is-some(get(options, "html_body")), null, body)
@@ -144,7 +234,19 @@ fn (body: Str, public: Bool, options: Map): Map {
 
 add-comment
 meta {
-    doc: """PUT /tickets/{id} with a comment - Add a public reply (`public: true`) or internal note (`public: false`). `options`: `author_id`, `html_body`, `uploads`; plus ticket changes to apply in the same update via `update-ticket`."""
+    doc: """
+    PUT /tickets/{id} with a comment - Add a public reply (`public: true`)
+    or internal note (`public: false`). `options`: `author_id`, `html_body`,
+    `uploads`; plus ticket changes to apply in the same update via
+    `update-ticket`.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/add-comment(35436, "We rolled back the deploy.", true)
+    ::zendesk::tickets/add-comment(35436, "Rollback finished at 14:05.", false, {author_id: 1900000001})
+    ```
+    """
 }
 fn
 (id: Any, body: Str, public: Bool): Any {
@@ -159,7 +261,19 @@ fn
 
 list-comments
 meta {
-    doc: """GET /tickets/{id}/comments - One cursor page of a ticket's comments, oldest first: `{comments, meta, links}`. `options`: `page_size` (max 100), `after`, `sort` ("created_at" or "-created_at"), `include` ("users"), `include_inline_images`."""
+    doc: """
+    GET /tickets/{id}/comments - One cursor page of a ticket's comments,
+    oldest first: `{comments, meta, links}`. `options`: `page_size` (max
+    100), `after`, `sort` ("created_at" or "-created_at"), `include`
+    ("users"), `include_inline_images`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::tickets/list-comments(35436, {page_size: 50, sort: "-created_at"})
+    map(page.comments, %.body)
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -174,7 +288,17 @@ fn
 
 list-all-comments
 meta {
-    doc: """Collect a ticket's whole conversation (up to `limit` comments) across cursor pages. Returns a Vec."""
+    doc: """
+    Collect a ticket's whole conversation (up to `limit` comments) across
+    cursor pages. Returns a Vec.
+
+    **Example**
+
+    ```hot
+    comments ::zendesk::tickets/list-all-comments(35436, 200)
+    length(comments)
+    ```
+    """
 }
 fn
 (id: Any, limit: Int): Vec {
@@ -193,7 +317,18 @@ fn
 
 build-merge-body
 meta {
-    doc: """Merge body: `ids` (source tickets) plus `options` (`target_comment`, `source_comment`, `target_comment_is_public`, `source_comment_is_public`). Unset options are omitted. Exposed for testing."""
+    doc: """
+    Merge body: `ids` (source tickets) plus `options` (`target_comment`,
+    `source_comment`, `target_comment_is_public`,
+    `source_comment_is_public`). Unset options are omitted. Exposed for
+    testing.
+
+    **Example**
+
+    ```hot
+    ::zendesk::tickets/build-merge-body([123, 456], {target_comment: "Merged"})  // {target_comment: "Merged", ids: [123, 456]}
+    ```
+    """
 }
 fn (source-ids: Vec, options: Map): Map {
   ::api/compact({...options, ids: source-ids})
@@ -230,7 +365,16 @@ fn
 
 list-ticket-tags
 meta {
-    doc: """GET /tickets/{id}/tags - A ticket's tags: `{tags}`."""
+    doc: """
+    GET /tickets/{id}/tags - A ticket's tags: `{tags}`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/list-ticket-tags(35436)
+    out.tags
+    ```
+    """
 }
 fn
 (id: Any): Any {
@@ -242,7 +386,17 @@ fn
 
 add-ticket-tags
 meta {
-    doc: """PUT /tickets/{id}/tags - Add tags, keeping existing ones. Returns the ticket's tags."""
+    doc: """
+    PUT /tickets/{id}/tags - Add tags, keeping existing ones. Returns the
+    ticket's tags.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/add-ticket-tags(35436, ["vip", "escalated"])
+    out.tags
+    ```
+    """
 }
 fn
 (id: Any, tags: Vec): Any {
@@ -254,7 +408,16 @@ fn
 
 set-ticket-tags
 meta {
-    doc: """POST /tickets/{id}/tags - Replace all of a ticket's tags."""
+    doc: """
+    POST /tickets/{id}/tags - Replace all of a ticket's tags.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/set-ticket-tags(35436, ["billing"])
+    out.tags
+    ```
+    """
 }
 fn
 (id: Any, tags: Vec): Any {
@@ -266,7 +429,16 @@ fn
 
 remove-ticket-tags
 meta {
-    doc: """DELETE /tickets/{id}/tags - Remove the given tags from a ticket."""
+    doc: """
+    DELETE /tickets/{id}/tags - Remove the given tags from a ticket.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/remove-ticket-tags(35436, ["escalated"])
+    out.tags
+    ```
+    """
 }
 fn
 (id: Any, tags: Vec): Any {
@@ -278,7 +450,17 @@ fn
 
 list-tags
 meta {
-    doc: """GET /tags - The account's most used tags with counts: one cursor page `{tags, meta, links}`. `options`: `page_size`, `after`."""
+    doc: """
+    GET /tags - The account's most used tags with counts: one cursor page
+    `{tags, meta, links}`. `options`: `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::tickets/list-tags({page_size: 50})
+    map(page.tags, %.name)
+    ```
+    """
 }
 fn
 (): Any {
@@ -297,7 +479,19 @@ fn
 
 list-ticket-fields
 meta {
-    doc: """GET /ticket_fields - System and custom ticket fields (`{ticket_fields}`), with the `id`s that `custom_fields` entries use and, for dropdowns, `custom_field_options`. `options`: `locale`, `creator`."""
+    doc: """
+    GET /ticket_fields - System and custom ticket fields
+    (`{ticket_fields}`), with the `id`s that `custom_fields` entries use
+    and, for dropdowns, `custom_field_options`. `options`: `locale`,
+    `creator`.
+
+    **Example**
+
+    ```hot
+    out ::zendesk::tickets/list-ticket-fields({locale: "en-US"})
+    map(out.ticket_fields, %.title)
+    ```
+    """
 }
 fn
 (): Any {
@@ -312,7 +506,19 @@ fn
 
 list-satisfaction-ratings
 meta {
-    doc: """GET /satisfaction_ratings - One cursor page of CSAT ratings (admins only): `{satisfaction_ratings, meta, links}`. `options`: `score` ("good", "bad", "received", "bad_with_comment", ...), `start_time`/`end_time` (Unix seconds), `page_size`, `after`."""
+    doc: """
+    GET /satisfaction_ratings - One cursor page of CSAT ratings (admins
+    only): `{satisfaction_ratings, meta, links}`. `options`: `score`
+    ("good", "bad", "received", "bad_with_comment", ...),
+    `start_time`/`end_time` (Unix seconds), `page_size`, `after`.
+
+    **Example**
+
+    ```hot
+    page ::zendesk::tickets/list-satisfaction-ratings({score: "bad_with_comment", page_size: 50})
+    map(page.satisfaction_ratings, %.comment)
+    ```
+    """
 }
 fn
 (): Any {
@@ -361,7 +567,17 @@ fn
 
 export-tickets-next
 meta {
-    doc: """GET /incremental/tickets/cursor?cursor= - The next batch of an incremental ticket export, from the previous batch's `after_cursor`."""
+    doc: """
+    GET /incremental/tickets/cursor?cursor= - The next batch of an
+    incremental ticket export, from the previous batch's `after_cursor`.
+
+    **Example**
+
+    ```hot
+    batch ::zendesk::tickets/export-tickets(1780000000, {exclude_deleted: true})
+    following if(batch.end_of_stream, null, ::zendesk::tickets/export-tickets-next(batch.after_cursor))
+    ```
+    """
 }
 fn
 (cursor: Str): Any {

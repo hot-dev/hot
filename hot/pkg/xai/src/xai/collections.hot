@@ -123,7 +123,24 @@ SearchResponse type {
 
 management-request
 meta {
-    doc: """Make an HTTP request with Management API Key. Required for Collections API. A trailing `opts` Map can carry a `management-api-key` (see `::xai::api/resolve-management`); `url` is used as given.""",
+    doc: """
+    Make an HTTP request with Management API Key. Required for Collections
+    API. A trailing `opts` Map can carry a `management-api-key` (see
+    `::xai::api/resolve-management`); `url` is used as given.
+
+    **Example**
+
+    ```hot
+    ::collections ::xai::collections
+
+    response ::collections/management-request("GET", "https://management-api.x.ai/v1/collections")
+    response.body
+
+    // With a per-call key
+    key ::hot::ctx/get("tenant.xai.management.key")
+    ::collections/management-request("GET", "https://management-api.x.ai/v1/collections", {}, "", {management-api-key: key})
+    ```
+    """,
     ctx: {"xai.management.api.key": {required: false}}
 }
 fn
@@ -152,7 +169,7 @@ meta {
     **Example**
 
     ```hot
-    collection create(CreateCollectionRequest({
+    collection ::xai::collections/create(::xai::collections/CreateCollectionRequest({
         name: "My Documents",
         description: "Research papers and notes"
     }))
@@ -184,7 +201,7 @@ meta {
     **Example**
 
     ```hot
-    result list()
+    result ::xai::collections/list()
     result.collections // => [{id: "col_abc", name: "My Docs", ...}, ...]
 
     names map(result.collections, %.name)
@@ -211,7 +228,7 @@ meta {
     **Example**
 
     ```hot
-    collection get("collection_abc123")
+    collection ::xai::collections/get("collection_abc123")
     collection.name // => "My Documents"
     collection.file_count // => 42
     ```
@@ -237,7 +254,7 @@ meta {
     **Example**
 
     ```hot
-    collection update("collection_abc123", UpdateCollectionRequest({
+    collection ::xai::collections/update("collection_abc123", ::xai::collections/UpdateCollectionRequest({
         name: "Updated Name",
         description: "New description"
     }))
@@ -265,7 +282,7 @@ meta {
     **Example**
 
     ```hot
-    delete("collection_abc123")
+    ::xai::collections/delete("collection_abc123")
     ```
     """
 }
@@ -296,14 +313,14 @@ meta {
 
     ```hot
     // First upload file via ::xai::files/upload, then add to collection
-    doc add-document("col_abc123", "file_xyz789")
+    doc ::xai::collections/add-document("col_abc123", "file_xyz789")
     doc.id // => "doc_..."
 
     // With metadata fields
-    doc add-document("col_abc123", "file_xyz789", {category: "report", year: "2024"})
+    doc ::xai::collections/add-document("col_abc123", "file_xyz789", {category: "report", year: "2024"})
 
     // With a per-call Management API key
-    doc add-document("col_abc123", "file_xyz789", {}, {management-api-key: "tenant-key"})
+    doc ::xai::collections/add-document("col_abc123", "file_xyz789", {}, {management-api-key: ::hot::ctx/get("tenant.xai.management.key")})
     ```
     """
 }
@@ -335,7 +352,7 @@ meta {
     **Example**
 
     ```hot
-    remove-document("col_abc123", "file_xyz789")
+    ::xai::collections/remove-document("col_abc123", "file_xyz789")
     ```
     """
 }
@@ -370,7 +387,7 @@ meta {
     **Example**
 
     ```hot
-    results search(SearchRequest({
+    results ::xai::collections/search(::xai::collections/SearchRequest({
         query: "What were the key revenue drivers?",
         collection_ids: ["col_abc123"],
         max_results: 10,
@@ -432,7 +449,7 @@ meta {
     **Example**
 
     ```hot
-    results search-simple("revenue analysis", ["col_abc123"])
+    results ::xai::collections/search-simple("revenue analysis", ["col_abc123"])
     results.results // => [{content: "...", score: 0.92, ...}, ...]
     ```
     """
@@ -458,7 +475,7 @@ meta {
     **Example**
 
     ```hot
-    results keyword-search("Q3 2024 revenue", ["col_abc123"])
+    results ::xai::collections/keyword-search("Q3 2024 revenue", ["col_abc123"])
     results.results // => [{content: "...", score: 0.88, ...}, ...]
     ```
     """
@@ -486,7 +503,7 @@ meta {
     **Example**
 
     ```hot
-    results semantic-search("financial performance", ["col_abc123"])
+    results ::xai::collections/semantic-search("financial performance", ["col_abc123"])
     results.results // => [{content: "...", score: 0.91, ...}, ...]
     ```
     """

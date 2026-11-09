@@ -69,7 +69,16 @@ type {
 
 build-transcribe-args
 meta {
-    doc: "Build whisper CLI arguments after the `whisper` executable name."
+    doc: """
+    Build whisper CLI arguments after the `whisper` executable name.
+
+    **Example**
+
+    ```hot
+    opts ::whisper/TranscribeOpts({model: "small", language: "en"})
+    ::whisper/build-transcribe-args("/data/in.mp3", "/data/out", opts)  // ["/data/in.mp3", "--model", "small", "--output_format", "json", "--output_dir", "/data/out", "--language", "en"]
+    ```
+    """
 }
 fn (input-path: Str, output-dir: Str, opts: TranscribeOpts): Vec<Str> {
     model or(opts.model, "base")
@@ -97,7 +106,17 @@ fn (input-path: Str, output-dir: Str, opts: TranscribeOpts): Vec<Str> {
 
 parse-transcribe-output
 meta {
-    doc: "Parse whisper JSON output (full transcript, segments, detected language)."
+    doc: """
+    Parse whisper JSON output (full transcript, segments, detected
+    language).
+
+    **Example**
+
+    ```hot
+    ::whisper/parse-transcribe-output("{\"text\": \"Hello\", \"language\": \"en\"}")  // {text: "Hello", language: "en"}
+    ::whisper/parse-transcribe-output("")  // {}
+    ```
+    """
 }
 fn (stdout: Any): Map {
     text Str(or(stdout, "")) |> trim()
@@ -108,7 +127,9 @@ fn (stdout: Any): Map {
 // Helpers
 // ============================================================================
 
-resolve-output fn (user-output: Str?, default: Str): Str {
+resolve-output
+meta {no-doc: true}
+fn (user-output: Str?, default: Str): Str {
     cond {
         is-null(user-output) => { default }
         not(starts-with(user-output, "hot://")) => {
@@ -118,23 +139,44 @@ resolve-output fn (user-output: Str?, default: Str): Str {
     }
 }
 
-file-ext fn (path: Str): Str {
-    parts split(path, ".")
-    last(parts)
+file-ext
+meta {no-doc: true}
+fn (path: Str): Str {
+    ext last(split(path, "."))
+    if(::hot::regex/is-match(ext, "^[A-Za-z0-9]+$"), ext, "bin")
 }
 
-join-args fn (args: Vec<Str>): Str {
-    join(args, " ")
-}
-
-input-copy-command fn (input: Str, in-path: Str): Str {
+// Quote one value for `sh`. Values made only of safe characters are unchanged.
+shell-quote
+meta {no-doc: true}
+fn (value: Str): Str {
     cond {
-        starts-with(input, "hot://") => { `hotbox cp '${input}' ${in-path}` }
-        => { `cp '${input}' ${in-path}` }
+        ::hot::regex/is-match(value, "^[A-Za-z0-9_@%+=:,./-]+$") => { value }
+        => {
+            escaped replace(value, "'", "'\\''")
+            `'${escaped}'`
+        }
     }
 }
 
-model-to-min-size fn (model: Str): Str {
+join-args
+meta {no-doc: true}
+fn (args: Vec<Str>): Str {
+    join(map(args, shell-quote), " ")
+}
+
+input-copy-command
+meta {no-doc: true}
+fn (input: Str, in-path: Str): Str {
+    cond {
+        starts-with(input, "hot://") => { `hotbox cp ${shell-quote(input)} ${shell-quote(in-path)}` }
+        => { `cp ${shell-quote(input)} ${shell-quote(in-path)}` }
+    }
+}
+
+model-to-min-size
+meta {no-doc: true}
+fn (model: Str): Str {
     m model |> trim() |> lowercase()
     cond {
         in(m, ["tiny", "base"]) => { "large" }
@@ -145,7 +187,9 @@ model-to-min-size fn (model: Str): Str {
     }
 }
 
-run-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+run-whisper-box
+meta {no-doc: true}
+fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     needs-entrypoint-reset eq(img, DEFAULT_IMAGE)
     info ::box/start({
@@ -160,7 +204,9 @@ run-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int)
     ::task/await(info.id)
 }
 
-start-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
+start-whisper-box
+meta {no-doc: true}
+fn (shell-script: Str, box-size: Str, image: Str?, timeout: Int): Map {
     img or(image, DEFAULT_IMAGE)
     needs-entrypoint-reset eq(img, DEFAULT_IMAGE)
     ::box/start({
@@ -174,7 +220,9 @@ start-whisper-box fn (shell-script: Str, box-size: Str, image: Str?, timeout: In
     })
 }
 
-check-box-result fn (result: Map, tool-name: Str): Map {
+check-box-result
+meta {no-doc: true}
+fn (result: Map, tool-name: Str): Map {
     cond {
         ne(result.status, "completed") => {
             fail(`${tool-name} task ${result.status}`, {
@@ -213,7 +261,8 @@ meta {
     holds timed segments, and `language` is the detected or forced language code.
     `url` is the `hot://` URL of the output file (same format as requested).
 
-    Box size defaults from the model (`tiny`/`base` → small, `small` → medium, etc.).
+    Box size defaults from the model: `tiny`/`base` use `large`, `small` uses `xlarge`,
+    `medium` uses `2xlarge`, and `large` uses `4xlarge`.
 
     **Example**
 
@@ -251,7 +300,7 @@ fn (input: Str): Map {
     whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
     out-file `${out-dir}/${stem}.${fmt}`
     copy-input input-copy-command(input, in-path)
-    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${shell-quote(out-file)} && hotbox cp ${shell-quote(out-file)} ${shell-quote(hot-output)}`
 
     result run-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
     checked check-box-result(result, "whisper")
@@ -286,14 +335,14 @@ meta {
     doc: """
     Start a Whisper transcription in a container without waiting for completion.
 
-    Returns the box task info from `::box/start`. Use `::task/await` on the
+    Returns the box task info from `::hot::box/start`. Use `::hot::task/await` on the
     returned id to wait for the result.
 
     **Example**
 
     ```hot
     info ::whisper/start-transcribe("hot://uploads/voice.mp3", {model: "small", language: "en"})
-    result ::task/await(info.id)
+    result ::hot::task/await(info.id)
     ```
     """,
     box: {min-size: "small"}
@@ -321,7 +370,7 @@ fn (input: Str): Map {
     whisper-args join-args(build-transcribe-args(in-path, out-dir, opts))
     out-file `${out-dir}/${stem}.${fmt}`
     copy-input input-copy-command(input, in-path)
-    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${out-file} && hotbox cp ${out-file} '${hot-output}'`
+    script `mkdir -p ${out-dir} && ${copy-input} && whisper ${whisper-args} 1>&2 && cat ${shell-quote(out-file)} && hotbox cp ${shell-quote(out-file)} ${shell-quote(hot-output)}`
 
     info start-whisper-box(script, box-size, opts.image, or(opts.timeout, 1800))
     assoc(info, "data", {output: hot-output})
