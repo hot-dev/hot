@@ -1697,14 +1697,16 @@ under {a: Money(80.0), b: 100}
         let cases = [
             (
                 "takes fn (x: Bool): Bool { x }\nprobe fn (m: Map): Bool { takes(gt(m.a, m.b)) }",
-                "gt requires numbers (an Err passed to parameter `x` of ::t/takes;",
+                "parameter `b` of `::hot::cmp/gt` expected Int | Dec, got Null",
+                "(an Err passed to parameter `x` of ::t/takes;",
             ),
             (
                 "probe fn (m: Map): Any {\n    result lte(m.a, m.b)\n    Str(result)\n}",
-                "lte requires numbers (an Err passed",
+                "parameter `b` of `::hot::cmp/lte` expected Int | Dec, got Null",
+                "(an Err passed",
             ),
         ];
-        for (body, expected) in cases {
+        for (body, expected, consumed) in cases {
             let src = format!(
                 "::t ns\nMoney type Dec\n{body}\nprobe({{a: 1, b: 2}})\nprobe({{a: 1, b: 2}})\nprobe({{a: 1, b: 2}})\nprobe({{a: Money(1.0), b: null}})"
             );
@@ -1715,7 +1717,9 @@ under {a: Money(80.0), b: 100}
                 let error = compile_and_run_with_std_conf(&src, Some(conf))
                     .expect_err("the Err is consumed");
                 assert!(
-                    error.contains(&format!("Result error: {expected}")),
+                    error.contains("Result error: ConstraintError.Violation")
+                        && error.contains(expected)
+                        && error.contains(consumed),
                     "{mode}: {error}\n{src}"
                 );
             }
@@ -1733,7 +1737,10 @@ under {a: Money(80.0), b: 100}
         ] {
             let error = compile_and_run_with_std_conf(src, Some(conf))
                 .expect_err("the predicate's Err is consumed");
-            assert!(error.contains("gt requires numbers"), "{mode}: {error}");
+            assert!(
+                error.contains("parameter `a` of `::hot::cmp/gt` expected Int | Dec, got Null"),
+                "{mode}: {error}"
+            );
         }
     }
 
@@ -1744,14 +1751,16 @@ under {a: Money(80.0), b: 100}
         let cases = [
             (
                 "takes fn (x: Bool): Bool { x }\nprobe fn (a: Any, b: Any): Bool { takes(gt(a, b)) }",
-                "gt requires numbers (an Err passed to parameter `x` of ::t/takes;",
+                "parameter `b` of `::hot::cmp/gt` expected Int | Dec, got Null",
+                "(an Err passed to parameter `x` of ::t/takes;",
             ),
             (
                 "probe fn (a: Any, b: Any): Any { concat(Str(lte(a, b)), \"x\") }",
-                "lte requires numbers (an Err passed as argument 1 of ::hot::type/Str",
+                "parameter `b` of `::hot::cmp/lte` expected Int | Dec, got Null",
+                "(an Err passed as argument 1 of ::hot::type/Str",
             ),
         ];
-        for (body, expected) in cases {
+        for (body, expected, consumed) in cases {
             let src = format!("::t ns\nMoney type Dec\n{body}\nprobe(1, 2)\nprobe(1, 2)\nprobe(Money(1.0), null)");
             for (mode, conf) in [
                 ("jit", crate::val!({"jit": {"threshold": 1}})),
@@ -1760,7 +1769,9 @@ under {a: Money(80.0), b: 100}
                 let error = compile_and_run_with_std_conf(&src, Some(conf))
                     .expect_err("the Err is consumed");
                 assert!(
-                    error.contains(&format!("Result error: {expected}")),
+                    error.contains("Result error: ConstraintError.Violation")
+                        && error.contains(expected)
+                        && error.contains(consumed),
                     "{mode}: {error}\n{src}"
                 );
             }
@@ -4598,6 +4609,125 @@ f fn (n: Int): Int {
 f(0)"#;
         let text = run_text(src, None);
         assert!(text.contains("nested too deeply"), "{text}");
+    }
+
+    #[test]
+    fn recursion_through_pmap_meets_a_limit() {
+        // Each worker's VM counted calls from zero, as a parallel branch's did.
+        let src = r#"::t ns
+f fn (n: Int): Int {
+    first(pmap(range(4), (x) { if(eq(x, 0), f(add(n, 1)), x) }))
+}
+f(0)"#;
+        // A limit either way: the depth of parallel work, or the native
+        // stack where a build's frames are large.
+        let text = run_text(src, None);
+        assert!(
+            text.contains("nested too deeply") || text.contains("stack budget exhausted"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_piped_call_resolves_as_a_direct_call_does() {
+        // A pipe looked the function up its own way: it missed a namespace
+        // function that shares a core name, and a local that shadows one.
+        let src = r#"::t ns
+length fn (x) { 42 }
+g fn () {
+    first (x) { "local" }
+    [first([1, 2]), [1, 2] |> first(), length([1, 2, 3]), [1, 2, 3] |> length(), [1, 2, 3] |> length]
+}
+g()"#;
+        for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+            let text = run_text(src, conf);
+            assert_eq!(
+                text,
+                r#"OK:Vec([Str("local"), Str("local"), Int(42), Int(42), Int(42)])"#
+            );
+        }
+    }
+
+    #[test]
+    fn a_where_type_declared_in_a_function_is_a_compile_error() {
+        // Its constraint was never checked: 80 passed for a type that
+        // wants more than 100000.
+        let src = r#"::t ns
+fd fn (p: Int): Any {
+    Big type Int where gt(%, 100000)
+    q: Big p
+    q
+}
+fd(80)"#;
+        let text = run_text(src, None);
+        assert!(text.contains("is declared inside `fd`"), "{text}");
+    }
+
+    #[test]
+    fn a_dec_result_that_is_not_finite_is_an_err() {
+        // `Inf` and `NaN` were Dec values that went on through arithmetic,
+        // where `div(1, 0)` and an Int overflow are Errs.
+        let src = r#"::t ns
+tell fn (r: Result): Str { if(is-err(r), "err", "ok") }
+big fn () { pow(10.0, 20000) }
+many fn (a, b) { mul(a, b) }
+power fn (a, b) { pow(a, b) }
+parse fn (s) { Dec(s) }
+[
+    tell(many(big(), big())),
+    tell(power(0, -1)),
+    tell(power(0.0, 0.0)),
+    tell(parse("NaN")),
+    tell(parse("Infinity")),
+    tell(parse("-inf")),
+    tell(many(2.5, 2.0)),
+    tell(add(big(), big())),
+    tell(parse("1.5")),
+]"#;
+        for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+            let text = run_text(src, conf);
+            assert_eq!(
+                text,
+                r#"OK:Vec([Str("err"), Str("err"), Str("err"), Str("err"), Str("err"), Str("err"), Str("ok"), Str("ok"), Str("ok")])"#
+            );
+        }
+    }
+
+    #[test]
+    fn a_core_function_reports_a_wrong_argument_the_same_in_both_tiers() {
+        // The interpreter called the native, which answered in its own
+        // words (or accepted the value); compiled code ran hot-std's
+        // parameter check for some functions and the native for others.
+        for (call, parameter) in [
+            ("length(x)", "parameter `coll` of `::hot::coll/length`"),
+            ("rest(x)", "parameter `coll` of `::hot::coll/rest`"),
+            ("add(x, 1)", "parameter `x` of `::hot::math/add`"),
+            ("sub(1, x)", "parameter `y` of `::hot::math/sub`"),
+            ("lt(x, 1)", "parameter `a` of `::hot::cmp/lt`"),
+            ("mod(x, 2)", "parameter `x` of `::hot::math/mod`"),
+        ] {
+            let src = format!(
+                r#"::t ns
+f fn (x) {{ {call} }}
+tell fn (r: Result): Any {{ if(is-err(r), Str(r), "ok") }}
+[tell(f(null)), tell(f(null))]"#
+            );
+            let mut answers = Vec::new();
+            for conf in [
+                Some(crate::val!({"jit": {"mode": "disabled"}})),
+                Some(crate::val!({"jit": {"threshold": 1}})),
+            ] {
+                let text = run_text(&src, conf);
+                assert!(
+                    text.contains("ConstraintError.Violation") && text.contains(parameter),
+                    "{call}: {text}"
+                );
+                answers.push(text);
+            }
+            // The same Err, to where each tier says how far the run got.
+            let told = |text: &str| text.split(", location:").next().map(str::to_owned);
+            assert_eq!(told(&answers[0]), told(&answers[1]), "{call}");
+        }
     }
 
     #[test]

@@ -7128,10 +7128,13 @@ impl VirtualMachine {
         // Only where the name reaches hot-std's function: a binding in this
         // namespace or a project core function of the same name is called
         // through the lookup, as compiled code calls it.
-        if !self
-            .native_core_shadows_ref()
-            .shadows(&self.current_namespace, function_name)
-        {
+        'native: {
+            if self
+                .native_core_shadows_ref()
+                .shadows(&self.current_namespace, function_name)
+            {
+                break 'native;
+            }
             use crate::lang::hot::r#type::HotResult as HR;
             use crate::lang::hot::{bool, cmp, coll, math};
 
@@ -7144,8 +7147,32 @@ impl VirtualMachine {
                     return Ok($val);
                 }};
             }
-            // A native's failure is an Err value, as through `call-lib`.
+            // A VM built without hot-std (as some tests build one) has
+            // only the natives.
+            let has_std = !self.core_functions.is_empty();
+            // These paths take the argument types they name. Any other
+            // (`break 'native`) goes on to hot-std's function, whose
+            // parameter check answers for what it doesn't accept
+            // (`ConstraintError.Violation`), as compiled code reports it.
+            // So does a native that fails: it only read its arguments, so
+            // asking again changes nothing.
             macro_rules! fast_return_hr {
+                ($hr:expr) => {
+                    match $hr {
+                        HR::Ok(val) => fast_return!(val),
+                        HR::Err(_) if has_std => break 'native,
+                        HR::Err(err_val) => {
+                            if !is_dispatch_function {
+                                self.decrement_function_call_depth(function_name);
+                            }
+                            return self.dispatch_hotlib_err(err_val);
+                        }
+                    }
+                };
+            }
+            // For a native that runs user code: its failure is an Err
+            // value, as through `call-lib`, and it isn't run again.
+            macro_rules! fast_return_once {
                 ($hr:expr) => {
                     match $hr {
                         HR::Ok(val) => fast_return!(val),
@@ -7170,32 +7197,37 @@ impl VirtualMachine {
                 1 => match function_name {
                     "not" => match &args[0] {
                         Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
-                        _ => fast_return_hr!(bool::not(self, args)),
+                        _ => fast_return_once!(bool::not(self, args)),
                     },
                     "is-zero" => match &args[0] {
                         Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
-                        _ => fast_return_hr!(math::is_zero(args)),
+                        _ if has_std => break 'native,
+                        _ => fast_return_once!(math::is_zero(args)),
                     },
                     "is-empty" => match crate::val::as_fields(&args[0]) {
                         Val::Vec(v) => fast_return!(coll::fast_is_empty_vec(v)),
                         Val::Str(s) => fast_return!(coll::fast_is_empty_str(s)),
                         Val::Map(m) => fast_return!(coll::fast_is_empty_map(m)),
                         Val::Null => fast_return!(Val::Bool(true)),
-                        _ => fast_return_hr!(coll::is_empty(args)),
+                        _ if has_std => break 'native,
+                        _ => fast_return_once!(coll::is_empty(args)),
                     },
                     "length" => match crate::val::as_fields(&args[0]) {
                         Val::Vec(v) => fast_return!(coll::fast_length_vec(v)),
                         Val::Str(s) => fast_return!(coll::fast_length_str(s)),
                         Val::Map(m) => fast_return!(coll::fast_length_map(m)),
-                        _ => fast_return_hr!(coll::length(args)),
+                        _ if has_std => break 'native,
+                        _ => fast_return_once!(coll::length(args)),
                     },
                     "first" => match &args[0] {
                         Val::Vec(v) => fast_return!(coll::fast_first_vec(v)),
-                        _ => fast_return_hr!(coll::first(args)),
+                        _ if has_std => break 'native,
+                        _ => fast_return_once!(coll::first(args)),
                     },
                     "rest" => match &args[0] {
                         Val::Vec(v) => fast_return!(coll::fast_rest_vec(v)),
-                        _ => fast_return_hr!(coll::rest(args)),
+                        _ if has_std => break 'native,
+                        _ => fast_return_once!(coll::rest(args)),
                     },
                     "range" => match &args[0] {
                         Val::Int(end) => {
@@ -7252,12 +7284,14 @@ impl VirtualMachine {
                                 fast_return!(coll::fast_get_vec_int(v, *i))
                             }
                             (Val::Map(m), key) => fast_return!(coll::fast_get_map(m, key)),
-                            _ => fast_return_hr!(coll::get(args)),
+                            _ if has_std => break 'native,
+                            _ => fast_return_once!(coll::get(args)),
                         },
                         "concat" => match (&args[0], &args[1]) {
                             (Val::Str(a), Val::Str(b)) => fast_return!(coll::fast_concat_str(a, b)),
                             (Val::Vec(a), Val::Vec(b)) => fast_return!(coll::fast_concat_vec(a, b)),
-                            _ => fast_return_hr!(coll::concat(args)),
+                            _ if has_std => break 'native,
+                            _ => fast_return_once!(coll::concat(args)),
                         },
                         "range" => match (&args[0], &args[1]) {
                             (Val::Int(start), Val::Int(end)) => {
@@ -7298,6 +7332,9 @@ impl VirtualMachine {
                         _ => None,
                     };
                     if let Some(hr) = tier2 {
+                        if matches!(function_name, "call" | "apply") {
+                            fast_return_once!(hr);
+                        }
                         fast_return_hr!(hr);
                     }
                 }
@@ -11168,18 +11205,7 @@ impl VirtualMachine {
             // calls from this VM's depth, so recursion through a parallel
             // flow meets a limit instead of opening threads until the
             // system refuses one.
-            let max_parallel = max_parallel_depth();
-            if self.parallel_depth >= max_parallel {
-                return Err(VmError::runtime(format!(
-                    "Parallel flows are nested too deeply ({} levels, max {}). \
-                     This usually indicates a function that calls itself from inside a \
-                     parallel flow without reaching its base case. \
-                     Raise HOT_MAX_PARALLEL_DEPTH if your workload genuinely nests deeper.",
-                    self.parallel_depth, max_parallel
-                )));
-            }
-            let branch_parallel_depth = self.parallel_depth + 1;
-            let branch_call_depth = self.user_function_depth;
+            let (branch_parallel_depth, branch_call_depth) = self.parallel_branch_depths()?;
 
             // Get the current namespace so task VMs use the same one
             let main_namespace = self.current_namespace.clone();
@@ -11328,8 +11354,10 @@ impl VirtualMachine {
                                 );
                                 task_vm.inherit_host_context(&host_context_tmpl);
                                 task_vm.inherit_namespace_variables(&namespace_snapshot_clone);
-                                task_vm.parallel_depth = branch_parallel_depth;
-                                task_vm.user_function_depth = branch_call_depth;
+                                task_vm.inherit_parallel_depths(
+                                    branch_parallel_depth,
+                                    branch_call_depth,
+                                );
 
                                 // Share the failure state
                                 task_vm.failure_state = failure_state_clone;
@@ -11656,6 +11684,31 @@ impl VirtualMachine {
 
     /// How many user-function calls are running, the current one included
     /// (see `execute_user_function`).
+    /// The depths a VM started for one branch of this VM's parallel work (a
+    /// `parallel` flow's branch, a `pmap` worker) begins at: one parallel
+    /// level deeper, and this VM's call depth. Refused past
+    /// [`max_parallel_depth`].
+    pub(crate) fn parallel_branch_depths(&self) -> VmResult<(usize, usize)> {
+        let max_parallel = max_parallel_depth();
+        if self.parallel_depth >= max_parallel {
+            return Err(VmError::runtime(format!(
+                "Parallel flows are nested too deeply ({} levels, max {}). \
+                 This usually indicates a function that calls itself from inside a \
+                 parallel flow or `pmap` without reaching its base case. \
+                 Raise HOT_MAX_PARALLEL_DEPTH if your workload genuinely nests deeper.",
+                self.parallel_depth, max_parallel
+            )));
+        }
+        Ok((self.parallel_depth + 1, self.user_function_depth))
+    }
+
+    /// Start this branch VM at the depths [`Self::parallel_branch_depths`]
+    /// gave its parent.
+    pub(crate) fn inherit_parallel_depths(&mut self, parallel_depth: usize, call_depth: usize) {
+        self.parallel_depth = parallel_depth;
+        self.user_function_depth = call_depth;
+    }
+
     pub(crate) fn user_function_depth(&self) -> usize {
         self.user_function_depth
     }
@@ -12235,6 +12288,26 @@ impl VirtualMachine {
                 "Cannot access property on {:?}",
                 other
             ))),
+        }
+    }
+
+    /// The Err of the core function `short_name` for arguments its native
+    /// refused, when compiled code called the native itself: what hot-std's
+    /// function answers, whose parameter check names the argument. The
+    /// interpreter's fast path gets there by falling through to that
+    /// function.
+    pub(crate) fn core_native_refusal(
+        &mut self,
+        short_name: &str,
+        args: &[Val],
+        native_err: Val,
+    ) -> Val {
+        let Some(qualified) = self.lookup_core_function_name(short_name) else {
+            return Val::err(native_err);
+        };
+        match self.execute_function_call_by_name(&qualified, args) {
+            Ok(answer) if answer.is_err() => answer,
+            _ => Val::err(native_err),
         }
     }
 

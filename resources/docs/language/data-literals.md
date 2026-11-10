@@ -20,7 +20,7 @@ Use backticks for string interpolation:
 
 {{result:data-literals#template-strings}}
 
-Any expression can go inside `${}`.
+Any expression can go inside `${}`. To write a literal `${`, escape the dollar: `\${`.
 
 ### Block Strings
 

@@ -5004,8 +5004,53 @@ impl Compiler {
                     return Ok(dest_reg);
                 }
 
-                // Look up function ID by name
-                if let Some(&function_id) = self.function_mapping.get(function_name) {
+                // Resolve the name as a direct call does: a local of that
+                // name first, then this namespace's function of the call's
+                // arity, then a core one. A piped call used to look the bare
+                // name up alone, so `xs |> length()` reached the core
+                // `length` past a namespace's own, and past a local.
+                let shadowed_by_local = self.is_local_name(function_name);
+                let qualified_name = format!("{}/{}", self.current_namespace, function_name);
+                let function_id = if shadowed_by_local {
+                    None
+                } else {
+                    self.function_mapping
+                        .get(&format!("{}/{}", qualified_name, total_args))
+                        .or_else(|| self.function_mapping.get(&qualified_name))
+                        .or_else(|| {
+                            self.function_mapping
+                                .get(&format!("{}/{}", function_name, total_args))
+                        })
+                        .or_else(|| self.function_mapping.get(function_name))
+                        .copied()
+                        // A function defined in another function's body is
+                        // callable by id only from inside that body.
+                        .filter(|id| {
+                            !self.program.local_functions.contains(id)
+                                || self
+                                    .local_function_names
+                                    .iter()
+                                    .any(|name| name == function_name)
+                        })
+                };
+
+                if shadowed_by_local {
+                    // Call the local's value (see `compile_function_call`).
+                    let function_reg = self.allocate_register();
+                    let name_constant = self
+                        .program
+                        .add_constant(Constant::Val(Val::from(function_name.to_string())));
+                    self.emit_instruction(Instruction::LoadVar {
+                        dest: function_reg,
+                        var_name: name_constant,
+                    });
+                    self.emit_instruction(Instruction::Call {
+                        dest: dest_reg,
+                        function: function_reg,
+                        args_start,
+                        args_count: total_args as u8,
+                    });
+                } else if let Some(function_id) = function_id {
                     self.emit_instruction(Instruction::CallUserFunction {
                         dest: dest_reg,
                         function_id,

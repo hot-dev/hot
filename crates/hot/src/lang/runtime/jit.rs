@@ -2827,7 +2827,7 @@ unsafe fn hot_jit_add_numeric_body(
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
     let result = crate::lang::hot::math::add(&args);
-    write_numeric_result(out, result)
+    write_numeric_result(out, "add", &args, result)
 }
 
 unsafe fn hot_jit_sub_numeric_body(
@@ -2844,7 +2844,7 @@ unsafe fn hot_jit_sub_numeric_body(
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
     let result = crate::lang::hot::math::sub(&args);
-    write_numeric_result(out, result)
+    write_numeric_result(out, "sub", &args, result)
 }
 
 unsafe fn hot_jit_mul_numeric_body(
@@ -2861,7 +2861,7 @@ unsafe fn hot_jit_mul_numeric_body(
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
     let result = crate::lang::hot::math::mul(&args);
-    write_numeric_result(out, result)
+    write_numeric_result(out, "mul", &args, result)
 }
 
 unsafe fn hot_jit_div_numeric_body(
@@ -2878,7 +2878,7 @@ unsafe fn hot_jit_div_numeric_body(
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
     let result = crate::lang::hot::math::div(&args);
-    write_numeric_result(out, result)
+    write_numeric_result(out, "div", &args, result)
 }
 
 unsafe fn hot_jit_mod_numeric_body(
@@ -2895,7 +2895,7 @@ unsafe fn hot_jit_mod_numeric_body(
         Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
     };
     let result = crate::lang::hot::math::modulo(&args);
-    write_numeric_result(out, result)
+    write_numeric_result(out, "mod", &args, result)
 }
 
 unsafe fn hot_jit_ne_numeric_body(
@@ -3291,7 +3291,7 @@ unsafe fn hot_jit_binop_general_body(
     };
     match result {
         HotResult::Ok(val) => new_owned_val(val),
-        HotResult::Err(err) => new_owned_val(Val::err(err)),
+        HotResult::Err(err) => new_owned_val(core_native_refusal(binop_core_name(op), &args, err)),
     }
 }
 
@@ -3389,7 +3389,7 @@ unsafe fn hot_jit_order_general_body(
     };
     match result {
         HotResult::Ok(val) => new_owned_val(val),
-        HotResult::Err(err) => new_owned_val(Val::err(err)),
+        HotResult::Err(err) => new_owned_val(core_native_refusal(cmp_core_name(op), &args, err)),
     }
 }
 
@@ -4273,7 +4273,9 @@ unsafe extern "C" fn hot_jit_length_value(val_ptr: i64) -> i64 {
     let val = ok_payload(unsafe { &*(val_ptr as *const Val) });
     let result = match crate::lang::hot::coll::length(std::slice::from_ref(val)) {
         crate::lang::hot::r#type::HotResult::Ok(len) => len,
-        crate::lang::hot::r#type::HotResult::Err(err) => Val::err(err),
+        crate::lang::hot::r#type::HotResult::Err(err) => {
+            core_native_refusal("length", std::slice::from_ref(val), err)
+        }
     };
     new_owned_val(result)
 }
@@ -5154,6 +5156,8 @@ unsafe fn decode_strict_operands(
 /// Returns 0 on success, or a non-zero OwnedVal error pointer on failure.
 fn write_numeric_result(
     result_ptr: *mut D256,
+    core: &str,
+    args: &[Val],
     result: crate::lang::hot::r#type::HotResult<Val>,
 ) -> i64 {
     match result {
@@ -5170,8 +5174,22 @@ fn write_numeric_result(
         crate::lang::hot::r#type::HotResult::Ok(other) => new_owned_val(Val::err(Val::Str(
             format!("numeric operation returned unexpected type: {:?}", other).into(),
         ))),
-        crate::lang::hot::r#type::HotResult::Err(err) => new_owned_val(Val::err(err)),
+        crate::lang::hot::r#type::HotResult::Err(err) => {
+            new_owned_val(core_native_refusal(core, args, err))
+        }
     }
+}
+
+/// The Err of a core function whose native refused its arguments: what
+/// hot-std's function answers for them, which names the parameter
+/// (`ConstraintError.Violation`), as the interpreter reports it.
+fn core_native_refusal(core: &str, args: &[Val], native_err: Val) -> Val {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return Val::err(native_err);
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    vm.core_native_refusal(core, args, native_err)
 }
 
 fn eval_numeric_cmp(

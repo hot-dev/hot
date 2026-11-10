@@ -334,3 +334,29 @@ meta ["test"] fn () {
     xs range(1000)
     repeat(() { assert-eq(1000, count(xs)) })
 }
+
+// ----------------------------------------------------------------------------
+// Template expressions: read once, to their own closing brace.
+// ----------------------------------------------------------------------------
+
+test-template-expressions
+meta ["test"] fn () {
+    name "Ann"
+    assert-eq("a x}y b", `a ${concat("x", "}y")} b`, "a brace in a string")
+    assert-eq("q say \"hi\" r", `q ${"say \"hi\""} r`, "an escape is decoded once")
+    assert-eq("t a\tb", `t ${"a\tb"}`, "a tab stays a tab")
+    assert-eq("n in Ann {x} o", `n ${`in ${name} {x}`} o`, "a template in a template")
+    assert-eq(concat("cost $", "{name} and $5"), `cost \${name} and \$5`, "an escaped dollar")
+    assert-eq("m } z", `m ${get({k: "}"}, "k")} z`, "a brace in a map's string")
+}
+
+// ----------------------------------------------------------------------------
+// A local can be named `meta`, on the line after another binding.
+// ----------------------------------------------------------------------------
+
+test-local-named-meta
+meta ["test"] fn () {
+    x 1
+    meta {a: 2}
+    assert-eq(3, add(x, get(meta, "a")))
+}
