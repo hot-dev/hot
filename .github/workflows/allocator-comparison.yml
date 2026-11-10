@@ -1,0 +1,71 @@
+name: allocator-comparison
+
+# Compares the system allocator with mimalloc on Linux: time, peak memory, and
+# memory through a long run. An experiment: it runs when the experiment's
+# branch is pushed, and the report is the job summary. Nothing depends on it.
+on:
+  push:
+    branches: [ mimalloc-experiment ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.99.1
+  TAILWIND_VERSION: v4.3.3
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: 2
+  CARGO_HTTP_TIMEOUT: 30
+  SQLX_OFFLINE: 'true'
+  CI: 'true'
+
+jobs:
+  compare:
+    name: System allocator vs mimalloc
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Free disk space when low
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: "false"
+          cargo-build-jobs: '8'
+
+      # Both binaries are release builds, as a published `hot` is. They go
+      # side by side in a directory that holds Hot's resources, where a
+      # binary looks for them first.
+      - name: Build with the system allocator
+        run: |
+          cargo build --release --locked -p hot_cli
+          mkdir -p "$RUNNER_TEMP/alloc/resources"
+          for entry in resources/*; do ln -s "$PWD/$entry" "$RUNNER_TEMP/alloc/resources/"; done
+          ln -s "$PWD/hot/pkg" "$RUNNER_TEMP/alloc/resources/pkg"
+          cp target/release/hot "$RUNNER_TEMP/alloc/hot-system"
+
+      - name: Build with mimalloc
+        run: |
+          cargo build --release --locked -p hot_cli --features hot/mimalloc
+          cp target/release/hot "$RUNNER_TEMP/alloc/hot-mimalloc"
+
+      - name: Compare
+        run: |
+          python3 scripts/ci/allocator-comparison.py \
+            "$RUNNER_TEMP/alloc/hot-system" "$RUNNER_TEMP/alloc/hot-mimalloc" \
+            --out "$GITHUB_STEP_SUMMARY"
+
+      - name: sccache stats
+        run: sccache --show-stats || true
