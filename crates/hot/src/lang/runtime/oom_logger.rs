@@ -36,7 +36,145 @@
 //! * Inside the OOM logger we can't call any function that allocates. Stick
 //!   to `core::fmt::Write` into stack-allocated buffers and direct syscalls.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
+
+/// The allocator under the logger: the system's.
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System;
+
+/// The allocator under the logger: mimalloc, or the system's when
+/// `HOT_ALLOCATOR=system` is set as the process starts.
+#[cfg(feature = "mimalloc")]
+#[allow(non_upper_case_globals)]
+static System: chosen::Chosen = chosen::Chosen;
+
+/// The allocator this process runs on: `"mimalloc"` or `"system"`.
+pub fn allocator_name() -> &'static str {
+    #[cfg(feature = "mimalloc")]
+    if !chosen::is_system() {
+        return "mimalloc";
+    }
+    "system"
+}
+
+/// mimalloc, with the system allocator as a choice made once, at the
+/// process's first allocation.
+///
+/// mimalloc is faster for Hot's many small allocations and holds more
+/// memory. The system allocator stays available without a rebuild, for a
+/// deployment that has to give that memory back, and for glibc's heap
+/// checks (`MALLOC_CHECK_`), which only see what glibc allocates.
+#[cfg(feature = "mimalloc")]
+mod chosen {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    const UNDECIDED: u8 = 0;
+    const MIMALLOC: u8 = 1;
+    const SYSTEM: u8 = 2;
+
+    /// Decided once and never changed after: a block goes back to the
+    /// allocator it came from.
+    static CHOICE: AtomicU8 = AtomicU8::new(UNDECIDED);
+    static MI: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+    #[inline(always)]
+    pub(super) fn is_system() -> bool {
+        match CHOICE.load(Ordering::Relaxed) {
+            MIMALLOC => false,
+            SYSTEM => true,
+            _ => decide(),
+        }
+    }
+
+    /// Threads that race here read the same environment and store the same
+    /// answer.
+    #[cold]
+    fn decide() -> bool {
+        let system = wants_system();
+        CHOICE.store(if system { SYSTEM } else { MIMALLOC }, Ordering::Relaxed);
+        system
+    }
+
+    #[cfg(unix)]
+    fn wants_system() -> bool {
+        // SAFETY: `getenv` reads the environment and allocates nothing. This
+        // runs at the first allocation, before anything can have changed it.
+        let value = unsafe { libc::getenv(c"HOT_ALLOCATOR".as_ptr()) };
+        // SAFETY: a non-null result is a NUL-terminated string.
+        !value.is_null() && unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes() == b"system"
+    }
+
+    #[cfg(windows)]
+    fn wants_system() -> bool {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetEnvironmentVariableA(name: *const u8, buffer: *mut u8, size: u32) -> u32;
+        }
+        // Room for "system" and its NUL, and no more: a longer value is
+        // another value.
+        let mut value = [0u8; 8];
+        // SAFETY: the name is NUL-terminated and the buffer is as long as
+        // the size given. The call writes into the buffer only; what it
+        // allocates itself, it takes from the process heap, not from here.
+        let length = unsafe {
+            GetEnvironmentVariableA(
+                c"HOT_ALLOCATOR".as_ptr().cast(),
+                value.as_mut_ptr(),
+                value.len() as u32,
+            )
+        };
+        // The length written, without the NUL. For a value that didn't fit
+        // it is the size needed, which is larger than the buffer.
+        value.get(..length as usize) == Some(b"system".as_slice())
+    }
+
+    /// No way known here to read the environment without allocating.
+    #[cfg(not(any(unix, windows)))]
+    fn wants_system() -> bool {
+        false
+    }
+
+    pub(super) struct Chosen;
+
+    unsafe impl GlobalAlloc for Chosen {
+        #[inline]
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if is_system() {
+                unsafe { System.alloc(layout) }
+            } else {
+                unsafe { MI.alloc(layout) }
+            }
+        }
+
+        #[inline]
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if is_system() {
+                unsafe { System.dealloc(ptr, layout) }
+            } else {
+                unsafe { MI.dealloc(ptr, layout) }
+            }
+        }
+
+        #[inline]
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if is_system() {
+                unsafe { System.alloc_zeroed(layout) }
+            } else {
+                unsafe { MI.alloc_zeroed(layout) }
+            }
+        }
+
+        #[inline]
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if is_system() {
+                unsafe { System.realloc(ptr, layout, new_size) }
+            } else {
+                unsafe { MI.realloc(ptr, layout, new_size) }
+            }
+        }
+    }
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Re-entrancy guard so a panic / log inside the logger doesn't recurse.
@@ -80,6 +218,8 @@ unsafe impl GlobalAlloc for LoggingAllocator {
 pub const DEFAULT_MALLOC_ARENAS: i32 = 4;
 
 /// Cap glibc's malloc arenas at `max`, unless `MALLOC_ARENA_MAX` sets the cap.
+/// It matters only when the process runs on the system allocator (see
+/// `allocator_name`): mimalloc has no arenas of this kind.
 /// glibc gives threads that contend for the heap arenas of their own, up to
 /// eight per core, and keeps the memory they once held: a worker whose
 /// threads ran a burst of large runs stays near its peak resident size. Call

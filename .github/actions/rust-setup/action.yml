@@ -49,7 +49,10 @@ runs:
     - name: Install sccache
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       with:
-        version: "v0.16.0"
+        # 0.19.0 is the first release that takes MSVC's `-Tp <file>`, which
+        # the cc crate passes for a `.cc` source (mimalloc's, on Windows).
+        # Before it, sccache gave the compiler `/WX-` as the source file.
+        version: "v0.19.0"
         token: ${{ github.token }}
 
     - name: Configure sccache (local disk cache)

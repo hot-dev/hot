@@ -1,0 +1,83 @@
+name: allocator-comparison
+
+# Compares mimalloc, which `hot` runs on, with the system allocator on Linux:
+# time, peak memory, and memory through a long run. The report is the job
+# summary. It runs on request, and on pushes to the branch that made mimalloc
+# the default. Nothing depends on it.
+on:
+  push:
+    branches: [ mimalloc-experiment ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.99.1
+  TAILWIND_VERSION: v4.3.3
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: 2
+  CARGO_HTTP_TIMEOUT: 30
+  SQLX_OFFLINE: 'true'
+  CI: 'true'
+
+jobs:
+  compare:
+    name: mimalloc vs the system allocator
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Free disk space when low
+        uses: ./.github/actions/free-disk-space
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: "false"
+          cargo-build-jobs: '8'
+
+      # A release build, as a published `hot` is, in a directory that
+      # holds Hot's resources, where a binary looks for them first.
+      - name: Build
+        run: |
+          cargo build --release --locked -p hot_cli
+          mkdir -p "$RUNNER_TEMP/alloc/resources"
+          for entry in resources/*; do ln -s "$PWD/$entry" "$RUNNER_TEMP/alloc/resources/"; done
+          ln -s "$PWD/hot/pkg" "$RUNNER_TEMP/alloc/resources/pkg"
+          cp target/release/hot "$RUNNER_TEMP/alloc/hot"
+
+      # The memory smoke fixtures in a container capped at 1 GiB, the size
+      # of the smallest self-host worker, on each allocator.
+      - name: Memory smoke test at 1 GiB, mimalloc
+        run: |
+          docker run --rm --memory 1g --memory-swap 1g \
+            -e HOT_HOME=/work/hot \
+            -v "$PWD:/work" -w /work ubuntu:24.04 \
+            ./scripts/ci/memory-smoke.sh ./target/release/hot
+
+      - name: Memory smoke test at 1 GiB, system allocator
+        if: always()
+        run: |
+          docker run --rm --memory 1g --memory-swap 1g \
+            -e HOT_HOME=/work/hot -e HOT_ALLOCATOR=system \
+            -v "$PWD:/work" -w /work ubuntu:24.04 \
+            ./scripts/ci/memory-smoke.sh ./target/release/hot
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 scripts/ci/allocator-comparison.py "$RUNNER_TEMP/alloc/hot" \
+            --out "$GITHUB_STEP_SUMMARY"
+
+      - name: sccache stats
+        run: sccache --show-stats || true

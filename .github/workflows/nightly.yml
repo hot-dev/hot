@@ -147,19 +147,30 @@ jobs:
       # Every function compiled on its first call, with glibc checking the
       # heap on every allocation and filling freed memory, so a JIT
       # use-after-free or double free aborts instead of passing by luck.
+      # On the system allocator: glibc checks only what it allocates.
       - name: Hot tests, JIT threshold 1, under MALLOC_CHECK_=3
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+          HOT_ALLOCATOR: system
           MALLOC_CHECK_: '3'
           MALLOC_PERTURB_: '165'
         run: ./target/release/hot test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
 
       # The memory smoke fixtures in a container capped at 1 GiB, the size
-      # of the smallest self-host worker.
-      - name: Memory smoke test (1 GiB, MALLOC_CHECK_=3)
+      # of the smallest self-host worker: as `hot` runs, on mimalloc, and
+      # on the system allocator with glibc's heap checks.
+      - name: Memory smoke test (1 GiB)
         run: |
           docker run --rm --memory 1g --memory-swap 1g \
-            -e HOT_HOME=/work/hot -e MALLOC_CHECK_=3 -e MALLOC_PERTURB_=165 \
+            -e HOT_HOME=/work/hot \
+            -v "$PWD:/work" -w /work ubuntu:24.04 \
+            ./scripts/ci/memory-smoke.sh ./target/release/hot
+
+      - name: Memory smoke test (1 GiB, system allocator, MALLOC_CHECK_=3)
+        run: |
+          docker run --rm --memory 1g --memory-swap 1g \
+            -e HOT_HOME=/work/hot -e HOT_ALLOCATOR=system \
+            -e MALLOC_CHECK_=3 -e MALLOC_PERTURB_=165 \
             -v "$PWD:/work" -w /work ubuntu:24.04 \
             ./scripts/ci/memory-smoke.sh ./target/release/hot
 
