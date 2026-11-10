@@ -30,6 +30,11 @@ const MAX_PROCESSING_RETRIES: usize = 3;
 /// 100k is large enough that healthy bursty workloads never block.
 const CHANNEL_CAPACITY: usize = 100_000;
 
+/// Dead letters kept for inspection, as many as the other backends keep.
+/// Nothing drains them in production, so a full channel drops its oldest
+/// entry instead of blocking whoever dead-letters the next one.
+const DLQ_CAPACITY: usize = 10_000;
+
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -110,7 +115,7 @@ impl<T> Clone for Channels<T> {
 impl<T: Send + Sync + 'static> Channels<T> {
     fn create() -> Self {
         let (tx, rx) = async_channel::bounded(CHANNEL_CAPACITY);
-        let (dlq_tx, dlq_rx) = async_channel::bounded(CHANNEL_CAPACITY);
+        let (dlq_tx, dlq_rx) = async_channel::bounded(DLQ_CAPACITY);
         Self {
             tx,
             rx,
@@ -195,8 +200,23 @@ impl<T: Send + Sync + 'static> MemQueue<T> {
         out
     }
 
+    /// Add a dead letter without waiting for room: a full channel drops its
+    /// oldest entry (see `DLQ_CAPACITY`).
+    fn push_dlq(&self, mut item: T) -> Result<(), MemQueueError> {
+        loop {
+            match self.channels.dlq_tx.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(async_channel::TrySendError::Full(rejected)) => {
+                    item = rejected;
+                    let _ = self.channels.dlq_rx.try_recv();
+                }
+                Err(async_channel::TrySendError::Closed(_)) => return Err(MemQueueError::Closed),
+            }
+        }
+    }
+
     async fn send_to_dlq(&self, item: T, reason: &str) {
-        if let Err(send_err) = self.channels.dlq_tx.send(item).await {
+        if let Err(send_err) = self.push_dlq(item) {
             tracing::warn!(
                 queue = self.queue_name,
                 reason = reason,
@@ -241,9 +261,17 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
         };
 
         if retry_item.exceeded_retries() {
+            // The payload goes back to the caller, as on Redis: no delivery
+            // of this message is left to settle what it stands for.
+            let dead_letter = serde_json::to_vec(&retry_item.item).ok();
             self.send_to_dlq(retry_item.item, "retry limit exceeded")
                 .await;
-            return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
+            return Err(Box::new(match dead_letter {
+                Some(payload) => QueueProcessingError::DeadLettered(
+                    super::RecoveredQueueMessage::new(payload, Serialization::Json),
+                ),
+                None => QueueProcessingError::RetryLimitExceeded,
+            }));
         }
 
         let queue_wait = retry_item.first_attempt.elapsed();
@@ -310,6 +338,18 @@ where
                 .as_ref()
                 .is_some_and(|item| item.redelivered),
         }
+    }
+
+    /// Deliveries of this message that already counted toward its retry limit.
+    pub fn prior_attempts(&self) -> usize {
+        self.retry_item.as_ref().map_or(0, |item| item.retry_count)
+    }
+
+    /// Whether a worker error on this delivery dead-letters the message:
+    /// `process` then moves it to the DLQ itself and reports only the
+    /// worker's error.
+    pub fn last_attempt(&self) -> bool {
+        self.prior_attempts() + 1 >= MAX_PROCESSING_RETRIES
     }
 
     pub async fn process<F, Fut, R>(
@@ -566,11 +606,8 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + 'static> Queue<T> for MemQu
             reason = reason,
             "Moving item to dead letter queue"
         );
-        self.channels
-            .dlq_tx
-            .send(item)
-            .await
-            .map_err(|_| Box::new(MemQueueError::Closed) as Box<dyn Error + Send + Sync>)?;
+        self.push_dlq(item)
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)?;
         Ok(())
     }
 }
@@ -888,16 +925,44 @@ mod tests {
                 )
             })
             .await;
+        // The dead letter comes back with its payload, so the caller can
+        // settle what the message stood for.
         match result {
-            Err(e) => assert!(
-                e.to_string().contains("Retry limit exceeded"),
-                "unexpected error: {}",
-                e
-            ),
-            Ok(_) => panic!("expected RetryLimitExceeded after exhausting the counted budget"),
+            Err(e) => match e.downcast_ref::<QueueProcessingError>() {
+                Some(QueueProcessingError::DeadLettered(message)) => {
+                    assert!(e.to_string().contains("Retry limit exceeded"));
+                    assert_eq!(message.decode::<i32>(), Ok(7));
+                }
+                _ => panic!("unexpected error: {}", e),
+            },
+            Ok(_) => panic!("expected DeadLettered after exhausting the counted budget"),
         }
         assert!(queue.is_empty().await.unwrap());
         assert_eq!(queue.try_drain_dlq(), vec![7]);
+    }
+
+    /// A lease knows when a worker error on it is the one that dead-letters
+    /// its message: `process` reports that error, not the dead-lettering.
+    #[tokio::test]
+    async fn lease_reports_the_attempt_whose_failure_dead_letters() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(5).await.unwrap();
+
+        for attempt in 1..=MAX_PROCESSING_RETRIES {
+            let lease = queue.claim_now().await.unwrap().expect("a delivery");
+            assert_eq!(lease.last_attempt(), attempt == MAX_PROCESSING_RETRIES);
+            let result = lease
+                .process(
+                    |_item| async move { Err::<i32, Box<dyn Error + Send + Sync>>("fail".into()) },
+                )
+                .await;
+            assert!(matches!(
+                result.unwrap_err().downcast_ref::<QueueProcessingError>(),
+                Some(QueueProcessingError::WorkerError(_))
+            ));
+        }
+        assert!(queue.claim_now().await.unwrap().is_none());
+        assert_eq!(queue.try_drain_dlq(), vec![5]);
     }
 
     /// Never-lose rule, memory backend: an opted-out infrastructure retry
@@ -1016,6 +1081,29 @@ mod tests {
 
         let dlq = queue.try_drain_dlq();
         assert_eq!(dlq, vec!["dropped".to_string()]);
+    }
+
+    /// Nothing drains the dead letters in production: a full channel drops
+    /// its oldest entry instead of blocking the caller.
+    #[tokio::test]
+    async fn full_dead_letter_channel_drops_its_oldest_entry() {
+        let queue = MemQueue::<usize>::new(unique_name("tq")).unwrap();
+        let overflow = 3;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for item in 0..DLQ_CAPACITY + overflow {
+                queue
+                    .move_to_dead_letter_queue(item, "test reason".to_string())
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .expect("dead-lettering must not wait for room");
+
+        let dlq = queue.try_drain_dlq();
+        assert_eq!(dlq.len(), DLQ_CAPACITY);
+        assert_eq!(dlq.first(), Some(&overflow));
+        assert_eq!(dlq.last(), Some(&(DLQ_CAPACITY + overflow - 1)));
     }
 
     #[tokio::test]

@@ -611,6 +611,26 @@ pub async fn run_for_environment(
         schedule_policy.max_active_per_org
     );
 
+    // The scheduler only enqueues to hot:email, to recover app emails whose
+    // own enqueue never happened (see `recover_pending_emails`).
+    let email_queue: Option<Arc<dyn Queue<Message>>> =
+        match hot::queue::ProcessingQueue::<Message>::new_with_cluster(
+            queue_type,
+            "hot:email".to_string(),
+            redis_uri.clone(),
+            redis_cluster,
+            serialization,
+        ) {
+            Ok(queue) => Some(Arc::new(queue)),
+            Err(e) => {
+                warn!(
+                    "hot.dev: SCHEDULER could not open the email queue; pending app emails will not be recovered: {}",
+                    e
+                );
+                None
+            }
+        };
+
     // Create queue for sending scheduled events to workers
     let event_queue: Arc<dyn Queue<Message>> = match queue_type {
         QueueType::Memory => {
@@ -783,6 +803,7 @@ pub async fn run_for_environment(
 
         // Start the retry processor task.
         let retry_queue_clone = Arc::clone(&event_queue);
+        let retry_email_queue = email_queue.clone();
         let retry_db_clone = Arc::clone(&db);
         let mut shutdown_rx = shutdown_tx.subscribe();
         let retry_health = Arc::clone(&dispatch_health);
@@ -794,6 +815,9 @@ pub async fn run_for_environment(
             loop {
                 tokio::select! {
                     _ = retry_timer.tick() => {
+                        if let Some(email_queue) = &retry_email_queue {
+                            recover_pending_emails(&retry_db_clone, email_queue.as_ref()).await;
+                        }
                         match process_pending_retries(&retry_db_clone, &retry_queue_clone, env_id).await {
                             Ok(()) => retry_health.loop_passed("retry processor"),
                             Err(e) => error!("hot.dev: SCHEDULER retry processor failed: {}", e),
@@ -1909,6 +1933,47 @@ fn format_duration(duration: chrono::Duration) -> String {
         format!("{}m {}s", seconds / 60, seconds % 60)
     } else {
         format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    }
+}
+
+/// How often the email sweep also settles stale emails (see
+/// `EmailQueueEntry::settle_stale`): that pass reads rows no index covers, and
+/// the bounds it enforces are minutes long.
+const EMAIL_SETTLE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Recover the app emails nothing is left to send: once per
+/// `EMAIL_SETTLE_INTERVAL` return those stuck in `sending` to pending and fail
+/// those too old to send, then enqueue the overdue pending ones again.
+async fn recover_pending_emails(db: &DatabasePool, email_queue: &dyn Queue<Message>) {
+    static LAST_SETTLE: Mutex<Option<Instant>> = Mutex::new(None);
+    let settle = {
+        let mut last = LAST_SETTLE.lock().unwrap_or_else(PoisonError::into_inner);
+        let due = last.is_none_or(|at| at.elapsed() >= EMAIL_SETTLE_INTERVAL);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    };
+    let sweep = async {
+        if settle {
+            match hot::db::email_queue::EmailQueueEntry::settle_stale(db, Utc::now()).await {
+                Ok(stale) if stale.failed + stale.released > 0 => warn!(
+                    failed = stale.failed,
+                    released = stale.released,
+                    "Settled app emails that were too old to send or stuck in sending"
+                ),
+                Ok(_) => {}
+                Err(error) => warn!(%error, "Stale email sweep failed"),
+            }
+        }
+        hot::lang::event::queue::recover_pending_emails(db, email_queue).await
+    };
+    // The pass bounds its own enqueues and gives back a claim whose enqueue
+    // failed; this is the backstop for a database that hangs.
+    match tokio::time::timeout(Duration::from_secs(30), sweep).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(%error, "Pending email sweep failed"),
+        Err(error) => warn!(%error, "Pending email sweep timed out"),
     }
 }
 

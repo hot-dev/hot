@@ -24,6 +24,7 @@ use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -42,6 +43,8 @@ const DLQ_MAX_MESSAGES: i64 = 10_000;
 const DROPPED_LEASE_BACKOFF: Duration = Duration::from_millis(100);
 const SCHEMA_INIT_MAX_ATTEMPTS: usize = 5;
 const SCHEMA_INIT_RETRY_DELAY: Duration = Duration::from_millis(25);
+/// How often an initialized queue checks that its tables still exist.
+const SCHEMA_RECHECK_INTERVAL_MS: i64 = 1_000;
 const FILE_REMOVE_MAX_ATTEMPTS: usize = 20;
 const FILE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(10);
 const FILE_REMOVE_MAX_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -281,6 +284,12 @@ struct SharedQueue {
     notifications_tx: async_channel::Sender<String>,
     notifications_rx: async_channel::Receiver<String>,
     initialized: OnceCell<()>,
+    /// When the schema was last initialized or seen in place (see
+    /// `ensure_initialized`).
+    schema_checked_at_ms: AtomicI64,
+    /// `queue_metadata.created_at_ms` as last read: it changes when the file
+    /// is initialized again, by this process or another.
+    schema_created_at_ms: AtomicI64,
     /// Consumers of this process already recorded in `queue_consumer`.
     registered_consumers: Mutex<std::collections::HashSet<String>>,
 }
@@ -309,6 +318,8 @@ fn create_shared(queue_name: &str, path: &Path) -> Result<Arc<SharedQueue>, Sqli
         notifications_tx,
         notifications_rx,
         initialized: OnceCell::new(),
+        schema_checked_at_ms: AtomicI64::new(0),
+        schema_created_at_ms: AtomicI64::new(0),
         registered_consumers: Mutex::new(std::collections::HashSet::new()),
     }))
 }
@@ -361,22 +372,112 @@ impl SharedQueue {
         let pool = self.ensure_pool().await;
         self.initialized
             .get_or_try_init(|| async {
-                for attempt in 0..SCHEMA_INIT_MAX_ATTEMPTS {
-                    match self.initialize_schema(pool).await {
-                        Ok(()) => return Ok(()),
-                        Err(error)
-                            if is_transient_database_lock(&error)
-                                && attempt + 1 < SCHEMA_INIT_MAX_ATTEMPTS =>
-                        {
-                            tokio::time::sleep(SCHEMA_INIT_RETRY_DELAY).await;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                unreachable!("schema initialization retry loop always returns")
+                self.initialize_schema_with_retry(pool).await?;
+                self.forget_consumers_of_a_replaced_schema(pool).await;
+                Ok::<_, SqliteQueueError>(())
             })
-            .await
-            .map(|_| ())
+            .await?;
+        // The tables can vanish under an initialized queue: a `hot` that
+        // found the file before its first initialization finished resets it.
+        // Initialize it again rather than fail every operation until restart.
+        if self.schema_check_due() {
+            if !self.schema_present(pool).await? {
+                tracing::warn!(
+                    queue = self.queue_name,
+                    "SQLite queue tables are gone; initializing the queue file again"
+                );
+                self.initialize_schema_with_retry(pool).await?;
+            }
+            self.forget_consumers_of_a_replaced_schema(pool).await;
+        }
+        Ok(())
+    }
+
+    /// The new `queue_consumer` table of a file initialized again, here or
+    /// by another process, holds none of this process's consumers: forget
+    /// that they were recorded, so `register_consumer` records them again.
+    async fn forget_consumers_of_a_replaced_schema(&self, pool: &SqlitePool) {
+        let created_at_ms: Result<Option<i64>, _> =
+            sqlx::query_scalar("SELECT created_at_ms FROM queue_metadata WHERE singleton = 1")
+                .fetch_optional(pool)
+                .await;
+        // Unreadable: the next check reads it again.
+        let Ok(Some(created_at_ms)) = created_at_ms else {
+            return;
+        };
+        let seen = self
+            .schema_created_at_ms
+            .swap(created_at_ms, AtomicOrdering::Relaxed);
+        if seen != created_at_ms {
+            self.registered_consumers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    /// Remember that `consumer_name` was recorded in `queue_consumer`, by a
+    /// write begun while the schema was `schema_created_at_ms`. A schema
+    /// replaced since may not hold that row, so the write is then forgotten
+    /// and `register_consumer` records the consumer again. The check is made
+    /// under the set's lock: `forget_consumers_of_a_replaced_schema` moves
+    /// the schema on before it clears the set, so a stale name either fails
+    /// the check here or is cleared there.
+    fn note_consumer_registered(&self, consumer_name: &str, schema_created_at_ms: i64) -> bool {
+        let mut registered = self
+            .registered_consumers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.schema_created_at_ms.load(AtomicOrdering::Relaxed) != schema_created_at_ms {
+            return false;
+        }
+        registered.insert(consumer_name.to_string());
+        true
+    }
+
+    async fn initialize_schema_with_retry(
+        &self,
+        pool: &SqlitePool,
+    ) -> Result<(), SqliteQueueError> {
+        for attempt in 0..SCHEMA_INIT_MAX_ATTEMPTS {
+            match self.initialize_schema(pool).await {
+                Ok(()) => {
+                    self.schema_checked_at_ms
+                        .store(now_ms(), AtomicOrdering::Relaxed);
+                    return Ok(());
+                }
+                Err(error)
+                    if is_transient_database_lock(&error)
+                        && attempt + 1 < SCHEMA_INIT_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(SCHEMA_INIT_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("schema initialization retry loop always returns")
+    }
+
+    /// Whether to check now that the tables still exist: once per
+    /// `SCHEMA_RECHECK_INTERVAL_MS`, by one caller.
+    fn schema_check_due(&self) -> bool {
+        let now = now_ms();
+        let last = self.schema_checked_at_ms.load(AtomicOrdering::Relaxed);
+        now.saturating_sub(last) >= SCHEMA_RECHECK_INTERVAL_MS
+            && self
+                .schema_checked_at_ms
+                .compare_exchange(last, now, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed)
+                .is_ok()
+    }
+
+    async fn schema_present(&self, pool: &SqlitePool) -> Result<bool, SqliteQueueError> {
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('queue_metadata', 'queue_message', 'queue_consumer')",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(tables == 3)
     }
 
     async fn initialize_schema(&self, pool: &SqlitePool) -> Result<(), SqliteQueueError> {
@@ -784,6 +885,11 @@ impl<T> SqliteQueue<T> {
         {
             return;
         }
+        // The schema this row is written against: see `note_consumer_registered`.
+        let schema_created_at_ms = self
+            .shared
+            .schema_created_at_ms
+            .load(AtomicOrdering::Relaxed);
         let registered = sqlx::query(
             "INSERT OR REPLACE INTO queue_consumer \
              (consumer_name, process_host, process_id, registered_at_ms) VALUES (?, ?, ?, ?)",
@@ -797,10 +903,7 @@ impl<T> SqliteQueue<T> {
         match registered {
             Ok(_) => {
                 self.shared
-                    .registered_consumers
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(self.consumer_name.clone());
+                    .note_consumer_registered(&self.consumer_name, schema_created_at_ms);
             }
             Err(error) => tracing::warn!(
                 queue = self.shared.queue_name,
@@ -930,7 +1033,6 @@ where
                 .unwrap_or_default();
             SqliteQueueLease {
                 queue: self.clone(),
-                message_id: Some(row.message_id),
                 payload: Some(row.payload),
                 serialization: row.serialization,
                 retry_count: row.retry_count,
@@ -939,6 +1041,12 @@ where
                     row.last_error.as_deref(),
                     Some(RECOVERED_MARK | PROCESSING_ALONE_MARK)
                 ),
+                keepalive: Some(LeaseKeepalive::start(
+                    self.clone(),
+                    row.message_id.clone(),
+                    row.lease_token.clone(),
+                )),
+                message_id: Some(row.message_id),
                 lease_token: row.lease_token,
                 claimed_at,
                 enqueued_at,
@@ -1132,6 +1240,55 @@ impl SoleDeliveryMarker {
     }
 }
 
+/// Renews a lease from the moment it is claimed until its
+/// `SqliteQueueLease` is settled or dropped. A lease can wait in memory
+/// between its claim and its handler for longer than the lease lasts;
+/// unrenewed, it would expire there and this same process's recovery would
+/// requeue a message that is about to run. A process that stops takes the
+/// renewal with it, so its leases still expire.
+struct LeaseKeepalive {
+    stop: tokio::sync::oneshot::Sender<()>,
+    renewal: tokio::task::JoinHandle<()>,
+}
+
+impl LeaseKeepalive {
+    fn start<T>(queue: SqliteQueue<T>, message_id: String, lease_token: String) -> Self
+    where
+        T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
+    {
+        let renewal_interval = (queue.lease_duration / 3).max(Duration::from_millis(250));
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+        let renewal = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(renewal_interval) => {
+                        match queue.renew_lease(&message_id, &lease_token).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    queue = queue.shared.queue_name,
+                                    message_id = message_id,
+                                    "Failed to renew SQLite queue lease: {}",
+                                    error
+                                );
+                            }
+                        }
+                    }
+                    // Stopped, or the lease was dropped.
+                    _ = &mut stopped => break,
+                }
+            }
+        });
+        Self { stop, renewal }
+    }
+
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.renewal.await;
+    }
+}
+
 pub struct SqliteQueueLease<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
@@ -1143,6 +1300,7 @@ where
     retry_count: i64,
     redelivered: bool,
     recovered: bool,
+    keepalive: Option<LeaseKeepalive>,
     lease_token: String,
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1174,6 +1332,11 @@ where
         self.retry_count + 1 >= MAX_PROCESSING_RETRIES
     }
 
+    /// Deliveries of this message that already counted toward its retry limit.
+    pub fn prior_attempts(&self) -> usize {
+        usize::try_from(self.retry_count).unwrap_or(0)
+    }
+
     /// With crash quarantine, a handle to mark this delivery as processing
     /// alone in its worker (see `SqliteQueue::with_crash_quarantine`).
     pub fn sole_delivery_marker(&self) -> Option<super::SoleDeliveryMarker> {
@@ -1187,6 +1350,18 @@ where
         }))
     }
 
+    /// Stop holding this lease without settling it, as its worker stopping
+    /// would: the message stays leased until the lease expires and recovery
+    /// takes it. `std::mem::forget` would leave the keepalive renewing it.
+    #[doc(hidden)]
+    pub fn abandon(mut self) {
+        self.keepalive.take();
+        self.completed = true;
+    }
+
+    /// Run `worker` on the message and settle the lease with its result.
+    /// `Ok(None)` without running `worker` when the lease was lost before
+    /// the handler could start.
     pub async fn process<F, Fut, R>(
         mut self,
         worker: F,
@@ -1205,6 +1380,42 @@ where
             .payload
             .take()
             .expect("SQLite queue lease already completed");
+        // Run the handler only while the message is still leased to this
+        // delivery. Once the lease is lost the message belongs to another
+        // delivery, which runs it; running it here too would run it twice.
+        match self.queue.renew_lease(&message_id, &self.lease_token).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    queue = self.queue.shared.queue_name,
+                    message_id = message_id,
+                    "SQLite queue lease was lost before its handler ran; leaving the message to its new delivery"
+                );
+                self.message_id.take();
+                self.completed = true;
+                return Ok(None);
+            }
+            Err(error) => {
+                // Unverified: hand the message back without running it or
+                // counting an attempt. If that fails too, the drop releases it.
+                if self
+                    .queue
+                    .release_for_retry(
+                        &message_id,
+                        &self.lease_token,
+                        "lease could not be verified before processing",
+                        DROPPED_LEASE_BACKOFF,
+                        false,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.message_id.take();
+                    self.completed = true;
+                }
+                return Err(Box::new(error));
+            }
+        }
         let serialization = serialization_from_id(self.serialization)?;
         let item: T = match deserialize(&payload, serialization) {
             Ok(item) => item,
@@ -1222,38 +1433,13 @@ where
             }
         };
 
-        let queue = self.queue.clone();
-        let renew_message_id = message_id.clone();
-        let renew_token = self.lease_token.clone();
-        let renewal_interval = (self.queue.lease_duration / 3).max(Duration::from_millis(250));
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let renewal = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(renewal_interval) => {
-                        match queue.renew_lease(&renew_message_id, &renew_token).await {
-                            Ok(true) => {}
-                            Ok(false) => break,
-                            Err(error) => {
-                                tracing::warn!(
-                                    queue = queue.shared.queue_name,
-                                    message_id = renew_message_id,
-                                    "Failed to renew SQLite queue lease: {}",
-                                    error
-                                );
-                            }
-                        }
-                    }
-                    _ = &mut stop_rx => break,
-                }
-            }
-        });
-
         let wait_target_p99_ms = queue_wait_target_p99_ms();
         let processing_started = Instant::now();
+        // The keepalive started at the claim renews the lease meanwhile.
         let result = worker(item).await;
-        let _ = stop_tx.send(());
-        let _ = renewal.await;
+        if let Some(keepalive) = self.keepalive.take() {
+            keepalive.stop().await;
+        }
 
         let outcome = match result {
             Ok(value) => {
@@ -1444,6 +1630,13 @@ where
     }
 }
 
+/// See `SqliteQueueAdmin::inspect_schema`.
+enum ManagedSchema {
+    Complete,
+    Empty,
+    Incompatible,
+}
+
 pub struct SqliteQueueAdmin {
     directory: PathBuf,
 }
@@ -1534,8 +1727,17 @@ impl SqliteQueueAdmin {
         matches!(
             error,
             SqliteQueueError::Database(sqlx::Error::Database(database))
-                if matches!(database.code().as_deref(), Some("11" | "26"))
+                if database.code().as_deref().is_some_and(Self::is_resettable_result_code)
         )
+    }
+
+    /// Whether a SQLite result code says the file is corrupt
+    /// (SQLITE_CORRUPT, 11) or not a database (SQLITE_NOTADB, 26). SQLite
+    /// reports extended codes, such as 779 for SQLITE_CORRUPT_INDEX, whose
+    /// low byte is the primary code.
+    fn is_resettable_result_code(code: &str) -> bool {
+        code.parse::<i64>()
+            .is_ok_and(|code| matches!(code & 0xff, 11 | 26))
     }
 
     fn is_transient_file_lock(error: &std::io::Error) -> bool {
@@ -1570,9 +1772,14 @@ impl SqliteQueueAdmin {
         Ok(())
     }
 
-    async fn prepare_schema(pool: &SqlitePool, path: &Path) -> Result<bool, SqliteQueueError> {
+    /// What a managed file holds: the queue's schema, nothing yet, or
+    /// tables this build cannot use.
+    async fn inspect_schema(
+        conn: &mut sqlx::SqliteConnection,
+        path: &Path,
+    ) -> Result<ManagedSchema, SqliteQueueError> {
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-            .fetch_one(pool)
+            .fetch_one(&mut *conn)
             .await?;
         if version > SCHEMA_VERSION {
             return Err(SqliteQueueError::UnsupportedSchema {
@@ -1586,20 +1793,23 @@ impl SqliteQueueAdmin {
             "SELECT name FROM sqlite_master WHERE type = 'table' \
              AND name IN ('queue_metadata', 'queue_message')",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let has_metadata = tables.iter().any(|table| table == "queue_metadata");
         let has_messages = tables.iter().any(|table| table == "queue_message");
+        if !has_metadata && !has_messages {
+            return Ok(ManagedSchema::Empty);
+        }
 
         let mut metadata_schema_version = None;
         let complete = if has_metadata && has_messages {
             let metadata_columns: Vec<String> =
                 sqlx::query_scalar("SELECT name FROM pragma_table_info('queue_metadata')")
-                    .fetch_all(pool)
+                    .fetch_all(&mut *conn)
                     .await?;
             let message_columns: Vec<String> =
                 sqlx::query_scalar("SELECT name FROM pragma_table_info('queue_message')")
-                    .fetch_all(pool)
+                    .fetch_all(&mut *conn)
                     .await?;
             let columns_complete = ["singleton", "queue_name", "schema_version", "created_at_ms"]
                 .iter()
@@ -1624,7 +1834,7 @@ impl SqliteQueueAdmin {
                 metadata_schema_version = sqlx::query_scalar(
                     "SELECT schema_version FROM queue_metadata WHERE singleton = 1",
                 )
-                .fetch_optional(pool)
+                .fetch_optional(&mut *conn)
                 .await?;
             }
             columns_complete && metadata_schema_version.is_some()
@@ -1640,14 +1850,43 @@ impl SqliteQueueAdmin {
                 supported: SCHEMA_VERSION,
             });
         }
-        if complete {
-            return Ok(true);
+        Ok(if complete {
+            ManagedSchema::Complete
+        } else {
+            ManagedSchema::Incompatible
+        })
+    }
+
+    async fn prepare_schema(pool: &SqlitePool, path: &Path) -> Result<bool, SqliteQueueError> {
+        {
+            let mut conn = pool.acquire().await?;
+            match Self::inspect_schema(&mut conn, path).await? {
+                ManagedSchema::Complete => return Ok(true),
+                // Nothing to read, and nothing to reset: a queue creates its
+                // whole schema in one transaction, so its process may be
+                // doing that right now. Dropping "leftover" tables here
+                // would drop the ones it is about to commit.
+                ManagedSchema::Empty => return Ok(false),
+                ManagedSchema::Incompatible => {}
+            }
         }
 
-        // An empty or partially initialized managed file contains no queue
-        // state we can safely interpret. Reset its private schema to empty;
-        // the next real queue connection will atomically bootstrap it.
-        let mut tx = pool.begin().await?;
+        // Tables this build cannot use hold no queue state we can safely
+        // interpret. Reset the file's private schema to empty; the next real
+        // queue connection will atomically bootstrap it. Decide again under
+        // the write lock, so the reset cannot race a queue's initialization.
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        match Self::inspect_schema(&mut tx, path).await? {
+            ManagedSchema::Complete => {
+                tx.rollback().await?;
+                return Ok(true);
+            }
+            ManagedSchema::Empty => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            ManagedSchema::Incompatible => {}
+        }
         sqlx::query("DROP TABLE IF EXISTS queue_message")
             .execute(&mut *tx)
             .await?;
@@ -2528,5 +2767,219 @@ mod tests {
 
         assert_eq!(seen.load(Ordering::SeqCst), ITEMS);
         assert_eq!(queue.len().await.unwrap(), 0);
+    }
+
+    /// A claimed lease can wait for its handler longer than the lease lasts.
+    /// It stays this delivery's lease: recovery leaves it alone, and it runs
+    /// once.
+    #[tokio::test]
+    async fn waiting_lease_outlives_its_duration_without_being_recovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "waiting-lease")
+            .with_orphan_idle_ms(MIN_LEASE_DURATION.as_millis() as u64);
+        queue.enqueue("waiting".to_string()).await.unwrap();
+        let lease = queue.claim_now().await.unwrap().unwrap();
+
+        tokio::time::sleep(MIN_LEASE_DURATION + Duration::from_millis(500)).await;
+        assert_eq!(queue.recover_orphaned_items().await.unwrap(), 0);
+        assert!(queue.claim_now().await.unwrap().is_none());
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::clone(&runs);
+        let processed = lease
+            .process(|item| async move {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Box<dyn Error + Send + Sync>>(item)
+            })
+            .await
+            .unwrap();
+        assert_eq!(processed.as_deref(), Some("waiting"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.len().await.unwrap(), 0);
+    }
+
+    /// An abandoned lease expires as a stopped worker's would.
+    #[tokio::test]
+    async fn abandoned_lease_expires_and_is_recovered() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "abandoned-lease")
+            .with_orphan_idle_ms(MIN_LEASE_DURATION.as_millis() as u64);
+        queue.enqueue("orphan".to_string()).await.unwrap();
+        queue.claim_now().await.unwrap().unwrap().abandon();
+
+        tokio::time::sleep(MIN_LEASE_DURATION + Duration::from_millis(500)).await;
+        assert_eq!(queue.recover_orphaned_items().await.unwrap(), 1);
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(lease.recovered());
+        lease.completed = true;
+    }
+
+    /// A lease that was recovered while it waited does not run its handler:
+    /// the message runs once, in its new delivery.
+    #[tokio::test]
+    async fn lost_lease_does_not_run_its_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "lost-lease");
+        queue.enqueue("once".to_string()).await.unwrap();
+        let stale = queue.claim_now().await.unwrap().unwrap();
+        let message_id = stale.message_id.clone().unwrap();
+        expire_lease(&queue, &message_id).await;
+        assert_eq!(queue.recover_orphaned_items().await.unwrap(), 1);
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::clone(&runs);
+        let skipped = stale
+            .process(|item| async move {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Box<dyn Error + Send + Sync>>(item)
+            })
+            .await
+            .unwrap();
+        assert_eq!(skipped, None);
+        assert_eq!(runs.load(Ordering::SeqCst), 0);
+
+        // Skipping it neither released nor counted the new delivery's message.
+        assert_eq!(
+            state_and_retries(&queue, &message_id).await,
+            (STATE_READY, 1)
+        );
+        let lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(lease.recovered());
+        let ran = Arc::clone(&runs);
+        lease
+            .process(|item| async move {
+                ran.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Box<dyn Error + Send + Sync>>(item)
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(queue.len().await.unwrap(), 0);
+    }
+
+    #[test]
+    fn admin_resets_on_extended_corruption_codes() {
+        // SQLITE_CORRUPT, SQLITE_NOTADB, and SQLITE_CORRUPT_VTAB, _SEQUENCE
+        // and _INDEX.
+        for code in ["11", "26", "267", "523", "779"] {
+            assert!(SqliteQueueAdmin::is_resettable_result_code(code), "{code}");
+        }
+        // SQLITE_BUSY, SQLITE_CANTOPEN, SQLITE_IOERR_READ, SQLITE_BUSY_SNAPSHOT.
+        for code in ["5", "14", "266", "517", "not a code"] {
+            assert!(!SqliteQueueAdmin::is_resettable_result_code(code), "{code}");
+        }
+    }
+
+    /// A queue creates its schema in one transaction. An admin that opens the
+    /// file before that commits sees no tables, and must not then drop the
+    /// ones the queue commits.
+    #[tokio::test]
+    async fn admin_leaves_a_file_another_process_is_initializing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(queue_file_name("mid-bootstrap"));
+        let initializer = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&initializer)
+            .await
+            .unwrap();
+        let mut tx = initializer.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        for create_table in [
+            "CREATE TABLE queue_metadata (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE queue_message (id INTEGER PRIMARY KEY)",
+        ] {
+            sqlx::query(create_table).execute(&mut *tx).await.unwrap();
+        }
+
+        let admin = SqliteQueueAdmin::new(temp.path().to_path_buf());
+        let status = tokio::spawn(async move { admin.status().await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tx.commit().await.unwrap();
+        assert!(status.await.unwrap().unwrap().queues.is_empty());
+
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('queue_metadata', 'queue_message')",
+        )
+        .fetch_one(&initializer)
+        .await
+        .unwrap();
+        assert_eq!(tables, 2);
+        initializer.close().await;
+    }
+
+    /// A queue whose tables were dropped under it initializes them again,
+    /// and records its consumer in the new `queue_consumer` table.
+    #[tokio::test]
+    async fn initialized_queue_recovers_when_its_tables_vanish() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "vanished-tables").with_crash_quarantine();
+        let registered = async || {
+            let consumers: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM queue_consumer WHERE consumer_name = ?")
+                    .bind(&queue.consumer_name)
+                    .fetch_one(queue.shared.pool())
+                    .await
+                    .unwrap();
+            // A process that cannot name its host registers no consumer.
+            consumers == 1 || process_host().is_empty()
+        };
+        queue.enqueue("before".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        lease.completed = true;
+        drop(lease);
+        assert!(registered().await);
+        let replaced_schema = queue
+            .shared
+            .schema_created_at_ms
+            .load(AtomicOrdering::Relaxed);
+
+        for drop_table in [
+            "DROP TABLE queue_message",
+            "DROP TABLE queue_metadata",
+            "DROP TABLE queue_consumer",
+        ] {
+            sqlx::query(drop_table)
+                .execute(queue.shared.pool())
+                .await
+                .unwrap();
+        }
+        sqlx::query("PRAGMA user_version = 0")
+            .execute(queue.shared.pool())
+            .await
+            .unwrap();
+        // The new metadata row is written a moment after the old one was.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Make the next operation's schema check due.
+        queue
+            .shared
+            .schema_checked_at_ms
+            .store(0, AtomicOrdering::Relaxed);
+
+        queue.enqueue("after".to_string()).await.unwrap();
+        queue.enqueue("claimed".to_string()).await.unwrap();
+        assert_eq!(queue.dequeue().await.unwrap().as_deref(), Some("after"));
+        // A registration written to the old table that only now gets its
+        // answer must not count as recorded in the new one.
+        assert_ne!(
+            queue
+                .shared
+                .schema_created_at_ms
+                .load(AtomicOrdering::Relaxed),
+            replaced_schema
+        );
+        assert!(
+            !queue
+                .shared
+                .note_consumer_registered(&queue.consumer_name, replaced_schema)
+        );
+        // The claim finds the consumer missing from the new table.
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        lease.completed = true;
+        drop(lease);
+        assert!(registered().await);
     }
 }
