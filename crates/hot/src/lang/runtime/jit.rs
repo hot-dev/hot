@@ -3730,6 +3730,15 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
     }
 
     let error_capture = vm.error_capture_active;
+    // A core function, by the interpreter's direct path for these
+    // arguments when it has one.
+    if let Some(result) = vm.core_call_from_compiled(function_id as u32, &args) {
+        vm.pending_proven = None;
+        return match result {
+            Ok(result) => new_owned_val(result),
+            Err(err) => vm_error_to_owned_val(err, error_capture),
+        };
+    }
     // Same runtime overload dispatch and implicit coercion as the
     // interpreter's CallUserFunction, with the arguments prepared for the
     // overload called.

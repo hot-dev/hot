@@ -6626,6 +6626,46 @@ label fn (n: Int): Str { if(gt(n, 100), "big", "small") }
         assert!(taken[4] >= 3, "{taken:?}");
     }
 
+    /// Compiled code calls a core function by the interpreter's direct path
+    /// (it ran hot-std's function, which calls the native by name). The
+    /// answers are the interpreter's: for the types the path takes, for
+    /// those it leaves to hot-std's parameter check, for a Result argument,
+    /// and where the namespace has a function of the same name.
+    #[test]
+    fn compiled_calls_of_core_functions_answer_as_the_interpreter_does() {
+        let src = r#"::t ns
+first fn (xs: Vec): Str { "the namespace's first" }
+score fn (m: Map): Int { add(mul(get(m, "a"), 3), length(get(m, "tags"))) }
+pick fn (x: Any, k: Any): Any { get(x, k) }
+join fn (a: Any, b: Any): Any { concat(a, b) }
+head fn (xs: Vec): Str { first(xs) }
+safe fn (x: Any, k: Any): Str {
+    r pick(x, k)
+    if(is-err(r), "err", Str(r))
+}
+unwrapped fn (m: Map): Any { get(ok(m), "a") }
+rows map(range(4), (i) { {a: i, tags: [i, i]} })
+[
+    map(rows, (m) { score(m) }),
+    pick([10, 20], 1), pick({k: "v"}, "k"), pick("héllo", 1), pick({k: 1}, "missing"),
+    join("a", "b"), join([1], [2]), safe(5, 0), safe(null, "k"),
+    head([1, 2]), unwrapped({a: 7}),
+]"#;
+        let expected = val!([
+            [2, 5, 8, 11],
+            20, "v", "é", null,
+            "ab", [1, 2], "err", "err",
+            "the namespace's first", 7
+        ]);
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
     /// The same program in VMs on several threads at once: they publish to
     /// and take from one table, and run the same code.
     #[test]
