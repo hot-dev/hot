@@ -353,7 +353,8 @@ default. Raise memory budgets together with worker memory and concurrency sizing
 
 ### Memory allocator
 
-`hot` allocates with [mimalloc](https://github.com/microsoft/mimalloc). It is
+On Linux and macOS `hot` allocates with
+[mimalloc](https://github.com/microsoft/mimalloc). It is
 faster than the system allocator for Hot's many small values, and it holds
 more memory: about 40 MB more in each `hot` process, and a higher peak under
 load. To run a process on the system allocator, set `HOT_ALLOCATOR=system` in
@@ -366,8 +367,8 @@ HOT_ALLOCATOR=system hot worker
 Use it where a service has to fit a tight memory limit, or to run glibc's heap
 checks (`MALLOC_CHECK_`), which only see what glibc allocates. A worker limits
 glibc to four malloc arenas (`MALLOC_ARENA_MAX` overrides that); the limit has
-no effect under mimalloc. On Windows the variable is not read. A `hot` built
-with `--no-default-features` has only the system allocator.
+no effect under mimalloc. On Windows `hot` always runs on the system allocator.
+A `hot` built with `--no-default-features` has only the system allocator.
 
 Persisted values retain the existing record nesting limit so every fleet reader
 can safely consume them. Trace records also retain their inline threshold and

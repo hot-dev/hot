@@ -39,18 +39,19 @@
 use std::alloc::{GlobalAlloc, Layout};
 
 /// The allocator under the logger: the system's.
-#[cfg(not(feature = "mimalloc"))]
+#[cfg(not(all(feature = "mimalloc", unix)))]
 use std::alloc::System;
 
 /// The allocator under the logger: mimalloc, or the system's when
-/// `HOT_ALLOCATOR=system` is set as the process starts.
-#[cfg(feature = "mimalloc")]
+/// `HOT_ALLOCATOR=system` is set as the process starts. On Windows it is
+/// always the system's: mimalloc isn't built there.
+#[cfg(all(feature = "mimalloc", unix))]
 #[allow(non_upper_case_globals)]
 static System: chosen::Chosen = chosen::Chosen;
 
 /// The allocator this process runs on: `"mimalloc"` or `"system"`.
 pub fn allocator_name() -> &'static str {
-    #[cfg(feature = "mimalloc")]
+    #[cfg(all(feature = "mimalloc", unix))]
     if !chosen::is_system() {
         return "mimalloc";
     }
@@ -64,7 +65,7 @@ pub fn allocator_name() -> &'static str {
 /// memory. The system allocator stays available without a rebuild, for a
 /// deployment that has to give that memory back, and for glibc's heap
 /// checks (`MALLOC_CHECK_`), which only see what glibc allocates.
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "mimalloc", unix))]
 mod chosen {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -96,19 +97,12 @@ mod chosen {
         system
     }
 
-    #[cfg(unix)]
     fn wants_system() -> bool {
         // SAFETY: `getenv` reads the environment and allocates nothing. This
         // runs at the first allocation, before anything can have changed it.
         let value = unsafe { libc::getenv(c"HOT_ALLOCATOR".as_ptr()) };
         // SAFETY: a non-null result is a NUL-terminated string.
         !value.is_null() && unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes() == b"system"
-    }
-
-    /// Reading the environment here would allocate.
-    #[cfg(not(unix))]
-    fn wants_system() -> bool {
-        false
     }
 
     pub(super) struct Chosen;

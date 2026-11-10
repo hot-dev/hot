@@ -18,7 +18,7 @@ workspace = true
 [features]
 default = ["mimalloc"]
 kata = ["hot_task_worker/kata"]
-# The allocator `hot` runs on. On by default: build with
+# The allocator `hot` runs on, on Linux and macOS. On by default: build with
 # `--no-default-features` for a `hot` that has only the system allocator.
 # `HOT_ALLOCATOR=system` picks the system allocator when `hot` starts.
 mimalloc = ["hot/mimalloc"]

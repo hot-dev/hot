@@ -56,15 +56,9 @@ jobs:
           ln -s "$PWD/hot/pkg" "$RUNNER_TEMP/alloc/resources/pkg"
           cp target/release/hot "$RUNNER_TEMP/alloc/hot"
 
-      - name: Compare
-        run: |
-          python3 scripts/ci/allocator-comparison.py "$RUNNER_TEMP/alloc/hot" \
-            --out "$GITHUB_STEP_SUMMARY"
-
       # The memory smoke fixtures in a container capped at 1 GiB, the size
       # of the smallest self-host worker, on each allocator.
       - name: Memory smoke test at 1 GiB, mimalloc
-        if: always()
         run: |
           docker run --rm --memory 1g --memory-swap 1g \
             -e HOT_HOME=/work/hot \
@@ -78,6 +72,12 @@ jobs:
             -e HOT_HOME=/work/hot -e HOT_ALLOCATOR=system \
             -v "$PWD:/work" -w /work ubuntu:24.04 \
             ./scripts/ci/memory-smoke.sh ./target/release/hot
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 scripts/ci/allocator-comparison.py "$RUNNER_TEMP/alloc/hot" \
+            --out "$GITHUB_STEP_SUMMARY"
 
       - name: sccache stats
         run: sccache --show-stats || true
