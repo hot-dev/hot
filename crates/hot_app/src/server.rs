@@ -249,7 +249,10 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
             Some(redis_uri_str)
         };
         let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
-        let serialization = hot::data::serialization::Serialization::default();
+        let serialization = conf
+            .get_str_or_default("serialization.type", "zstd-json")
+            .parse::<hot::data::serialization::Serialization>()
+            .unwrap_or_default();
 
         match hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
             queue_type,

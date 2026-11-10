@@ -56,6 +56,95 @@ type RunInfo = (
     Option<String>,
 );
 
+/// A timestamp as `serde_json` wrote it into a trace row.
+fn json_timestamp(value: &serde_json::Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?).ok()
+}
+
+/// Waits before each retry of a run lifecycle write that hit a transient
+/// database error. The worker acknowledges the event whether or not the write
+/// lands, so one connection reset must not cost a run its start or its
+/// terminal status.
+const RUN_WRITE_RETRY_DELAYS_MS: [u64; 3] = [50, 100, 200];
+/// No retry starts once a write has been failing this long. Retries hold the
+/// run's shard, and callers wait 2s for a run:start flush and 5s for a result.
+const RUN_WRITE_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Whether the same statement can succeed on a second attempt: the connection
+/// or pool failed, or the database turned the transaction away for
+/// concurrency. Constraint and data errors are not transient.
+pub(crate) fn is_transient_db_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(database) => {
+            let Some(code) = database.code() else {
+                return false;
+            };
+            if database
+                .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+                .is_some()
+            {
+                // SQLITE_BUSY and SQLITE_LOCKED, with their extended codes.
+                return code
+                    .parse::<i32>()
+                    .is_ok_and(|code| matches!(code & 0xff, 5 | 6));
+            }
+            // Connection exceptions, serialization failure, deadlock, lock
+            // timeout, connection limit, and a server shutting down or starting.
+            code.starts_with("08")
+                || matches!(
+                    code.as_ref(),
+                    "40001" | "40P01" | "55P03" | "53300" | "57P01" | "57P02" | "57P03"
+                )
+        }
+        _ => false,
+    }
+}
+
+/// A stream write's error, kept as the database error when a retry can help.
+fn stream_write_error(context: &str, error: crate::db::stream::StreamError) -> sqlx::Error {
+    match error {
+        crate::db::stream::StreamError::Database(error) if is_transient_db_error(&error) => error,
+        error => sqlx::Error::Protocol(format!("{context}: {error}")),
+    }
+}
+
+/// Run a run lifecycle write, retrying transient database errors within
+/// `RUN_WRITE_RETRY_BUDGET`. Each write is idempotent: inserts ignore an
+/// existing run, and terminal updates only move a run that is still running.
+async fn retry_transient_run_write<T, F, Fut>(
+    what: &'static str,
+    run_id: Uuid,
+    mut write: F,
+) -> Result<T, sqlx::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    let started = Instant::now();
+    let mut delays = RUN_WRITE_RETRY_DELAYS_MS.iter();
+    loop {
+        match write().await {
+            Err(error)
+                if is_transient_db_error(&error) && started.elapsed() < RUN_WRITE_RETRY_BUDGET =>
+            {
+                let Some(delay_ms) = delays.next() else {
+                    return Err(error);
+                };
+                tracing::warn!(
+                    "DatabaseWriter: {} write for run {} hit a transient error, retrying in {}ms: {}",
+                    what,
+                    run_id,
+                    delay_ms,
+                    error
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn elapsed_ms(elapsed: std::time::Duration) -> u64 {
     elapsed.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -1089,13 +1178,15 @@ impl DatabaseWriter {
                     result,
                 } => {
                     if let Some((execution_context, start_time)) = pending_starts.remove(&run_id) {
-                        if let Err(e) = Self::write_run_start_stop(
-                            pool,
-                            &execution_context,
-                            start_time,
-                            event_time,
-                            &result,
-                        )
+                        if let Err(e) = retry_transient_run_write("run:start+stop", run_id, || {
+                            Self::write_run_start_stop(
+                                pool,
+                                &execution_context,
+                                start_time,
+                                event_time,
+                                &result,
+                            )
+                        })
                         .await
                         {
                             batch_failed = true;
@@ -1105,8 +1196,10 @@ impl DatabaseWriter {
                                 e
                             );
                         }
-                    } else if let Err(e) =
-                        Self::write_run_stop(pool, run_id, event_time, &result).await
+                    } else if let Err(e) = retry_transient_run_write("run:stop", run_id, || {
+                        Self::write_run_stop(pool, run_id, event_time, &result)
+                    })
+                    .await
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
@@ -1118,13 +1211,19 @@ impl DatabaseWriter {
                     failure,
                 } => {
                     if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
-                        && let Err(e) =
-                            Self::write_run_start(pool, &execution_context, start_time).await
+                        && let Err(e) = retry_transient_run_write("run:start", run_id, || {
+                            Self::write_run_start(pool, &execution_context, start_time)
+                        })
+                        .await
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
                     }
-                    if let Err(e) = Self::write_run_fail(pool, run_id, event_time, &failure).await {
+                    if let Err(e) = retry_transient_run_write("run:fail", run_id, || {
+                        Self::write_run_fail(pool, run_id, event_time, &failure)
+                    })
+                    .await
+                    {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
                     }
@@ -1135,14 +1234,18 @@ impl DatabaseWriter {
                     cancellation,
                 } => {
                     if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
-                        && let Err(e) =
-                            Self::write_run_start(pool, &execution_context, start_time).await
+                        && let Err(e) = retry_transient_run_write("run:start", run_id, || {
+                            Self::write_run_start(pool, &execution_context, start_time)
+                        })
+                        .await
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
                     }
-                    if let Err(e) =
-                        Self::write_run_cancel(pool, run_id, event_time, &cancellation).await
+                    if let Err(e) = retry_transient_run_write("run:cancel", run_id, || {
+                        Self::write_run_cancel(pool, run_id, event_time, &cancellation)
+                    })
+                    .await
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
@@ -1150,8 +1253,10 @@ impl DatabaseWriter {
                 }
                 DatabaseWrite::RunInfo { run_id, info } => {
                     if let Some((execution_context, start_time)) = pending_starts.remove(&run_id)
-                        && let Err(e) =
-                            Self::write_run_start(pool, &execution_context, start_time).await
+                        && let Err(e) = retry_transient_run_write("run:start", run_id, || {
+                            Self::write_run_start(pool, &execution_context, start_time)
+                        })
+                        .await
                     {
                         batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
@@ -1172,8 +1277,12 @@ impl DatabaseWriter {
             }
         }
 
-        for (_, (execution_context, start_time)) in pending_starts {
-            if let Err(e) = Self::write_run_start(pool, &execution_context, start_time).await {
+        for (run_id, (execution_context, start_time)) in pending_starts {
+            if let Err(e) = retry_transient_run_write("run:start", run_id, || {
+                Self::write_run_start(pool, &execution_context, start_time)
+            })
+            .await
+            {
                 batch_failed = true;
                 tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
             }
@@ -1393,6 +1502,15 @@ impl DatabaseWriter {
                     {
                         continue;
                     }
+                    // A stop's start_time is a placeholder (its stop time)
+                    // when its start was flushed separately: keep the earlier.
+                    if key == "start_time"
+                        && let (Some(kept), Some(new)) =
+                            (json_timestamp(&old[key]), json_timestamp(value))
+                        && kept <= new
+                    {
+                        continue;
+                    }
                     old[key] = value.clone();
                 }
             } else {
@@ -1415,7 +1533,9 @@ ON CONFLICT (call_id) DO UPDATE SET
     error = COALESCE(EXCLUDED.error, hot.call.error),
     flow = COALESCE(EXCLUDED.flow, hot.call.flow),
     duration_us = COALESCE(EXCLUDED.duration_us, hot.call.duration_us),
-    start_time = COALESCE(EXCLUDED.start_time, hot.call.start_time),
+    -- A stop flushed after its start carries the stop time as a NOT NULL
+    -- placeholder, so the earlier start always wins.
+    start_time = LEAST(hot.call.start_time, EXCLUDED.start_time),
     parent_call_id = COALESCE(EXCLUDED.parent_call_id, hot.call.parent_call_id),
     -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
     function_name = COALESCE(NULLIF(EXCLUDED.function_name, 'unknown'), NULLIF(hot.call.function_name, 'unknown'), 'unknown'),
@@ -1687,7 +1807,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             ctx.env_id.unwrap_or_default(),
         )
         .await
-        .map_err(|e| sqlx::Error::Protocol(format!("Failed to create stream: {}", e)))?;
+        .map_err(|e| stream_write_error("Failed to create stream", e))?;
 
         // Retry logic for foreign key violations on origin_run_id
         // This handles race conditions where the parent run's run:start hasn't been written yet
@@ -1940,7 +2060,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             ctx.env_id.unwrap_or_default(),
         )
         .await
-        .map_err(|e| sqlx::Error::Protocol(format!("Failed to create stream: {}", e)))?;
+        .map_err(|e| stream_write_error("Failed to create stream", e))?;
 
         let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
@@ -2716,14 +2836,16 @@ WHERE hot.call.run_id = EXCLUDED.run_id
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
                  COALESCE(length(CAST(?8 AS BLOB)), 0) + COALESCE(length(CAST(?9 AS BLOB)), 0) +
                  COALESCE(length(CAST(?10 AS BLOB)), 0) + COALESCE(length(CAST(?11 AS BLOB)), 0) + 50, ?19
-             WHERE ?3 IS NULL OR EXISTS (SELECT 1 FROM call parent WHERE parent.call_id=?3 AND parent.run_id=?2)
+             WHERE ?3 IS NULL OR NOT EXISTS (SELECT 1 FROM call parent WHERE parent.call_id=?3 AND parent.run_id<>?2)
              ON CONFLICT (call_id) DO UPDATE SET
                  stop_time = COALESCE(excluded.stop_time, call.stop_time),
                  return_value = COALESCE(excluded.return_value, call.return_value),
                  error = COALESCE(excluded.error, call.error),
                  flow = COALESCE(excluded.flow, call.flow),
                  duration_us = COALESCE(excluded.duration_us, call.duration_us),
-                 start_time = COALESCE(excluded.start_time, call.start_time),
+                 -- A stop flushed after its start carries the stop time as a NOT NULL
+                 -- placeholder, so the earlier start always wins.
+                 start_time = CASE WHEN excluded.start_time IS NULL OR julianday(call.start_time) <= julianday(excluded.start_time) THEN call.start_time ELSE excluded.start_time END,
                  parent_call_id = COALESCE(excluded.parent_call_id, call.parent_call_id),
                  -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
                  function_name = COALESCE(NULLIF(excluded.function_name, 'unknown'), NULLIF(call.function_name, 'unknown'), 'unknown'),
@@ -3385,5 +3507,151 @@ mod tests {
         assert_eq!(parsed["$type"], "::hot::type/Fn");
         assert_eq!(parsed["$val"]["lazy"], true);
         assert_eq!(parsed["$val"]["captures"]["value"], false);
+    }
+
+    #[tokio::test]
+    async fn transient_run_write_errors_are_retried_and_others_are_not() {
+        assert!(is_transient_db_error(&sqlx::Error::PoolTimedOut));
+        assert!(is_transient_db_error(&sqlx::Error::Io(
+            std::io::ErrorKind::ConnectionReset.into()
+        )));
+        assert!(!is_transient_db_error(&sqlx::Error::RowNotFound));
+        assert!(!is_transient_db_error(&sqlx::Error::Protocol("x".into())));
+
+        // A constraint violation is a database error, but not a transient one.
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let constraint = sqlx::query("INSERT INTO run (run_id) VALUES (NULL)")
+            .execute(pool)
+            .await
+            .unwrap_err();
+        assert!(matches!(constraint, sqlx::Error::Database(_)));
+        assert!(!is_transient_db_error(&constraint));
+
+        let run_id = Uuid::new_v4();
+        let mut attempts = 0;
+        let result = retry_transient_run_write("test", run_id, || {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                if attempt < 3 {
+                    Err(sqlx::Error::PoolTimedOut)
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 3);
+
+        let mut attempts = 0;
+        let result: Result<(), _> = retry_transient_run_write("test", run_id, || {
+            attempts += 1;
+            async { Err(sqlx::Error::RowNotFound) }
+        })
+        .await;
+        assert!(matches!(result, Err(sqlx::Error::RowNotFound)));
+        assert_eq!(attempts, 1);
+
+        // A write that keeps failing gives up after its bounded retries.
+        let mut attempts = 0;
+        let started = Instant::now();
+        let result: Result<(), _> = retry_transient_run_write("test", run_id, || {
+            attempts += 1;
+            async { Err(sqlx::Error::PoolTimedOut) }
+        })
+        .await;
+        assert!(matches!(result, Err(sqlx::Error::PoolTimedOut)));
+        assert_eq!(attempts, RUN_WRITE_RETRY_DELAYS_MS.len() + 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_stop_flushed_after_its_start_keeps_the_call_start_time() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let context = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+        let call = Uuid::new_v4();
+        let started =
+            chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+        let stopped = started + chrono::Duration::seconds(2);
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        let mut start = trace_write(&context, call, None, "start");
+        if let DatabaseWrite::Call { start_time, .. } = &mut start {
+            *start_time = Some(started);
+        }
+        writer.write(start);
+        writer.flush_run(data.run_id).await.unwrap();
+        // The emitter builds a stop whose start it already flushed with the
+        // stop time standing in for the NOT NULL start_time.
+        let mut stop = trace_write(&context, call, None, "stop");
+        if let DatabaseWrite::Call {
+            start_time,
+            stop_time,
+            ..
+        } = &mut stop
+        {
+            *start_time = Some(stopped);
+            *stop_time = Some(stopped);
+        }
+        writer.write(stop);
+        writer.flush_run(data.run_id).await.unwrap();
+        let row: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as("SELECT start_time, stop_time FROM call WHERE call_id=?")
+                .bind(call)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(row, (started, stopped));
+        writer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_call_with_a_missing_parent_does_not_roll_back_its_chunk() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let context = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+        let (sibling, orphan) = (Uuid::new_v4(), Uuid::new_v4());
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        writer.write(trace_write(&context, sibling, None, "sibling"));
+        // Its parent was purged, or was in a chunk that never landed.
+        let mut child = trace_write(&context, orphan, None, "orphan");
+        if let DatabaseWrite::Call { parent_call_id, .. } = &mut child {
+            *parent_call_id = Some(Uuid::new_v4());
+        }
+        writer.write(child);
+        writer.flush_run(data.run_id).await.unwrap();
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM call WHERE call_id IN (?, ?)")
+            .bind(sibling)
+            .bind(orphan)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 2);
+        writer.shutdown().await.unwrap();
     }
 }

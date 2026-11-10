@@ -368,10 +368,15 @@ impl Call {
                 }
                 DatabasePool::Sqlite(pool) => {
                     let result = sqlx::query(
+                        // `start_time` is RFC 3339 text with a `T`, which sorts
+                        // after `datetime()`'s space on the cutoff's own day:
+                        // compare instants. The date-only bound holds for both
+                        // shapes as text and can use an index.
                         "DELETE FROM call WHERE call_id IN (
                             SELECT call_id FROM call
-                            WHERE start_time < datetime('now', '-' || ? || ' days')
-                            LIMIT ?
+                            WHERE start_time < date('now', '-' || ?1 || ' days', '+1 day')
+                            AND julianday(start_time) < julianday('now', '-' || ?1 || ' days')
+                            LIMIT ?2
                         )",
                     )
                     .bind(&days_str)
@@ -442,7 +447,8 @@ impl Call {
                         "DELETE FROM call WHERE call_id IN (
                             SELECT c.call_id FROM call c
                             WHERE c.env_id IN ({})
-                            AND c.start_time < datetime('now', '-' || ? || ' days')
+                            AND c.start_time < date('now', '-' || ? || ' days', '+1 day')
+                            AND julianday(c.start_time) < julianday('now', '-' || ? || ' days')
                             LIMIT ?
                         )",
                         placeholders
@@ -451,7 +457,8 @@ impl Call {
                     for id in env_ids {
                         q = q.bind(id);
                     }
-                    q = q.bind(&days_str).bind(batch_size);
+                    // As in `delete_older_than`: the date-only bound, then the instant.
+                    q = q.bind(&days_str).bind(&days_str).bind(batch_size);
                     let result = q.execute(pool).await?;
                     result.rows_affected() as i64
                 }
@@ -749,6 +756,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_retention_splits_calls_on_the_cutoff_day() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        // Bound as the trace writer binds them: RFC 3339 with a `T`.
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let insert = async |start: chrono::DateTime<chrono::Utc>| {
+            let call_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES(?,?,?,'::retention/test','root','root',0,?,1)",
+            )
+            .bind(call_id)
+            .bind(data.run_id)
+            .bind(data.env_id)
+            .bind(start)
+            .execute(pool)
+            .await
+            .unwrap();
+            call_id
+        };
+        let left = async || {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT call_id FROM call WHERE env_id=? ORDER BY start_time",
+            )
+            .bind(data.env_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        };
+
+        let _expired = insert(cutoff - chrono::Duration::minutes(5)).await;
+        let kept = insert(cutoff + chrono::Duration::minutes(5)).await;
+        assert_eq!(
+            Call::delete_older_than_for_org(&db, &[data.env_id], 7, 100)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(left().await, vec![kept]);
+
+        let _expired = insert(cutoff - chrono::Duration::minutes(5)).await;
+        assert_eq!(Call::delete_older_than(&db, 7, 100).await.unwrap(), 1);
+        assert_eq!(left().await, vec![kept]);
     }
 
     /// Insert a call in `run_id` with a spilled `call_args` payload; returns

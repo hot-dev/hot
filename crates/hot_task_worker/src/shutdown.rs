@@ -123,6 +123,10 @@ pub struct ActiveTask {
 #[derive(Clone)]
 pub struct TaskShutdownCoordinator {
     active_tasks: Arc<RwLock<Vec<ActiveTask>>>,
+    /// Tasks whose container a previous worker left running here and whose
+    /// row could not be read yet, so that they are not adopted yet either
+    /// (see [`Self::defer_adoption`]).
+    deferred_adoptions: Arc<RwLock<Vec<Uuid>>>,
     shutdown_initiated: Arc<AtomicBool>,
     /// How long to wait for in-flight tasks to finish before cancelling.
     /// Constructor-overrideable so tests can drive the flow without
@@ -140,6 +144,7 @@ impl TaskShutdownCoordinator {
     pub fn with_drain_secs(code_drain_timeout_secs: u64) -> Self {
         Self {
             active_tasks: Arc::new(RwLock::new(Vec::new())),
+            deferred_adoptions: Arc::new(RwLock::new(Vec::new())),
             shutdown_initiated: Arc::new(AtomicBool::new(false)),
             code_drain_timeout: Duration::from_secs(code_drain_timeout_secs),
         }
@@ -177,12 +182,40 @@ impl TaskShutdownCoordinator {
         }
     }
 
-    /// Return whether this process is still actively executing `task_id`.
+    /// Hold `task_id` as active while its container, left running here by a
+    /// previous worker, waits for a database that could not say what the
+    /// task is. Nothing watches the container yet, but it is this worker's
+    /// to adopt: the zombie reaper must not fail its row and start a second
+    /// run beside it. Not a registered task, so shutdown neither waits for
+    /// it nor retries it; the next worker finds the container again.
+    pub fn defer_adoption(&self, task_id: Uuid) {
+        if let Ok(mut deferred) = self.deferred_adoptions.write()
+            && !deferred.contains(&task_id)
+        {
+            deferred.push(task_id);
+        }
+    }
+
+    /// The adoption deferred by [`Self::defer_adoption`] was settled: the
+    /// task is registered like any adopted one, or its container is gone.
+    pub fn finish_deferred_adoption(&self, task_id: &Uuid) {
+        if let Ok(mut deferred) = self.deferred_adoptions.write() {
+            deferred.retain(|id| id != task_id);
+        }
+    }
+
+    /// Return whether this process is still actively executing `task_id`,
+    /// or holds its container for an adoption it could not finish yet.
     pub fn is_task_active(&self, task_id: &Uuid) -> bool {
         self.active_tasks
             .read()
             .map(|tasks| tasks.iter().any(|task| &task.task_id == task_id))
             .unwrap_or(false)
+            || self
+                .deferred_adoptions
+                .read()
+                .map(|deferred| deferred.contains(task_id))
+                .unwrap_or(false)
     }
 
     pub fn is_shutting_down(&self) -> bool {

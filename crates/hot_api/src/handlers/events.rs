@@ -187,7 +187,6 @@ async fn publish_event_to_queue(
             event_time,
             access_id,
         },
-        false,
     )
     .await?;
 
@@ -209,15 +208,16 @@ struct StoredEvent<'a> {
     access_id: Option<Uuid>,
 }
 
-/// Enqueue a stored event to the hot:event queue for worker processing.
-/// `may_repeat` says another message of the event may have reached a worker.
+/// Enqueue a stored event to the hot:event queue for worker processing. The
+/// message says it may repeat: the enqueue below retries, and an attempt that
+/// reached the queue can still report a timeout, so a second message of the
+/// event may reach a worker. So can a resend of a publish that names its event.
 async fn enqueue_event(
     queue: &dyn Queue<Message>,
     db: &DatabasePool,
     auth: &AuthContext,
     actor_user_id: Uuid,
     event: &StoredEvent<'_>,
-    may_repeat: bool,
 ) -> Result<(), PublishError> {
     let StoredEvent {
         event_id,
@@ -279,16 +279,14 @@ async fn enqueue_event(
         target_project_name: None,
     };
 
-    let mut head = AHashMap::from_iter([
+    let head = AHashMap::from_iter([
         ("env_id".to_string(), auth.env_id().to_string()),
         ("event_type".to_string(), event_type.to_string()),
-    ]);
-    if may_repeat {
-        head.insert(
+        (
             hot::lang::event::MAY_REPEAT_HEAD.to_string(),
             "true".to_string(),
-        );
-    }
+        ),
+    ]);
     let event_message = hot::lang::event::EventMessage {
         id: event_id,
         head,
@@ -326,7 +324,7 @@ async fn enqueue_leased_event(
     event: &StoredEvent<'_>,
 ) -> Result<(), PublishError> {
     let event_id = event.event_id;
-    let enqueued = enqueue_event(queue, db, auth, actor_user_id, event, true).await;
+    let enqueued = enqueue_event(queue, db, auth, actor_user_id, event).await;
     let settled = match enqueued {
         Ok(()) => Event::finish_enqueue(db, &event_id).await,
         Err(_) => Event::release_enqueue(db, &event_id, chrono::Utc::now()).await,
@@ -1125,8 +1123,8 @@ mod tests {
         let message = queue.messages.lock().unwrap()[0].clone();
         let message = hot::lang::event::EventMessage::try_from(message).unwrap();
         assert!(
-            !message.may_repeat(),
-            "this path pays for no earlier-run read"
+            message.may_repeat(),
+            "its enqueue retries, and a retry can add a second message"
         );
     }
 
