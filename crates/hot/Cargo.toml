@@ -11,7 +11,8 @@ homepage.workspace = true
 workspace = true
 
 [features]
-# Experiment: mimalloc in place of the system allocator.
+# mimalloc under the allocator in `lang::runtime::oom_logger`. `hot_cli` turns
+# it on by default.
 mimalloc = ["dep:mimalloc"]
 default = []
 s3-storage = ["aws-config", "aws-runtime", "aws-sdk-s3"]

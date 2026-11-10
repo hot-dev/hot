@@ -351,6 +351,24 @@ default. Raise memory budgets together with worker memory and concurrency sizing
 | `HOT_BOX_MAX_IMAGE_BYTES` | 4 GiB | Compressed manifest and layer sizes per image |
 | `HOT_BOX_MAX_CACHED_IMAGES` | 128 | Cached image count before eviction; active images are retained |
 
+### Memory allocator
+
+`hot` allocates with [mimalloc](https://github.com/microsoft/mimalloc). It is
+faster than the system allocator for Hot's many small values, and it holds
+more memory: about 40 MB more in each `hot` process, and a higher peak under
+load. To run a process on the system allocator, set `HOT_ALLOCATOR=system` in
+its environment before it starts:
+
+```bash
+HOT_ALLOCATOR=system hot worker
+```
+
+Use it where a service has to fit a tight memory limit, or to run glibc's heap
+checks (`MALLOC_CHECK_`), which only see what glibc allocates. A worker limits
+glibc to four malloc arenas (`MALLOC_ARENA_MAX` overrides that); the limit has
+no effect under mimalloc. On Windows the variable is not read. A `hot` built
+with `--no-default-features` has only the system allocator.
+
 Persisted values retain the existing record nesting limit so every fleet reader
 can safely consume them. Trace records also retain their inline threshold and
 blob offload policy. Other outgoing and persisted payloads use the configurable

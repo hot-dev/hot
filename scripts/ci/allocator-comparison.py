@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Compare the system allocator with mimalloc: speed, peak memory, and memory
+"""Compare mimalloc with the system allocator: speed, peak memory, and memory
 over a long run.
 
-    allocator-comparison.py SYSTEM_BIN MIMALLOC_BIN [--quick] [--out FILE]
+    allocator-comparison.py HOT_BIN [--quick] [--out FILE]
 
-Run from the repository root. Each binary must find Hot's resources (run it
+Run from the repository root. The binary must find Hot's resources (run it
 from a build directory that has them, as the workflow sets up). Prints a
 Markdown report, and appends it to FILE (the workflow passes the job summary).
 
-Three configurations are compared: the system allocator as it is, the system
-allocator with `MALLOC_ARENA_MAX=4` (the limit a worker sets for itself; it
-only means something for glibc), and mimalloc. Each is measured in blocks,
-after a run that isn't counted (see `measure`), and the fastest run of each is
-kept, since shared runners are noisy.
+One binary, three ways: on the system allocator (`HOT_ALLOCATOR=system`), on
+the system allocator with `MALLOC_ARENA_MAX=4` (the limit a worker sets for
+itself; it only means something for glibc), and on mimalloc, the default.
+Each is measured in blocks, after a run that isn't counted, and the fastest
+run of each is kept, since shared runners are noisy.
 """
 import json
 import os
@@ -29,12 +29,12 @@ ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 OUT = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else None
 if OUT in ARGS:
     ARGS.remove(OUT)
-SYSTEM_BIN, MIMALLOC_BIN = (os.path.abspath(p) for p in ARGS[:2])
+HOT_BIN = os.path.abspath(ARGS[0])
 
 CONFIGS = [
-    ("system", SYSTEM_BIN, {}),
-    ("system, 4 arenas", SYSTEM_BIN, {"MALLOC_ARENA_MAX": "4"}),
-    ("mimalloc", MIMALLOC_BIN, {}),
+    ("system", HOT_BIN, {"HOT_ALLOCATOR": "system"}),
+    ("system, 4 arenas", HOT_BIN, {"HOT_ALLOCATOR": "system", "MALLOC_ARENA_MAX": "4"}),
+    ("mimalloc", HOT_BIN, {}),
 ]
 # ru_maxrss is kilobytes on Linux and bytes on macOS.
 RSS_UNIT = 1024 if sys.platform.startswith("linux") else 1
@@ -43,12 +43,9 @@ RSS_UNIT = 1024 if sys.platform.startswith("linux") else 1
 def measure(name, args, cwd, rounds):
     """`args` under each configuration: fastest time, median peak memory.
 
-    A binary's compile caches are its own, and running the other binary
-    replaces them, so the run after a switch does more work and holds more
-    memory. Each configuration is therefore measured in a block, after one
-    run of its binary that isn't counted. The blocks are run twice, the
-    second time in the opposite order, so that drift in the machine doesn't
-    favor one end.
+    Each configuration is measured in a block, after one run that isn't
+    counted. The blocks are run twice, the second time in the opposite
+    order, so that drift in the machine doesn't favor one end.
     """
     times = {label: [] for label, _, _ in CONFIGS}
     peaks = {label: [] for label, _, _ in CONFIGS}
@@ -211,7 +208,7 @@ def ratio(value, base):
 
 
 def main():
-    lines = ["# System allocator vs mimalloc", ""]
+    lines = ["# mimalloc vs the system allocator", ""]
     uname = os.uname()
     lines.append(
         f"`{uname.sysname} {uname.machine}`, {os.cpu_count()} CPUs. Fastest of several runs with "
@@ -224,7 +221,7 @@ def main():
 
     # The test projects need their databases once.
     subprocess.run(
-        [SYSTEM_BIN, "init", "-c", "hot.test.hot", "--ctx", "hot/ci.ctx.hot"],
+        [HOT_BIN, "init", "-c", "hot.test.hot", "--ctx", "hot/ci.ctx.hot"],
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
@@ -284,7 +281,7 @@ def main():
 
     # Size the soak from a short run, to last about the target under each.
     target = 20 if QUICK else 240
-    probe = soak(SYSTEM_BIN, {}, 20, work)
+    probe = soak(HOT_BIN, {}, 20, work)
     rounds = max(20, int(20 * target / max(probe["seconds"], 0.5)))
     lines += [
         "## Memory through a long run",

@@ -8553,7 +8553,10 @@ pub async fn run_with_components_shared_context_and_db(
     stream_publisher: Option<Arc<StreamPubSub>>,
     precreated_db: Option<Arc<DatabasePool>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    debug!("hot.dev: WORKER starting");
+    debug!(
+        allocator = hot::lang::runtime::oom_logger::allocator_name(),
+        "hot.dev: WORKER starting"
+    );
     validate_worker_semantics_conf(&worker_conf)?;
     // Read from the arguments as given, before any default replaces them.
     let standalone_process = standalone_worker_process(
