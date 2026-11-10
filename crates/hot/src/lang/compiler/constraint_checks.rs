@@ -883,6 +883,7 @@ impl<'a> Index<'a> {
             }
             for def in defs {
                 self.check_captured_parameters(ns, name, def, out);
+                Self::check_local_constrained_types(name, &def.body, out);
                 for arg in def.args.args.iter().filter(|a| a.lazy) {
                     if arg
                         .type_annotation
@@ -918,6 +919,56 @@ impl<'a> Index<'a> {
                 }
             }
         }
+    }
+
+    /// `unsupported-constraint` for a type declared with `where` inside a
+    /// function body. Constraint specs are built from the namespace's own
+    /// declarations, so such a type's predicate was never checked: a value
+    /// that fails it passed, with no diagnostic.
+    fn check_local_constrained_types(
+        function: &str,
+        body: &Value,
+        out: &mut ConstraintDiagnostics,
+    ) {
+        let mut report = |target: &VarRef, type_def: &TypeDef| {
+            if type_def.refinement.is_none() {
+                return;
+            }
+            out.errors.push(diagnostic(
+                "unsupported-constraint",
+                format!(
+                    "Type `{}` is declared inside `{}`, so its `where` constraint isn't checked",
+                    target.var.sym.name(),
+                    function
+                ),
+                Some("declare the type at the top level of its namespace"),
+                false,
+                target
+                    .var
+                    .src
+                    .as_ref()
+                    .or(target.src.as_ref())
+                    .map(error_location),
+            ));
+        };
+        walk(body, &mut |value| match value {
+            // A body binds `Name type ...` as a reference directly before
+            // the declaration, or as a pair of its own.
+            Value::Flow(flow) => {
+                for pair in flow.expressions.windows(2) {
+                    if let [Value::Ref(Ref::Var(target)), Value::TypeDef(type_def)] = pair {
+                        report(target, type_def);
+                    }
+                }
+            }
+            Value::MultipleValues(values) => {
+                if let [Value::Ref(Ref::Var(target)), Value::TypeDef(type_def)] = values.as_slice()
+                {
+                    report(target, type_def);
+                }
+            }
+            _ => {}
+        });
     }
 
     /// A parameter's predicate sees only its own value, so naming another

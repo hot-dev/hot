@@ -347,11 +347,15 @@ pub fn int_constructor(
             } else {
                 format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
             };
-            let call_res = vm
-                .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
-                .or_else(|_| {
-                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]))
-                });
+            // The bare name is a second way to find the conversion, not a
+            // second attempt at it: when the two names are the same, a
+            // failing conversion would run twice, side effects included.
+            let mut call_res =
+                vm.execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]));
+            if call_res.is_err() && qualified != impl_fn_name {
+                call_res =
+                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]));
+            }
             match call_res {
                 Ok(val) => return HotResult::Ok(val),
                 Err(e) => return HotResult::Err(Val::from(e.to_string())),
@@ -369,8 +373,9 @@ fn dec_internal(args: &[Val]) -> HotResult<Val> {
         Val::Dec(d) => HotResult::Ok(Val::Dec(*d)),
         Val::Int(i) => HotResult::Ok(Val::Dec(D256::from(*i))),
         Val::Str(s) => match s.parse::<D256>() {
-            Ok(d) => HotResult::Ok(Val::Dec(d)),
-            Err(_) => HotResult::Err(Val::from(format!("Cannot convert '{}' to Dec", s))),
+            // "NaN" and "Infinity" parse, but no Dec holds them.
+            Ok(d) if d.is_finite() => HotResult::Ok(Val::Dec(d)),
+            _ => HotResult::Err(Val::from(format!("Cannot convert '{}' to Dec", s))),
         },
         Val::Bool(b) => HotResult::Ok(Val::Dec(D256::from(if *b { 1 } else { 0 }))),
         Val::Map(m) => {
@@ -420,11 +425,15 @@ pub fn dec_constructor(
             } else {
                 format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
             };
-            let call_res = vm
-                .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
-                .or_else(|_| {
-                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]))
-                });
+            // The bare name is a second way to find the conversion, not a
+            // second attempt at it: when the two names are the same, a
+            // failing conversion would run twice, side effects included.
+            let mut call_res =
+                vm.execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]));
+            if call_res.is_err() && qualified != impl_fn_name {
+                call_res =
+                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]));
+            }
             match call_res {
                 Ok(val) => return HotResult::Ok(val),
                 Err(e) => return HotResult::Err(Val::from(e.to_string())),
@@ -485,11 +494,15 @@ pub fn bool_constructor(
             } else {
                 format!("{}/{}", vm.get_current_namespace(), impl_fn_name)
             };
-            let call_res = vm
-                .execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]))
-                .or_else(|_| {
-                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]))
-                });
+            // The bare name is a second way to find the conversion, not a
+            // second attempt at it: when the two names are the same, a
+            // failing conversion would run twice, side effects included.
+            let mut call_res =
+                vm.execute_function_call_by_name(&qualified, std::slice::from_ref(&args[0]));
+            if call_res.is_err() && qualified != impl_fn_name {
+                call_res =
+                    vm.execute_function_call_by_name(&impl_fn_name, std::slice::from_ref(&args[0]));
+            }
             match call_res {
                 Ok(val) => return HotResult::Ok(val),
                 Err(e) => return HotResult::Err(Val::from(e.to_string())),

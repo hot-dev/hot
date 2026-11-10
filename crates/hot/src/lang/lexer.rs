@@ -240,6 +240,87 @@ pub struct Lexer {
     errors: Vec<LexerError>,
 }
 
+/// Stands in a template token's content for a `$` written with an escape
+/// (`\$`), which is text even before a `{`. A private-use character: the
+/// parser turns it back into `$`.
+pub(crate) const TEMPLATE_ESCAPED_DOLLAR: char = '\u{E000}';
+
+/// Where the template expression that opens just before `start` ends: the
+/// index past its closing `}`. Strings and templates inside it are skipped
+/// whole, so a brace or backtick in one doesn't end it. `None` when it never
+/// closes.
+pub(crate) fn template_expression_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            '"' => {
+                i = skip_string_literal(chars, i)?;
+                continue;
+            }
+            '`' => {
+                i = skip_template_literal(chars, i)?;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The index past the string literal that opens at `open`.
+fn skip_string_literal(chars: &[char], open: usize) -> Option<usize> {
+    if chars[open..].starts_with(&['"', '"', '"']) {
+        let mut i = open + 3;
+        while i < chars.len() {
+            if chars[i..].starts_with(&['"', '"', '"']) {
+                return Some(i + 3);
+            }
+            i += 1;
+        }
+        return None;
+    }
+    let mut i = open + 1;
+    loop {
+        match chars.get(i)? {
+            '\\' => i += 2,
+            '"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+}
+
+/// The index past the template literal that opens at `open`.
+fn skip_template_literal(chars: &[char], open: usize) -> Option<usize> {
+    let block = chars[open..].starts_with(&['`', '`', '`']);
+    let mut i = if block { open + 3 } else { open + 1 };
+    loop {
+        match chars.get(i)? {
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                i = template_expression_end(chars, i + 2)?;
+            }
+            '`' if block => {
+                if chars[i..].starts_with(&['`', '`', '`']) {
+                    return Some(i + 3);
+                }
+                i += 1;
+            }
+            '`' => return Some(i + 1),
+            // A block template has no escapes.
+            '\\' if !block => i += 2,
+            _ => i += 1,
+        }
+    }
+}
+
 impl Lexer {
     pub fn new(source: &str) -> Self {
         let source_chars: Vec<char> = source.chars().collect();
@@ -795,10 +876,39 @@ impl Lexer {
             if self.peek() == '\\' {
                 // Handle escape sequences in template literals.
                 self.advance(); // consume backslash
+                if !self.is_at_end() && self.peek() == '$' {
+                    self.advance();
+                    content.push(TEMPLATE_ESCAPED_DOLLAR);
+                    continue;
+                }
+                let decoded_from = content.len();
                 self.process_escape_sequence(&mut content);
+                // A `$` that came from an escape (`\$`, `\u0024`) is text,
+                // even before a `{`: mark it so the parser doesn't read
+                // `${` as the start of an expression.
+                if &content[decoded_from..] == "$" {
+                    content.truncate(decoded_from);
+                    content.push(TEMPLATE_ESCAPED_DOLLAR);
+                }
+            } else if self.peek() == '$' && self.peek_next() == '{' {
+                // An expression is copied as written, through its closing
+                // brace: the parser lexes it, so decoding its escapes here
+                // would decode them twice, and a backtick or brace inside
+                // one of its strings is not the template's.
+                match template_expression_end(&self.source_chars, self.position + 2) {
+                    Some(end) => {
+                        while self.position < end {
+                            content.push(self.peek());
+                            self.advance();
+                        }
+                    }
+                    // Unterminated: the parser reports it, at the `${`.
+                    None => {
+                        content.push(self.peek());
+                        self.advance();
+                    }
+                }
             } else {
-                // For now, just read the content as-is including ${} expressions
-                // The parser will handle splitting this into parts
                 content.push(self.peek());
                 self.advance();
             }

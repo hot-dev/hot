@@ -2897,7 +2897,6 @@ fn nesting_past_the_limit_is_a_located_parse_error() {
             " } }".repeat(5000)
         ),
         format!("x {}1{}", "(a) { ".repeat(5000), " }".repeat(5000)),
-        format!("x {}1", "!".repeat(5000)),
         format!("x: {}Int{} 1", "Vec<".repeat(5000), ">".repeat(5000)),
     ] {
         let error = parse_hot(&source).expect_err("too deep");
@@ -2956,8 +2955,50 @@ fn qualified_references_take_no_index_or_deep_path() {
     }
 }
 
+/// `!value` was a prefix that nothing read: `!done` ran as `done`.
+#[test]
+fn a_bang_prefix_is_a_parse_error() {
+    for source in ["f fn (done) { !done }", "x !true", "f fn (r) { g(!r) }"] {
+        let error = parse_hot(source).expect_err(source);
+        assert!(
+            error.message.contains("`!` is not an operator")
+                && error.message.contains("not(value)"),
+            "{source:?}: {error}"
+        );
+    }
+}
+
+/// A template expression runs to its own closing brace: a brace or a
+/// backtick inside one of its strings or templates doesn't end it. It is one
+/// expression, and `\$` writes a dollar that starts none.
+#[test]
+fn template_expressions_end_at_their_own_brace() {
+    for source in [
+        "msg `a ${concat(\"x\", \"}\")} b`\n",
+        "msg `a ${get({k: \"}\"}, \"k\")} b`\n",
+        "msg `a ${\"tick ` tick\"} b`\n",
+        "msg `outer ${`inner ${name} {x}`} done`\n",
+        "msg `cost \\${name} and \\$5`\n",
+    ] {
+        assert!(
+            parse_hot(source).is_ok(),
+            "{source:?}: {:?}",
+            parse_hot(source).err()
+        );
+    }
+
+    // What followed a complete expression was dropped without a word.
+    for source in ["msg `t ${total 2} u`\n", "msg `t ${1 2 3}`\n"] {
+        let error = parse_hot(source).expect_err(source);
+        assert!(
+            error.message.contains("one expression"),
+            "{source:?}: {error}"
+        );
+    }
+}
+
 /// An error inside `${...}` points at its place in the file, not at the
-/// start of the file, for single-line, nested and block templates.
+/// start of the file, for single-line and block templates.
 #[test]
 fn template_expression_errors_point_into_the_file() {
     let source = "::t ns\n\nname \"x\"\nmsg `hello ${add(1, }`\n";
@@ -2979,9 +3020,8 @@ fn template_expression_errors_point_into_the_file() {
         Some(std::path::Path::new("t.hot"))
     );
 
-    // An unescaped backtick ends the outer template, so its `${` is
-    // unterminated: the error is at that `${`.
-    let source = "::t ns\n\nmsg `outer ${`inner ${name}`} done`\n";
+    // An expression that never closes: the error is at its `${`.
+    let source = "::t ns\n\nmsg `outer ${add(1, 2) done`\n";
     let error = parse_hot_file(source, "t.hot").expect_err("unterminated");
     assert!(
         error
@@ -3021,7 +3061,7 @@ fn template_expression_errors_point_into_the_file() {
     );
 
     // Lexer errors in an expression are placed the same way.
-    let source = "x 1\nmsg `v ${\"open}`\n";
+    let source = "x 1\nmsg `v ${12abc}`\n";
     let error = parse_hot_file(source, "t.hot").expect_err("lexer error");
     assert!(error.message.contains("Lexer error"), "{error}");
     assert_eq!(error.location.line, 2, "{error}");

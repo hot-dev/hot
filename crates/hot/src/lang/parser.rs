@@ -151,6 +151,10 @@ pub struct Parser {
     /// How many expressions, function definitions and types enclose the
     /// one being parsed. See `MAX_NESTING_DEPTH`.
     depth: usize,
+    /// The binding being parsed is a local, in a function body. Its
+    /// metadata has to start on the value's own line: on the next line,
+    /// `meta {...}` is the next statement, a local named `meta`.
+    local_binding: bool,
 }
 
 /// How deeply expressions, function definitions and types may nest. The
@@ -271,6 +275,7 @@ impl Parser {
             template_expressions: 0,
             where_salt: None,
             depth: 0,
+            local_binding: false,
         }
     }
 
@@ -1533,8 +1538,13 @@ impl Parser {
             // already enjoy on type/impl forms). Trailing entries merge
             // onto any leading meta with trailing keys winning, the
             // same semantics used by `merge_trailing_meta` elsewhere.
-            self.skip_newlines();
-            if let Some(token) = self.peek()
+            let own_line = self.next_statement_token().1;
+            let may_trail = own_line || !self.local_binding;
+            if may_trail {
+                self.skip_newlines();
+            }
+            if may_trail
+                && let Some(token) = self.peek()
                 && matches!(token.token_type, TokenType::Identifier(ref s) if s == "meta")
                 && self.is_meta_lookahead()
             {
@@ -3719,12 +3729,15 @@ impl Parser {
     fn parse_primary_value_at_depth(&mut self) -> ParseResult<Value> {
         match self.peek() {
             Some(token) => match &token.token_type {
-                // Raw (no-unwrap) prefix: !value
-                TokenType::Not => {
-                    self.next(); // consume "!"
-                    let inner = self.parse_primary_value()?;
-                    Ok(Value::Raw(Box::new(inner)))
-                }
+                // `!value` once passed a Result along without unwrapping it.
+                // A `Result` parameter does that now, and nothing else
+                // read the prefix, so it only hid typos: `!done` ran as
+                // `done`.
+                TokenType::Not => Err(self.error(
+                    "`!` is not an operator in Hot. For \"not\", use `not(value)`. \
+                     To take an Err as a value, declare the parameter as `Result` \
+                     and test it with `is-err`.",
+                )),
 
                 // Literals: 42, "hello", true, null
                 // Type info is always populated for literals to enable compile-time type resolution
@@ -4943,15 +4956,20 @@ impl Parser {
         template: &Token,
     ) -> ParseResult<Vec<TemplatePart>> {
         let mut parts = Vec::new();
-        let mut chars = content.chars().peekable();
+        let chars: Vec<char> = content.chars().collect();
         let mut current_text = String::new();
         let expression_starts = self.template_expression_starts(template);
         let mut expressions = 0;
 
-        while let Some(ch) = chars.next() {
-            if ch == '$' && chars.peek() == Some(&'{') {
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            if ch == crate::lang::lexer::TEMPLATE_ESCAPED_DOLLAR {
+                // `\$`: a dollar that starts no expression.
+                current_text.push('$');
+                i += 1;
+            } else if ch == '$' && chars.get(i + 1) == Some(&'{') {
                 // Found start of expression ${
-                chars.next(); // consume '{'
                 let start = expression_starts.as_ref().map(|starts| {
                     starts.get(expressions).copied().unwrap_or(SourcePoint {
                         position: template.position,
@@ -4967,23 +4985,10 @@ impl Parser {
                     current_text.clear();
                 }
 
-                // Parse the expression inside ${}
-                let mut expr_content = String::new();
-                let mut brace_depth = 1;
-
-                for expr_ch in chars.by_ref() {
-                    if expr_ch == '{' {
-                        brace_depth += 1;
-                    } else if expr_ch == '}' {
-                        brace_depth -= 1;
-                        if brace_depth == 0 {
-                            break;
-                        }
-                    }
-                    expr_content.push(expr_ch);
-                }
-
-                if brace_depth > 0 {
+                // The expression runs to its closing brace. A brace or
+                // backtick inside one of its strings or templates isn't it.
+                let Some(end) = crate::lang::lexer::template_expression_end(&chars, i + 2) else {
+                    let expr_content: String = chars[i + 2..].iter().collect();
                     // Point at the `${`, two characters before the expression.
                     let (line, column, position) = match start {
                         Some(start) => (
@@ -5007,16 +5012,19 @@ impl Parser {
                             file: self.file_path.clone(),
                         },
                     });
-                }
+                };
+                let expr_content: String = chars[i + 2..end - 1].iter().collect();
+                i = end;
 
                 // Parse the expression content as Hot code
-                if !expr_content.is_empty() {
+                if !expr_content.trim().is_empty() {
                     let expr_value = self.parse_expression_from_string(&expr_content, start)?;
                     parts.push(TemplatePart::Expression(Box::new(expr_value)));
                 }
             } else {
                 // Regular character, add to current text
                 current_text.push(ch);
+                i += 1;
             }
         }
 
@@ -5049,28 +5057,38 @@ impl Parser {
             line: template.line,
             column: template.column,
         };
-        let mut brace_depth = 0usize;
+        // Step `point` over `count` characters of the source.
+        let step = |point: &mut SourcePoint, count: usize| {
+            for _ in 0..count {
+                let Some(&ch) = chars.get(point.position) else {
+                    return;
+                };
+                point.position += 1;
+                if ch == '\n' {
+                    point.line += 1;
+                    point.column = 1;
+                } else {
+                    point.column += 1;
+                }
+            }
+        };
+        // A block template has no escapes: a backslash there is text.
+        let block = chars[point.position.min(chars.len())..].starts_with(&['`', '`', '`']);
         while point.position < end {
             let ch = chars[point.position];
-            if brace_depth == 0 {
-                if ch == '$' && chars.get(point.position + 1) == Some(&'{') {
-                    point.position += 2;
-                    point.column += 2;
-                    starts.push(point);
-                    brace_depth = 1;
-                    continue;
-                }
-            } else if ch == '{' {
-                brace_depth += 1;
-            } else if ch == '}' {
-                brace_depth -= 1;
-            }
-            point.position += 1;
-            if ch == '\n' {
-                point.line += 1;
-                point.column = 1;
+            if ch == '\\' && !block {
+                // An escape, `\$` included: its character starts nothing.
+                step(&mut point, 2);
+            } else if ch == '$' && chars.get(point.position + 1) == Some(&'{') {
+                step(&mut point, 2);
+                starts.push(point);
+                let close = crate::lang::lexer::template_expression_end(chars, point.position)
+                    .unwrap_or(end)
+                    .min(end);
+                let inside = close.saturating_sub(point.position);
+                step(&mut point, inside);
             } else {
-                point.column += 1;
+                step(&mut point, 1);
             }
         }
         Some(starts)
@@ -5148,7 +5166,20 @@ impl Parser {
         ));
         // Nesting continues into the template's expressions.
         expr_parser.depth = self.depth;
-        let value = expr_parser.parse_value();
+        let mut value = expr_parser.parse_value();
+        // One expression, all of it: what followed a complete expression
+        // was dropped, so `${total 2}` rendered `total` and nothing said so.
+        if value.is_ok() {
+            expr_parser.skip_newlines();
+            let leftover = expr_parser
+                .peek()
+                .is_some_and(|token| !matches!(token.token_type, TokenType::Eof));
+            if leftover {
+                value = Err(expr_parser.error(
+                    "A template expression is one expression: nothing can follow it inside `${}`",
+                ));
+            }
+        }
         self.pending_hidden.append(&mut expr_parser.pending_hidden);
         if let Some(error) = expr_parser.unavoidable_error.take() {
             self.unavoidable_error = Some(error);
@@ -6351,7 +6382,10 @@ impl Parser {
                 // Parse as variable assignment
                 let spaced_paren = self.at_spaced_paren_binding();
                 let src = self.peek().map(|token| self.token_source(token));
-                let (mut var, value) = self.parse_var_definition()?;
+                let enclosing = std::mem::replace(&mut self.local_binding, true);
+                let parsed = self.parse_var_definition();
+                self.local_binding = enclosing;
+                let (mut var, value) = parsed?;
                 if spaced_paren && var.meta.is_none() {
                     var.meta = Some(crate::lang::ast::spaced_paren_binding_meta());
                     if var.src.is_none() {

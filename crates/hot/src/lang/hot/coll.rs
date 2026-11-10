@@ -1897,6 +1897,14 @@ fn pmap_vec(
     use std::sync::Arc as StdArc;
     use std::thread;
 
+    // Each worker's VM is one parallel level deeper and goes on counting
+    // calls from here, so a function that reaches itself through `pmap`
+    // meets a limit, as one that does through a `parallel` flow.
+    let (worker_parallel_depth, worker_call_depth) = match vm.parallel_branch_depths() {
+        Ok(depths) => depths,
+        Err(error) => return HotResult::Err(Val::from(error.to_string())),
+    };
+
     // Capture Tokio runtime handle so spawned threads can use async functions
     let tokio_handle = tokio::runtime::Handle::try_current().ok();
     let host_context = vm.host_context_snapshot();
@@ -1970,6 +1978,7 @@ fn pmap_vec(
             task_vm.inherit_host_context(&host_context_clone);
             task_vm.inherit_namespace_variables(&namespace_snapshot_clone);
             task_vm.set_current_namespace(namespace_clone);
+            task_vm.inherit_parallel_depths(worker_parallel_depth, worker_call_depth);
 
             let mut chunk_results: Vec<Val> = Vec::with_capacity(chunk_vec.len());
             let mut chunk_halt: Option<PmapHalt> = None;

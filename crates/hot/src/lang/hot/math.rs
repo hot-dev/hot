@@ -65,6 +65,37 @@ pub fn int_overflow() -> Val {
     Val::err(Val::from("Integer overflow"))
 }
 
+/// A Dec for arithmetic that answers out-of-range and undefined results
+/// with `Inf` or `NaN`, which `dec_or_err` turns into an Err. (By default
+/// such a result panics in a debug build and is a `NaN` in a release one.)
+#[inline(always)]
+fn quiet(value: D256) -> D256 {
+    const QUIET: fastnum::decimal::Context = fastnum::decimal::Context::default().without_traps();
+    value.with_ctx(QUIET)
+}
+
+/// A Dec result, or an Err when it isn't a finite number: too large for a
+/// Dec (`mul` of two huge ones, `pow(0, -1)`) or undefined (`pow(0.0, 0.0)`).
+/// `div(1, 0)` is an Err the same way, and so is an Int that overflows.
+#[inline(always)]
+pub fn dec_or_err(result: D256) -> Val {
+    if result.is_finite() {
+        Val::Dec(result)
+    } else {
+        dec_not_finite(result)
+    }
+}
+
+/// The Err for a Dec that is `NaN` or infinite.
+#[cold]
+pub fn dec_not_finite(value: D256) -> Val {
+    Val::err(Val::from(if value.is_nan() {
+        "Decimal result is undefined or out of range"
+    } else {
+        "Decimal overflow"
+    }))
+}
+
 /// An Int result, or the overflow Err when it doesn't fit.
 #[inline(always)]
 fn int_or_overflow(result: Option<i64>) -> Val {
@@ -158,16 +189,16 @@ pub fn add(args: &[Val]) -> HotResult<Val> {
 fn add_pair(x: &Val, y: &Val) -> HotResult<Val> {
     match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_add(*b))),
-        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a + *b)),
+        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(dec_or_err(quiet(*a) + quiet(*b))),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
             let a_dec = Decimal::from(*a);
-            HotResult::Ok(Val::Dec(a_dec + *b))
+            HotResult::Ok(dec_or_err(quiet(a_dec) + quiet(*b)))
         }
         (Val::Dec(a), Val::Int(b)) => {
             use fastnum::decimal::Decimal;
             let b_dec = Decimal::from(*b);
-            HotResult::Ok(Val::Dec(*a + b_dec))
+            HotResult::Ok(dec_or_err(quiet(*a) + quiet(b_dec)))
         }
         _ => HotResult::Err(Val::from("add requires numbers")),
     }
@@ -186,16 +217,16 @@ pub fn sub(args: &[Val]) -> HotResult<Val> {
 fn sub_pair(x: &Val, y: &Val) -> HotResult<Val> {
     match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_sub(*b))),
-        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a - *b)),
+        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(dec_or_err(quiet(*a) - quiet(*b))),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
             let a_dec = Decimal::from(*a);
-            HotResult::Ok(Val::Dec(a_dec - *b))
+            HotResult::Ok(dec_or_err(quiet(a_dec) - quiet(*b)))
         }
         (Val::Dec(a), Val::Int(b)) => {
             use fastnum::decimal::Decimal;
             let b_dec = Decimal::from(*b);
-            HotResult::Ok(Val::Dec(*a - b_dec))
+            HotResult::Ok(dec_or_err(quiet(*a) - quiet(b_dec)))
         }
         _ => HotResult::Err(Val::from("sub requires numbers")),
     }
@@ -214,16 +245,16 @@ pub fn mul(args: &[Val]) -> HotResult<Val> {
 fn mul_pair(x: &Val, y: &Val) -> HotResult<Val> {
     match (x, y) {
         (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_mul(*b))),
-        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a * *b)),
+        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(dec_or_err(quiet(*a) * quiet(*b))),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
             let a_dec = Decimal::from(*a);
-            HotResult::Ok(Val::Dec(a_dec * *b))
+            HotResult::Ok(dec_or_err(quiet(a_dec) * quiet(*b)))
         }
         (Val::Dec(a), Val::Int(b)) => {
             use fastnum::decimal::Decimal;
             let b_dec = Decimal::from(*b);
-            HotResult::Ok(Val::Dec(*a * b_dec))
+            HotResult::Ok(dec_or_err(quiet(*a) * quiet(b_dec)))
         }
         _ => HotResult::Err(Val::from("mul requires numbers")),
     }
@@ -246,19 +277,19 @@ fn div_pair(x: &Val, y: &Val) -> HotResult<Val> {
                 return HotResult::Ok(Val::err(Val::from("Division by zero")));
             }
             // Integer division that can result in decimal
-            let result = D256::from(*a) / D256::from(*b);
+            let result = quiet(D256::from(*a)) / quiet(D256::from(*b));
             // For int/int division, convert back to integer if the result is a whole number
             if let Some(int_result) = d256_to_i64(&result) {
                 HotResult::Ok(Val::Int(int_result))
             } else {
-                HotResult::Ok(Val::Dec(result))
+                HotResult::Ok(dec_or_err(result))
             }
         }
         (Val::Dec(a), Val::Dec(b)) => {
             if b.is_zero() {
                 return HotResult::Ok(Val::err(Val::from("Division by zero")));
             }
-            HotResult::Ok(Val::Dec(*a / *b))
+            HotResult::Ok(dec_or_err(quiet(*a) / quiet(*b)))
         }
         (Val::Int(a), Val::Dec(b)) => {
             if b.is_zero() {
@@ -266,7 +297,7 @@ fn div_pair(x: &Val, y: &Val) -> HotResult<Val> {
             }
             use fastnum::decimal::Decimal;
             let a_dec = Decimal::from(*a);
-            HotResult::Ok(Val::Dec(a_dec / *b))
+            HotResult::Ok(dec_or_err(quiet(a_dec) / quiet(*b)))
         }
         (Val::Dec(a), Val::Int(b)) => {
             if *b == 0 {
@@ -274,7 +305,7 @@ fn div_pair(x: &Val, y: &Val) -> HotResult<Val> {
             }
             use fastnum::decimal::Decimal;
             let b_dec = Decimal::from(*b);
-            HotResult::Ok(Val::Dec(*a / b_dec))
+            HotResult::Ok(dec_or_err(quiet(*a) / quiet(b_dec)))
         }
         _ => HotResult::Err(Val::from("div requires numbers")),
     }
@@ -286,7 +317,7 @@ fn dec_remainder(a: fastnum::D256, b: fastnum::D256) -> HotResult<Val> {
     if b.is_zero() {
         return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
     }
-    HotResult::Ok(Val::Dec(a % b))
+    HotResult::Ok(dec_or_err(quiet(a) % quiet(b)))
 }
 
 /// Modulo operation: the remainder of truncated division, which has the sign
@@ -323,7 +354,7 @@ pub fn pow(args: &[Val]) -> HotResult<Val> {
                 use fastnum::decimal::Decimal;
                 let a_dec = Decimal::from(*a);
                 let b_dec = Decimal::from(*b);
-                HotResult::Ok(Val::Dec(a_dec.pow(b_dec)))
+                HotResult::Ok(dec_or_err(quiet(a_dec).pow(quiet(b_dec))))
             } else {
                 HotResult::Ok(int_pow(*a, *b))
             }
@@ -351,16 +382,16 @@ fn dec_pow(base: fastnum::D256, exponent: fastnum::D256) -> HotResult<Val> {
         if exponent == fastnum::D256::HALF {
             // An exact root comes back padded to full precision
             // (`3.000...0`): drop the zeros, keeping a whole root whole.
-            let root = base.sqrt().reduce();
+            let root = quiet(base).sqrt().reduce();
             let root = if root.fractional_digits_count() < 0 {
                 root.rescale(0)
             } else {
                 root
             };
-            return HotResult::Ok(Val::Dec(root));
+            return HotResult::Ok(dec_or_err(root));
         }
     }
-    HotResult::Ok(Val::Dec(base.pow(exponent)))
+    HotResult::Ok(dec_or_err(quiet(base).pow(quiet(exponent))))
 }
 
 /// Ceiling function
