@@ -249,7 +249,7 @@ pub(crate) const TEMPLATE_ESCAPED_DOLLAR: char = '\u{E000}';
 /// index past its closing `}`. Strings and templates inside it are skipped
 /// whole, so a brace or backtick in one doesn't end it. `None` when it never
 /// closes.
-pub(crate) fn template_expression_end(chars: &[char], start: usize) -> Option<usize> {
+pub fn template_expression_end(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut i = start;
     while i < chars.len() {

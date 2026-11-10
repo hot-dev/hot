@@ -2,7 +2,7 @@
 
 use crate::index::{Def, Index, Scope};
 use crate::syntax::{Local, LocalKind};
-use hot::lang::ast::{FlowType, FnDef, TypeDef, Value};
+use hot::lang::ast::{FlowType, FnDef, Refinement, TypeDef, Value};
 use hot::val::Val;
 use tower_lsp_server::ls_types::{
     CompletionItemKind, Documentation, ParameterInformation, ParameterLabel, SignatureInformation,
@@ -44,18 +44,53 @@ pub fn params(index: &Index, fn_def: &FnDef) -> Vec<String> {
     params
 }
 
+/// ` where <predicate>`, or nothing.
+fn where_clause(refinement: Option<&Refinement>) -> String {
+    refinement
+        .map(|r| format!(" where {}", r.source))
+        .unwrap_or_default()
+}
+
+/// What follows an arity's parameter list: its precondition and its return
+/// type, as written (`where lte(%.a, %.b): Int where gte(%, 0)`).
+fn after_params(index: &Index, fn_def: &FnDef) -> String {
+    let ret = fn_def
+        .return_type
+        .as_ref()
+        .map(|t| format!(": {}", index.display_type(t)))
+        .unwrap_or_default();
+    format!("{}{ret}", where_clause(fn_def.precondition.as_ref()))
+}
+
 /// One arity's signature: `fn match(c: Color): Str`.
 pub fn fn_signature(index: &Index, fn_def: &FnDef) -> String {
     let modifier = match &fn_def.body {
         Value::Flow(flow) => flow_modifier(&flow.flow_type),
         _ => "",
     };
-    let ret = fn_def
-        .return_type
-        .as_ref()
-        .map(|t| format!(": {}", index.display_type(t)))
-        .unwrap_or_default();
-    format!("fn{modifier}({}){ret}", params(index, fn_def).join(", "))
+    format!(
+        "fn{modifier}({}){}",
+        params(index, fn_def).join(", "),
+        after_params(index, fn_def)
+    )
+}
+
+/// A type declaration in one line, as far as it fits: `type Int where
+/// between(%, 1, 65535)`, `type { ... } where lte(%.low, %.high)`, `enum`.
+fn type_signature(index: &Index, type_def: &TypeDef) -> String {
+    let constraint = where_clause(type_def.refinement.as_ref());
+    if type_def.variants.is_some() {
+        format!("enum{constraint}")
+    } else if let Some(alias) = &type_def.type_alias {
+        format!(
+            "type {}{constraint}",
+            index.display_type(&alias.to_string())
+        )
+    } else if constraint.is_empty() {
+        "type".to_string()
+    } else {
+        format!("type {{ ... }}{constraint}")
+    }
 }
 
 /// The signature line(s) shown for a definition.
@@ -69,11 +104,7 @@ pub fn detail(index: &Index, value: &Value) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        Value::TypeDef(type_def) => Some(if type_def.variants.is_some() {
-            "enum".to_string()
-        } else {
-            "type".to_string()
-        }),
+        Value::TypeDef(type_def) => Some(type_signature(index, type_def)),
         _ => None,
     }
 }
@@ -161,21 +192,56 @@ fn meta_section(def: &Def<'_>) -> String {
 /// The type a type annotation names, resolved from `scope`. Optional and
 /// refined forms resolve to their base type; generic containers to none.
 pub fn resolve_type<'a>(scope: &Scope<'a>, annotation: &str) -> Option<Def<'a>> {
+    resolve_type_through(scope, annotation, 0)
+}
+
+/// Refinements of refinements deeper than this are treated as cycles.
+const MAX_REFINEMENT_HOPS: usize = 8;
+
+fn resolve_type_through<'a>(scope: &Scope<'a>, annotation: &str, hops: usize) -> Option<Def<'a>> {
+    if hops > MAX_REFINEMENT_HOPS {
+        return None;
+    }
+    // `Item where p(%)` is an Item.
+    let annotation = annotation.split(" where ").next().unwrap_or(annotation);
     let annotation = annotation.trim().trim_end_matches('?').trim();
     if annotation.contains('<') || annotation.contains('|') || annotation.is_empty() {
         return None;
     }
-    let def = match annotation.rsplit_once('/') {
-        Some((ns, name)) if ns.starts_with("::") => {
-            let ns = scope.expand(ns);
-            scope
-                .index
-                .get(&ns, name)
-                .map(|def| scope.index.follow(def))?
-        }
-        _ => scope.global(annotation)?,
+    let (ns, name) = match annotation.rsplit_once('/') {
+        Some((ns, name)) if ns.starts_with("::") => (Some(scope.expand(ns)), name),
+        _ => (None, annotation),
     };
-    matches!(def.value, Value::TypeDef(_)).then_some(def)
+    // The hidden type an inline `where` declares: what it refines.
+    if hot::lang::ast::is_inline_refinement_type(name) {
+        let ns = ns.unwrap_or_else(|| scope.ns.clone());
+        let refined = scope.index.refined_type(&ns, name)?;
+        return resolve_type_through(&Scope::in_namespace(scope.index, &ns), &refined, hops + 1);
+    }
+    let def = match ns {
+        Some(ns) => scope
+            .index
+            .get(&ns, name)
+            .map(|def| scope.index.follow(def))?,
+        None => scope.global(name)?,
+    };
+    let Value::TypeDef(type_def) = def.value else {
+        return None;
+    };
+    // A named refinement of a record (`Small type Item where p(%)`) has
+    // the record's fields.
+    if type_def.refinement.is_some()
+        && let Some(alias) = &type_def.type_alias
+        && let Some(base) = resolve_type_through(
+            &Scope::in_namespace(scope.index, def.ns),
+            &alias.to_string(),
+            hops + 1,
+        )
+        && !type_fields(&base).is_empty()
+    {
+        return Some(base);
+    }
+    Some(def)
 }
 
 /// The record fields of a type: `(name, annotation)`.
@@ -217,6 +283,12 @@ fn type_hover(index: &Index, def: &Def<'_>, type_def: &TypeDef) -> String {
     }
     if let Some(alias) = &type_def.type_alias {
         content.push_str(&format!("#### Type Alias\n\n`{}`\n\n", alias));
+    }
+    if let Some(refinement) = &type_def.refinement {
+        content.push_str(&format!(
+            "#### Constraint\n\n`where {}`\n\n",
+            refinement.source
+        ));
     }
     if let Some(variants) = &type_def.variants {
         content.push_str("#### Variants\n\n");
@@ -295,6 +367,13 @@ pub fn def_hover(index: &Index, def: &Def<'_>) -> String {
     let mut content = format!("### {}\n", def.qualified());
     if let Some(detail) = detail(index, def.value) {
         content.push_str(&format!("```hot\n{}\n```\n\n", detail));
+    } else if let Some(annotation) = &def.var.type_annotation {
+        // A typed binding: `max-retries: Int 3`.
+        content.push_str(&format!(
+            "```hot\n{}: {}\n```\n\n",
+            def.name,
+            index.display_type(annotation)
+        ));
     }
     if let Some(doc) = doc(def) {
         content.push_str(&doc);
@@ -363,7 +442,10 @@ pub fn local_hover(local: &Local) -> String {
     match &local.kind {
         LocalKind::Param(Some(t)) => format!("```hot\n{}: {}\n```\n\nparameter", local.name, t),
         LocalKind::Param(None) => format!("```hot\n{}\n```\n\nparameter", local.name),
-        LocalKind::Binding(_) => format!("```hot\n{}\n```\n\nlocal binding", local.name),
+        LocalKind::Binding(_, Some(t)) => {
+            format!("```hot\n{}: {}\n```\n\nlocal binding", local.name, t)
+        }
+        LocalKind::Binding(_, None) => format!("```hot\n{}\n```\n\nlocal binding", local.name),
         LocalKind::ArmBinding => format!("```hot\n{}\n```\n\nmatch arm binding", local.name),
     }
 }
@@ -393,13 +475,13 @@ pub fn signatures(index: &Index, def: &Def<'_>) -> Vec<SignatureInformation> {
             .iter()
             .map(|f| {
                 let params = params(index, f);
-                let ret = f
-                    .return_type
-                    .as_ref()
-                    .map(|t| format!(": {}", index.display_type(t)))
-                    .unwrap_or_default();
                 signature(
-                    format!("{}({}){}", def.name, params.join(", "), ret),
+                    format!(
+                        "{}({}){}",
+                        def.name,
+                        params.join(", "),
+                        after_params(index, f)
+                    ),
                     params,
                     doc.clone(),
                 )
@@ -414,9 +496,17 @@ pub fn signatures(index: &Index, def: &Def<'_>) -> Vec<SignatureInformation> {
                     .map(|(n, t)| format!("{}: {}", n, index.display_type(t)))
                     .collect();
                 out.push(signature(
-                    format!("{}({{ {} }})", def.name, parts.join(", ")),
+                    format!(
+                        "{}({}){}",
+                        def.name,
+                        parts.join(", "),
+                        where_clause(type_def.refinement.as_ref())
+                    ),
                     parts,
-                    Some("Struct constructor - pass a map with the required fields".to_string()),
+                    Some(
+                        "Struct constructor: name the fields, or pass one Map that holds them"
+                            .to_string(),
+                    ),
                 ));
             }
             for constructor in type_def.constructor_functions.iter().flatten() {
@@ -428,10 +518,15 @@ pub fn signatures(index: &Index, def: &Def<'_>) -> Vec<SignatureInformation> {
                 ));
             }
             if out.is_empty() {
-                if type_def.type_alias.is_some() {
+                if let Some(alias) = &type_def.type_alias {
+                    let value = format!(
+                        "value: {}{}",
+                        index.display_type(&alias.to_string()),
+                        where_clause(type_def.refinement.as_ref())
+                    );
                     out.push(signature(
-                        format!("{}(value)", def.name),
-                        vec!["value".to_string()],
+                        format!("{}({})", def.name, value),
+                        vec![value],
                         Some("Type alias constructor".to_string()),
                     ));
                 } else if type_def.variants.is_some() {
