@@ -12,8 +12,7 @@ workspace = true
 
 [features]
 # mimalloc under the allocator in `lang::runtime::oom_logger`. `hot_cli` turns
-# it on by default. It does nothing on Windows, where `hot` stays on the system
-# allocator (see the dependency).
+# it on by default.
 mimalloc = ["dep:mimalloc"]
 default = []
 s3-storage = ["aws-config", "aws-runtime", "aws-sdk-s3"]
@@ -22,6 +21,10 @@ local-embeddings = ["dep:fastembed"]
 test-utils = []
 
 [dependencies]
+# On Windows its C source is compiled as C++ with MSVC's `-Tp <file>`. A
+# compiler cache in front of MSVC has to understand that: sccache does from
+# 0.19.0.
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 ahash = { workspace = true }
 fastnum = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
@@ -144,9 +147,6 @@ ammonia = { workspace = true }
 # allocation-failure path.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-# Not on Windows: its C source is compiled there as C++ with `-Tp <file>`,
-# which a compiler cache in front of MSVC (sccache, as CI uses) breaks.
-mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 [target."cfg(windows)".dependencies]
 same-file = { workspace = true }
