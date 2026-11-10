@@ -366,8 +366,8 @@ HOT_ALLOCATOR=system hot worker
 Use it where a service has to fit a tight memory limit, or to run glibc's heap
 checks (`MALLOC_CHECK_`), which only see what glibc allocates. A worker limits
 glibc to four malloc arenas (`MALLOC_ARENA_MAX` overrides that); the limit has
-no effect under mimalloc. On Windows the variable is not read. A `hot` built
-with `--no-default-features` has only the system allocator.
+no effect under mimalloc. A `hot` built with `--no-default-features` has only
+the system allocator.
 
 Persisted values retain the existing record nesting limit so every fleet reader
 can safely consume them. Trace records also retain their inline threshold and

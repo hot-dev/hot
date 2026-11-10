@@ -105,8 +105,32 @@ mod chosen {
         !value.is_null() && unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes() == b"system"
     }
 
-    /// Reading the environment here would allocate.
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn wants_system() -> bool {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetEnvironmentVariableA(name: *const u8, buffer: *mut u8, size: u32) -> u32;
+        }
+        // Room for "system" and its NUL, and no more: a longer value is
+        // another value.
+        let mut value = [0u8; 8];
+        // SAFETY: the name is NUL-terminated and the buffer is as long as
+        // the size given. The call writes into the buffer only; what it
+        // allocates itself, it takes from the process heap, not from here.
+        let length = unsafe {
+            GetEnvironmentVariableA(
+                c"HOT_ALLOCATOR".as_ptr().cast(),
+                value.as_mut_ptr(),
+                value.len() as u32,
+            )
+        };
+        // The length written, without the NUL. For a value that didn't fit
+        // it is the size needed, which is larger than the buffer.
+        value.get(..length as usize) == Some(b"system".as_slice())
+    }
+
+    /// No way known here to read the environment without allocating.
+    #[cfg(not(any(unix, windows)))]
     fn wants_system() -> bool {
         false
     }
