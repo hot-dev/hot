@@ -2470,7 +2470,7 @@ nullable fn (x: Str?): Any { x }
 via-any("warm")
 via-any("warm")
 via-any("warm")
-[is-err(via-any(null)), is-err(f(null)), f("s"), nullable(null), Str(null), `[${null}]`]"#;
+[is-err(via-any(null)), is-err(f(first([null]))), f("s"), nullable(null), Str(null), `[${null}]`]"#;
         assert_same_with_and_without_jit(
             src,
             &Val::vec(vec![
@@ -2656,7 +2656,7 @@ kept fn match (x: Str): Any {
 }
 any fn (json: Str): Any { from-json(json) }
 fails fn (): Str { err("bad") }
-[user(any("\"x\"")), mapped(User({id: "a"})), int(Port(80)), deferred("not an int"), kept(fails()), kept("a")]"#;
+[user(any("\"x\"")), mapped(User({id: "a"})), int(Port(80)), deferred(any("\"not an int\"")), kept(fails()), kept("a")]"#;
         assert_same_with_and_without_jit(
             src,
             &Val::vec(vec![
@@ -3944,7 +3944,7 @@ run fn (): Vec {
     callbacks flatten([
         map([label], ::a/str-first), map([label], ::a/str-last),
         map([label], ::a/past-custom), map(["s", label], ::a/past-others),
-        map([label], ::a/lone), [by-value(label)], [call("::a/str-last", [label])]
+        map([label], ::a/lone), [by-value(label)], [call(first(["::a/str-last"]), [label])]
     ])
     [
         ::a/str-first(label), ::a/str-last(label), ::a/past-others(label),
@@ -4621,6 +4621,29 @@ f(0)"#;
         let src = "::t ns\nxs [1, 2]\n1 |> add(...xs)";
         let text = run_text(src, None);
         assert!(text.contains("can't spread"), "{text}");
+    }
+
+    #[test]
+    fn a_lambda_gives_the_same_results_across_its_tier_up() {
+        // A lambda's calls are counted before it has a profile of its own,
+        // and the call that reaches the threshold compiles it: results on
+        // either side of that call match the interpreter's.
+        let src = r#"::t ns
+scale fn (xs: Vec, by: Int): Vec { map(xs, (x) { mul(x, by) }) }
+few scale([1, 2, 3], 2)
+many scale(range(60), 3)
+mixed map(["a", 1, 2.5, null, [1]], (x) { [x, x] })
+[few, length(many), last(many), length(mixed)]"#;
+        let expected = crate::val!([[2, 4, 6], 60, 177, 5]);
+        for threshold in [1, 2, 20, 100] {
+            let out = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"threshold": threshold}})),
+            );
+            assert_eq!(out, Ok(expected.clone()), "threshold {threshold}");
+        }
+        let out = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})));
+        assert_eq!(out, Ok(expected), "interpreter");
     }
 
     #[test]

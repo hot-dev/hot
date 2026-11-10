@@ -340,6 +340,8 @@ default. Raise memory budgets together with worker memory and concurrency sizing
 | `HOT_MAX_EXPANDED_VALUE_NODES` | Twice `HOT_MAX_COLLECTION_SIZE`, plus one | Expanded value occurrences at an output boundary |
 | `HOT_MAX_EXPANDED_VALUE_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Str and Bytes payload, plus 8 bytes for every other value occurrence |
 | `HOT_MAX_STRING_BYTES` | 256 MiB | Produced text or checked serialized output |
+| `HOT_MAX_RECURSION_DEPTH` | 4,096 | Function calls open at once in one run; a tail call doesn't count |
+| `HOT_MAX_PARALLEL_DEPTH` | 64 | `parallel` flows open inside one another; each branch runs on a thread of its own |
 | `HOT_SQLITE_MAX_QUERY_ROWS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Rows materialized by one query |
 | `HOT_SQLITE_MAX_QUERY_CELLS` | `HOT_MAX_COLLECTION_SIZE` (16 Mi) | Cells materialized by one query |
 | `HOT_SQLITE_MAX_QUERY_BYTES` | `HOT_MAX_ALLOC_BYTES` (256 MiB) | Query result storage and individual SQLite values |

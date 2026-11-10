@@ -349,7 +349,15 @@ fn dec_pow(base: fastnum::D256, exponent: fastnum::D256) -> HotResult<Val> {
         // is `exp(exponent * ln(base))` at full Dec precision, hundreds of
         // times slower, and can miss an exact root in its last digits.
         if exponent == fastnum::D256::HALF {
-            return HotResult::Ok(Val::Dec(base.sqrt()));
+            // An exact root comes back padded to full precision
+            // (`3.000...0`): drop the zeros, keeping a whole root whole.
+            let root = base.sqrt().reduce();
+            let root = if root.fractional_digits_count() < 0 {
+                root.rescale(0)
+            } else {
+                root
+            };
+            return HotResult::Ok(Val::Dec(root));
         }
     }
     HotResult::Ok(Val::Dec(base.pow(exponent)))

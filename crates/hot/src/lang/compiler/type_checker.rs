@@ -1130,6 +1130,7 @@ impl TypeChecker {
             self.core_variables.len(),
         );
 
+        self.register_all_function_signatures(program);
         for (_ns_path, namespace) in &program.namespaces {
             self.check_namespace(namespace)?;
         }
@@ -3459,7 +3460,8 @@ impl TypeChecker {
                 .is_some_and(|(enum_fqn, _)| arrow(enum_fqn))
     }
 
-    fn check_namespace(&mut self, namespace: &Namespace) -> CompilerResult<()> {
+    /// Make `namespace` the one being checked, and return its path.
+    fn enter_namespace(&mut self, namespace: &Namespace) -> String {
         let ns_path = namespace.path.to_string();
         // Reset the global scope so previous namespaces' top-level bindings
         // can't leak in via short-name lookup. Cross-namespace access still
@@ -3474,9 +3476,29 @@ impl TypeChecker {
             alias_map.insert(alias.to_string(), target.to_string());
         }
         self.context.set_current_aliases(alias_map);
+        ns_path
+    }
 
-        // First pass: collect function signatures for all arities.
-        //
+    /// Register the signatures of every namespace before any body is
+    /// checked. A call is checked against the signatures registered so far,
+    /// so a call into a namespace checked later found none and passed
+    /// unchecked, while the same call the other way round was reported.
+    ///
+    /// Whatever these parses report, `check_namespace` reports again when it
+    /// registers its own namespace's signatures: they are dropped here.
+    fn register_all_function_signatures(&mut self, program: &Program) {
+        let errors = self.errors.errors.len();
+        let warnings = self.errors.warnings.len();
+        for namespace in program.namespaces.values() {
+            let ns_path = self.enter_namespace(namespace);
+            self.register_function_signatures(namespace, &ns_path);
+        }
+        self.errors.errors.truncate(errors);
+        self.errors.warnings.truncate(warnings);
+    }
+
+    /// Collect `namespace`'s function signatures, for all arities.
+    fn register_function_signatures(&mut self, namespace: &Namespace, ns_path: &str) {
         // A function may be defined in two ways that both produce multiple arities:
         //   1. Comma-joined arities in a single `fn` form → Value::Fn(Vec<FnDef>).
         //   2. Repeated top-level `name fn (...) { ... }` declarations → the parser
@@ -3526,8 +3548,13 @@ impl TypeChecker {
             self.context
                 .replace_function_signatures(qualified_name, signatures);
         }
+    }
 
-        // Second pass: infer types for all variables
+    fn check_namespace(&mut self, namespace: &Namespace) -> CompilerResult<()> {
+        let ns_path = self.enter_namespace(namespace);
+        self.register_function_signatures(namespace, &ns_path);
+
+        // Infer types for all variables
         for (var, value) in &namespace.scope.vars {
             let var_name = var.sym.name().to_string();
 
@@ -3574,6 +3601,7 @@ impl TypeChecker {
     fn infer_value_type(&mut self, value: &Value) -> TypeExpr {
         match value {
             Value::Val(val, type_info) => {
+                self.check_literal_expressions(val);
                 if let Some(ann) = type_info {
                     if ann == "Map" && matches!(val, Val::Map(_)) {
                         return self.infer_val_type(val);
@@ -3831,11 +3859,50 @@ impl TypeChecker {
                 }
             }
 
-            // Other value types default to Any for now
-            Value::MapWithSpread { .. } => {
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for entry in base_entries.values() {
+                    self.check_literal_expressions(entry);
+                }
+                for (_, spread) in spread_entries {
+                    self.infer_value_type(spread);
+                }
                 TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any))
             }
+            // Other value types default to Any for now
             _ => TypeExpr::Any,
+        }
+    }
+
+    /// Check the expressions a literal holds. A Map or Vec literal keeps
+    /// each entry that isn't itself a literal as a boxed expression, at any
+    /// depth, and the literal's own type is inferred without looking inside
+    /// them: a call written in a literal (`{total: sum(a, b, c)}`) went
+    /// unchecked, as did a `match` there. Their types still don't feed the
+    /// literal's.
+    fn check_literal_expressions(&mut self, val: &Val) {
+        match val {
+            Val::Box(boxed) => {
+                if let Some(node) = boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                    self.infer_value_type(&node.0);
+                } else if let Some(call) = boxed.as_any().downcast_ref::<crate::lang::ast::FnCall>()
+                {
+                    self.infer_value_type(&Value::FnCall(call.clone()));
+                }
+            }
+            Val::Map(entries) => {
+                for entry in entries.values() {
+                    self.check_literal_expressions(entry);
+                }
+            }
+            Val::Vec(elements) => {
+                for element in elements.iter() {
+                    self.check_literal_expressions(element);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -7187,6 +7254,58 @@ mod tests {
             "only `caller` should mismatch, got: {:?}",
             checker.errors.errors
         );
+    }
+
+    /// The arity mismatches `source` is reported for.
+    fn arity_mismatches(source: &str) -> usize {
+        use crate::lang::errors::CompilerError;
+        let program = crate::lang::parser::parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        checker
+            .errors
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::ArityMismatch { .. }))
+            .count()
+    }
+
+    #[test]
+    fn calls_inside_literals_are_checked() {
+        // A literal's entries are boxed expressions, which were never
+        // walked: each of these passed `hot check` and failed when run.
+        let source = r#"
+        ::t ns
+        f fn (x: Int): Int { x }
+        in-map fn (): Any { {a: f(1, 2, 3)} }
+        in-vec fn (): Any { [f(1, 2, 3)] }
+        in-spread fn (base: Map): Any { {...base, a: f(1, 2, 3)} }
+        nested fn (): Any { {a: [{b: f(1, 2, 3)}]} }
+        fine fn (): Any { {a: f(1), b: [f(2)]} }
+        "#;
+        assert_eq!(arity_mismatches(source), 4);
+    }
+
+    #[test]
+    fn calls_into_a_later_namespace_are_checked() {
+        // Signatures were registered as each namespace was checked, so a
+        // call into one checked later was skipped. Both orders report now.
+        let caller_first = r#"
+        ::a ns
+        call-b fn (): Int { ::b/fb(1, 2, 3) }
+
+        ::b ns
+        fb fn (x: Int): Int { x }
+        "#;
+        let callee_first = r#"
+        ::b ns
+        fb fn (x: Int): Int { x }
+
+        ::a ns
+        call-b fn (): Int { ::b/fb(1, 2, 3) }
+        "#;
+        assert_eq!(arity_mismatches(caller_first), 1);
+        assert_eq!(arity_mismatches(callee_first), 1);
     }
 
     #[test]

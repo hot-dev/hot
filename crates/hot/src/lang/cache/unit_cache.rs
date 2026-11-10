@@ -400,7 +400,7 @@ impl UnitCache {
             super::prune_legacy_unscoped_entries(self.dir_for(unit), &unit.fs_safe_id(), &suffix);
         }
         drop(file_lock_guard);
-        super::prune_stale_cache_files(self.dir_for(unit), &cache_path);
+        super::prune_stale_cache_files_once(self.dir_for(unit), &cache_path);
 
         tracing::debug!(
             "Saved cache for {} ({} namespaces, {} bytes -> {} bytes compressed, {:.1}x)",

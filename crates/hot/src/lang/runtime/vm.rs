@@ -810,7 +810,8 @@ pub struct VirtualMachine {
     /// is an error instead of unbounded recursion.
     ast_initializers_in_progress: Vec<String>,
     /// Debug: Current function name for correlation
-    current_debug_function: Option<String>,
+    /// The function whose instructions ran last, for error reports.
+    current_debug_function: Option<FunctionId>,
     /// Function name to ID mapping from compiler (ordered for consistent resolution)
     function_mapping: Arc<IndexMap<String, crate::lang::bytecode::FunctionId>>,
     /// Core functions registry for call-lib access (ordered)
@@ -942,6 +943,10 @@ pub struct VirtualMachine {
     /// Lazily computed written-register sets per FunctionId (for the
     /// re-entrant save/restore above).
     function_used_registers_cache: AHashMap<FunctionId, std::rc::Rc<[u32]>>,
+    /// The registers re-entrant calls have set aside, innermost last. A call
+    /// pushes its own on entry and takes them back on exit, so recursion
+    /// reuses one buffer where each call used to allocate a vector.
+    saved_registers: Vec<(usize, Val)>,
     /// Failure state (thread-safe for parallel execution)
     failure_state: Arc<VmFailureState>,
     /// Cancellation state (thread-safe for parallel execution)
@@ -1011,6 +1016,14 @@ fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
 /// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
 /// in the type checker counts them.
 fn is_primitive_param_type(param_type: &str) -> bool {
+    // The usual annotation is a bare built-in name: this runs for every
+    // argument of every checked call, so those skip the parsing below.
+    if matches!(
+        param_type,
+        "Str" | "Int" | "Dec" | "Bool" | "Any" | "Vec" | "Map" | "Bytes" | "Byte" | "Null"
+    ) {
+        return true;
+    }
     let base = param_type.strip_suffix('?').unwrap_or(param_type);
     let base = base.split('<').next().unwrap_or(base).trim();
     let base = base.strip_prefix("::hot::type/").unwrap_or(base);
@@ -1176,6 +1189,7 @@ impl VirtualMachine {
             meta_calls_read: Arc::new(AtomicBool::new(false)),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
+            saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
                 failure: RwLock::new(None),
@@ -6900,7 +6914,7 @@ impl VirtualMachine {
 
         // Add scope stack information for debugging
         tracing::error!("VM: Scope stack depth: {}", self.scope_stack.len());
-        if let Some(current_function) = &self.current_debug_function {
+        if let Some(current_function) = self.current_debug_function_name() {
             tracing::error!("VM: Current function: {}", current_function);
         }
 
@@ -9329,21 +9343,14 @@ impl VirtualMachine {
         // Take the values out (leaving Null) instead of cloning: the lambda only
         // reads registers it wrote itself, and a deep clone of large caller
         // collections on every lambda call is pure waste.
-        let registers_to_save: Vec<(usize, Val)> = lambda_info
-            .used_registers
-            .iter()
-            .filter_map(|&reg| {
-                let reg_idx = reg as usize;
-                if reg_idx < self.registers.len() {
-                    Some((
-                        reg_idx,
-                        std::mem::replace(&mut self.registers[reg_idx], Val::Null),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let saved_from = self.saved_registers.len();
+        for &reg in lambda_info.used_registers.iter() {
+            let reg_idx = reg as usize;
+            if reg_idx < self.registers.len() {
+                let value = std::mem::replace(&mut self.registers[reg_idx], Val::Null);
+                self.saved_registers.push((reg_idx, value));
+            }
+        }
 
         // Execute lambda instructions with proper instruction pointer management
         let mut lambda_ip = 0;
@@ -9595,7 +9602,7 @@ impl VirtualMachine {
         self.flow_frame_base = saved_flow_frame_base;
 
         // Restore saved registers before truncating (for recursive lambdas)
-        for (reg_idx, saved_val) in registers_to_save {
+        for (reg_idx, saved_val) in self.saved_registers.drain(saved_from..) {
             if reg_idx < self.registers.len() {
                 self.registers[reg_idx] = saved_val;
             }
@@ -9728,6 +9735,11 @@ impl VirtualMachine {
         if lambda_info.is_lazy_param {
             return Ok(None);
         }
+        // Counted before anything is built for the call: a lambda far from
+        // compiling, or one that can't be, costs a lookup here and no more.
+        let Some(prior_calls) = self.jit.admit_lambda_call(lambda_info) else {
+            return Ok(None);
+        };
 
         let normalized_args: Vec<Val> = lambda_info
             .parameters
@@ -9753,6 +9765,7 @@ impl VirtualMachine {
                 lambda_info,
                 &normalized_args,
                 &captures,
+                prior_calls,
                 CallNames::new(&self.namespace_variables, &self.core_functions, &shadows),
             )
             .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
@@ -9835,21 +9848,17 @@ impl VirtualMachine {
         // `add(fib(n-1), fib(n-2))`). First-entry calls skip this entirely.
         let fid = function_id as usize;
         let reentrant = self.function_active_depth.get(fid).copied().unwrap_or(0) > 0;
-        let saved_own_registers: Vec<(usize, Val)> = if reentrant {
+        let saved_from = self.saved_registers.len();
+        if reentrant {
             let used = self.function_used_registers(function_id);
-            used.iter()
-                .filter_map(|&reg| {
-                    let idx = reg as usize;
-                    if idx < self.registers.len() {
-                        Some((idx, std::mem::replace(&mut self.registers[idx], Val::Null)))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+            for &reg in used.iter() {
+                let idx = reg as usize;
+                if idx < self.registers.len() {
+                    let value = std::mem::replace(&mut self.registers[idx], Val::Null);
+                    self.saved_registers.push((idx, value));
+                }
+            }
+        }
         if let Some(slot) = self.function_active_depth.get_mut(fid) {
             *slot += 1;
         }
@@ -9870,7 +9879,7 @@ impl VirtualMachine {
         }
         // Restore even on error so a failed call can't leak clobbered
         // registers into an outer frame (VMs are reused across REPL runs).
-        for (idx, val) in saved_own_registers {
+        for (idx, val) in self.saved_registers.drain(saved_from..) {
             self.registers[idx] = val;
         }
         result
@@ -10174,6 +10183,13 @@ impl VirtualMachine {
     }
 
     /// Written-register set for a function body (lazily computed and cached).
+    /// The name of the function whose instructions ran last.
+    fn current_debug_function_name(&self) -> Option<&str> {
+        self.current_debug_function
+            .and_then(|id| self.program.functions.get(id as usize))
+            .map(|function| function.name.as_str())
+    }
+
     fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
         if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
             return std::rc::Rc::clone(cached);
@@ -10361,24 +10377,32 @@ impl VirtualMachine {
             let saved_scope_depth = self.scope_stack.len();
             self.scope_stack.push(function_scope);
 
-            // Save the current namespace and switch to the function's namespace
-            let saved_namespace = self.current_namespace.clone();
+            // Switch to the function's namespace, keeping the caller's to
+            // return to. A call within one namespace, the usual case, has
+            // nothing to switch or restore: only its `ns` variable is checked.
             let function_namespace = function_name
                 .rfind('/')
-                .map(|namespace_end| function_name[..namespace_end].to_string());
-
-            if let Some(ref namespace) = function_namespace {
-                tracing::trace!(
-                    "VM: Switching to function namespace '{}' for function '{}'",
-                    namespace,
-                    function_name
-                );
-                self.current_namespace = namespace.clone();
+                .map(|namespace_end| &function_name[..namespace_end]);
+            let mut saved_namespace: Option<String> = None;
+            if let Some(namespace) = function_namespace {
+                if namespace != self.current_namespace {
+                    tracing::trace!(
+                        "VM: Switching to function namespace '{}' for function '{}'",
+                        namespace,
+                        function_name
+                    );
+                    saved_namespace = Some(std::mem::replace(
+                        &mut self.current_namespace,
+                        namespace.to_string(),
+                    ));
+                }
 
                 // Ensure the function's namespace has a ns variable pointing to itself
                 if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
                     self.scope_stack.truncate(saved_scope_depth);
-                    self.current_namespace = saved_namespace;
+                    if let Some(saved_namespace) = saved_namespace {
+                        self.current_namespace = saved_namespace;
+                    }
                     return Err(err);
                 }
             }
@@ -10415,7 +10439,7 @@ impl VirtualMachine {
                 // Function has instructions - execute them
 
                 // Store function name for debug correlation
-                self.current_debug_function = Some(function_name.to_owned());
+                self.current_debug_function = Some(function_id);
                 tracing::trace!(
                     "VM: Function '{}' has {} instructions",
                     function_name,
@@ -10589,16 +10613,21 @@ impl VirtualMachine {
                 self.registers.truncate(saved_register_count_for_call);
             }
 
-            // Restore the saved namespace
-            tracing::trace!(
-                "VM: Restoring namespace from '{}' to '{}'",
-                self.current_namespace,
-                saved_namespace
-            );
-            self.current_namespace = saved_namespace.clone();
-
-            // Ensure the restored namespace has a ns variable pointing to itself
-            let restored = self.ensure_namespace_has_ns_variable(&saved_namespace);
+            // Restore the caller's namespace, if the call left it
+            let restored = match saved_namespace {
+                Some(saved_namespace) => {
+                    tracing::trace!(
+                        "VM: Restoring namespace from '{}' to '{}'",
+                        self.current_namespace,
+                        saved_namespace
+                    );
+                    // Ensure the restored namespace has a ns variable pointing to itself
+                    let restored = self.ensure_namespace_has_ns_variable(&saved_namespace);
+                    self.current_namespace = saved_namespace;
+                    restored
+                }
+                None => Ok(()),
+            };
             let result = result?;
             restored?;
 
@@ -11693,8 +11722,7 @@ impl VirtualMachine {
             "function": call_ctx
                 .map(|ctx| Val::from(ctx.function_name.clone()))
                 .unwrap_or_else(|| {
-                    self.current_debug_function
-                        .clone()
+                    self.current_debug_function_name()
                         .map(Val::from)
                         .unwrap_or(Val::Null)
                 }),
@@ -12809,7 +12837,7 @@ impl VirtualMachine {
                 }
                 Err(e) => {
                     // Restore instruction pointer and return error
-                    let func_name = self.current_debug_function.as_deref().unwrap_or("unknown");
+                    let func_name = self.current_debug_function_name().unwrap_or("unknown");
                     tracing::trace!("[{}] Error during function execution: {:?}", func_name, e);
                     self.instruction_pointer = saved_instruction_pointer;
                     return Err(e);

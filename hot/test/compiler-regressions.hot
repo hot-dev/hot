@@ -259,6 +259,8 @@ meta ["test"] fn () {
 test-pow-of-a-half-and-of-a-negative-base
 meta ["test"] fn () {
     assert-eq(3.0, pow(9, 0.5), "square root of a square")
+    assert-eq("3", Str(pow(9, 0.5)), "an exact root isn't padded with zeros")
+    assert-eq("0.5", Str(pow(0.25, 0.5)))
     assert-eq(0.5, pow(0.25, 0.5))
     assert-eq(-8, pow(-2, 3), "a whole exponent keeps its sign")
     assert(is-err(pow(-8, 0.5)), "no real square root")

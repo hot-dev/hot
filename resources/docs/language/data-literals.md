@@ -69,6 +69,11 @@ Numbers with decimal points. Hot uses `Dec` instead of floating-point:
 
 {{snippet:data-literals#decimals}}
 
+A number literal is digits, with an optional leading `-` and one decimal
+point. There is no exponent, hex or digit-separator form: `1e10`, `0xFF` and
+`1_000` are syntax errors. Write the number out, or compute it
+(`pow(10, 10)`).
+
 **Why Dec instead of Float?**
 
 Floating-point math has precision issues:

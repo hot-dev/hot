@@ -206,7 +206,8 @@ meta {
     core: true,
     doc: """
     Raise `base` to the power `exp`. An Int power that doesn't fit in an Int
-    is `Err("Integer overflow")`.
+    is `Err("Integer overflow")`. A power of `0.5` is the square root. A
+    negative `base` has no fractional power, so that is an Err too.
 
     **Example**
 
@@ -215,6 +216,8 @@ meta {
     pow(10, 2)     // 100
     pow(2, 0)      // 1
     pow(1.5, 2)    // 2.25
+    pow(9, 0.5)    // 3
+    pow(-8, 0.5)   // Err("pow of a negative number requires a whole exponent")
     ```
     """
 }

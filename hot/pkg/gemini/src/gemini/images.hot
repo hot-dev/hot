@@ -91,28 +91,16 @@ fn
     generate(request, {})
 },
 (request: GenerateImageRequest, opts: Map): GenerateImageResponse | HttpError {
-    // Build the request body for Imagen
+    // Build the request body for Imagen. Each optional setting is sent only
+    // when the request has it.
+    parameters {sampleCount: if(is-null(request.numberOfImages), 1, request.numberOfImages)}
+        |> assoc-some("aspectRatio", request.aspectRatio)
+        |> assoc-some("negativePrompt", request.negativePrompt)
+        |> assoc-some("safetyFilterLevel", request.safetyFilterLevel)
+        |> assoc-some("personGeneration", request.personGeneration)
     body {
         instances: [{prompt: request.prompt}],
-        parameters: merge(
-            {sampleCount: if(is-null(request.numberOfImages), 1, request.numberOfImages)},
-            cond {
-                not(is-null(request.aspectRatio)) => { {aspectRatio: request.aspectRatio} }
-                => { {} }
-            },
-            cond {
-                not(is-null(request.negativePrompt)) => { {negativePrompt: request.negativePrompt} }
-                => { {} }
-            },
-            cond {
-                not(is-null(request.safetyFilterLevel)) => { {safetyFilterLevel: request.safetyFilterLevel} }
-                => { {} }
-            },
-            cond {
-                not(is-null(request.personGeneration)) => { {personGeneration: request.personGeneration} }
-                => { {} }
-            }
-        )
+        parameters: parameters
     }
 
     response api-call("POST", `/v1/models/${IMAGEN_MODEL}:predict`, {}, body, opts)

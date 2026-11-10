@@ -1643,7 +1643,19 @@ impl BytecodeProgram {
         match constant {
             Constant::Val(v) => {
                 0u8.hash(&mut hasher);
-                v.hash(&mut hasher);
+                // A boxed value hashes as its type name alone, which put
+                // every lambda and thunk of a program in one bucket: each
+                // new one was compared, instruction by instruction, with all
+                // before it. A lambda hashes by its own contents here.
+                match v {
+                    crate::val::Val::Box(boxed) => {
+                        match boxed.as_any().downcast_ref::<LambdaInfo>() {
+                            Some(lambda) => lambda.hash(&mut hasher),
+                            None => v.hash(&mut hasher),
+                        }
+                    }
+                    _ => v.hash(&mut hasher),
+                }
             }
             Constant::FunctionRef(s) => {
                 1u8.hash(&mut hasher);
