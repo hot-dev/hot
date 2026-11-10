@@ -77,12 +77,14 @@ resource "google_sql_database_instance" "postgres" {
     disk_autoresize             = true
     deletion_protection_enabled = local.postgres.deletion_protection
     user_labels                 = { hot-installation = local.config.name, managed-by = "opentofu" }
-    # The connections the contract plans for this size, and which the scaling
-    # maximums must fit; Cloud SQL's memory-based default (500 for 16 GB, 600
-    # for 32 GB) would refuse them.
+    # The connections the contract plans for this size, which the scaling
+    # maximums must fit, and those of the extra hosts a rolling update adds
+    # to every group at once (main.tf): a new host image would otherwise
+    # start hosts the database refuses. Cloud SQL's memory-based default (500
+    # for 16 GB, 600 for 32 GB) would refuse them too.
     database_flags {
       name  = "max_connections"
-      value = tostring(module.contract.database_connections)
+      value = tostring(module.contract.database_connections + local.rollout_connections)
     }
     location_preference {
       zone = local.config.zone

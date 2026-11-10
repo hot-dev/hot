@@ -346,8 +346,8 @@ run "endpoints_and_scaling" {
     error_message = "An incident on a host that scale-in or a rolling update removed closes after half an hour without data, not a week."
   }
   assert {
-    condition     = one(google_sql_database_instance.postgres[0].settings[0].database_flags).name == "max_connections" && one(google_sql_database_instance.postgres[0].settings[0].database_flags).value == "400"
-    error_message = "Cloud SQL accepts the connections the scaling maximums were checked against."
+    condition     = one(google_sql_database_instance.postgres[0].settings[0].database_flags).name == "max_connections" && one(google_sql_database_instance.postgres[0].settings[0].database_flags).value == "640"
+    error_message = "Cloud SQL accepts the connections the scaling maximums were checked against, and 20 for each of the 3 extra hosts a rolling update adds to each of the 4 regional groups."
   }
   assert {
     condition     = google_memorystore_instance.valkey[0].replica_count == 1 && one(google_memorystore_instance.valkey[0].zone_distribution_config).mode == "MULTI_ZONE"
@@ -419,8 +419,8 @@ run "fixed_task_worker_count" {
     error_message = "A fixed worker count lets the autoscaler scale in, so a lower count takes effect."
   }
   assert {
-    condition     = one(google_sql_database_instance.postgres[0].settings[0].database_flags).value == "800" && one(google_monitoring_alert_policy.database_connections[0].conditions).condition_threshold[0].threshold_value == 640
-    error_message = "A 16 GB tier defaults to 500 connections; the medium budget of 800 is set on the database, and its alert is 80% of it."
+    condition     = one(google_sql_database_instance.postgres[0].settings[0].database_flags).value == "1040" && one(google_monitoring_alert_policy.database_connections[0].conditions).condition_threshold[0].threshold_value == 640
+    error_message = "A 16 GB tier defaults to 500 connections; the database takes the medium budget of 800 and a rolling update's 240, and the alert is 80% of the budget."
   }
 }
 
