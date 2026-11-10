@@ -57,6 +57,14 @@ enum ClaimedWorkerQueue {
     Email(ProcessingQueueLease<Message>),
 }
 
+impl ClaimedWorkerQueue {
+    fn into_lease(self) -> ProcessingQueueLease<Message> {
+        let (Self::Request(lease) | Self::Event(lease) | Self::Alert(lease) | Self::Email(lease)) =
+            self;
+        lease
+    }
+}
+
 const WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 const LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 5;
 const WORKER_HANDOFF_WAIT_LOG_MS: u64 = 100;
@@ -191,11 +199,16 @@ impl WorkerExecutionServices {
         Some(store)
     }
 
+    /// The context variables a run of this project sees: the environment's,
+    /// overridden by the project's. An environment with none configured
+    /// yields an empty map. A failure to read or decrypt them is an error,
+    /// never a partial map: a run started without its configuration and
+    /// secrets would act on nulls. Only a complete load is cached.
     async fn context_for(
         &self,
         encryption: &ContextEncryption,
         key: TenantContextKey,
-    ) -> AHashMap<String, Val> {
+    ) -> Result<AHashMap<String, Val>, ContextLoadError> {
         {
             let mut contexts = self.contexts.lock().await;
             if self.context_ttl.is_zero() {
@@ -204,7 +217,7 @@ impl WorkerExecutionServices {
             } else {
                 Self::purge_expired_contexts(&mut contexts, self.context_ttl);
                 if let Some(cached) = contexts.get(&key) {
-                    return cached.values.clone();
+                    return Ok(cached.values.clone());
                 }
             }
         }
@@ -213,64 +226,19 @@ impl WorkerExecutionServices {
             org_id: key.org_id,
             env_id: key.env_id,
         });
-        let mut values = AHashMap::new();
-        let mut cacheable = true;
 
-        match Context::get_by_env(&db, &key.env_id).await {
-            Ok(context_vars) => {
-                for context_var in context_vars.into_iter().filter(|value| value.active) {
-                    match context_var.get_decrypted_value(encryption, &key.org_id) {
-                        Ok(value) => {
-                            values.insert(context_var.key, value);
-                        }
-                        Err(e) => {
-                            cacheable = false;
-                            tracing::warn!(
-                                org_id = %key.org_id,
-                                env_id = %key.env_id,
-                                "Failed to decrypt environment context variable '{}': {}",
-                                context_var.key,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                cacheable = false;
-                tracing::warn!(
-                    org_id = %key.org_id,
-                    env_id = %key.env_id,
-                    "Failed to load environment context variables: {}",
-                    e
-                );
-            }
-        }
-
-        match Context::get_by_project(&db, &key.project_id).await {
-            Ok(context_vars) => {
-                for context_var in context_vars.into_iter().filter(|value| value.active) {
-                    match context_var.get_decrypted_value(encryption, &key.org_id) {
-                        Ok(value) => {
-                            // Project context intentionally overrides env context.
-                            values.insert(context_var.key, value);
-                        }
-                        Err(e) => {
-                            cacheable = false;
-                            tracing::warn!(
-                                org_id = %key.org_id,
-                                env_id = %key.env_id,
-                                project_id = %key.project_id,
-                                "Failed to decrypt project context variable '{}': {}",
-                                context_var.key,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                cacheable = false;
+        let env_vars = Context::get_by_env(&db, &key.env_id).await.map_err(|e| {
+            tracing::warn!(
+                org_id = %key.org_id,
+                env_id = %key.env_id,
+                "Failed to load environment context variables: {}",
+                e
+            );
+            ContextLoadError::from_read("environment", &e)
+        })?;
+        let project_vars = Context::get_by_project(&db, &key.project_id)
+            .await
+            .map_err(|e| {
                 tracing::warn!(
                     org_id = %key.org_id,
                     env_id = %key.env_id,
@@ -278,10 +246,32 @@ impl WorkerExecutionServices {
                     "Failed to load project context variables: {}",
                     e
                 );
-            }
-        }
+                ContextLoadError::from_read("project", &e)
+            })?;
+        let decrypt = |context_vars: Vec<Context>| {
+            context_vars
+                .into_iter()
+                .filter(|value| value.active)
+                .map(|context_var| {
+                    let value = context_var
+                        .get_decrypted_value(encryption, &key.org_id)
+                        .map_err(|e| e.to_string());
+                    (context_var.key, value)
+                })
+                .collect::<Vec<_>>()
+        };
+        let values =
+            merge_context_values(decrypt(env_vars), decrypt(project_vars)).inspect_err(|e| {
+                tracing::warn!(
+                    org_id = %key.org_id,
+                    env_id = %key.env_id,
+                    project_id = %key.project_id,
+                    "Failed to decrypt context variables: {}",
+                    e
+                );
+            })?;
 
-        if cacheable && !self.context_ttl.is_zero() && self.cache_max_entries > 0 {
+        if !self.context_ttl.is_zero() && self.cache_max_entries > 0 {
             let mut contexts = self.contexts.lock().await;
             Self::purge_expired_contexts(&mut contexts, self.context_ttl);
             Self::evict_oldest_context_if_full(&mut contexts, self.cache_max_entries);
@@ -294,7 +284,7 @@ impl WorkerExecutionServices {
             );
         }
 
-        values
+        Ok(values)
     }
 
     fn evict_oldest_store_if_full(
@@ -335,6 +325,91 @@ impl WorkerExecutionServices {
     ) {
         contexts.retain(|_, value| value.loaded_at.elapsed() < ttl);
     }
+}
+
+/// Starts a handler error for context variables the database could not
+/// serve. The event executor matches on the token to leave the event for an
+/// infrastructure retry (see `should_retry_context_load`).
+const CONTEXT_LOAD_UNAVAILABLE_ERROR: &str =
+    "[context-load-unavailable] Cannot load the run's context variables";
+
+/// Starts a handler error for context variables that are stored but can't be
+/// read. The event executor matches on the token to fail the run at once
+/// (see `is_permanent_setup_failure`).
+const CONTEXT_UNREADABLE_ERROR: &str =
+    "[context-unreadable] Cannot read the run's context variables";
+
+/// Why a run's context variables could not be loaded. Either way the run
+/// does not start.
+#[derive(Debug, PartialEq)]
+enum ContextLoadError {
+    /// The database could not be read: a later delivery may succeed.
+    Unavailable(String),
+    /// A stored value can't be decoded or decrypted: every delivery fails
+    /// the same way until the variable is set again.
+    Unreadable(String),
+}
+
+impl ContextLoadError {
+    fn from_read(scope: &str, error: &hot::db::context::ContextError) -> Self {
+        let reason = format!("{scope} context: {error}");
+        match error {
+            // The rows arrived but don't decode: reading them again won't help.
+            hot::db::context::ContextError::Database(
+                sqlx::Error::ColumnDecode { .. }
+                | sqlx::Error::Decode(_)
+                | sqlx::Error::ColumnNotFound(_)
+                | sqlx::Error::TypeNotFound { .. },
+            ) => Self::Unreadable(reason),
+            _ => Self::Unavailable(reason),
+        }
+    }
+}
+
+impl std::fmt::Display for ContextLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(reason) => write!(f, "{CONTEXT_LOAD_UNAVAILABLE_ERROR}: {reason}"),
+            Self::Unreadable(reason) => write!(f, "{CONTEXT_UNREADABLE_ERROR}: {reason}"),
+        }
+    }
+}
+
+/// Merge decrypted environment and project context variables, each a key
+/// with its value or the reason it can't be decrypted. A project variable
+/// overrides the environment's of the same key, readable or not. Any
+/// variable left undecryptable fails the load: the run would see null for it.
+fn merge_context_values(
+    env_vars: Vec<(String, Result<Val, String>)>,
+    project_vars: Vec<(String, Result<Val, String>)>,
+) -> Result<AHashMap<String, Val>, ContextLoadError> {
+    let mut values = AHashMap::new();
+    let mut unreadable: Vec<(String, String)> = Vec::new();
+    for (scope, vars) in [("environment", env_vars), ("project", project_vars)] {
+        for (key, value) in vars {
+            unreadable.retain(|(failed, _)| *failed != key);
+            match value {
+                Ok(value) => {
+                    values.insert(key, value);
+                }
+                Err(reason) => {
+                    values.remove(&key);
+                    unreadable.push((
+                        key.clone(),
+                        format!("{scope} context variable '{key}' can't be decrypted ({reason})"),
+                    ));
+                }
+            }
+        }
+    }
+    if unreadable.is_empty() {
+        return Ok(values);
+    }
+    let reasons: Vec<String> = unreadable.into_iter().map(|(_, reason)| reason).collect();
+    Err(ContextLoadError::Unreadable(format!(
+        "{}. Set the variable again",
+        reasons.join("; ")
+    )))
 }
 
 fn worker_queue_claimer_count(include_notifications: bool) -> usize {
@@ -393,8 +468,11 @@ fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64
 /// token makes the queue carry the cumulative count across requeues so
 /// repeat offenders eventually reach the DLQ.
 ///
-/// Only the `[event-setup-timeout]` and `[blocking-slot-admission-timeout]`
-/// redeliveries may use this helper. Every other infrastructure retry —
+/// Only redeliveries after a failure that may repeat on every delivery use
+/// this helper: the `[event-setup-timeout]` and
+/// `[blocking-slot-admission-timeout]` ones, a handler's setup failure, an
+/// exact-target event with no runnable handler, and a failed app email
+/// send. Every other infrastructure retry —
 /// especially the healthy running-task redelivery deferrals, which
 /// legitimately requeue dozens of times while an hours-long task executes —
 /// must keep the default reset behavior via
@@ -404,6 +482,165 @@ fn worker_counted_redelivery_error(message: impl Into<String>, backoff_ms: u64) 
         format!("{} {}", message.into(), PRESERVE_DELIVERY_COUNT_TOKEN),
         backoff_ms,
     )
+}
+
+/// Backoff before the redelivery that follows a counted attempt:
+/// `base_ms`, four times longer after each attempt the message already
+/// spent, up to `max_ms`.
+fn growing_backoff_ms(base_ms: u64, max_ms: u64, prior_attempts: usize) -> u64 {
+    let factor = 4u64.saturating_pow(prior_attempts.min(16) as u32);
+    base_ms.saturating_mul(factor).min(max_ms)
+}
+
+/// First backoff for an exact-target call or schedule whose build has no
+/// runnable handler here, as while its deployment is changing; it grows to
+/// `EXACT_TARGET_RETRY_MAX_BACKOFF_MS`.
+const EXACT_TARGET_RETRY_BACKOFF_MS: u64 = 15_000;
+const EXACT_TARGET_RETRY_MAX_BACKOFF_MS: u64 = 300_000;
+
+/// Deliveries an exact-target event gets before it is given up: the queues'
+/// retry limit, which the counted redeliveries below spend.
+const EXACT_TARGET_DELIVERY_ATTEMPTS: usize = 3;
+
+/// Whether a failure of this delivery is the exact-target event's last. Only
+/// the SQLite and memory queues say so themselves (`queue_last_attempt`);
+/// Redis carries the count of the deliveries before this one.
+fn exact_target_last_attempt(prior_attempts: usize, queue_last_attempt: bool) -> bool {
+    queue_last_attempt || prior_attempts + 1 >= EXACT_TARGET_DELIVERY_ATTEMPTS
+}
+
+/// Whether a counted failure of this event delivery is the event's last, on
+/// every queue: the one after it would be dead-lettered unrun. Redis never
+/// says so itself (`ProcessingQueueLease::last_attempt`), so there it is the
+/// count its counted redeliveries carry, as for an exact-target event. That
+/// count is a lower bound (it leaves out this entry's own failed starts), so
+/// on Redis a last delivery can still go unrecognized; the dead letter that
+/// follows settles what it left.
+fn event_last_delivery_attempt(prior_attempts: usize, queue_last_attempt: bool) -> bool {
+    exact_target_last_attempt(prior_attempts, queue_last_attempt)
+}
+
+/// An exact-target call or schedule found no runnable handler for its build.
+/// Its deployment may still be settling, so the event is delivered again
+/// after a growing backoff, each delivery counted: only an event whose build
+/// stays unavailable through them reaches the dead-letter queue.
+///
+/// The last of them fails as an ordinary error instead, which dead-letters
+/// the event at once: a backoff there would only delay the dead letter, as
+/// the delivery after it runs nothing.
+fn exact_target_retry_error(
+    message: impl Into<String>,
+    infra_retry_backoff_ms: u64,
+    prior_attempts: usize,
+    queue_last_attempt: bool,
+) -> WorkerError {
+    if exact_target_last_attempt(prior_attempts, queue_last_attempt) {
+        return Box::new(std::io::Error::other(message.into()));
+    }
+    worker_counted_redelivery_error(
+        message,
+        infra_retry_backoff_ms.max(growing_backoff_ms(
+            EXACT_TARGET_RETRY_BACKOFF_MS,
+            EXACT_TARGET_RETRY_MAX_BACKOFF_MS,
+            prior_attempts,
+        )),
+    )
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
+/// Pause after a panic in a worker task before it goes on, so a panic that
+/// repeats cannot spin.
+const WORKER_TASK_PANIC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Panics in a row, each within `WORKER_TASK_STABLE_RUN` of its restart,
+/// after which a supervised task is not restarted in place.
+const WORKER_TASK_MAX_QUICK_PANICS: u32 = 5;
+const WORKER_TASK_STABLE_RUN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Process one claimed delivery of an executor, containing a panic in it: a
+/// panic that unwound the executor's task would remove the executor for the
+/// life of the process, and one poison message could remove them all while
+/// the process stays up consuming nothing. The delivery's lease is dropped
+/// as the panic unwinds, which spends one of the message's attempts on every
+/// queue backend, so a message that panics each time reaches the dead-letter
+/// queue. Returns whether the delivery panicked.
+async fn contain_delivery_panic(
+    executor: &str,
+    delivery: impl std::future::Future<Output = ()>,
+) -> bool {
+    use futures::FutureExt;
+    let Err(panic) = std::panic::AssertUnwindSafe(delivery).catch_unwind().await else {
+        return false;
+    };
+    error!(
+        "hot.dev: WORKER {} panicked processing a delivery: {}. The delivery spent an attempt; the executor goes on",
+        executor,
+        panic_message(panic.as_ref())
+    );
+    tokio::time::sleep(WORKER_TASK_PANIC_BACKOFF).await;
+    true
+}
+
+/// Notified when a supervised worker task keeps panicking: the worker then
+/// drains and exits non-zero for its orchestrator to restart it.
+fn worker_task_gave_up() -> &'static Arc<tokio::sync::Notify> {
+    static GAVE_UP: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+    GAVE_UP.get_or_init(Default::default)
+}
+
+/// Spawn a long-lived worker task that is restarted when it panics. `task`
+/// builds the task's future, again for each restart. A panic is logged at
+/// error and the task restarts after `WORKER_TASK_PANIC_BACKOFF`; after
+/// `WORKER_TASK_MAX_QUICK_PANICS` panics in a row the task stays down and
+/// `gave_up` is notified.
+fn spawn_supervised_worker_task<F, Fut>(
+    name: String,
+    gave_up: Arc<tokio::sync::Notify>,
+    mut task: F,
+) -> JoinHandle<Result<(), WorkerError>>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), WorkerError>> + Send + 'static,
+{
+    use futures::FutureExt;
+    tokio::spawn(async move {
+        let mut quick_panics = 0u32;
+        loop {
+            let started = tokio::time::Instant::now();
+            let panic = match std::panic::AssertUnwindSafe(task()).catch_unwind().await {
+                Ok(result) => return result,
+                Err(panic) => panic,
+            };
+            quick_panics = if started.elapsed() >= WORKER_TASK_STABLE_RUN {
+                1
+            } else {
+                quick_panics + 1
+            };
+            if quick_panics >= WORKER_TASK_MAX_QUICK_PANICS {
+                error!(
+                    "hot.dev: WORKER {} panicked {} times in a row: {}. Restarting the worker",
+                    name,
+                    quick_panics,
+                    panic_message(panic.as_ref())
+                );
+                gave_up.notify_one();
+                return Err(worker_error(format!("{name} kept panicking")));
+            }
+            error!(
+                "hot.dev: WORKER {} panicked: {}. Restarting it",
+                name,
+                panic_message(panic.as_ref())
+            );
+            tokio::time::sleep(WORKER_TASK_PANIC_BACKOFF).await;
+        }
+    })
 }
 
 fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
@@ -463,107 +700,652 @@ async fn unregister_idle_consumer(queue_name: &str, queue: &ProcessingQueue<Mess
     }
 }
 
+/// First wait after a failed queue claim; it doubles with every further
+/// failure, up to `CLAIM_ERROR_BACKOFF_MAX`.
+const CLAIM_ERROR_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(250);
+const CLAIM_ERROR_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(4);
+/// A claimer warns about failed claims at most this often.
+const CLAIM_ERROR_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait before a claimer claims again after `consecutive_failures` (1 or
+/// more) failed claims in a row.
+fn claim_error_backoff(consecutive_failures: u32) -> std::time::Duration {
+    let doublings = consecutive_failures.saturating_sub(1).min(16);
+    CLAIM_ERROR_BACKOFF_MIN
+        .saturating_mul(1 << doublings)
+        .min(CLAIM_ERROR_BACKOFF_MAX)
+}
+
+/// A claimer's run of failed claims. With Redis refusing connections or
+/// answering READONLY a claim fails at once, so retrying without a pause is
+/// a busy loop per claimer.
+#[derive(Default)]
+struct ClaimErrors {
+    consecutive: u32,
+    last_warned: Option<std::time::Instant>,
+}
+
+impl ClaimErrors {
+    /// A claim answered: the next failure starts a new run.
+    fn recovered(&mut self, queue_name: &str) {
+        if self.consecutive > 0 {
+            info!(
+                "hot.dev: WORKER {} claimer claims again after {} failed claim(s)",
+                queue_name, self.consecutive
+            );
+            self.consecutive = 0;
+        }
+    }
+
+    /// Count a failed claim and how long to wait before the next one;
+    /// `warn` at most once per `CLAIM_ERROR_LOG_INTERVAL`.
+    fn failed(&mut self, now: std::time::Instant) -> (std::time::Duration, bool) {
+        self.consecutive = self.consecutive.saturating_add(1);
+        let warn = self
+            .last_warned
+            .is_none_or(|at| now.saturating_duration_since(at) >= CLAIM_ERROR_LOG_INTERVAL);
+        if warn {
+            self.last_warned = Some(now);
+        }
+        (claim_error_backoff(self.consecutive), warn)
+    }
+
+    /// After a failed claim: wait out the backoff, or until shutdown begins.
+    async fn pause(
+        &mut self,
+        queue_name: &str,
+        error: &(dyn std::error::Error + Send + Sync),
+        shutdown_rx: &mut watch::Receiver<bool>,
+    ) {
+        let (backoff, warn) = self.failed(std::time::Instant::now());
+        if warn {
+            warn!(
+                "hot.dev: WORKER {} claimer cannot claim ({} failure(s) in a row, next try in {}ms): {}",
+                queue_name,
+                self.consecutive,
+                duration_ms(backoff),
+                error
+            );
+        } else {
+            debug!("hot.dev: WORKER {} claimer error: {}", queue_name, error);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = shutdown_rx.changed() => {}
+        }
+    }
+}
+
+/// How long a shutdown waits for a queue to take unstarted deliveries back.
+const UNSTARTED_HAND_BACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// On shutdown, hand a claimed delivery this worker will not start back to
+/// its queue: another worker gets it at once, where a dropped lease stays
+/// with this consumer (Redis) until it has sat out the orphan idle, and
+/// spends one of the message's attempts (SQLite, memory). No attempt is
+/// counted, and the next delivery is marked redelivered.
+///
+/// False when the queue left the delivery claimed for its orphan recovery
+/// instead (see `ProcessingQueueLease::hand_back_unstarted`): it takes over
+/// from a delivery that never settled, so it must come back as one, or this
+/// consumer no longer owns it. An error leaves it as a dropped lease would.
+/// Neither dead-letters the message, so there are no runs to settle here.
+async fn hand_back_unstarted_lease(
+    lease: ProcessingQueueLease<Message>,
+) -> Result<bool, WorkerError> {
+    match tokio::time::timeout(UNSTARTED_HAND_BACK_TIMEOUT, lease.hand_back_unstarted()).await {
+        Ok(handed_back) => handed_back,
+        Err(_) => Err(worker_error(format!(
+            "the queue did not take the delivery back within {}s",
+            UNSTARTED_HAND_BACK_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+/// `hand_back_unstarted_lease` for `holder`, the task giving the lease up.
+async fn hand_back_lease_on_shutdown(holder: &str, lease: ProcessingQueueLease<Message>) {
+    match hand_back_unstarted_lease(lease).await {
+        Ok(true) => debug!(
+            "hot.dev: WORKER {} handed its claimed delivery back during shutdown",
+            holder
+        ),
+        Ok(false) => debug!(
+            "hot.dev: WORKER {} left its claimed delivery pending during shutdown; the queue recovers it",
+            holder
+        ),
+        Err(e) => warn!(
+            "hot.dev: WORKER {} could not hand a claimed delivery back during shutdown: {}",
+            holder, e
+        ),
+    }
+}
+
+/// On shutdown, hand back what `queue`'s consumer holds without a lease (see
+/// `ProcessingQueue::release_unstarted`).
+async fn release_unstarted_deliveries(queue_name: &str, queue: &ProcessingQueue<Message>) {
+    match tokio::time::timeout(UNSTARTED_HAND_BACK_TIMEOUT, queue.release_unstarted()).await {
+        Ok(Ok(0)) => {}
+        Ok(Ok(released)) => info!(
+            "hot.dev: WORKER handed {} unstarted {} deliveries back to the queue for another worker",
+            released, queue_name
+        ),
+        Ok(Err(e)) => warn!(
+            "hot.dev: WORKER could not hand unstarted {} deliveries back; they stay pending until reclaimed: {}",
+            queue_name, e
+        ),
+        Err(_) => warn!(
+            "hot.dev: WORKER timed out handing unstarted {} deliveries back; the rest stay pending until reclaimed",
+            queue_name
+        ),
+    }
+}
+
+/// On shutdown, hand this worker's own pending retries of `queue` to
+/// another worker (see `ProcessingQueue::hand_back_retries`).
+async fn hand_back_own_retries(
+    queue_name: &str,
+    queue: &ProcessingQueue<Message>,
+    delivery_ids: &[String],
+) {
+    if delivery_ids.is_empty() {
+        return;
+    }
+    match tokio::time::timeout(
+        UNSTARTED_HAND_BACK_TIMEOUT,
+        queue.hand_back_retries(delivery_ids),
+    )
+    .await
+    {
+        Ok(Ok(0)) => {}
+        Ok(Ok(released)) => info!(
+            "hot.dev: WORKER handed {} pending {} retries to the queue for another worker",
+            released, queue_name
+        ),
+        Ok(Err(e)) => warn!(
+            "hot.dev: WORKER could not hand its pending {} retries back; they stay pending until reclaimed: {}",
+            queue_name, e
+        ),
+        Err(_) => warn!(
+            "hot.dev: WORKER timed out handing its pending {} retries back; the rest stay pending until reclaimed",
+            queue_name
+        ),
+    }
+}
+
+/// On shutdown, hand back the leases still waiting in a claimer-to-executor
+/// channel once no executor receives from it any more: a drain timeout
+/// aborts the executors with claimed deliveries left there, which nobody
+/// started. Returns how many leases it took out of the channel.
+async fn hand_back_channel_leftovers(
+    channel: &str,
+    claimed_rx: &Mutex<mpsc::Receiver<ClaimedWorkerQueue>>,
+) -> usize {
+    // An executor that still holds the receiver is still receiving.
+    let Ok(mut claimed_rx) = claimed_rx.try_lock() else {
+        return 0;
+    };
+    let mut leftovers = 0;
+    while let Ok(claimed) = claimed_rx.try_recv() {
+        hand_back_lease_on_shutdown(channel, claimed.into_lease()).await;
+        leftovers += 1;
+    }
+    leftovers
+}
+
+/// How long a shutdown waits for the worker tasks it aborted to end.
+const WORKER_ABORT_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether every task of `handles` has ended, waiting up to `within` for
+/// the ones a drain timeout aborted: an aborted task ends at its next await.
+async fn worker_tasks_stopped<T>(handles: &[JoinHandle<T>], within: std::time::Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if handles.iter().all(JoinHandle::is_finished) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// What a shutdown hands back to the queues once its drain has ended, so
+/// that another worker runs it at once instead of after the orphan idle.
+///
+/// Never handed back this way, whatever the shutdown: a delivery recovered
+/// from a stopped worker, and a delivery whose handlers this worker started
+/// and did not settle (still running at the drain timeout, or cut off by
+/// the abort):
+///
+/// - The abort ends only the executor's async task. A handler's VM runs on
+///   a blocking thread that cannot be cancelled, and may execute until the
+///   process exits. A copy handed back now could start on another worker
+///   beside it.
+/// - A handler that outlived the shutdown timeout, its cancellation and the
+///   drain is what `CrashQuarantine` exists for, and the quarantine knows
+///   such a delivery only as a recovered one. A plain handed-back copy is a
+///   fresh entry: it would run beside other events on the next worker.
+///
+/// A recovered delivery nobody started here stays pending for the orphan
+/// reclaim. The deliveries still running at the drain timeout are handed
+/// back last and apart, delayed and marked recovered, when this process is
+/// certain to be gone first (see `hands_back_interrupted`); otherwise they
+/// stay pending for the orphan reclaim too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShutdownHandBack {
+    /// Deliveries nobody started: leases left in a handoff channel, a
+    /// consumer's prefetch buffer, first deliveries left in its pending
+    /// list. Each queue guards the handover itself (never started, still
+    /// this consumer's), so this needs only that no task of this process
+    /// can start one of them afterwards.
+    unstarted: bool,
+    /// This worker's own retries (`CrashQuarantine::own_retries_pending`),
+    /// with their counted starts.
+    own_retries: bool,
+}
+
+/// `tasks_stopped`: every claimer and executor task has ended, by itself
+/// or aborted. One that has not might still start a delivery it holds,
+/// beside the copy handed back: then nothing is.
+///
+/// `restarting`: the worker stops itself because its blocking executions
+/// ran out or a task kept panicking. A handler that timed out there returns
+/// an ordinary error while its thread keeps running, so this worker's own
+/// retries may be what exhausted it: they stay pending, and come back to
+/// the next worker as recovered deliveries.
+fn shutdown_hand_back(tasks_stopped: bool, restarting: bool) -> ShutdownHandBack {
+    ShutdownHandBack {
+        unstarted: tasks_stopped,
+        own_retries: tasks_stopped && !restarting,
+    }
+}
+
+/// How long this process may live once its shutdown starts handing back the
+/// deliveries it was still running: `arm_exit_bound` ends it then.
+const INTERRUPTED_HAND_BACK_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long after that hand-back another worker may take a delivery over.
+/// Twice the exit bound: the process, and every handler thread in it, is
+/// gone a whole bound before any of them can start again.
+const INTERRUPTED_HAND_BACK_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
+const _: () = assert!(
+    INTERRUPTED_HAND_BACK_DELAY.as_secs() >= 2 * INTERRUPTED_HAND_BACK_EXIT_BOUND.as_secs()
+);
+
+/// Whether a shutdown's last act hands the hot:event deliveries that were
+/// still running at its drain timeout to another worker, instead of leaving
+/// them pending for the orphan reclaim (several minutes on hot:event).
+///
+/// The next delivery must never run beside the handler thread it takes over
+/// from, so this is safe only with a hard bound on the life of this process:
+///
+/// - Nothing else bounds it. After the shutdown `run` returns, and the CLI's
+///   `main` drops its tokio runtime, which waits for every `spawn_blocking`
+///   thread without limit: a handler that ignores its cancellation keeps
+///   the process up until its supervisor kills it.
+/// - So, as its last act (after the emitter and publisher have flushed, so
+///   the bound cuts nothing short but a stuck handler), the shutdown arms
+///   `arm_exit_bound`, a plain thread that ends the process (`exit_now`)
+///   `INTERRUPTED_HAND_BACK_EXIT_BOUND` later, and only then hands the
+///   deliveries back, not to be taken over for
+///   `INTERRUPTED_HAND_BACK_DELAY` (twice the bound) by the Redis server's
+///   clock (see `RedisStreamQueue::hand_back_interrupted_entry`). The bound
+///   starts before any hand-back reaches Redis and the delay after, so the
+///   process ends at least one bound before another worker can run one.
+///
+/// The worker that takes a delivery over reads the same entry from its own
+/// pending list, as after an orphan reclaim: recovered and redelivered, with
+/// its starts counted on. It runs alone (`CrashQuarantine`) and reads the
+/// event's earlier runs, which reopens the runs this delivery left running.
+///
+/// Not when the workers drained (nothing was running), not when a task
+/// outlived the abort (`hand_back.own_retries` is unset: it might still
+/// start something), and not when the worker restarts itself: there the
+/// handlers that exhausted it are the suspects, and they stay pending for
+/// the next worker's reclaim, as its own retries do. And only in a process
+/// that is this worker's alone (`standalone_worker_process`): the exit must
+/// never cut short another service of a shared process.
+fn hands_back_interrupted(
+    hand_back: ShutdownHandBack,
+    workers_drained: bool,
+    standalone_process: bool,
+) -> bool {
+    hand_back.own_retries && !workers_drained && standalone_process
+}
+
+/// Whether this worker has its process to itself, from what `run` is given.
+/// `hot worker` is the only caller that runs it so: it sets the
+/// `runtime.profile` "production" and shares nothing in-process. `hot dev`
+/// and `hot test` run the API, scheduler and task worker beside it, under
+/// the profile "local-dev", and hand it the stream pub/sub (and `hot dev`
+/// the context storage) they share with those. Any one of these says the
+/// process is shared, whatever `HOT_ENV` is; an embedder that sets no
+/// profile is taken for one too.
+fn standalone_worker_process(
+    runtime_profile: &str,
+    shares_dev_context: bool,
+    shares_stream_pubsub: bool,
+) -> bool {
+    runtime_profile == "production" && !shares_dev_context && !shares_stream_pubsub
+}
+
+/// A pending forced exit of this process (see `arm_exit_bound`).
+struct ExitBound(Arc<std::sync::atomic::AtomicBool>);
+
+impl ExitBound {
+    /// Call the exit off: nothing was handed back that depends on it.
+    fn disarm(self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Run `exit` after `bound`, on a thread of its own that no runtime
+/// shutdown or stuck task can hold up, unless the result is disarmed first.
+/// An error means no thread could be started: nothing bounds the process.
+fn arm_exit_bound_with(
+    bound: std::time::Duration,
+    exit: impl FnOnce() + Send + 'static,
+) -> std::io::Result<ExitBound> {
+    let disarmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let disarmed_by = Arc::clone(&disarmed);
+    std::thread::Builder::new()
+        .name("hot-worker-exit-bound".to_string())
+        .spawn(move || {
+            std::thread::sleep(bound);
+            if !disarmed_by.load(std::sync::atomic::Ordering::SeqCst) {
+                exit();
+            }
+        })?;
+    Ok(ExitBound(disarmed))
+}
+
+/// End this process `INTERRUPTED_HAND_BACK_EXIT_BOUND` from now with the
+/// status of a clean stop, which is what it was asked for: the hard bound
+/// `hands_back_interrupted` relies on. The thread does nothing but exit: a
+/// log line there could wait on a blocked writer. The hand-back announces
+/// the exit instead.
+fn arm_exit_bound() -> std::io::Result<ExitBound> {
+    arm_exit_bound_with(INTERRUPTED_HAND_BACK_EXIT_BOUND, exit_now)
+}
+
+/// End the process at once, with the status of a clean stop.
+///
+/// On Unix without running exit handlers or static destructors, which
+/// `std::process::exit` runs while the handler threads are still alive: one
+/// that hung would keep the process up past the hand-back's delay. Nothing
+/// is lost by skipping them: the bound is armed as the shutdown's last act,
+/// after everything that needed flushing was flushed.
+fn exit_now() {
+    #[cfg(unix)]
+    // SAFETY: `_exit` takes no pointers and has no preconditions: it ends
+    // the process and never returns.
+    unsafe {
+        libc::_exit(0)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(0)
+}
+
+/// The last act of a shutdown that `hands_back_interrupted`: bound the life
+/// of this process, then hand `delivery_ids`, the hot:event deliveries it
+/// was still running, to another worker. Without the bound nothing is
+/// handed back.
+async fn hand_back_interrupted_deliveries(
+    queue: &ProcessingQueue<Message>,
+    delivery_ids: &[String],
+) {
+    if delivery_ids.is_empty() {
+        return;
+    }
+    let exit_bound = match arm_exit_bound() {
+        Ok(exit_bound) => exit_bound,
+        Err(error) => {
+            warn!(
+                "hot.dev: WORKER cannot bound its exit ({}); the {} hot:event deliveries it was running stay pending until reclaimed",
+                error,
+                delivery_ids.len()
+            );
+            return;
+        }
+    };
+    match tokio::time::timeout(
+        UNSTARTED_HAND_BACK_TIMEOUT,
+        queue.hand_back_interrupted(delivery_ids, INTERRUPTED_HAND_BACK_DELAY),
+    )
+    .await
+    {
+        // Nothing depends on the exit. The queue answers for every entry
+        // it holds handed back, so not this when a resent command found its
+        // first copy already applied.
+        Ok(Ok(0)) => exit_bound.disarm(),
+        Ok(Ok(released)) => warn!(
+            "hot.dev: WORKER handed {} hot:event deliveries it was still running to the queue; another worker gets them in {}s, and this process exits within {}s, with any handler that ignored its cancellation",
+            released,
+            INTERRUPTED_HAND_BACK_DELAY.as_secs(),
+            INTERRUPTED_HAND_BACK_EXIT_BOUND.as_secs()
+        ),
+        // Some may have been handed back: the exit stays armed.
+        Ok(Err(e)) => warn!(
+            "hot.dev: WORKER could not hand back all the hot:event deliveries it was running; the rest stay pending until reclaimed: {}",
+            e
+        ),
+        Err(_) => warn!(
+            "hot.dev: WORKER timed out handing back the hot:event deliveries it was running; the rest stay pending until reclaimed"
+        ),
+    }
+}
+
+/// Settles what a message stood for once a claim found it dead-lettered
+/// (see `claim_dead_letter`).
+type ClaimDeadLetterSettler = Arc<
+    dyn Fn(RecoveredQueueMessage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Whether a claim failed only because the queue dead-lettered the message
+/// it would have delivered: the memory queue's claim gate does, for a
+/// message whose deliveries were all dropped or failed. That is no failed
+/// claim, and the queue claims on. `Ok` holds the dead letter, when the
+/// queue could return it: nothing else will settle what it stood for.
+fn claim_dead_letter(error: WorkerError) -> Result<Option<RecoveredQueueMessage>, WorkerError> {
+    use hot::queue::QueueProcessingError;
+    match error.downcast::<QueueProcessingError>() {
+        Ok(error) => match *error {
+            QueueProcessingError::DeadLettered(message) => Ok(Some(message)),
+            QueueProcessingError::RetryLimitExceeded => Ok(None),
+            other => Err(Box::new(other)),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+/// After a claim that dead-lettered its message: settle what it stood for,
+/// as the executors do for a delivery dead-lettered while processing.
+async fn settle_claim_dead_letter(
+    queue_name: &str,
+    settle: Option<&ClaimDeadLetterSettler>,
+    dead_letter: Option<RecoveredQueueMessage>,
+) {
+    warn!(
+        "hot.dev: WORKER {} message exhausted its delivery retries and was moved to the dead-letter queue",
+        queue_name
+    );
+    if let (Some(settle), Some(message)) = (settle, dead_letter) {
+        settle(message).await;
+    }
+}
+
 fn spawn_worker_queue_claimer(
     queue_name: &'static str,
     queue: ProcessingQueue<Message>,
     claimed_tx: mpsc::Sender<ClaimedWorkerQueue>,
-    mut shutdown_rx: watch::Receiver<bool>,
+    shutdown_rx: watch::Receiver<bool>,
     wrap: fn(ProcessingQueueLease<Message>) -> ClaimedWorkerQueue,
     queue_metrics_enabled: bool,
+    on_dead_letter: Option<ClaimDeadLetterSettler>,
 ) -> JoinHandle<Result<(), WorkerError>> {
-    tokio::spawn(async move {
-        debug!("hot.dev: WORKER {} claimer started", queue_name);
+    // A claimer that panicked claims nothing more for its queue while the
+    // process stays up, so it runs supervised. Every restart claims through
+    // the same queue handle: a clone of a Redis queue is another consumer.
+    let queue = Arc::new(queue);
+    let name = format!("{queue_name} claimer");
+    let claimer_name = name.clone();
+    spawn_supervised_worker_task(name, Arc::clone(worker_task_gave_up()), move || {
+        let queue = Arc::clone(&queue);
+        let claimer_name = claimer_name.clone();
+        let claimed_tx = claimed_tx.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
+        let on_dead_letter = on_dead_letter.clone();
+        async move {
+            let queue: &ProcessingQueue<Message> = &queue;
+            debug!("hot.dev: WORKER {} claimer started", queue_name);
+            let mut claim_errors = ClaimErrors::default();
 
-        loop {
-            if *shutdown_rx.borrow() {
-                break;
-            }
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
 
-            let lease = match &queue {
-                ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => {
-                    tokio::select! {
-                        biased;
+                let lease = match &queue {
+                    ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => {
+                        tokio::select! {
+                            biased;
 
-                        changed = shutdown_rx.changed() => {
-                            if changed.is_err() || *shutdown_rx.borrow() {
-                                break;
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        result = queue.claim_blocking() => {
-                            match result {
-                                Ok(Some(lease)) => lease,
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
-                                    continue;
+                            result = queue.claim_blocking() => {
+                                match result {
+                                    Ok(Some(lease)) => lease,
+                                    Ok(None) => {
+                                        claim_errors.recovered(queue_name);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        match claim_dead_letter(e) {
+                                            Ok(dead_letter) => {
+                                                claim_errors.recovered(queue_name);
+                                                settle_claim_dead_letter(
+                                                    queue_name,
+                                                    on_dead_letter.as_ref(),
+                                                    dead_letter,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                claim_errors
+                                                    .pause(queue_name, e.as_ref(), &mut shutdown_rx)
+                                                    .await;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                ProcessingQueue::Redis(_) => {
-                    tokio::select! {
-                        biased;
+                    ProcessingQueue::Redis(_) => {
+                        tokio::select! {
+                            biased;
 
-                        changed = shutdown_rx.changed() => {
-                            if changed.is_err() || *shutdown_rx.borrow() {
-                                break;
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        result = queue.claim_blocking() => {
-                            match result {
-                                Ok(Some(lease)) => lease,
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    debug!("hot.dev: WORKER {} claimer error: {}", queue_name, e);
-                                    continue;
+                            result = queue.claim_blocking() => {
+                                match result {
+                                    Ok(Some(lease)) => lease,
+                                    Ok(None) => {
+                                        claim_errors.recovered(queue_name);
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        match claim_dead_letter(e) {
+                                            Ok(dead_letter) => {
+                                                claim_errors.recovered(queue_name);
+                                                settle_claim_dead_letter(
+                                                    queue_name,
+                                                    on_dead_letter.as_ref(),
+                                                    dead_letter,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                claim_errors
+                                                    .pause(queue_name, e.as_ref(), &mut shutdown_rx)
+                                                    .await;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            };
+                };
+                claim_errors.recovered(queue_name);
 
-            let handoff_started = std::time::Instant::now();
-            tokio::select! {
-                biased;
+                // The slot is reserved before the lease moves into the channel,
+                // so a shutdown that wins the race still holds the lease and can
+                // hand it back instead of leaving it pending for this consumer.
+                let handoff_started = std::time::Instant::now();
+                tokio::select! {
+                    biased;
 
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        debug!(
-                            "hot.dev: WORKER {} claimer dropping claimed lease during shutdown",
-                            queue_name
-                        );
-                        break;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            hand_back_lease_on_shutdown(&claimer_name, lease).await;
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                send_result = claimed_tx.send(wrap(lease)) => {
-                    let handoff_wait_ms = duration_ms(handoff_started.elapsed());
-                    if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
-                        tracing::info!(
-                            target: "hot::queue::handoff",
-                            queue = queue_name,
-                            handoff_wait_ms = handoff_wait_ms,
-                            threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
-                            "worker queue claimer handoff waited"
-                        );
-                    }
-                    if send_result.is_err() {
-                        debug!(
-                            "hot.dev: WORKER {} claimer stopping because executors are gone",
-                            queue_name
-                        );
-                        break;
+                    permit = claimed_tx.reserve() => {
+                        let send_result = match permit {
+                            Ok(permit) => {
+                                permit.send(wrap(lease));
+                                Ok(())
+                            }
+                            Err(_) => Err(lease),
+                        };
+                        let handoff_wait_ms = duration_ms(handoff_started.elapsed());
+                        if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
+                            tracing::info!(
+                                target: "hot::queue::handoff",
+                                queue = queue_name,
+                                handoff_wait_ms = handoff_wait_ms,
+                                threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
+                                "worker queue claimer handoff waited"
+                            );
+                        }
+                        if let Err(lease) = send_result {
+                            debug!(
+                                "hot.dev: WORKER {} claimer stopping because executors are gone",
+                                queue_name
+                            );
+                            hand_back_lease_on_shutdown(&claimer_name, lease).await;
+                            break;
+                        }
                     }
                 }
             }
+
+            // The first deliveries this consumer holds unstarted (its prefetch
+            // buffer) would otherwise wait out the orphan idle of a consumer
+            // that is gone. The leases already handed off are the executors'
+            // to hand back.
+            release_unstarted_deliveries(queue_name, queue).await;
+
+            info!("hot.dev: WORKER {} claimer stopped", queue_name);
+            Ok(())
         }
-
-        info!("hot.dev: WORKER {} claimer stopped", queue_name);
-        Ok(())
     })
 }
 
@@ -1475,6 +2257,31 @@ fn run_never_started(error: &str) -> Option<&str> {
     error.strip_suffix(RUN_NOT_STARTED_TOKEN).map(str::trim_end)
 }
 
+/// Whether a failed handler should stay pending without spending a delivery
+/// because the database could not serve its context variables: nothing ran,
+/// and the next delivery may load them. Only before any handler of the event
+/// started; a later handler's failure is held and counted instead.
+fn should_retry_context_load(error: &str, started_any_handler: bool) -> bool {
+    error.starts_with(CONTEXT_LOAD_UNAVAILABLE_ERROR) && !started_any_handler
+}
+
+/// A setup failure no redelivery can get past, such as a stored context
+/// variable that can't be decrypted: the run fails at once with the reason.
+fn is_permanent_setup_failure(error: &str) -> bool {
+    error.starts_with(CONTEXT_UNREADABLE_ERROR)
+}
+
+/// Whether every run in `run_ids` has recorded its end, so that a redelivery
+/// of their event skips their handlers (see `EarlierDelivery::Finished`).
+fn all_runs_finished(
+    recorded: &AHashMap<Uuid, hot::db::run::EarlierDelivery>,
+    run_ids: &[Uuid],
+) -> bool {
+    run_ids
+        .iter()
+        .all(|run_id| recorded.get(run_id) == Some(&hot::db::run::EarlierDelivery::Finished))
+}
+
 /// Redelivery backoff after a handler's setup failed: long enough for a
 /// storage or database blip to pass before the next counted attempt.
 const SETUP_FAILURE_BACKOFF_MS: u64 = 5_000;
@@ -1747,6 +2554,9 @@ struct ClaimFence {
     /// the delivery: the effective orphan-reclaim idle.
     reclaim_after: std::time::Duration,
     loss: tokio::sync::watch::Sender<Option<ClaimLoss>>,
+    /// Whether a touch was observed yet: the first one is the pickup touch,
+    /// made before any handler of this delivery has started.
+    touched_before: bool,
 }
 
 impl ClaimFence {
@@ -1764,6 +2574,7 @@ impl ClaimFence {
                 fence_after,
                 reclaim_after,
                 loss,
+                touched_before: false,
             },
             claim,
         )
@@ -1782,6 +2593,7 @@ impl ClaimFence {
         now: tokio::time::Instant,
     ) -> Option<ClaimLoss> {
         use hot::queue::streams::PendingTouch;
+        let pickup = !std::mem::replace(&mut self.touched_before, true);
         let current = self.verdict();
         if current == Some(ClaimLoss::Lost) {
             return None;
@@ -1791,6 +2603,11 @@ impl ClaimFence {
                 self.last_confirmed = now;
                 None
             }
+            // Acknowledged before this worker started it: while the delivery
+            // waited in the prefetch buffer or the handoff, with no
+            // keepalive, another worker reclaimed it, ran it and settled it.
+            // This copy is stale (see `pickup_verdict`).
+            Some(PendingTouch::Acked) if pickup => Some(ClaimLoss::Lost),
             // Trimmed from the stream or acknowledged: no other worker can
             // be handed the delivery any more, so the claim holds for good.
             Some(PendingTouch::Trimmed | PendingTouch::Acked) => None,
@@ -1828,12 +2645,70 @@ impl ClaimFence {
 struct EventKeepaliveGuard {
     touch_loop: tokio::task::JoinHandle<()>,
     claim: tokio::sync::watch::Receiver<Option<ClaimLoss>>,
+    /// What the first touch, at pickup, found (`None`: it failed).
+    pickup: Option<tokio::sync::oneshot::Receiver<Option<hot::queue::streams::PendingTouch>>>,
+    /// The delivery's stream entry id.
+    delivery_id: String,
 }
+
+/// How long an executor waits for the pickup touch before it starts the
+/// delivery anyway: past the queue's own bound on one Redis command.
+const EVENT_PICKUP_TOUCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl EventKeepaliveGuard {
     /// The claim fence's verdict for this delivery, for its runs to watch.
     fn claim(&self) -> tokio::sync::watch::Receiver<Option<ClaimLoss>> {
         self.claim.clone()
+    }
+
+    /// What the first touch found, once it has answered. `None` when it
+    /// failed or did not answer in time: the claim is then as unknown as it
+    /// was before the pickup touch existed, and the fence takes over.
+    async fn pickup_touch(&mut self) -> Option<hot::queue::streams::PendingTouch> {
+        let pickup = self.pickup.take()?;
+        tokio::time::timeout(EVENT_PICKUP_TOUCH_TIMEOUT, pickup)
+            .await
+            .ok()?
+            .ok()?
+    }
+}
+
+/// What an executor does with a Redis delivery it picks up, decided by the
+/// first keepalive touch before any handler starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickupVerdict {
+    /// The claim is confirmed, or could not be checked.
+    Run,
+    /// Run it as a redelivery: the runs of earlier deliveries say what is
+    /// left to do.
+    RunAsRedelivery,
+    /// Drop this copy: no handler, no ACK, no requeue, no counted attempt.
+    Drop(&'static str),
+}
+
+/// A delivery waits in the prefetch buffer and the claimer->executor handoff
+/// with no keepalive, so under sustained saturation another worker can
+/// reclaim it before this one picks it up. The first touch tells:
+///
+/// - Acknowledged: that worker also ran and settled it. Running this copy
+///   would run every handler a second time, and it is not marked
+///   redelivered, so nothing would look for the earlier runs.
+/// - Reclaimed: that worker has it now. Starting it here would count an
+///   attempt against the other worker's delivery for runs the fence stops
+///   before they start.
+/// - Trimmed: the entry left the stream, and one touch can't tell whether a
+///   reclaim ran it first. Nobody can be handed it again and this may be the
+///   last copy of the message, so dropping it could lose the event: it runs,
+///   as a redelivery, so handlers that finished elsewhere are skipped.
+/// - A failed touch decides nothing: the delivery runs as it always did,
+///   under the claim fence.
+fn pickup_verdict(first_touch: Option<hot::queue::streams::PendingTouch>) -> PickupVerdict {
+    use hot::queue::streams::PendingTouch;
+    match first_touch {
+        Some(PendingTouch::Touched) | None => PickupVerdict::Run,
+        Some(PendingTouch::Trimmed) => PickupVerdict::RunAsRedelivery,
+        Some(PendingTouch::Acked) => PickupVerdict::Drop("another worker already settled it"),
+        Some(PendingTouch::Reclaimed) => PickupVerdict::Drop("another worker reclaimed it"),
     }
 }
 
@@ -1870,7 +2745,9 @@ impl Drop for EventKeepaliveGuard {
 /// BEFORE pickup is covered only by the orphan-idle floor, so under
 /// sustained executor saturation a still-buffered delivery can exceed the
 /// reclaim idle and be XAUTOCLAIMed — a pre-existing tail risk the
-/// keepalive narrows but does not close.
+/// keepalive narrows but does not close. The first touch reports it, and
+/// the executor waits for that answer before it starts the delivery (see
+/// `pickup_verdict`).
 fn spawn_event_lease_keepalive(
     lease: &ProcessingQueueLease<Message>,
     effective_orphan_idle_ms: u64,
@@ -1892,6 +2769,9 @@ fn spawn_event_lease_keepalive(
         std::time::Duration::from_millis(effective_orphan_idle_ms),
         keepalive.delivered_at(),
     );
+    let delivery_id = keepalive.msg_id().to_string();
+    let (pickup_tx, pickup) = tokio::sync::oneshot::channel();
+    let mut pickup_tx = Some(pickup_tx);
     let touch_loop = tokio::spawn(async move {
         use hot::queue::streams::PendingTouch;
         // First touch immediately: the delivery may have accrued idle in the
@@ -1919,6 +2799,11 @@ fn spawn_event_lease_keepalive(
                     worker_id,
                     keepalive.msg_id()
                 );
+            }
+            // The executor waits for the first answer before it starts the
+            // delivery (see `pickup_verdict`); the fence has it by now.
+            if let Some(pickup_tx) = pickup_tx.take() {
+                let _ = pickup_tx.send(touched.as_ref().ok().copied());
             }
             match touched {
                 Ok(PendingTouch::Touched) => {
@@ -1976,7 +2861,249 @@ fn spawn_event_lease_keepalive(
             }
         }
     });
-    Some(EventKeepaliveGuard { touch_loop, claim })
+    Some(EventKeepaliveGuard {
+        touch_loop,
+        claim,
+        pickup: Some(pickup),
+        delivery_id,
+    })
+}
+
+/// The touch loop of `spawn_delivery_keepalive`. Dropping it aborts the
+/// loop, so it stops however processing ends.
+struct DeliveryKeepalive {
+    touch_loop: tokio::task::JoinHandle<()>,
+    /// The delivery's stream entry id.
+    delivery_id: String,
+}
+
+impl Drop for DeliveryKeepalive {
+    fn drop(&mut self) {
+        self.touch_loop.abort();
+    }
+}
+
+/// When a delivery's first keepalive touch is due: one interval after Redis
+/// delivered it, which is when its PEL idle clock started. A delivery
+/// processed within the interval costs Redis nothing; one that already
+/// waited that long for its executor is touched at once.
+fn delivery_keepalive_first_touch(
+    interval: std::time::Duration,
+    since_delivery: std::time::Duration,
+) -> std::time::Duration {
+    interval.saturating_sub(since_delivery)
+}
+
+/// Past a queue's own bound on processing one delivery, how much longer its
+/// keepalive goes on: room for the reads and writes around the bounded step.
+const DELIVERY_KEEPALIVE_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the keepalive of a hot:email delivery goes on: the send's own
+/// deadline, and the margin for its claim and for recording its outcome.
+const EMAIL_KEEPALIVE_CAP: std::time::Duration =
+    hot::db::email_queue::SEND_DEADLINE.saturating_add(DELIVERY_KEEPALIVE_MARGIN);
+
+/// How long the keepalive of a hot:request or hot:alert delivery goes on.
+/// No one timeout bounds either: a request is a queue write, and an alert is
+/// database reads and writes around sends that are each bounded (ten seconds
+/// for HTTP, the send deadline for email) but not as a whole. Ten minutes is
+/// beyond any that makes progress.
+const UNBOUNDED_DELIVERY_KEEPALIVE_CAP: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The wait before a delivery keepalive's next touch, due `delay` from now,
+/// or `None` when that is later than `cap` after delivery: the touches have
+/// run their course.
+fn delivery_keepalive_next_touch(
+    delay: std::time::Duration,
+    since_delivery: std::time::Duration,
+    cap: std::time::Duration,
+) -> Option<std::time::Duration> {
+    (since_delivery.saturating_add(delay) <= cap).then_some(delay)
+}
+
+/// Keep a claimed hot:request, hot:alert or hot:email delivery pending for
+/// this consumer while it is processed. These queues reclaim at the
+/// configured orphan idle (a minute by default), and an email send alone may
+/// take five (`hot::db::email_queue::SEND_DEADLINE`): without a touch another
+/// worker's janitor reclaims the entry mid-send, and for an email the
+/// original's counted requeue then fails on an entry it no longer owns, which
+/// loses the retry.
+///
+/// The cadence is the event keepalive's (`event_keepalive_interval_ms`),
+/// without its claim fence: nothing here runs long enough on a blocking
+/// thread to need stopping. `None` for memory and SQLite, as there.
+///
+/// The touches stop `cap` after delivery, however processing fares: a
+/// delivery still held then is taken for hung, and from an orphan idle later
+/// another worker may reclaim it, as it could before this keepalive existed.
+fn spawn_delivery_keepalive(
+    queue_name: &'static str,
+    lease: &ProcessingQueueLease<Message>,
+    orphan_idle_ms: u64,
+    cap: std::time::Duration,
+) -> Option<DeliveryKeepalive> {
+    let ProcessingQueueLease::Redis(lease) = lease else {
+        return None;
+    };
+    let keepalive = lease.keepalive()?;
+    let delivery_id = keepalive.msg_id().to_string();
+    let interval = std::time::Duration::from_millis(event_keepalive_interval_ms(orphan_idle_ms));
+    let touch_loop = tokio::spawn(async move {
+        use hot::queue::streams::PendingTouch;
+        let mut delay =
+            delivery_keepalive_first_touch(interval, keepalive.delivered_at().elapsed());
+        loop {
+            let since_delivery = keepalive.delivered_at().elapsed();
+            let Some(wait) = delivery_keepalive_next_touch(delay, since_delivery, cap) else {
+                // Still being processed at the cap, or this would not run.
+                tokio::time::sleep(cap.saturating_sub(since_delivery)).await;
+                warn!(
+                    "hot.dev: WORKER keepalive stopping: {} delivery {} is still being processed {}s after its delivery; another worker may reclaim it",
+                    queue_name,
+                    keepalive.msg_id(),
+                    cap.as_secs()
+                );
+                break;
+            };
+            tokio::time::sleep(wait).await;
+            match keepalive.touch().await {
+                Ok(PendingTouch::Touched) => delay = interval,
+                Ok(PendingTouch::Acked) => break,
+                Ok(gone @ (PendingTouch::Reclaimed | PendingTouch::Trimmed)) => {
+                    warn!(
+                        "hot.dev: WORKER keepalive stopping: {} delivery {} is no longer this worker's to touch ({:?})",
+                        queue_name,
+                        keepalive.msg_id(),
+                        gone
+                    );
+                    break;
+                }
+                // Sooner, so one failed touch does not add a whole interval
+                // to the gap between two that succeed.
+                Err(error) => {
+                    debug!(
+                        "hot.dev: WORKER keepalive touch failed for {} delivery {}: {}",
+                        queue_name,
+                        keepalive.msg_id(),
+                        error
+                    );
+                    delay = interval / 2;
+                }
+            }
+        }
+    });
+    Some(DeliveryKeepalive {
+        touch_loop,
+        delivery_id,
+    })
+}
+
+/// Whether a failed delivery stays in this consumer's pending list for its
+/// own retry: after an ordinary processing error only. An infrastructure
+/// retry is a new entry, and a dead letter is settled.
+fn leaves_own_retry_pending(error: &WorkerError) -> bool {
+    matches!(
+        error.downcast_ref::<hot::queue::QueueProcessingError>(),
+        Some(hot::queue::QueueProcessingError::WorkerError(_))
+    )
+}
+
+/// What the executors keep for the deliveries of one queue other than
+/// hot:event: the cadence of their PEL keepalive, and this worker's own
+/// pending retries of that queue, which a shutdown hands to another worker
+/// (see `ShutdownHandBack`). Clones share the retries.
+#[derive(Clone)]
+struct DeliveryWatch {
+    queue_name: &'static str,
+    orphan_idle_ms: u64,
+    /// How long after delivery the keepalive stops.
+    keepalive_cap: std::time::Duration,
+    own_retries: OwnRetries,
+}
+
+impl DeliveryWatch {
+    fn new(
+        queue_name: &'static str,
+        orphan_idle_ms: u64,
+        keepalive_cap: std::time::Duration,
+    ) -> Self {
+        Self {
+            queue_name,
+            orphan_idle_ms,
+            keepalive_cap,
+            own_retries: OwnRetries::default(),
+        }
+    }
+
+    /// As processing of `lease` begins: keep it alive, and stop listing it
+    /// as a pending retry. Hold the result for as long as processing runs.
+    fn begin(&self, lease: &ProcessingQueueLease<Message>) -> WatchedDelivery<'_> {
+        let keepalive = spawn_delivery_keepalive(
+            self.queue_name,
+            lease,
+            self.orphan_idle_ms,
+            self.keepalive_cap,
+        );
+        if let Some(keepalive) = &keepalive {
+            self.own_retries.take(&keepalive.delivery_id);
+        }
+        WatchedDelivery {
+            watch: self,
+            keepalive,
+        }
+    }
+}
+
+/// A delivery being processed under a `DeliveryWatch`.
+struct WatchedDelivery<'a> {
+    watch: &'a DeliveryWatch,
+    keepalive: Option<DeliveryKeepalive>,
+}
+
+impl WatchedDelivery<'_> {
+    /// Processing ended with `result`: a delivery it left pending for this
+    /// consumer is one of its own retries from now on.
+    fn end<R>(self, result: &Result<R, WorkerError>) {
+        if let (Some(keepalive), Err(error)) = (&self.keepalive, result)
+            && leaves_own_retry_pending(error)
+        {
+            self.watch.own_retries.note(&keepalive.delivery_id);
+        }
+    }
+}
+
+/// The hot:event deliveries of this process whose processing has begun and
+/// not ended, by Redis stream entry id. A drain timeout reads it just before
+/// it aborts the executors: those are the deliveries still running then (see
+/// `hands_back_interrupted`).
+#[derive(Clone, Default)]
+struct RunningDeliveries(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+/// Held while a delivery is processed (see `RunningDeliveries::enter`).
+struct RunningDelivery(RunningDeliveries, String);
+
+impl RunningDeliveries {
+    fn enter(&self, delivery_id: &str) -> RunningDelivery {
+        if let Ok(mut running) = self.0.lock() {
+            running.insert(delivery_id.to_string());
+        }
+        RunningDelivery(self.clone(), delivery_id.to_string())
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|running| running.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for RunningDelivery {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.0.0.lock() {
+            running.remove(&self.1);
+        }
+    }
 }
 
 // Simplified approach: ensure proper build isolation without complex caching
@@ -2723,18 +3850,315 @@ async fn process_alert_delivery_message(
     }
 }
 
+/// Deliveries one message of an app email gets: the queues' retry limit,
+/// which the counted redeliveries below spend. An email whose message spent
+/// them on failures that may pass is left to the recovery sweep, which
+/// enqueues it again until `hot::db::email_queue::RECOVERY_WINDOW` ends.
+const EMAIL_SEND_ATTEMPTS: usize = 3;
+
+/// First backoff after an app email's send failed; it grows to
+/// `EMAIL_RETRY_MAX_BACKOFF_MS`, so the attempts span a relay's short outage
+/// or greylisting instead of all landing within it.
+const EMAIL_RETRY_BACKOFF_MS: u64 = 30_000;
+const EMAIL_RETRY_MAX_BACKOFF_MS: u64 = 600_000;
+
+/// Where an app email's delivery stands in its retry budget.
+#[derive(Clone, Copy, Debug)]
+struct EmailAttempt {
+    /// Deliveries that already counted toward the retry limit.
+    prior_attempts: usize,
+    /// Whether a failure of this delivery is the message's last one.
+    last: bool,
+}
+
+impl EmailAttempt {
+    fn of(lease: &ProcessingQueueLease<Message>) -> Self {
+        Self::after(lease.prior_attempts(), lease.last_attempt())
+    }
+
+    fn after(prior_attempts: usize, queue_last_attempt: bool) -> Self {
+        Self {
+            prior_attempts,
+            last: queue_last_attempt || prior_attempts + 1 >= EMAIL_SEND_ATTEMPTS,
+        }
+    }
+}
+
+/// What a failed app email send leads to.
+#[derive(Debug, PartialEq)]
+enum EmailSendFailure {
+    /// Deliver the message again after the backoff, counted.
+    Retry { backoff_ms: u64 },
+    /// The message's attempts are spent on a failure that may pass: the
+    /// email is pending again and the message acknowledged. The recovery
+    /// sweep enqueues the email again, each time later, and fails it once it
+    /// is older than the recovery window.
+    LeaveToSweep,
+    /// Record the failure on the `email_queue` row and acknowledge the
+    /// message: no retry can send it.
+    Failed,
+}
+
+fn email_send_failure(error: &hot::email::EmailError, attempt: EmailAttempt) -> EmailSendFailure {
+    match error {
+        hot::email::EmailError::SendFailed(_) if attempt.last => EmailSendFailure::LeaveToSweep,
+        hot::email::EmailError::SendFailed(_) => EmailSendFailure::Retry {
+            backoff_ms: growing_backoff_ms(
+                EMAIL_RETRY_BACKOFF_MS,
+                EMAIL_RETRY_MAX_BACKOFF_MS,
+                attempt.prior_attempts,
+            ),
+        },
+        hot::email::EmailError::Rejected(_) | hot::email::EmailError::NotConfigured => {
+            EmailSendFailure::Failed
+        }
+    }
+}
+
+/// What a delivery of an app email does, from its try at the email's send
+/// claim (see `EmailQueueEntry::claim_send`).
+#[derive(Debug, PartialEq)]
+enum EmailDelivery {
+    /// This delivery holds the claim: send the email.
+    Send,
+    /// Another delivery has or had the email: acknowledge the message
+    /// without sending.
+    Skip,
+    /// The claim could not be tried: deliver the message again later.
+    RetryClaim(String),
+}
+
+fn email_delivery_for_claim(
+    claim: Result<bool, hot::db::email_queue::EmailQueueError>,
+) -> EmailDelivery {
+    match claim {
+        Ok(true) => EmailDelivery::Send,
+        Ok(false) => EmailDelivery::Skip,
+        Err(error) => EmailDelivery::RetryClaim(error.to_string()),
+    }
+}
+
+/// Why a delivery that lost the send claim has nothing to send, from the
+/// email's row as read after.
+fn lost_email_claim_reason(
+    status_id: Result<i16, hot::db::email_queue::EmailQueueError>,
+) -> &'static str {
+    use hot::db::email_queue::{EmailQueueError, EmailQueueStatus};
+
+    match status_id {
+        Ok(status_id) if status_id == EmailQueueStatus::Sending as i16 => {
+            "another delivery is sending it"
+        }
+        Ok(status_id) if status_id == EmailQueueStatus::Sent as i16 => {
+            "another message for it was already sent"
+        }
+        Ok(status_id) if status_id == EmailQueueStatus::Failed as i16 => {
+            "it was already given up as failed"
+        }
+        Err(EmailQueueError::NotFound) => "its email_queue row is gone",
+        // Pending again (the other delivery's send failed and will be
+        // retried), or unreadable.
+        Ok(_) | Err(EmailQueueError::Database(_)) => "another delivery claimed it",
+    }
+}
+
+/// Pauses between tries to record an app email's outcome on its row. With
+/// the send they stay well inside `SENDING_STALE_AFTER`.
+const EMAIL_SETTLE_RETRY_DELAYS_MS: [u64; 3] = [250, 1_000, 3_000];
+
+/// Run `write`, an update of an app email's row, again after each of
+/// `delays_ms` while the database refuses it.
+async fn settle_email_row<T, F, Fut>(
+    delays_ms: &[u64],
+    mut write: F,
+) -> Result<T, hot::db::email_queue::EmailQueueError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, hot::db::email_queue::EmailQueueError>>,
+{
+    let mut delays_ms = delays_ms.iter();
+    loop {
+        match write().await {
+            Ok(written) => return Ok(written),
+            Err(error) => {
+                let Some(delay_ms) = delays_ms.next() else {
+                    return Err(error);
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+            }
+        }
+    }
+}
+
+/// How the send of an app email a delivery claimed ended, for its row.
+#[derive(Clone, Copy)]
+enum EmailOutcome<'a> {
+    Sent,
+    /// Failed for now: pending again, for the retry delivery or a message
+    /// the recovery sweep enqueues to claim.
+    Retry(&'a str),
+    Failed(&'a str),
+}
+
+/// Record `outcome` on the row of an app email this delivery claimed, which
+/// ends the claim. When the database refuses through every retry the row
+/// stays `sending` and `holds_claim` set: only the recovery sweep's
+/// `SENDING_STALE_AFTER` bound, never the pending grace, then sends it again.
+async fn settle_claimed_email(
+    db: &DatabasePool,
+    email_queue_id: &Uuid,
+    holds_claim: &std::sync::atomic::AtomicBool,
+    outcome: EmailOutcome<'_>,
+) {
+    use hot::db::email_queue::{EmailQueueEntry, SENDING_STALE_AFTER};
+
+    let written = settle_email_row(&EMAIL_SETTLE_RETRY_DELAYS_MS, || async move {
+        match outcome {
+            EmailOutcome::Sent => EmailQueueEntry::mark_sent(db, email_queue_id).await,
+            EmailOutcome::Retry(error) => {
+                EmailQueueEntry::release_send(db, email_queue_id, error).await
+            }
+            EmailOutcome::Failed(error) => {
+                EmailQueueEntry::mark_failed(db, email_queue_id, error).await
+            }
+        }
+    })
+    .await;
+    match (written, outcome) {
+        (Ok(()), _) => holds_claim.store(false, std::sync::atomic::Ordering::SeqCst),
+        (Err(error), EmailOutcome::Sent) => error!(
+            "hot.dev: WORKER app email {} was sent, but that could not be recorded; it stays in sending and may be sent again after {} minutes: {}",
+            email_queue_id,
+            SENDING_STALE_AFTER.num_minutes(),
+            error
+        ),
+        (Err(error), _) => error!(
+            "hot.dev: WORKER could not record the failed send of app email {}; it stays in sending for {} minutes: {}",
+            email_queue_id,
+            SENDING_STALE_AFTER.num_minutes(),
+            error
+        ),
+    }
+}
+
+/// Process one claimed app email delivery, and settle its `email_queue` row
+/// if the queue dead-letters the message instead of delivering it.
+async fn process_email_lease(
+    worker_id: usize,
+    db: Arc<DatabasePool>,
+    senders: Arc<NotificationSenders>,
+    lease: ProcessingQueueLease<Message>,
+) {
+    let attempt = EmailAttempt::of(&lease);
+    let process_db = Arc::clone(&db);
+    // Set while this delivery holds the email's send claim.
+    let holds_claim = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let claim = Arc::clone(&holds_claim);
+    let Err(error) = lease
+        .process(|message| async move {
+            process_email_message(worker_id, process_db, senders, message, attempt, &claim).await
+        })
+        .await
+    else {
+        return;
+    };
+    let Some(hot::queue::QueueProcessingError::DeadLettered(message)) =
+        error.downcast_ref::<hot::queue::QueueProcessingError>()
+    else {
+        // A send failure was logged where it happened.
+        debug!("hot.dev: WORKER {} email queue error: {}", worker_id, error);
+        return;
+    };
+    let claimed = holds_claim.load(std::sync::atomic::Ordering::SeqCst);
+    settle_dead_lettered_email(worker_id, &db, message.decode::<Message>(), claimed).await;
+}
+
+/// A dead-lettered app email (`message`, as decoded from the queue) is never
+/// sent by that message. With `claimed`, this delivery left the email's
+/// `email_queue` row in `sending` and no one else settles it: the row fails.
+/// Without, the row is not this delivery's to fail. A pending one can be
+/// between the retries of another message for the email (the recovery sweep
+/// enqueues more than one), and the sweep enqueues it again or, past the
+/// recovery window, fails it; one in `sending` is another delivery's.
+async fn settle_dead_lettered_email(
+    worker_id: usize,
+    db: &DatabasePool,
+    message: Result<Message, String>,
+    claimed: bool,
+) {
+    use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus, RECOVERY_WINDOW};
+
+    let email_msg = message.and_then(hot::lang::event::queue::EmailMessage::try_from);
+    let email_msg = match email_msg {
+        Ok(email_msg) => email_msg,
+        Err(e) => {
+            error!(
+                "hot.dev: WORKER {} an app email was moved to the dead-letter queue and could not be read: {}",
+                worker_id, e
+            );
+            return;
+        }
+    };
+    let email_queue_id = email_msg.body.email_queue_id;
+    error!(
+        "hot.dev: WORKER {} app email {} (to: {}) exhausted its delivery attempts and was moved to the dead-letter queue",
+        worker_id, email_queue_id, email_msg.body.to_address
+    );
+    let db = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Email,
+        org_id: None,
+    });
+    if !claimed {
+        // Sent, failed with the reason its last attempt recorded, held by
+        // another delivery, or pending: only the last still needs sending.
+        let status_id = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+            .await
+            .map(|entry| entry.status_id);
+        if matches!(status_id, Ok(status_id) if status_id == EmailQueueStatus::Pending as i16) {
+            warn!(
+                "hot.dev: WORKER {} dead-lettered app email {} is still pending: another message for it or the recovery sweep sends it, or the sweep fails it once it is {} hours old",
+                worker_id,
+                email_queue_id,
+                RECOVERY_WINDOW.num_hours()
+            );
+        }
+        return;
+    }
+    if let Err(e) = EmailQueueEntry::fail_sending(
+        &db,
+        &email_queue_id,
+        "Exhausted its delivery attempts; moved to the dead-letter queue",
+    )
+    .await
+    {
+        warn!(
+            "hot.dev: WORKER {} could not mark dead-lettered app email {} as failed; the recovery sweep settles it: {}",
+            worker_id, email_queue_id, e
+        );
+    }
+}
+
+/// Deliver one message of an app email: claim the email's send, send it, and
+/// record the outcome on its row. `holds_claim` is set while this delivery
+/// holds the claim, and still set on return only if the outcome could not be
+/// recorded.
 async fn process_email_message(
     worker_id: usize,
     db: Arc<DatabasePool>,
     senders: Arc<NotificationSenders>,
     message: Message,
+    attempt: EmailAttempt,
+    holds_claim: &std::sync::atomic::AtomicBool,
 ) -> Result<(), WorkerError> {
+    use hot::db::email_queue::{EmailQueueEntry, RECOVERY_WINDOW, SEND_DEADLINE};
+
     let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
         operation: MaintenanceOperation::Email,
         org_id: None,
     }));
     let email_msg: hot::lang::event::queue::EmailMessage =
         message.try_into().map_err(|e: String| worker_error(e))?;
+    let email_queue_id = email_msg.body.email_queue_id;
 
     tracing::debug!(
         "hot.dev: WORKER {} processing app email to {} from hot:email queue",
@@ -2742,14 +4166,45 @@ async fn process_email_message(
         email_msg.body.to_address
     );
 
+    // More than one message can carry the same email: the recovery sweep
+    // enqueues a pending email again once its message is overdue, which a
+    // message waiting out a backlog or a retry backoff also is. The claim is
+    // one conditional update of the `email_queue` row, so of the deliveries
+    // that get here together one sends; without the claim's answer nothing
+    // is sent blindly.
+    match email_delivery_for_claim(EmailQueueEntry::claim_send(&db, &email_queue_id).await) {
+        EmailDelivery::Send => holds_claim.store(true, std::sync::atomic::Ordering::SeqCst),
+        EmailDelivery::Skip => {
+            let why = lost_email_claim_reason(
+                EmailQueueEntry::get_by_id(&db, &email_queue_id)
+                    .await
+                    .map(|entry| entry.status_id),
+            );
+            tracing::warn!(
+                "hot.dev: WORKER {} skips app email {} (to: {}): {}",
+                worker_id,
+                email_queue_id,
+                email_msg.body.to_address,
+                why
+            );
+            return Ok(());
+        }
+        EmailDelivery::RetryClaim(error) => {
+            return Err(worker_infrastructure_retry_error(
+                format!(
+                    "Cannot claim app email {} before sending it: {}",
+                    email_queue_id, error
+                ),
+                SETUP_FAILURE_BACKOFF_MS,
+            ));
+        }
+    }
+
+    // The row is `sending` from here, and every way out settles it.
     let sender = &senders.app_email;
     if !sender.is_available() {
-        let _ = hot::db::email_queue::EmailQueueEntry::mark_failed(
-            &db,
-            &email_msg.body.email_queue_id,
-            sender.unavailable_reason(),
-        )
-        .await;
+        let reason = EmailOutcome::Failed(sender.unavailable_reason());
+        settle_claimed_email(&db, &email_queue_id, holds_claim, reason).await;
         return Ok(());
     }
 
@@ -2760,32 +4215,80 @@ async fn process_email_message(
         text: email_msg.body.text_body.clone(),
     };
 
-    match sender
-        .send_email_with_from(&email, &email_msg.body.from_address)
-        .await
-    {
+    // A provider's own timeouts bound the steps of a send; the deadline
+    // bounds the send, which the sweep's stuck-row bound relies on.
+    let sent = tokio::time::timeout(
+        SEND_DEADLINE,
+        sender.send_email_with_from(&email, &email_msg.body.from_address),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(hot::email::EmailError::SendFailed(format!(
+            "the email provider did not answer within {}s",
+            SEND_DEADLINE.as_secs()
+        )))
+    });
+    match sent {
         Ok(()) => {
-            let _ = hot::db::email_queue::EmailQueueEntry::mark_sent(
-                &db,
-                &email_msg.body.email_queue_id,
-            )
-            .await;
+            settle_claimed_email(&db, &email_queue_id, holds_claim, EmailOutcome::Sent).await;
             Ok(())
         }
-        Err(e) => {
-            tracing::warn!(
-                "hot.dev: WORKER {} failed to send app email {} (to: {}), will retry via queue: {}",
-                worker_id,
-                email_msg.body.email_queue_id,
-                email_msg.body.to_address,
-                e
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            Err(worker_error(format!(
-                "app email send failed for {}: {}",
-                email_msg.body.email_queue_id, e
-            )))
-        }
+        Err(e) => match email_send_failure(&e, attempt) {
+            // The queue holds the message through the backoff, which grows
+            // with each attempt: retries moments apart all meet the same
+            // relay outage.
+            EmailSendFailure::Retry { backoff_ms } => {
+                tracing::warn!(
+                    "hot.dev: WORKER {} failed to send app email {} (to: {}), attempt {} of {}, will retry in {}s: {}",
+                    worker_id,
+                    email_queue_id,
+                    email_msg.body.to_address,
+                    attempt.prior_attempts + 1,
+                    EMAIL_SEND_ATTEMPTS,
+                    backoff_ms / 1_000,
+                    e
+                );
+                let reason = e.to_string();
+                let retry = EmailOutcome::Retry(&reason);
+                settle_claimed_email(&db, &email_queue_id, holds_claim, retry).await;
+                Err(worker_counted_redelivery_error(
+                    format!("app email send failed for {}: {}", email_queue_id, e),
+                    backoff_ms,
+                ))
+            }
+            // Acknowledged, not dead-lettered: the row is the record, and
+            // the sweep sends a new message for it.
+            EmailSendFailure::LeaveToSweep => {
+                tracing::warn!(
+                    "hot.dev: WORKER {} failed to send app email {} (to: {}), attempt {} of {} for this message; the recovery sweep retries it until it is {} hours old: {}",
+                    worker_id,
+                    email_queue_id,
+                    email_msg.body.to_address,
+                    attempt.prior_attempts + 1,
+                    EMAIL_SEND_ATTEMPTS,
+                    RECOVERY_WINDOW.num_hours(),
+                    e
+                );
+                let reason = e.to_string();
+                let retry = EmailOutcome::Retry(&reason);
+                settle_claimed_email(&db, &email_queue_id, holds_claim, retry).await;
+                Ok(())
+            }
+            EmailSendFailure::Failed => {
+                tracing::error!(
+                    "hot.dev: WORKER {} gave up sending app email {} (to: {}) after {} attempt(s): {}",
+                    worker_id,
+                    email_queue_id,
+                    email_msg.body.to_address,
+                    attempt.prior_attempts + 1,
+                    e
+                );
+                let reason = e.to_string();
+                let failed = EmailOutcome::Failed(&reason);
+                settle_claimed_email(&db, &email_queue_id, holds_claim, failed).await;
+                Ok(())
+            }
+        },
     }
 }
 
@@ -5528,7 +7031,11 @@ async fn execute_single_event_handler_inner(
                         project_id: project.project_id,
                     },
                 )
-                .await;
+                .await
+                // The run has not started: it must not, without the
+                // configuration and secrets its code expects. The event
+                // executor classifies the error by its leading token.
+                .map_err(|error| error.to_string())?;
             for (key, value) in database_context {
                 storage.insert(key, value);
             }
@@ -6694,9 +8201,10 @@ impl EngineEventEmitter for RunStartWatch {
 /// redelivered too, so each executes with no other event of this process,
 /// and the queue records that it did (see `SqliteQueue::with_crash_quarantine`).
 /// If it stops this worker as well, nothing else stops with it, and only its
-/// own retry limit counts the stop.
+/// own retry limit counts the stop. A retry of a delivery this process
+/// failed with an ordinary error is not such a delivery (see `OwnRetries`).
 #[derive(Clone, Default)]
-struct CrashQuarantine(Arc<tokio::sync::RwLock<()>>);
+struct CrashQuarantine(Arc<tokio::sync::RwLock<()>>, OwnRetries);
 
 /// Held while a delivery executes (see `CrashQuarantine::enter`).
 struct QuarantinePass {
@@ -6704,7 +8212,76 @@ struct QuarantinePass {
     _alone: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
 }
 
+/// The Redis deliveries this process left pending when their processing
+/// failed with an ordinary error, by stream entry id. Redis redelivers such
+/// a retry from the consumer's own pending list, which is also where the
+/// deliveries reclaimed from stopped workers arrive, and its lease can't
+/// tell the two apart (`RedisQueueLease::reclaimed`). The worker that failed
+/// the delivery can: a retry of its own handler error stopped nobody, and
+/// must not make every other event wait for it to run alone.
+#[derive(Clone, Default)]
+struct OwnRetries(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl OwnRetries {
+    /// More ids than a worker has retries pending mean deliveries that never
+    /// came back here (another worker reclaimed them): forget them all. The
+    /// retries still pending then run alone, as they did before.
+    const MAX_TRACKED: usize = 4096;
+
+    fn note(&self, delivery_id: &str) {
+        if let Ok(mut retries) = self.0.lock() {
+            if retries.len() >= Self::MAX_TRACKED {
+                retries.clear();
+            }
+            retries.insert(delivery_id.to_string());
+        }
+    }
+
+    fn take(&self, delivery_id: &str) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|mut retries| retries.remove(delivery_id))
+    }
+
+    /// The retries noted and not started again since.
+    fn pending(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|retries| retries.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
 impl CrashQuarantine {
+    /// Record that this process left the Redis delivery `delivery_id`
+    /// pending for a retry after an ordinary processing error.
+    fn note_own_retry(&self, delivery_id: &str) {
+        self.1.note(delivery_id);
+    }
+
+    /// Stop treating `delivery_id` as this process's own retry: another
+    /// worker took the delivery over.
+    fn forget_own_retry(&self, delivery_id: &str) {
+        self.1.take(delivery_id);
+    }
+
+    /// The Redis deliveries this process failed with an ordinary error and
+    /// has not started again: its own retries, still pending for its
+    /// consumer. A shutdown hands these to another worker (see
+    /// `ShutdownHandBack`). A retry an executor picked up is no longer one
+    /// of them (`recovers` spends the note), so a delivery that is running,
+    /// or was interrupted, is never listed.
+    fn own_retries_pending(&self) -> Vec<String> {
+        self.1.pending()
+    }
+
+    /// Whether a delivery its queue reports as recovered was left by a
+    /// stopped worker, rather than being this process's own retry of a
+    /// delivery it failed (`delivery_id`: the Redis stream entry id).
+    fn recovers(&self, lease_recovered: bool, delivery_id: Option<&str>) -> bool {
+        lease_recovered && !delivery_id.is_some_and(|id| self.1.take(id))
+    }
+
     /// Wait until the delivery may execute: a recovered delivery once no
     /// other delivery executes, the others while no recovered one does.
     async fn enter(
@@ -6978,6 +8555,12 @@ pub async fn run_with_components_shared_context_and_db(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
     validate_worker_semantics_conf(&worker_conf)?;
+    // Read from the arguments as given, before any default replaces them.
+    let standalone_process = standalone_worker_process(
+        &worker_conf.get_str("runtime.profile"),
+        dev_context_storage.is_some(),
+        stream_publisher.is_some(),
+    );
     // Before the executors' blocking threads start allocating.
     hot::lang::runtime::oom_logger::limit_malloc_arenas(
         hot::lang::runtime::oom_logger::DEFAULT_MALLOC_ARENAS,
@@ -8094,6 +9677,19 @@ pub async fn run_with_components_shared_context_and_db(
         mpsc::channel::<ClaimedWorkerQueue>(worker_handoff_capacity(1));
     let notification_claimed_rx = Arc::new(Mutex::new(notification_claimed_rx));
     let mut worker_handles = Vec::new();
+    // These queues reclaim at the configured orphan idle, unraised.
+    let request_watch = DeliveryWatch::new(
+        "hot:request",
+        queue_orphan_idle_ms,
+        UNBOUNDED_DELIVERY_KEEPALIVE_CAP,
+    );
+    let alert_watch = DeliveryWatch::new(
+        "hot:alert",
+        queue_orphan_idle_ms,
+        UNBOUNDED_DELIVERY_KEEPALIVE_CAP,
+    );
+    let email_watch = DeliveryWatch::new("hot:email", queue_orphan_idle_ms, EMAIL_KEEPALIVE_CAP);
+    let running_event_deliveries = RunningDeliveries::default();
 
     worker_handles.push(spawn_worker_queue_claimer(
         "hot:request",
@@ -8104,6 +9700,7 @@ pub async fn run_with_components_shared_context_and_db(
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Request,
         queue_metrics_enabled,
+        None,
     ));
     worker_handles.push(spawn_worker_queue_claimer(
         "hot:event",
@@ -8114,6 +9711,16 @@ pub async fn run_with_components_shared_context_and_db(
         shutdown_rx.clone(),
         ClaimedWorkerQueue::Event,
         queue_metrics_enabled,
+        // The event's held runs, as when an executor's delivery is
+        // dead-lettered.
+        db.clone().map(|db| -> ClaimDeadLetterSettler {
+            Arc::new(move |message| {
+                let db = Arc::clone(&db);
+                Box::pin(
+                    async move { settle_dead_lettered_event_runs(&db, message.payload()).await },
+                )
+            })
+        }),
     ));
     if db.is_some() {
         worker_handles.push(spawn_worker_queue_claimer(
@@ -8125,6 +9732,7 @@ pub async fn run_with_components_shared_context_and_db(
             shutdown_rx.clone(),
             ClaimedWorkerQueue::Alert,
             queue_metrics_enabled,
+            None,
         ));
         worker_handles.push(spawn_worker_queue_claimer(
             "hot:email",
@@ -8135,6 +9743,22 @@ pub async fn run_with_components_shared_context_and_db(
             shutdown_rx.clone(),
             ClaimedWorkerQueue::Email,
             queue_metrics_enabled,
+            // The email's row, as `process_email_lease` does. No delivery
+            // holds its send claim here.
+            db.clone().map(|db| -> ClaimDeadLetterSettler {
+                Arc::new(move |message| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        settle_dead_lettered_email(
+                            worker_count,
+                            &db,
+                            message.decode::<Message>(),
+                            false,
+                        )
+                        .await
+                    })
+                })
+            }),
         ));
     }
     drop(request_claimed_tx);
@@ -8145,6 +9769,8 @@ pub async fn run_with_components_shared_context_and_db(
         let notification_rx = notification_claimed_rx.clone();
         let notification_senders_ref = Arc::clone(&notification_senders);
         let notification_shutdown_rx = shutdown_rx.clone();
+        let alert_watch = alert_watch.clone();
+        let email_watch = email_watch.clone();
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = worker_count;
@@ -8162,52 +9788,57 @@ pub async fn run_with_components_shared_context_and_db(
                     };
 
                     if *notification_shutdown_rx.borrow() {
-                        debug!(
-                            "hot.dev: WORKER notification executor dropping lease during shutdown"
-                        );
-                        drop(claimed_queue);
-                        break;
+                        // As the event executors do: hand it back, and keep
+                        // receiving until the claimers are gone.
+                        hand_back_lease_on_shutdown(
+                            "notification executor",
+                            claimed_queue.into_lease(),
+                        )
+                        .await;
+                        continue;
                     }
 
-                    match claimed_queue {
-                        ClaimedWorkerQueue::Alert(lease) => {
-                            let db = db_for_notifications.clone();
-                            let senders = Arc::clone(&notification_senders_ref);
-                            if let Err(e) = lease
-                                .process(|message| async move {
-                                    process_alert_delivery_message(worker_id, db, senders, message)
+                    // A panic stays in the delivery (see `contain_delivery_panic`).
+                    let delivery = async {
+                        match claimed_queue {
+                            ClaimedWorkerQueue::Alert(lease) => {
+                                let db = db_for_notifications.clone();
+                                let senders = Arc::clone(&notification_senders_ref);
+                                let watched = alert_watch.begin(&lease);
+                                let result = lease
+                                    .process(|message| async move {
+                                        process_alert_delivery_message(
+                                            worker_id, db, senders, message,
+                                        )
                                         .await
-                                })
-                                .await
-                            {
-                                tracing::debug!(
-                                    "hot.dev: WORKER notification alert queue error: {}",
-                                    e
+                                    })
+                                    .await;
+                                watched.end(&result);
+                                if let Err(e) = result {
+                                    tracing::debug!(
+                                        "hot.dev: WORKER notification alert queue error: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            ClaimedWorkerQueue::Email(lease) => {
+                                let db = db_for_notifications.clone();
+                                let senders = Arc::clone(&notification_senders_ref);
+                                // Kept alive for the send. A failed send
+                                // is a delayed requeue, which any worker
+                                // promotes: no retry of it stays pending.
+                                let _watched = email_watch.begin(&lease);
+                                process_email_lease(worker_id, db, senders, lease).await;
+                            }
+                            other => {
+                                drop(other);
+                                tracing::warn!(
+                                    "hot.dev: WORKER notification executor received non-notification lease"
                                 );
                             }
                         }
-                        ClaimedWorkerQueue::Email(lease) => {
-                            let db = db_for_notifications.clone();
-                            let senders = Arc::clone(&notification_senders_ref);
-                            if let Err(e) = lease
-                                .process(|message| async move {
-                                    process_email_message(worker_id, db, senders, message).await
-                                })
-                                .await
-                            {
-                                tracing::debug!(
-                                    "hot.dev: WORKER notification email queue error: {}",
-                                    e
-                                );
-                            }
-                        }
-                        other => {
-                            drop(other);
-                            tracing::warn!(
-                                "hot.dev: WORKER notification executor received non-notification lease"
-                            );
-                        }
-                    }
+                    };
+                    contain_delivery_panic("notification executor", delivery).await;
                 }
 
                 Ok(())
@@ -8222,6 +9853,7 @@ pub async fn run_with_components_shared_context_and_db(
         let response_queue_for_requests = response_queue
             .clone()
             .with_consumer_name(admin_response_name.clone());
+        let request_watch = request_watch.clone();
         let handle: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> = tokio::spawn(
             async move {
                 let worker_id = 0usize;
@@ -8239,9 +9871,11 @@ pub async fn run_with_components_shared_context_and_db(
                     };
 
                     if *request_shutdown_rx.borrow() {
-                        debug!("hot.dev: WORKER request executor dropping lease during shutdown");
-                        drop(claimed_queue);
-                        break;
+                        // As the event executors do: hand it back, and keep
+                        // receiving until the claimer is gone.
+                        hand_back_lease_on_shutdown("request executor", claimed_queue.into_lease())
+                            .await;
+                        continue;
                     }
 
                     let ClaimedWorkerQueue::Request(lease) = claimed_queue else {
@@ -8252,7 +9886,10 @@ pub async fn run_with_components_shared_context_and_db(
                     };
 
                     let response_queue = response_queue_for_requests.clone();
-                    match lease
+                    // A panic stays in the delivery (see `contain_delivery_panic`).
+                    let delivery = async {
+                        let watched = request_watch.begin(&lease);
+                        let result = lease
                         .process(|message| async move {
                             let msg_type = message.head.get_str("__type");
                             match msg_type.as_str() {
@@ -8302,16 +9939,16 @@ pub async fn run_with_components_shared_context_and_db(
 
                             Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
                         })
-                        .await
-                    {
-                        Ok(Some(_)) | Ok(None) => {}
-                        Err(e) => {
+                        .await;
+                        watched.end(&result);
+                        if let Err(e) = result {
                             warn!(
                                 "hot.dev: WORKER {} error processing request message: {}",
                                 worker_id, e
                             );
                         }
-                    }
+                    };
+                    contain_delivery_panic("request executor", delivery).await;
                 }
 
                 Ok(())
@@ -8357,6 +9994,9 @@ pub async fn run_with_components_shared_context_and_db(
         let execution_services_clone = execution_services.clone();
         let blocking_execution_slots_clone = blocking_execution_slots.clone();
         let crash_quarantine_clone = crash_quarantine.clone();
+        let running_event_deliveries_clone = running_event_deliveries.clone();
+        let alert_watch_clone = alert_watch.clone();
+        let email_watch_clone = email_watch.clone();
         // Per-worker captures of the admin consumer names so the daily
         // queue_cleanup handler (built inside the worker spawn) can pin its
         // queue handles to w0's identity. See comment on `admin_*_name`
@@ -8383,44 +10023,97 @@ pub async fn run_with_components_shared_context_and_db(
                     };
 
                     if *shutdown_rx_clone.borrow() {
-                        debug!(
-                            "hot.dev: WORKER {} dropping claimed queue lease during shutdown",
-                            worker_id
-                        );
-                        drop(claimed_queue);
-                        break;
+                        // Claimed but not started: another worker gets it
+                        // now. Keep receiving until the claimers are gone, so
+                        // nothing they handed off stays behind in the channel.
+                        hand_back_lease_on_shutdown(
+                            &format!("{worker_id} executor"),
+                            claimed_queue.into_lease(),
+                        )
+                        .await;
+                        continue;
                     }
 
-                    match claimed_queue {
-                        ClaimedWorkerQueue::Request(lease) => {
-                            drop(lease);
-                            tracing::warn!(
-                                "hot.dev: WORKER {} event executor received request lease",
-                                worker_id
-                            );
-                        }
-                        ClaimedWorkerQueue::Event(lease) => {
-                            let queue_lease_timing = lease.timing();
-                            // A delivery its stopped worker left runs alone
-                            // (see `CrashQuarantine`).
-                            let recovered_delivery = lease.recovered();
-                            let sole_delivery_marker = lease.sole_delivery_marker();
-                            let last_delivery_attempt = lease.last_attempt();
-                            // Keep this delivery's PEL idle clock refreshed while
-                            // (possibly many) handlers execute serially, so orphan
-                            // reclaim never duplicates a live multi-handler event.
-                            // The guard aborts the touch task on every exit path
-                            // (ACK, error, panic); see spawn_event_lease_keepalive.
-                            let _keepalive_guard = spawn_event_lease_keepalive(
-                                &lease,
-                                event_orphan_idle_ms,
-                                worker_id,
-                            );
-                            // The claim fence's verdict, for the delivery's
-                            // runs to stop on (see `ClaimFence`).
-                            let claim = _keepalive_guard.as_ref().map(EventKeepaliveGuard::claim);
-                            // Process ONE event message (atomic operation)
-                            match lease.process(|message| {
+                    // A panic stays in the delivery (see `contain_delivery_panic`).
+                    let delivery = async {
+                        match claimed_queue {
+                            ClaimedWorkerQueue::Request(lease) => {
+                                drop(lease);
+                                tracing::warn!(
+                                    "hot.dev: WORKER {} event executor received request lease",
+                                    worker_id
+                                );
+                            }
+                            ClaimedWorkerQueue::Event(lease) => {
+                                let mut queue_lease_timing = lease.timing();
+                                let queue_backend = match &lease {
+                                    ProcessingQueueLease::Memory(_) => "memory",
+                                    ProcessingQueueLease::Sqlite(_) => "sqlite",
+                                    ProcessingQueueLease::Redis(_) => "redis",
+                                };
+                                let sole_delivery_marker = lease.sole_delivery_marker();
+                                let prior_delivery_attempts = lease.prior_attempts();
+                                let last_delivery_attempt = event_last_delivery_attempt(
+                                    prior_delivery_attempts,
+                                    lease.last_attempt(),
+                                );
+                                // Keep this delivery's PEL idle clock refreshed while
+                                // (possibly many) handlers execute serially, so orphan
+                                // reclaim never duplicates a live multi-handler event.
+                                // The guard aborts the touch task on every exit path
+                                // (ACK, error, panic); see spawn_event_lease_keepalive.
+                                let mut _keepalive_guard = spawn_event_lease_keepalive(
+                                    &lease,
+                                    event_orphan_idle_ms,
+                                    worker_id,
+                                );
+                                // The claim fence's verdict, for the delivery's
+                                // runs to stop on (see `ClaimFence`).
+                                let claim =
+                                    _keepalive_guard.as_ref().map(EventKeepaliveGuard::claim);
+                                let redis_delivery_id = _keepalive_guard
+                                    .as_ref()
+                                    .map(|guard| guard.delivery_id.clone());
+                                // The delivery waited for this executor with no
+                                // keepalive: start it only once the first touch
+                                // says it is still this worker's to run.
+                                if let Some(guard) = _keepalive_guard.as_mut() {
+                                    match pickup_verdict(guard.pickup_touch().await) {
+                                        PickupVerdict::Run => {}
+                                        PickupVerdict::RunAsRedelivery => {
+                                            queue_lease_timing.redelivered = true;
+                                        }
+                                        PickupVerdict::Drop(why) => {
+                                            warn!(
+                                                "hot.dev: WORKER {} drops its stale copy of event delivery {} unstarted: {}",
+                                                worker_id, guard.delivery_id, why
+                                            );
+                                            // Another worker has it now, so it is
+                                            // no longer this worker's own retry:
+                                            // if it comes back here, it comes back
+                                            // as a recovered delivery.
+                                            crash_quarantine_clone
+                                                .forget_own_retry(&guard.delivery_id);
+                                            // Dropping a Redis lease settles
+                                            // nothing and counts no attempt.
+                                            drop(lease);
+                                            return;
+                                        }
+                                    }
+                                }
+                                // A delivery its stopped worker left runs alone
+                                // (see `CrashQuarantine`); this worker's own
+                                // retry of a failed delivery does not.
+                                let recovered_delivery = crash_quarantine_clone
+                                    .recovers(lease.recovered(), redis_delivery_id.as_deref());
+                                // Listed as running from here to the end of
+                                // its processing, for a drain timeout (see
+                                // `hands_back_interrupted`).
+                                let _running = redis_delivery_id
+                                    .as_deref()
+                                    .map(|id| running_event_deliveries_clone.enter(id));
+                                // Process ONE event message (atomic operation)
+                                match lease.process(|message| {
                                 let db_ref = db_clone.clone();
                                 let blob_store_ref = blob_store_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
@@ -8518,14 +10211,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                 let db = &scoped_db;
                                                 event_message.body.execution_context.queue_timing =
                                                     Some(hot::lang::event::QueueExecutionTiming {
-                                                        backend: if queue_lease_timing
-                                                            .enqueued_at
-                                                            .is_some()
-                                                        {
-                                                            "redis".to_string()
-                                                        } else {
-                                                            "memory".to_string()
-                                                        },
+                                                        backend: queue_backend.to_string(),
                                                         enqueued_at: queue_lease_timing.enqueued_at,
                                                         claimed_at: queue_lease_timing.claimed_at,
                                                         queue_wait_us: queue_lease_timing
@@ -8583,9 +10269,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                             if exact_target_build.is_some() {
                                                                 // A build-scoped event was published while its deployment
                                                                 // was changing. Keep it in the backend retry/DLQ path rather
-                                                                // than acknowledging it as permanently unhandled.
-                                                                return Err(Box::new(std::io::Error::other(err_msg))
-                                                                    as Box<dyn std::error::Error + Send + Sync>);
+                                                                // than acknowledging it as permanently unhandled, and back
+                                                                // off between its deliveries: back to back they would all
+                                                                // fail before the deployment settles.
+                                                                warn!("hot.dev: WORKER {} {} (exact build target); the event is delivered again after a backoff unless this was its last attempt", worker_id, err_msg);
+                                                                return Err(exact_target_retry_error(err_msg, infra_retry_backoff_ms, prior_delivery_attempts, last_delivery_attempt));
                                                             }
                                                             acknowledge_unhandled_event_if_stable(
                                                                 worker_id,
@@ -8920,6 +10608,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                             }
                                                         }
 
+                                                        // Runs this delivery executed, and handlers after the
+                                                        // first whose setup failed before their run started: each
+                                                        // held (handler, build, run, failure) is settled after the
+                                                        // loop, where the event's redelivery is decided.
+                                                        let mut executed_runs: Vec<Uuid> = Vec::new();
+                                                        let mut held_setup_failures: Vec<(EventHandler, Build, Uuid, String)> = Vec::new();
+
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {
                                                             let mut all_success = true;
@@ -8935,6 +10630,27 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     return Err(worker_error(format!("Event handlers not started: {}", RunStop::ClaimLost(loss).error())));
                                                                 }
                                                                 shutdown_coord_ref.register_run(run_id);
+                                                                // A worker that is shutting down starts no more handlers:
+                                                                // a run started now would be cut off when the drain ends.
+                                                                // The event goes back to the queue for another worker,
+                                                                // with no attempt spent, and its redelivery skips the
+                                                                // handlers that finished. The run is registered before
+                                                                // the check, so a shutdown that begins meanwhile either
+                                                                // waits for it or stops it here. A memory queue ends
+                                                                // with the process: its events keep running instead.
+                                                                if queue_backend != "memory" && shutdown_coord_ref.is_shutting_down() {
+                                                                    // Only safe once every run this delivery executed has
+                                                                    // recorded its end: one that had not would run again.
+                                                                    let nothing_started = !started_any_handler && held_setup_failures.is_empty();
+                                                                    let hand_back = nothing_started
+                                                                        || hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await
+                                                                            .is_ok_and(|recorded| all_runs_finished(&recorded, &executed_runs));
+                                                                    if hand_back {
+                                                                        shutdown_coord_ref.unregister_run(&run_id);
+                                                                        info!("hot.dev: WORKER {} hands event {} back to the queue: shutting down before its next handler started", worker_id, event_message.body.event.event_id);
+                                                                        return Err(worker_infrastructure_retry_error("Worker shutting down before the event's next handler started", 0));
+                                                                    }
+                                                                }
 
                                                                 debug!("hot.dev: WORKER {} executing {}/{} (event_id={}, run_id={}, event_handler_id={}, build_id={})",
                                                                     worker_id,
@@ -8961,6 +10677,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
                                                                                                     started_any_handler = true;
+                                                                                                    executed_runs.push(run_id);
                                                                                                     debug!("Successfully executed event handler: {}", event_handler.event_handler_id);
                                                                                                     // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
 
@@ -8993,19 +10710,37 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                     warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
                                                                                                     return Err(worker_counted_redelivery_error(e, infra_retry_backoff_ms));
                                                                                                 }
+                                                                                                Err(e) if should_retry_context_load(&e, started_any_handler) => {
+                                                                                                    // The database could not serve the run's context
+                                                                                                    // variables, and the run did not start without them.
+                                                                                                    // Like the event's other database reads, this waits
+                                                                                                    // for the database without spending a delivery.
+                                                                                                    warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
+                                                                                                    return Err(worker_infrastructure_retry_error(e, infra_retry_backoff_ms.max(SETUP_FAILURE_BACKOFF_MS)));
+                                                                                                }
                                                                                                 Err(e) if run_never_started(&e).is_some() => {
                                                                                                     let reason = run_never_started(&e).unwrap_or(&e);
                                                                                                     // The handler's setup failed before its run started:
                                                                                                     // nothing ran, and no run records it. Before any handler
                                                                                                     // started, the event is delivered again, counted toward
                                                                                                     // its retry limit, and the run is held with the failure
-                                                                                                    // for the redelivery to reopen. After one started, or on
-                                                                                                    // the event's last attempt, the failure is the run's.
+                                                                                                    // for the redelivery to reopen. After one started, the
+                                                                                                    // run is held the same way and the other handlers go on:
+                                                                                                    // whether the event is delivered again for it is decided
+                                                                                                    // after the loop. On the event's last attempt, or when no
+                                                                                                    // redelivery can get past the failure, it is the run's.
                                                                                                     let failure = format!("Handler setup failed before the run started: {reason}");
-                                                                                                    if !started_any_handler && !last_delivery_attempt {
+                                                                                                    let retry = !last_delivery_attempt && !is_permanent_setup_failure(reason);
+                                                                                                    if retry && !started_any_handler {
                                                                                                         warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, failure);
                                                                                                         record_unstarted_run(db, &event_message, &handler_build, &event_handler, run_id, &failure, true).await;
                                                                                                         return Err(worker_counted_redelivery_error(failure, infra_retry_backoff_ms.max(SETUP_FAILURE_BACKOFF_MS)));
+                                                                                                    }
+                                                                                                    if retry {
+                                                                                                        warn!("hot.dev: WORKER {} holds event handler {} for the redelivery of event '{}': {}", worker_id, event_handler.event_handler_id, event_message.body.event.event_type, failure);
+                                                                                                        record_unstarted_run(db, &event_message, &handler_build, &event_handler, run_id, &failure, true).await;
+                                                                                                        held_setup_failures.push((event_handler, handler_build, run_id, failure));
+                                                                                                        continue;
                                                                                                     }
                                                                                                     error!("hot.dev: WORKER {} failed event handler {}: {}", worker_id, event_handler.event_handler_id, failure);
                                                                                                     record_unstarted_run(db, &event_message, &handler_build, &event_handler, run_id, &failure, false).await;
@@ -9014,6 +10749,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                 }
                                                                                                 Err(e) => {
                                                                                                     started_any_handler = true;
+                                                                                                    executed_runs.push(run_id);
                                                                                                     error!("Failed to execute event handler {}: {}", event_handler.event_handler_id, e);
                                                                                                     all_success = false;
                                                                                                     // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
@@ -9047,6 +10783,31 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                         return Err(worker_error(RunStop::ClaimLost(ClaimLoss::Lost).error()));
                                                                                     }
 
+                                                                                    // Handlers after the first whose setup failed are held
+                                                                                    // for a redelivery, counted toward the event's retry
+                                                                                    // limit like the first handler's. That is safe only if
+                                                                                    // every run this delivery executed has recorded its
+                                                                                    // end: the redelivery skips those and reopens the held
+                                                                                    // ones. A run without its end recorded would execute
+                                                                                    // again, so then the failures are the held runs'.
+                                                                                    if let Some((_, _, _, failure)) = held_setup_failures.first() {
+                                                                                        let redeliver = match hot::db::run::Run::earlier_deliveries(db, &event_message.body.event.event_id).await {
+                                                                                            Ok(recorded) => all_runs_finished(&recorded, &executed_runs),
+                                                                                            Err(error) => {
+                                                                                                warn!("hot.dev: WORKER {} cannot read the runs of event {} to redeliver it: {}", worker_id, event_message.body.event.event_id, error);
+                                                                                                false
+                                                                                            }
+                                                                                        };
+                                                                                        if redeliver {
+                                                                                            warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, failure);
+                                                                                            return Err(worker_counted_redelivery_error(failure.clone(), infra_retry_backoff_ms.max(SETUP_FAILURE_BACKOFF_MS)));
+                                                                                        }
+                                                                                        for (event_handler, handler_build, run_id, failure) in &held_setup_failures {
+                                                                                            error!("hot.dev: WORKER {} failed event handler {}: {}", worker_id, event_handler.event_handler_id, failure);
+                                                                                            record_unstarted_run(db, &event_message, handler_build, event_handler, *run_id, failure, false).await;
+                                                                                        }
+                                                                                    }
+
                                                                                     match execution_result {
                                                                                         (Ok(()), success) => {
                                                                                             if success {
@@ -9060,6 +10821,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                         (Err(e), _) => {
                                                                                             let err_msg = format!("Failed to execute event handlers for event type '{}': {}", event_message.body.event.event_type, e);
                                                                                             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                            if exact_target_build.is_some() {
+                                                                                                // The event's exact build has no deployed, ready
+                                                                                                // handler here: its deployment is changing, or the
+                                                                                                // build was superseded. Back off between deliveries
+                                                                                                // so a deployment can settle before the event is
+                                                                                                // dead-lettered; it is never rerouted to another build.
+                                                                                                return Err(exact_target_retry_error(err_msg, infra_retry_backoff_ms, prior_delivery_attempts, last_delivery_attempt));
+                                                                                            }
                                                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
                                                                                         }
                                                                                     }
@@ -9978,6 +11747,22 @@ pub async fn run_with_components_shared_context_and_db(
                                     // No events in queue - continue to next iteration
                                 },
                                 Err(e) => {
+                                    // An ordinary processing error leaves the
+                                    // Redis entry pending for this consumer's
+                                    // retry, which is no recovered delivery
+                                    // (see `OwnRetries`). Noted before any
+                                    // await: the retry can be read at once.
+                                    // Not when another worker has the entry:
+                                    // it comes back only if that one stops.
+                                    let claim_lost = matches!(
+                                        claim.as_ref().map(|claim| *claim.borrow()),
+                                        Some(Some(ClaimLoss::Lost))
+                                    );
+                                    if let (Some(hot::queue::QueueProcessingError::WorkerError(_)), Some(delivery_id), false) =
+                                        (e.downcast_ref::<hot::queue::QueueProcessingError>(), redis_delivery_id.as_deref(), claim_lost)
+                                    {
+                                        crash_quarantine_clone.note_own_retry(delivery_id);
+                                    }
                                     debug!("hot.dev: WORKER {} error processing event: {}", worker_id, e);
                                     if let (Some(hot::queue::QueueProcessingError::DeadLettered(message)), Some(db)) =
                                         (e.downcast_ref::<hot::queue::QueueProcessingError>(), db_clone.as_ref())
@@ -9986,27 +11771,26 @@ pub async fn run_with_components_shared_context_and_db(
                                     }
                                 }
                             }
-                        }
-                        ClaimedWorkerQueue::Alert(lease) => {
-                            // Process ONE alert delivery from hot:alert queue (if any)
-                            // This allows main workers to help with alert processing when idle
-                            if let Some(ref db_ref) = db_clone {
-                                match lease
-                                    .process(|message| {
-                                        let db = db_ref.clone();
-                                        let senders = Arc::clone(&notification_senders_clone);
-                                        async move {
-                                            process_alert_delivery_message(
-                                                worker_id, db, senders, message,
-                                            )
-                                            .await
-                                        }
-                                    })
-                                    .await
-                                {
-                                    Ok(Some(_)) => {}
-                                    Ok(None) => { /* no alerts in queue */ }
-                                    Err(e) => {
+                            }
+                            ClaimedWorkerQueue::Alert(lease) => {
+                                // Process ONE alert delivery from hot:alert queue (if any)
+                                // This allows main workers to help with alert processing when idle
+                                if let Some(ref db_ref) = db_clone {
+                                    let watched = alert_watch_clone.begin(&lease);
+                                    let result = lease
+                                        .process(|message| {
+                                            let db = db_ref.clone();
+                                            let senders = Arc::clone(&notification_senders_clone);
+                                            async move {
+                                                process_alert_delivery_message(
+                                                    worker_id, db, senders, message,
+                                                )
+                                                .await
+                                            }
+                                        })
+                                        .await;
+                                    watched.end(&result);
+                                    if let Err(e) = result {
                                         tracing::debug!(
                                             "hot.dev: WORKER {} alert queue error: {}",
                                             worker_id,
@@ -10015,34 +11799,18 @@ pub async fn run_with_components_shared_context_and_db(
                                     }
                                 }
                             }
-                        }
-                        ClaimedWorkerQueue::Email(lease) => {
-                            // Process ONE app email from hot:email queue (if any)
-                            if let Some(ref db_ref) = db_clone {
-                                match lease
-                                    .process(|message| {
-                                        let db = db_ref.clone();
-                                        let senders = Arc::clone(&notification_senders_clone);
-                                        async move {
-                                            process_email_message(worker_id, db, senders, message)
-                                                .await
-                                        }
-                                    })
-                                    .await
-                                {
-                                    Ok(Some(_)) => {}
-                                    Ok(None) => { /* no emails in queue */ }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "hot.dev: WORKER {} email queue error: {}",
-                                            worker_id,
-                                            e
-                                        );
-                                    }
+                            ClaimedWorkerQueue::Email(lease) => {
+                                // Process ONE app email from hot:email queue (if any)
+                                if let Some(ref db_ref) = db_clone {
+                                    let db = db_ref.clone();
+                                    let senders = Arc::clone(&notification_senders_clone);
+                                    let _watched = email_watch_clone.begin(&lease);
+                                    process_email_lease(worker_id, db, senders, lease).await;
                                 }
                             }
                         }
-                    }
+                    };
+                    contain_delivery_panic("event executor", delivery).await;
                 }
 
                 Ok(())
@@ -10062,12 +11830,15 @@ pub async fn run_with_components_shared_context_and_db(
         );
     }
 
-    let restarting = tokio::select! {
-        _ = hot::signal::shutdown_signal() => false,
-        _ = hot::execution_watchdog::events().restart_requested() => true,
+    let restart_reason = tokio::select! {
+        _ = hot::signal::shutdown_signal() => None,
+        _ = hot::execution_watchdog::events().restart_requested() => Some("Blocking execution ceiling exhausted"),
+        // A supervised task (see `spawn_supervised_worker_task`) stayed down.
+        _ = worker_task_gave_up().notified() => Some("A worker task kept panicking"),
     };
-    if restarting {
-        error!("Blocking execution ceiling exhausted; draining before supervisor restart");
+    let restarting = restart_reason.is_some();
+    if let Some(reason) = restart_reason {
+        error!("{reason}; draining before supervisor restart");
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(120)).await;
             std::process::exit(75);
@@ -10096,6 +11867,8 @@ pub async fn run_with_components_shared_context_and_db(
         "hot.dev: WORKER waiting for workers to complete (timeout: {}s)",
         worker_shutdown_timeout.as_secs()
     );
+    // The hot:event deliveries still running when the drain timed out.
+    let mut interrupted_event_deliveries = Vec::new();
     let workers_drained =
         match tokio::time::timeout(worker_shutdown_timeout, join_all(&mut worker_handles)).await {
             Ok(results) => {
@@ -10112,17 +11885,108 @@ pub async fn run_with_components_shared_context_and_db(
                     "hot.dev: WORKER shutdown timeout ({}s), aborting remaining worker tasks",
                     worker_shutdown_timeout.as_secs()
                 );
+                // Read before the abort, which ends each delivery's listing
+                // with its executor.
+                interrupted_event_deliveries = running_event_deliveries.snapshot();
                 for handle in &worker_handles {
                     handle.abort();
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                drop(worker_handles);
                 false
             }
         };
+    let tasks_stopped =
+        workers_drained || worker_tasks_stopped(&worker_handles, WORKER_ABORT_SETTLE).await;
+    drop(worker_handles);
 
     if !workers_drained {
         warn!("hot.dev: WORKER workers were aborted; only idle consumers will be unregistered");
+    }
+    let hand_back = shutdown_hand_back(tasks_stopped, restarting);
+    if !hand_back.unstarted {
+        warn!(
+            "hot.dev: WORKER tasks still running after the abort; claimed deliveries stay pending until reclaimed"
+        );
+    }
+    // One budget for the whole pass: a queue that is down must not hold the
+    // exit for each delivery in turn.
+    let final_hand_back = async {
+        if hand_back.unstarted {
+            // No claimer or executor is left, so nothing this consumer
+            // holds unstarted will be started here. After an abort that
+            // includes the leases the executors never received. A delivery
+            // whose handlers started is not among them: its queue refuses
+            // it (see `ShutdownHandBack` for why it stays pending).
+            for (channel, claimed_rx) in [
+                ("hot:request handoff", &request_claimed_rx),
+                ("hot:event handoff", &event_claimed_rx),
+                ("notification handoff", &notification_claimed_rx),
+            ] {
+                let leftovers = hand_back_channel_leftovers(channel, claimed_rx).await;
+                if leftovers > 0 {
+                    info!(
+                        "hot.dev: WORKER gave up {} claimed deliveries left in the {}",
+                        leftovers, channel
+                    );
+                }
+            }
+            // Then what the consumers hold without a lease: a prefetch
+            // buffer its claimer did not get to release, and first
+            // deliveries a dropped lease left pending.
+            let mut drained_queues = vec![
+                ("hot:event", &event_queue, &admin_event_name),
+                ("hot:request", &request_queue, &admin_request_name),
+            ];
+            if db.is_some() {
+                drained_queues.push(("hot:alert", &alert_queue, &admin_alert_name));
+                drained_queues.push(("hot:email", &email_queue, &admin_email_name));
+            }
+            for (queue_name, queue, consumer_name) in drained_queues {
+                release_unstarted_deliveries(
+                    queue_name,
+                    &queue.clone().with_consumer_name(consumer_name.clone()),
+                )
+                .await;
+            }
+        }
+        if hand_back.own_retries {
+            hand_back_own_retries(
+                "hot:event",
+                &event_queue
+                    .clone()
+                    .with_consumer_name(admin_event_name.clone()),
+                &crash_quarantine.own_retries_pending(),
+            )
+            .await;
+            // The other queues' retries wait out an orphan idle too. Not
+            // hot:email: its retries are delayed requeues (see the
+            // executors), which any worker promotes.
+            hand_back_own_retries(
+                "hot:request",
+                &request_queue
+                    .clone()
+                    .with_consumer_name(admin_request_name.clone()),
+                &request_watch.own_retries.pending(),
+            )
+            .await;
+            if db.is_some() {
+                hand_back_own_retries(
+                    "hot:alert",
+                    &alert_queue
+                        .clone()
+                        .with_consumer_name(admin_alert_name.clone()),
+                    &alert_watch.own_retries.pending(),
+                )
+                .await;
+            }
+        }
+    };
+    if tokio::time::timeout(UNSTARTED_HAND_BACK_TIMEOUT, final_hand_back)
+        .await
+        .is_err()
+    {
+        warn!(
+            "hot.dev: WORKER ran out of time handing deliveries back; the rest stay pending until reclaimed"
+        );
     }
     unregister_idle_consumer(
         "hot:event",
@@ -10179,6 +12043,20 @@ pub async fn run_with_components_shared_context_and_db(
         } else {
             debug!("hot.dev: WORKER event publisher shutdown complete");
         }
+    }
+
+    // The last act: it bounds the life of this process, so everything that
+    // may take its time (the consumers above, the flushes) is done. The
+    // deliveries stay this consumer's pending entries until another worker
+    // takes them over, which is why its consumer stayed registered.
+    if hands_back_interrupted(hand_back, workers_drained, standalone_process) {
+        hand_back_interrupted_deliveries(
+            &event_queue
+                .clone()
+                .with_consumer_name(admin_event_name.clone()),
+            &interrupted_event_deliveries,
+        )
+        .await;
     }
 
     info!("hot.dev: WORKER shutdown complete");
@@ -11251,6 +13129,687 @@ mod tests {
         }
     }
 
+    /// A delivery that sat buffered with no keepalive can be reclaimed, run
+    /// and acknowledged by another worker before this one picks it up. The
+    /// first touch then finds it acknowledged, before any handler started
+    /// here: the copy is stale, not a claim that holds for good.
+    #[test]
+    fn claim_fence_loses_a_delivery_acknowledged_before_its_first_touch() {
+        use hot::queue::streams::PendingTouch;
+        let secs = std::time::Duration::from_secs;
+        let start = tokio::time::Instant::now();
+
+        let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), start);
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Acked), start),
+            Some(ClaimLoss::Lost)
+        );
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
+        assert_eq!(
+            claim_stops_new_runs(Some(&claim), start),
+            Some(ClaimLoss::Lost)
+        );
+
+        // Acknowledged after an earlier touch, confirmed or failed, keeps its
+        // meaning: nobody else can be handed the delivery.
+        for earlier in [Some(PendingTouch::Touched), None] {
+            let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), start);
+            assert_eq!(fence.observe(earlier, start), None);
+            assert_eq!(
+                fence.observe(Some(PendingTouch::Acked), start + secs(5)),
+                None
+            );
+            assert_eq!(*claim.borrow(), None, "{earlier:?}");
+        }
+
+        // A first touch that finds the entry trimmed loses nothing: nobody
+        // else can run it, and this may be the last copy.
+        let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), start);
+        assert_eq!(fence.observe(Some(PendingTouch::Trimmed), start), None);
+        assert_eq!(*claim.borrow(), None);
+    }
+
+    #[test]
+    fn pickup_verdict_drops_only_deliveries_another_worker_has_or_settled() {
+        use hot::queue::streams::PendingTouch;
+        assert_eq!(
+            pickup_verdict(Some(PendingTouch::Touched)),
+            PickupVerdict::Run
+        );
+        // A touch that failed decides nothing.
+        assert_eq!(pickup_verdict(None), PickupVerdict::Run);
+        assert!(matches!(
+            pickup_verdict(Some(PendingTouch::Acked)),
+            PickupVerdict::Drop(_)
+        ));
+        assert!(matches!(
+            pickup_verdict(Some(PendingTouch::Reclaimed)),
+            PickupVerdict::Drop(_)
+        ));
+        // Gone from the stream: it runs, and looks for earlier runs first.
+        assert_eq!(
+            pickup_verdict(Some(PendingTouch::Trimmed)),
+            PickupVerdict::RunAsRedelivery
+        );
+    }
+
+    /// The executor starts a delivery only once the keepalive's first touch
+    /// has answered.
+    #[tokio::test]
+    async fn keepalive_guard_reports_the_first_touch_once() {
+        use hot::queue::streams::PendingTouch;
+        let guard_with = |pickup| EventKeepaliveGuard {
+            touch_loop: tokio::spawn(std::future::pending::<()>()),
+            claim: tokio::sync::watch::channel(None).1,
+            pickup,
+            delivery_id: "1-0".to_string(),
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = guard_with(Some(rx));
+        tx.send(Some(PendingTouch::Acked)).unwrap();
+        assert_eq!(guard.pickup_touch().await, Some(PendingTouch::Acked));
+        assert_eq!(guard.pickup_touch().await, None);
+
+        // A touch that failed, and a touch loop that ended without an
+        // answer, both leave the claim unknown.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = guard_with(Some(rx));
+        tx.send(None).unwrap();
+        assert_eq!(guard.pickup_touch().await, None);
+        let (tx, rx) = tokio::sync::oneshot::channel::<Option<PendingTouch>>();
+        let mut guard = guard_with(Some(rx));
+        drop(tx);
+        assert_eq!(guard.pickup_touch().await, None);
+    }
+
+    #[test]
+    fn claim_errors_back_off_and_warn_at_a_bounded_rate() {
+        let millis = std::time::Duration::from_millis;
+        assert_eq!(claim_error_backoff(1), millis(250));
+        assert_eq!(claim_error_backoff(2), millis(500));
+        assert_eq!(claim_error_backoff(3), millis(1_000));
+        assert_eq!(claim_error_backoff(5), CLAIM_ERROR_BACKOFF_MAX);
+        assert_eq!(claim_error_backoff(u32::MAX), CLAIM_ERROR_BACKOFF_MAX);
+
+        let start = std::time::Instant::now();
+        let mut errors = ClaimErrors::default();
+        assert_eq!(errors.failed(start), (millis(250), true));
+        assert_eq!(errors.failed(start + millis(250)), (millis(500), false));
+        // A claim that answers starts the backoff over, not the warnings.
+        errors.recovered("test:queue");
+        assert_eq!(errors.failed(start + millis(800)), (millis(250), false));
+        assert_eq!(
+            errors.failed(start + CLAIM_ERROR_LOG_INTERVAL),
+            (millis(500), true)
+        );
+    }
+
+    /// The pause after a failed claim ends as soon as shutdown begins.
+    #[tokio::test(start_paused = true)]
+    async fn claim_error_pause_ends_on_shutdown() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let mut errors = ClaimErrors {
+            consecutive: 10,
+            ..ClaimErrors::default()
+        };
+        let error = worker_error("connection refused");
+        let started = tokio::time::Instant::now();
+        let pause = errors.pause("test:queue", error.as_ref(), &mut shutdown_rx);
+        tokio::pin!(pause);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut pause)
+                .await
+                .is_err()
+        );
+        shutdown_tx.send(true).unwrap();
+        pause.await;
+        assert!(started.elapsed() < CLAIM_ERROR_BACKOFF_MAX);
+    }
+
+    /// A Redis retry of a delivery this process failed comes from the same
+    /// pending list as a delivery reclaimed from a stopped worker, but it
+    /// must not take the quarantine's exclusive lock.
+    #[tokio::test]
+    async fn crash_quarantine_leaves_this_workers_own_retries_shared() {
+        let quarantine = CrashQuarantine::default();
+        // A stopped worker's delivery, on any backend, is recovered.
+        assert!(quarantine.recovers(true, None));
+        assert!(quarantine.recovers(true, Some("7-0")));
+        assert!(!quarantine.recovers(false, Some("7-0")));
+
+        // This process fails 7-0 with an ordinary error: its retry is not.
+        quarantine.note_own_retry("7-0");
+        assert!(quarantine.recovers(true, Some("8-0")));
+        let retry = quarantine.recovers(true, Some("7-0"));
+        assert!(!retry);
+        // So it runs beside a delivery in flight instead of waiting for it.
+        let in_flight = quarantine.enter(false, None, 0).await;
+        let _retry_pass = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            quarantine.enter(retry, None, 1),
+        )
+        .await
+        .expect("an ordinary retry must not wait for the deliveries in flight");
+        drop(in_flight);
+        // The note is spent: the id coming back again without a failure
+        // here (its lease was dropped, or it was reclaimed) is recovered.
+        assert!(quarantine.recovers(true, Some("7-0")));
+    }
+
+    /// On shutdown a claimed delivery goes back to its queue unstarted, and
+    /// the handover spends none of the message's attempts.
+    #[tokio::test]
+    async fn unstarted_lease_is_handed_back_without_spending_an_attempt() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("worker-hand-back-test-{}", Uuid::new_v4()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let message = test_message();
+        let message_id = message.id;
+        queue.enqueue(message).await.unwrap();
+
+        // More handovers than the message has attempts.
+        for _ in 0..6 {
+            let lease = queue.claim_blocking().await.unwrap().unwrap();
+            assert!(!lease.recovered());
+            assert!(hand_back_unstarted_lease(lease).await.unwrap());
+        }
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+        assert!(lease.timing().redelivered);
+        let processed = lease
+            .process(|message| async move { Ok::<Uuid, WorkerError>(message.id) })
+            .await
+            .unwrap();
+        assert_eq!(processed, Some(message_id));
+        assert_eq!(queue.release_unstarted().await.unwrap(), 0);
+    }
+
+    /// The deliveries still running at a drain timeout are handed back only
+    /// when every task ended, the worker is not restarting itself, and the
+    /// process is the worker's alone, so that its exit may be bounded.
+    #[test]
+    fn interrupted_deliveries_are_handed_back_only_with_a_bounded_exit() {
+        let stopped = shutdown_hand_back(true, false);
+        assert!(hands_back_interrupted(stopped, false, true));
+        // Drained: nothing was running.
+        assert!(!hands_back_interrupted(stopped, true, true));
+        // A process shared with other services is never cut short.
+        assert!(!hands_back_interrupted(stopped, false, false));
+        // A self-restart leaves them for the next worker's reclaim.
+        assert!(!hands_back_interrupted(
+            shutdown_hand_back(true, true),
+            false,
+            true
+        ));
+        // A task that outlived the abort might still start something.
+        for restarting in [false, true] {
+            assert!(!hands_back_interrupted(
+                shutdown_hand_back(false, restarting),
+                false,
+                true
+            ));
+        }
+
+        // Only `hot worker` has its process to itself: the production
+        // profile with nothing shared in-process. `hot dev` and `hot test`
+        // run under "local-dev" and share the stream pub/sub (and context),
+        // whatever HOT_ENV says, and no profile at all decides nothing.
+        assert!(standalone_worker_process("production", false, false));
+        assert!(!standalone_worker_process("local-dev", true, true));
+        assert!(!standalone_worker_process("local-dev", false, true));
+        assert!(!standalone_worker_process("local-dev", false, false));
+        assert!(!standalone_worker_process("production", false, true));
+        assert!(!standalone_worker_process("production", true, false));
+        for unset in ["", "null", "staging"] {
+            assert!(!standalone_worker_process(unset, false, false));
+        }
+        // No worker may take one over until a whole bound past the exit.
+        assert!(INTERRUPTED_HAND_BACK_DELAY >= INTERRUPTED_HAND_BACK_EXIT_BOUND * 2);
+    }
+
+    /// The exit bound fires on its own thread once its time is up, and not
+    /// at all once disarmed.
+    #[test]
+    fn exit_bound_fires_unless_disarmed() {
+        let bound = std::time::Duration::from_millis(20);
+        let (fired_tx, fired_rx) = std::sync::mpsc::channel();
+        let _armed = arm_exit_bound_with(bound, move || {
+            let _ = fired_tx.send(());
+        })
+        .unwrap();
+        fired_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the bound should fire");
+
+        let (fired_tx, fired_rx) = std::sync::mpsc::channel::<()>();
+        arm_exit_bound_with(bound, move || {
+            let _ = fired_tx.send(());
+        })
+        .unwrap()
+        .disarm();
+        // The thread ends without firing: the sender is dropped unused.
+        assert_eq!(
+            fired_rx.recv_timeout(std::time::Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    /// The registry a drain timeout reads lists a delivery from the start
+    /// of its processing until its executor lets go of it, however.
+    #[test]
+    fn running_deliveries_are_listed_until_their_processing_ends() {
+        let running = RunningDeliveries::default();
+        let first = running.enter("1-0");
+        let second = running.clone().enter("2-0");
+        let mut listed = running.snapshot();
+        listed.sort();
+        assert_eq!(listed, vec!["1-0".to_string(), "2-0".to_string()]);
+        drop(first);
+        assert_eq!(running.snapshot(), vec!["2-0".to_string()]);
+        drop(second);
+        assert!(running.snapshot().is_empty());
+    }
+
+    /// A short delivery is never touched; one that waited an interval for
+    /// its executor is touched at once.
+    #[test]
+    fn delivery_keepalive_first_touch_is_due_an_interval_after_delivery() {
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(delivery_keepalive_first_touch(secs(20), secs(0)), secs(20));
+        assert_eq!(delivery_keepalive_first_touch(secs(20), secs(3)), secs(17));
+        assert_eq!(delivery_keepalive_first_touch(secs(20), secs(20)), secs(0));
+        assert_eq!(delivery_keepalive_first_touch(secs(20), secs(95)), secs(0));
+        // The default one-minute orphan idle is touched three times over.
+        assert_eq!(event_keepalive_interval_ms(60_000), 20_000);
+    }
+
+    /// A delivery is touched until its queue's cap after delivery and no
+    /// longer: one still held then is left to the orphan reclaim.
+    #[test]
+    fn delivery_keepalive_stops_at_its_queues_cap() {
+        let secs = std::time::Duration::from_secs;
+        let cap = secs(360);
+        assert_eq!(
+            delivery_keepalive_next_touch(secs(20), secs(0), cap),
+            Some(secs(20))
+        );
+        assert_eq!(
+            delivery_keepalive_next_touch(secs(20), secs(340), cap),
+            Some(secs(20))
+        );
+        assert_eq!(
+            delivery_keepalive_next_touch(secs(20), secs(341), cap),
+            None
+        );
+        assert_eq!(delivery_keepalive_next_touch(secs(0), secs(900), cap), None);
+        // A retry after a failed touch is held to the cap too.
+        assert_eq!(
+            delivery_keepalive_next_touch(secs(10), secs(355), cap),
+            None
+        );
+
+        // An email is covered through its send and the writes around it;
+        // the queues with no bound of their own, generously.
+        assert!(EMAIL_KEEPALIVE_CAP > hot::db::email_queue::SEND_DEADLINE);
+        assert_eq!(
+            EMAIL_KEEPALIVE_CAP,
+            hot::db::email_queue::SEND_DEADLINE + DELIVERY_KEEPALIVE_MARGIN
+        );
+        assert!(UNBOUNDED_DELIVERY_KEEPALIVE_CAP >= EMAIL_KEEPALIVE_CAP);
+    }
+
+    /// Only an ordinary processing error leaves a Redis delivery pending
+    /// for its consumer's own retry.
+    #[test]
+    fn only_an_ordinary_processing_error_leaves_an_own_retry_pending() {
+        use hot::queue::QueueProcessingError;
+        let failed: WorkerError = Box::new(QueueProcessingError::WorkerError("boom".into()));
+        assert!(leaves_own_retry_pending(&failed));
+        let requeued: WorkerError = Box::new(QueueProcessingError::QueueError("later".into()));
+        assert!(!leaves_own_retry_pending(&requeued));
+        let exhausted: WorkerError = Box::new(QueueProcessingError::RetryLimitExceeded);
+        assert!(!leaves_own_retry_pending(&exhausted));
+        assert!(!leaves_own_retry_pending(&worker_error("not from a queue")));
+    }
+
+    /// A queue's watch lists a delivery as this worker's own retry from its
+    /// ordinary failure until it is started again, and never one that was
+    /// acknowledged, requeued, or has no pending entry (memory, SQLite).
+    #[tokio::test]
+    async fn delivery_watch_tracks_own_retries_per_queue() {
+        use hot::queue::QueueProcessingError;
+        let cap = UNBOUNDED_DELIVERY_KEEPALIVE_CAP;
+        let watch = DeliveryWatch::new("hot:alert", 60_000, cap);
+        let other_queue = DeliveryWatch::new("hot:request", 60_000, cap);
+        let watched = |watch: &'static DeliveryWatch, delivery_id: Option<&str>| WatchedDelivery {
+            watch,
+            keepalive: delivery_id.map(|delivery_id| DeliveryKeepalive {
+                touch_loop: tokio::spawn(async {}),
+                delivery_id: delivery_id.to_string(),
+            }),
+        };
+        let watch: &'static DeliveryWatch = Box::leak(Box::new(watch));
+        let failed = || -> Result<Option<()>, WorkerError> {
+            Err(Box::new(QueueProcessingError::WorkerError("boom".into())))
+        };
+        let requeued = || -> Result<Option<()>, WorkerError> {
+            Err(Box::new(QueueProcessingError::QueueError("later".into())))
+        };
+
+        watched(watch, Some("1-0")).end(&Ok(Some(())));
+        watched(watch, Some("2-0")).end(&requeued());
+        watched(watch, None).end(&failed());
+        assert!(watch.own_retries.pending().is_empty());
+
+        watched(watch, Some("3-0")).end(&failed());
+        assert_eq!(watch.own_retries.pending(), vec!["3-0".to_string()]);
+        assert!(other_queue.own_retries.pending().is_empty());
+        // Clones share the list: every executor of the queue sees it.
+        assert_eq!(watch.clone().own_retries.pending(), vec!["3-0".to_string()]);
+
+        // A memory lease has no pending entry: no keepalive, nothing spent.
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("worker-delivery-watch-test-{}", Uuid::new_v4()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        queue.enqueue(test_message()).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().expect("a lease");
+        let memory = watch.begin(&lease);
+        assert!(memory.keepalive.is_none());
+        let result = lease.process(|_| async { Ok::<(), WorkerError>(()) }).await;
+        memory.end(&result);
+        assert_eq!(watch.own_retries.pending(), vec!["3-0".to_string()]);
+
+        // Picked up again (`begin` on its Redis lease): no longer pending.
+        assert!(watch.own_retries.take("3-0"));
+        assert!(watch.own_retries.pending().is_empty());
+    }
+
+    /// A claim that only reports its message dead-lettered is no failed
+    /// claim; any other error is.
+    #[test]
+    fn claim_dead_letter_tells_a_dead_letter_from_a_failed_claim() {
+        use hot::queue::QueueProcessingError;
+        assert!(matches!(
+            claim_dead_letter(Box::new(QueueProcessingError::RetryLimitExceeded)),
+            Ok(None)
+        ));
+        let failed = claim_dead_letter(Box::new(QueueProcessingError::QueueError(
+            "connection refused".into(),
+        )))
+        .unwrap_err();
+        assert!(failed.to_string().contains("connection refused"));
+        let failed = claim_dead_letter(worker_error("READONLY")).unwrap_err();
+        assert_eq!(failed.to_string(), "READONLY");
+    }
+
+    /// The memory queue dead-letters at its claim gate a message whose
+    /// deliveries were all dropped. The claimer settles what the message
+    /// stood for and claims on, without the pause of a failed claim.
+    #[tokio::test]
+    async fn claimer_settles_a_message_dead_lettered_at_claim() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("worker-claimer-dead-letter-test-{}", Uuid::new_v4()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let doomed = test_message();
+        let doomed_id = doomed.id;
+        queue.enqueue(doomed).await.unwrap();
+
+        let (settled_tx, mut settled_rx) = mpsc::unbounded_channel::<Uuid>();
+        let settle: ClaimDeadLetterSettler = Arc::new(move |message| {
+            let settled_tx = settled_tx.clone();
+            Box::pin(async move {
+                let message = message
+                    .decode::<Message>()
+                    .expect("the dead letter decodes");
+                let _ = settled_tx.send(message.id);
+            })
+        });
+        let (claimed_tx, mut claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = spawn_worker_queue_claimer(
+            "test:event",
+            queue.clone(),
+            claimed_tx,
+            shutdown_rx,
+            ClaimedWorkerQueue::Event,
+            false,
+            Some(settle),
+        );
+
+        // Each dropped lease spends one of the message's deliveries.
+        let second = tokio::time::Duration::from_secs(1);
+        let mut dropped = 0;
+        let settled = loop {
+            tokio::select! {
+                settled = settled_rx.recv() => break settled.expect("the settler is alive"),
+                claimed = tokio::time::timeout(second, claimed_rx.recv()) => {
+                    drop(claimed.expect("a claim or the dead letter").expect("a lease"));
+                    dropped += 1;
+                    assert!(dropped <= 8, "the message should have been dead-lettered");
+                }
+            }
+        };
+        assert_eq!(settled, doomed_id);
+        assert!(dropped >= 1);
+
+        // No pause: the next message is claimed well inside the shortest
+        // failed-claim backoff.
+        let next = test_message();
+        let next_id = next.id;
+        queue.enqueue(next).await.unwrap();
+        let claimed = tokio::time::timeout(CLAIM_ERROR_BACKOFF_MIN / 2, claimed_rx.recv())
+            .await
+            .expect("the claimer should not pause after a dead letter")
+            .expect("a lease");
+        let processed = claimed
+            .into_lease()
+            .process(|message| async move { Ok::<Uuid, WorkerError>(message.id) })
+            .await
+            .unwrap();
+        assert_eq!(processed, Some(next_id));
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(second, handle)
+            .await
+            .expect("claimer should stop on shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A shutdown hands deliveries back only once no task of the process can
+    /// still start them, and its own retries only when it is not stopping
+    /// itself over executions that may be theirs.
+    #[test]
+    fn shutdown_hands_back_only_what_no_task_can_still_start() {
+        // Drained, or aborted with every task ended, on an ordinary signal.
+        assert_eq!(
+            shutdown_hand_back(true, false),
+            ShutdownHandBack {
+                unstarted: true,
+                own_retries: true
+            }
+        );
+        // The worker restarts itself: its own retries stay crash-suspect.
+        assert_eq!(
+            shutdown_hand_back(true, true),
+            ShutdownHandBack {
+                unstarted: true,
+                own_retries: false
+            }
+        );
+        // A task outlived the abort: it may still start what it holds.
+        for restarting in [false, true] {
+            assert_eq!(
+                shutdown_hand_back(false, restarting),
+                ShutdownHandBack {
+                    unstarted: false,
+                    own_retries: false
+                }
+            );
+        }
+    }
+
+    /// Only a retry nobody started again is handed over on shutdown: not a
+    /// retry an executor picked up (running, or interrupted by the abort),
+    /// and never a delivery recovered from a stopped worker.
+    #[test]
+    fn own_retries_pending_lists_only_retries_not_started_again() {
+        let quarantine = CrashQuarantine::default();
+        assert!(quarantine.own_retries_pending().is_empty());
+
+        quarantine.note_own_retry("7-0");
+        quarantine.note_own_retry("8-0");
+        // An executor picks 7-0 up again.
+        assert!(!quarantine.recovers(true, Some("7-0")));
+        assert_eq!(quarantine.own_retries_pending(), vec!["8-0".to_string()]);
+        // A delivery reclaimed from a stopped worker was never noted.
+        assert!(quarantine.recovers(true, Some("9-0")));
+        assert_eq!(quarantine.own_retries_pending(), vec!["8-0".to_string()]);
+        // Listing spends nothing: the retry still runs shared if it comes back.
+        assert!(!quarantine.recovers(true, Some("8-0")));
+        assert!(quarantine.own_retries_pending().is_empty());
+    }
+
+    /// After a drain timeout aborted the executors, the leases they never
+    /// received go back to the queue, with no attempt spent.
+    #[tokio::test]
+    async fn leases_left_in_the_handoff_channel_are_handed_back() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("worker-channel-leftovers-test-{}", Uuid::new_v4()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let (claimed_tx, claimed_rx) = mpsc::channel::<ClaimedWorkerQueue>(4);
+        let claimed_rx = Mutex::new(claimed_rx);
+        for _ in 0..2 {
+            queue.enqueue(test_message()).await.unwrap();
+        }
+        for _ in 0..2 {
+            let lease = queue.claim_blocking().await.unwrap().unwrap();
+            assert!(
+                claimed_tx
+                    .send(ClaimedWorkerQueue::Event(lease))
+                    .await
+                    .is_ok()
+            );
+        }
+        drop(claimed_tx);
+
+        // An executor that still holds the receiver may still start them.
+        {
+            let _receiving = claimed_rx.lock().await;
+            assert_eq!(hand_back_channel_leftovers("test", &claimed_rx).await, 0);
+        }
+        assert_eq!(hand_back_channel_leftovers("test", &claimed_rx).await, 2);
+        assert_eq!(hand_back_channel_leftovers("test", &claimed_rx).await, 0);
+
+        for _ in 0..2 {
+            let lease = queue.claim_blocking().await.unwrap().unwrap();
+            assert!(lease.timing().redelivered);
+            assert!(!lease.recovered());
+            let processed = lease
+                .process(|message| async move { Ok::<Uuid, WorkerError>(message.id) })
+                .await
+                .unwrap();
+            assert!(processed.is_some());
+        }
+    }
+
+    /// The final hand-back waits for the tasks a drain timeout aborted, and
+    /// tells when one of them did not end.
+    #[tokio::test]
+    async fn worker_tasks_stopped_waits_for_aborted_tasks() {
+        let aborted = tokio::spawn(std::future::pending::<()>());
+        let finished = tokio::spawn(async {});
+        aborted.abort();
+        assert!(
+            worker_tasks_stopped(&[aborted, finished], std::time::Duration::from_secs(2)).await
+        );
+
+        let running = tokio::spawn(std::future::pending::<()>());
+        assert!(
+            !worker_tasks_stopped(
+                std::slice::from_ref(&running),
+                std::time::Duration::from_millis(60)
+            )
+            .await
+        );
+        running.abort();
+    }
+
+    /// A delivery that takes over from one that never settled is not handed
+    /// back on shutdown: it stays claimed for the queue's orphan recovery,
+    /// so it comes back recovered again instead of as an ordinary delivery.
+    #[tokio::test]
+    async fn recovered_lease_is_not_handed_back_on_shutdown() {
+        use hot::queue::sqlite::SqliteQueue;
+
+        let temp = tempfile::tempdir().unwrap();
+        let lease_duration = std::time::Duration::from_secs(1);
+        let queue = SqliteQueue::<Message>::new_at(
+            format!("worker-recovered-hand-back-test-{}", Uuid::new_v4()),
+            temp.path().to_path_buf(),
+        )
+        .unwrap()
+        .with_orphan_idle_ms(lease_duration.as_millis() as u64);
+        let message = test_message();
+        let message_id = message.id;
+        queue.enqueue(message).await.unwrap();
+
+        // A first delivery goes back at once, and comes back as an ordinary
+        // redelivery.
+        let lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(!lease.recovered());
+        assert!(
+            hand_back_unstarted_lease(ProcessingQueueLease::Sqlite(lease))
+                .await
+                .unwrap()
+        );
+        let lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(!lease.recovered());
+        assert_eq!(lease.prior_attempts(), 0);
+
+        // Its worker stops while holding it: the next delivery is recovered.
+        lease.abandon();
+        tokio::time::sleep(lease_duration + std::time::Duration::from_millis(500)).await;
+        assert_eq!(queue.recover_orphaned_items().await.unwrap(), 1);
+        let lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(lease.recovered());
+
+        // Shutdown before it starts: not handed back, nobody else claims it.
+        assert!(
+            !hand_back_unstarted_lease(ProcessingQueueLease::Sqlite(lease))
+                .await
+                .unwrap()
+        );
+        assert!(queue.claim_now().await.unwrap().is_none());
+
+        // The orphan recovery delivers it, recovered still.
+        tokio::time::sleep(lease_duration + std::time::Duration::from_millis(500)).await;
+        assert_eq!(queue.recover_orphaned_items().await.unwrap(), 1);
+        let lease = queue.claim_now().await.unwrap().unwrap();
+        assert!(lease.recovered());
+        let processed = ProcessingQueueLease::Sqlite(lease)
+            .process(|message| async move { Ok::<Uuid, WorkerError>(message.id) })
+            .await
+            .unwrap();
+        assert_eq!(processed, Some(message_id));
+    }
+
     /// The fence's clock starts when Redis handed the delivery over, not at
     /// executor pickup: a delivery that waited in the prefetch buffer is
     /// that much closer to being reclaimable.
@@ -11693,6 +14252,8 @@ mod tests {
                 std::future::pending::<()>().await;
             }),
             claim: tokio::sync::watch::channel(None).1,
+            pickup: None,
+            delivery_id: String::new(),
         };
         drop(guard);
 
@@ -13681,6 +16242,7 @@ fn (event) {{ "{name}" }}
             shutdown_rx,
             ClaimedWorkerQueue::Request,
             false,
+            None,
         );
 
         let claimed = tokio::time::timeout(tokio::time::Duration::from_secs(1), claimed_rx.recv())
@@ -13729,6 +16291,7 @@ fn (event) {{ "{name}" }}
             shutdown_rx,
             ClaimedWorkerQueue::Request,
             false,
+            None,
         );
 
         // With a channel capacity of 1 and no executor draining, the claimer
@@ -14093,61 +16656,15 @@ fn (event) {{ "{name}" }}
         (port, connections, messages)
     }
 
-    #[tokio::test]
-    async fn app_emails_share_one_smtp_connection() {
-        use std::sync::atomic::Ordering;
-
-        let (port, connections, messages) = counting_smtp_relay().await;
-        let senders = Arc::new(NotificationSenders::from_conf(&val!({
-            "email": {
-                "provider": "smtp",
-                "from": "hot@example.test",
-                "smtp": {"host": "127.0.0.1", "port": i64::from(port), "security": "none"}
-            }
-        })));
-        let db = Arc::new(hot::db::test_db().await);
-
-        for _ in 0..2 {
-            let message: Message = hot::lang::event::queue::EmailMessage {
-                id: Uuid::now_v7(),
-                head: ahash::AHashMap::new(),
-                body: hot::lang::event::queue::EmailMessageBody {
-                    email_queue_id: Uuid::now_v7(),
-                    to_address: "ops@example.test".to_string(),
-                    subject: "Hello".to_string(),
-                    html_body: None,
-                    text_body: Some("delivered".to_string()),
-                    from_address: "Hot <hot@example.test>".to_string(),
-                },
-            }
-            .into();
-            process_email_message(0, Arc::clone(&db), Arc::clone(&senders), message)
-                .await
-                .unwrap();
-            // lettre returns a connection to its pool from a spawned task, so
-            // a send that starts first would open a second connection.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        assert_eq!(messages.load(Ordering::SeqCst), 2);
-        assert_eq!(connections.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn an_app_email_this_worker_cannot_send_records_why() {
-        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
-
-        let senders = Arc::new(NotificationSenders::from_conf(&val!({
-            "email": {"provider": "mystery", "from": "hot@example.test"}
-        })));
-        let db = Arc::new(hot::db::test_db().await);
-        let (to_address, from_address) = ("ops@example.test", "Hot <hot@example.test>");
-        let email_queue_id = EmailQueueEntry::enqueue(
-            &db,
+    /// An app email on the `email_queue` table and a queue message for it.
+    async fn queued_app_email(db: &DatabasePool, to_address: &str) -> (Uuid, Message) {
+        let from_address = "Hot <hot@example.test>";
+        let email_queue_id = hot::db::email_queue::EmailQueueEntry::enqueue(
+            db,
             to_address,
             "Hello",
             None,
-            Some("undelivered"),
+            Some("body"),
             from_address,
         )
         .await
@@ -14160,15 +16677,229 @@ fn (event) {{ "{name}" }}
                 to_address: to_address.to_string(),
                 subject: "Hello".to_string(),
                 html_body: None,
-                text_body: Some("undelivered".to_string()),
+                text_body: Some("body".to_string()),
                 from_address: from_address.to_string(),
             },
         }
         .into();
+        (email_queue_id, message)
+    }
 
-        process_email_message(0, Arc::clone(&db), senders, message)
+    /// One delivery of an app email's message. Also says whether it ended
+    /// still holding the email's send claim.
+    async fn deliver_app_email(
+        db: &Arc<DatabasePool>,
+        senders: &Arc<NotificationSenders>,
+        message: Message,
+        attempt: EmailAttempt,
+    ) -> (Result<(), WorkerError>, bool) {
+        let holds_claim = std::sync::atomic::AtomicBool::new(false);
+        let delivered = process_email_message(
+            0,
+            Arc::clone(db),
+            Arc::clone(senders),
+            message,
+            attempt,
+            &holds_claim,
+        )
+        .await;
+        (delivered, holds_claim.into_inner())
+    }
+
+    fn smtp_senders(port: u16) -> Arc<NotificationSenders> {
+        Arc::new(NotificationSenders::from_conf(&val!({
+            "email": {
+                "provider": "smtp",
+                "from": "hot@example.test",
+                "smtp": {"host": "127.0.0.1", "port": i64::from(port), "security": "none"}
+            }
+        })))
+    }
+
+    async fn email_status(db: &DatabasePool, email_queue_id: &Uuid) -> i16 {
+        hot::db::email_queue::EmailQueueEntry::get_by_id(db, email_queue_id)
             .await
-            .unwrap();
+            .unwrap()
+            .status_id
+    }
+
+    #[tokio::test]
+    async fn app_emails_share_one_smtp_connection() {
+        use hot::db::email_queue::EmailQueueStatus;
+        use std::sync::atomic::Ordering;
+
+        let (port, connections, messages) = counting_smtp_relay().await;
+        let senders = smtp_senders(port);
+        let db = Arc::new(hot::db::test_db().await);
+
+        let mut last = None;
+        for _ in 0..2 {
+            // Only an email whose pending `email_queue` row the delivery
+            // claims is sent.
+            let (email_queue_id, message) = queued_app_email(&db, "ops@example.test").await;
+            last = Some((email_queue_id, message.clone()));
+            let (delivered, holds_claim) =
+                deliver_app_email(&db, &senders, message, EmailAttempt::after(0, false)).await;
+            delivered.unwrap();
+            assert!(!holds_claim);
+            assert_eq!(
+                email_status(&db, &email_queue_id).await,
+                EmailQueueStatus::Sent as i16
+            );
+            // lettre returns a connection to its pool from a spawned task, so
+            // a send that starts first would open a second connection.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        assert_eq!(messages.load(Ordering::SeqCst), 2);
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+
+        // A second message for an email already sent, as the recovery sweep
+        // can enqueue, is acknowledged without sending it again.
+        let (email_queue_id, duplicate) = last.unwrap();
+        let (delivered, holds_claim) =
+            deliver_app_email(&db, &senders, duplicate, EmailAttempt::after(0, false)).await;
+        delivered.unwrap();
+        assert!(!holds_claim);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(messages.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            email_status(&db, &email_queue_id).await,
+            EmailQueueStatus::Sent as i16
+        );
+    }
+
+    #[tokio::test]
+    async fn deliveries_of_one_app_email_that_race_send_it_once() {
+        use hot::db::email_queue::EmailQueueStatus;
+        use std::sync::atomic::Ordering;
+
+        let (port, _, messages) = counting_smtp_relay().await;
+        let senders = smtp_senders(port);
+        let db = Arc::new(hot::db::test_db().await);
+        // Three messages for one email, as after a backlog the recovery
+        // sweep enqueued it through, taken by three executors together.
+        let (email_queue_id, message) = queued_app_email(&db, "ops@example.test").await;
+        let attempt = EmailAttempt::after(0, false);
+
+        let deliveries = tokio::join!(
+            deliver_app_email(&db, &senders, message.clone(), attempt),
+            deliver_app_email(&db, &senders, message.clone(), attempt),
+            deliver_app_email(&db, &senders, message, attempt),
+        );
+        for (delivered, holds_claim) in [deliveries.0, deliveries.1, deliveries.2] {
+            delivered.expect("the winner sent it, and the others are acknowledged");
+            assert!(!holds_claim);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(messages.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            email_status(&db, &email_queue_id).await,
+            EmailQueueStatus::Sent as i16
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_sends_nothing_while_another_holds_the_send_claim() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+        use std::sync::atomic::Ordering;
+
+        let (port, _, messages) = counting_smtp_relay().await;
+        let senders = smtp_senders(port);
+        let db = Arc::new(hot::db::test_db().await);
+        let (email_queue_id, message) = queued_app_email(&db, "ops@example.test").await;
+        // Another delivery is sending it, or died sending it.
+        assert!(
+            EmailQueueEntry::claim_send(&db, &email_queue_id)
+                .await
+                .unwrap()
+        );
+
+        let (delivered, holds_claim) =
+            deliver_app_email(&db, &senders, message, EmailAttempt::after(0, false)).await;
+        delivered.expect("the message is acknowledged");
+        assert!(!holds_claim);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(messages.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            email_status(&db, &email_queue_id).await,
+            EmailQueueStatus::Sending as i16
+        );
+    }
+
+    #[test]
+    fn only_the_delivery_that_wins_the_send_claim_sends() {
+        use hot::db::email_queue::{EmailQueueError, EmailQueueStatus};
+
+        assert_eq!(email_delivery_for_claim(Ok(true)), EmailDelivery::Send);
+        // Being sent, sent or failed already, or no row at all: acknowledged.
+        assert_eq!(email_delivery_for_claim(Ok(false)), EmailDelivery::Skip);
+        // A claim that could not be tried is neither: the message is
+        // delivered again.
+        assert!(matches!(
+            email_delivery_for_claim(Err(EmailQueueError::Database(sqlx::Error::PoolTimedOut))),
+            EmailDelivery::RetryClaim(_)
+        ));
+
+        let reasons = [
+            Ok(EmailQueueStatus::Sending as i16),
+            Ok(EmailQueueStatus::Sent as i16),
+            Ok(EmailQueueStatus::Failed as i16),
+            Err(EmailQueueError::NotFound),
+            Ok(EmailQueueStatus::Pending as i16),
+        ]
+        .map(lost_email_claim_reason);
+        assert!(reasons[0].contains("is sending it"));
+        assert!(reasons[1].contains("already sent"));
+        assert!(reasons[2].contains("failed"));
+        assert!(reasons[3].contains("gone"));
+        assert!(reasons[4].contains("claimed it"));
+    }
+
+    #[tokio::test]
+    async fn recording_an_email_outcome_is_retried_a_bounded_number_of_times() {
+        use hot::db::email_queue::EmailQueueError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let refused = || EmailQueueError::Database(sqlx::Error::PoolTimedOut);
+        let tries = AtomicUsize::new(0);
+        // The database comes back on the third try.
+        let written = settle_email_row(&[1, 1, 1], || async {
+            if tries.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err(refused())
+            } else {
+                Ok("written")
+            }
+        })
+        .await;
+        assert_eq!(written.unwrap(), "written");
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+
+        // It stays down: one try, one more after each delay, then the error.
+        tries.store(0, Ordering::SeqCst);
+        let written: Result<(), _> = settle_email_row(&[1, 1], || async {
+            tries.fetch_add(1, Ordering::SeqCst);
+            Err(refused())
+        })
+        .await;
+        assert!(written.is_err());
+        assert_eq!(tries.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn an_app_email_this_worker_cannot_send_records_why() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+
+        let senders = Arc::new(NotificationSenders::from_conf(&val!({
+            "email": {"provider": "mystery", "from": "hot@example.test"}
+        })));
+        let db = Arc::new(hot::db::test_db().await);
+        let (email_queue_id, message) = queued_app_email(&db, "ops@example.test").await;
+
+        let (delivered, holds_claim) =
+            deliver_app_email(&db, &senders, message, EmailAttempt::after(0, false)).await;
+        delivered.unwrap();
+        assert!(!holds_claim);
 
         let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
             .await
@@ -14178,6 +16909,522 @@ fn (event) {{ "{name}" }}
             entry.error_message.as_deref(),
             Some("email provider 'mystery' is not registered")
         );
+    }
+
+    /// An app email on the `email_queue` table and its queue message, sent
+    /// through an SMTP relay nothing listens on.
+    async fn undeliverable_app_email(
+        db: &DatabasePool,
+        to_address: &str,
+    ) -> (Arc<NotificationSenders>, Uuid, Message) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let (email_queue_id, message) = queued_app_email(db, to_address).await;
+        (smtp_senders(port), email_queue_id, message)
+    }
+
+    #[tokio::test]
+    async fn a_failed_app_email_send_backs_off_then_is_left_to_the_sweep() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+
+        let db = Arc::new(hot::db::test_db().await);
+        let (senders, email_queue_id, message) =
+            undeliverable_app_email(&db, "ops@example.test").await;
+
+        // An early attempt: a counted infrastructure retry whose backoff
+        // grows. The claim is given back, so the row is pending again for
+        // the retry delivery to claim, with the reason on it.
+        let mut backoffs = Vec::new();
+        for prior_attempts in 0..EMAIL_SEND_ATTEMPTS - 1 {
+            let (delivered, holds_claim) = deliver_app_email(
+                &db,
+                &senders,
+                message.clone(),
+                EmailAttempt::after(prior_attempts, false),
+            )
+            .await;
+            let err = delivered.unwrap_err();
+            let infra = err
+                .downcast_ref::<QueueInfrastructureError>()
+                .expect("a send failure with attempts left is an infrastructure retry");
+            assert!(infra.to_string().contains(PRESERVE_DELIVERY_COUNT_TOKEN));
+            backoffs.push(infra.backoff());
+            assert!(!holds_claim);
+            let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+                .await
+                .unwrap();
+            assert_eq!(entry.status_id, EmailQueueStatus::Pending as i16);
+            assert!(
+                entry
+                    .error_message
+                    .unwrap()
+                    .contains("SMTP delivery failed")
+            );
+        }
+        assert!(backoffs[0] >= std::time::Duration::from_secs(30));
+        assert!(backoffs.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // The message's last attempt: it is acknowledged, not dead-lettered,
+        // and the row is pending with the reason, for the recovery sweep to
+        // enqueue again once it is overdue.
+        let (delivered, holds_claim) = deliver_app_email(
+            &db,
+            &senders,
+            message,
+            EmailAttempt::after(EMAIL_SEND_ATTEMPTS - 1, false),
+        )
+        .await;
+        delivered.expect("a message out of attempts is acknowledged");
+        assert!(!holds_claim);
+        let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+            .await
+            .unwrap();
+        assert_eq!(entry.status_id, EmailQueueStatus::Pending as i16);
+        assert!(
+            entry
+                .error_message
+                .unwrap()
+                .contains("SMTP delivery failed")
+        );
+        let sweep = |after: chrono::Duration| {
+            let db = Arc::clone(&db);
+            async move {
+                EmailQueueEntry::claim_overdue(&db, chrono::Utc::now() + after, 10)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| entry.email_queue_id)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let grace = hot::db::email_queue::RECOVERY_GRACE;
+        assert!(sweep(grace - chrono::Duration::minutes(1)).await.is_empty());
+        assert_eq!(
+            sweep(grace + chrono::Duration::minutes(1)).await,
+            vec![email_queue_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_app_email_fails_its_row_without_a_retry() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+
+        let db = Arc::new(hot::db::test_db().await);
+        let (senders, email_queue_id, message) =
+            undeliverable_app_email(&db, "not an address").await;
+
+        let (delivered, holds_claim) =
+            deliver_app_email(&db, &senders, message, EmailAttempt::after(0, false)).await;
+        delivered.expect("a rejected email is acknowledged, not retried");
+        assert!(!holds_claim);
+
+        let entry = EmailQueueEntry::get_by_id(&db, &email_queue_id)
+            .await
+            .unwrap();
+        assert_eq!(entry.status_id, EmailQueueStatus::Failed as i16);
+        assert!(
+            entry
+                .error_message
+                .unwrap()
+                .contains("Invalid recipient address")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_lettered_app_email_fails_only_the_row_its_delivery_holds() {
+        use hot::db::email_queue::{EmailQueueEntry, EmailQueueStatus};
+        use std::sync::atomic::Ordering;
+
+        let (port, _, messages) = counting_smtp_relay().await;
+        let senders = smtp_senders(port);
+        let db = Arc::new(hot::db::test_db().await);
+        let (pending_id, pending) = queued_app_email(&db, "ops@example.test").await;
+        let (sent_id, sent) = queued_app_email(&db, "dev@example.test").await;
+        EmailQueueEntry::mark_sent(&db, &sent_id).await.unwrap();
+        // Left in sending by the dead-lettered delivery itself, and held by
+        // another delivery that is still sending.
+        let (own_id, own) = queued_app_email(&db, "own@example.test").await;
+        let (other_id, other) = queued_app_email(&db, "other@example.test").await;
+        for id in [&own_id, &other_id] {
+            assert!(EmailQueueEntry::claim_send(&db, id).await.unwrap());
+        }
+
+        let duplicate = pending.clone();
+        for (message, claimed) in [
+            (duplicate, false),
+            (sent, false),
+            (own, true),
+            (other, false),
+        ] {
+            settle_dead_lettered_email(0, &db, Ok(message), claimed).await;
+        }
+
+        let entry = EmailQueueEntry::get_by_id(&db, &own_id).await.unwrap();
+        assert_eq!(entry.status_id, EmailQueueStatus::Failed as i16);
+        assert!(entry.error_message.unwrap().contains("dead-letter queue"));
+        assert_eq!(
+            email_status(&db, &sent_id).await,
+            EmailQueueStatus::Sent as i16
+        );
+        assert_eq!(
+            email_status(&db, &other_id).await,
+            EmailQueueStatus::Sending as i16
+        );
+
+        // The pending email is not failed by its duplicate's dead-letter:
+        // the original message's retry still claims and sends it.
+        assert_eq!(
+            email_status(&db, &pending_id).await,
+            EmailQueueStatus::Pending as i16
+        );
+        let (delivered, holds_claim) =
+            deliver_app_email(&db, &senders, pending, EmailAttempt::after(1, false)).await;
+        delivered.unwrap();
+        assert!(!holds_claim);
+        assert_eq!(messages.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            email_status(&db, &pending_id).await,
+            EmailQueueStatus::Sent as i16
+        );
+    }
+
+    #[test]
+    fn email_send_failures_retry_with_growing_backoff_until_the_last_attempt() {
+        use hot::email::EmailError;
+
+        let transient = EmailError::SendFailed("connection refused".into());
+        assert_eq!(
+            email_send_failure(&transient, EmailAttempt::after(0, false)),
+            EmailSendFailure::Retry { backoff_ms: 30_000 }
+        );
+        assert_eq!(
+            email_send_failure(&transient, EmailAttempt::after(1, false)),
+            EmailSendFailure::Retry {
+                backoff_ms: 120_000
+            }
+        );
+        // The retry limit, or the queue saying so, ends the message's
+        // retries; the email is the sweep's from there.
+        for last in [EmailAttempt::after(2, false), EmailAttempt::after(0, true)] {
+            assert_eq!(
+                email_send_failure(&transient, last),
+                EmailSendFailure::LeaveToSweep
+            );
+        }
+        // A rejection is never retried.
+        assert_eq!(
+            email_send_failure(
+                &EmailError::Rejected("no such user".into()),
+                EmailAttempt::after(0, false)
+            ),
+            EmailSendFailure::Failed
+        );
+        assert_eq!(growing_backoff_ms(30_000, 600_000, 9), 600_000);
+        assert_eq!(growing_backoff_ms(u64::MAX, u64::MAX, usize::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn exact_target_retries_are_counted_and_back_off_longer_each_time() {
+        let backoff_secs = |prior_attempts| {
+            let err =
+                exact_target_retry_error("No event handlers found", 1_000, prior_attempts, false);
+            let infra = err
+                .downcast_ref::<QueueInfrastructureError>()
+                .expect("an exact-target retry is an infrastructure retry");
+            // Counted: an event whose build never comes back is dead-lettered.
+            assert!(infra.to_string().contains(PRESERVE_DELIVERY_COUNT_TOKEN));
+            infra.backoff().as_secs()
+        };
+        assert_eq!([backoff_secs(0), backoff_secs(1)], [15, 60]);
+        // The worker's own retry backoff is the floor.
+        let err = exact_target_retry_error("No event handlers found", 20_000, 0, false);
+        let infra = err.downcast_ref::<QueueInfrastructureError>().unwrap();
+        assert_eq!(infra.backoff().as_secs(), 20);
+        assert_eq!(growing_backoff_ms(15_000, 300_000, 2), 240_000);
+        assert_eq!(growing_backoff_ms(15_000, 300_000, 10), 300_000);
+    }
+
+    /// A setup failure's counted redeliveries end on every queue: the last
+    /// delivery inside the retry limit is recognized by the count Redis
+    /// carries, where the lease itself never says so.
+    #[test]
+    fn setup_failure_last_attempt_is_recognized_on_every_queue() {
+        // Redis: `last_attempt()` is always false; the carried count tells.
+        assert!(!event_last_delivery_attempt(0, false));
+        assert!(!event_last_delivery_attempt(1, false));
+        assert!(event_last_delivery_attempt(2, false));
+        assert!(event_last_delivery_attempt(3, false));
+        // SQLite and memory say so themselves.
+        assert!(event_last_delivery_attempt(0, true));
+        assert!(event_last_delivery_attempt(2, true));
+    }
+
+    /// The delivery after the last attempt runs nothing, so the last attempt
+    /// fails without a backoff: an ordinary error, which the queue answers
+    /// with the dead letter on its next pickup, or at once.
+    #[test]
+    fn exact_target_last_attempt_dead_letters_without_a_backoff() {
+        // Redis and memory never say "last attempt": the count decides.
+        assert!(!exact_target_last_attempt(0, false));
+        assert!(!exact_target_last_attempt(1, false));
+        assert!(exact_target_last_attempt(2, false));
+        assert!(exact_target_last_attempt(7, false));
+        // SQLite does.
+        assert!(exact_target_last_attempt(0, true));
+
+        for (prior_attempts, queue_last_attempt) in [(2, false), (1, true)] {
+            let err = exact_target_retry_error(
+                "No event handlers found",
+                1_000,
+                prior_attempts,
+                queue_last_attempt,
+            );
+            assert!(
+                err.downcast_ref::<QueueInfrastructureError>().is_none(),
+                "the last attempt must not ask for another delivery"
+            );
+            assert!(err.to_string().contains("No event handlers found"));
+        }
+    }
+
+    #[test]
+    fn context_values_merge_whole_or_not_at_all() {
+        let ok = |key: &str, value: i64| (key.to_string(), Ok(Val::from(value)));
+        let bad = |key: &str| (key.to_string(), Err("wrong key".to_string()));
+
+        // No context configured is not a failure.
+        assert_eq!(merge_context_values(vec![], vec![]), Ok(AHashMap::new()));
+        // A project variable overrides the environment's.
+        let merged = merge_context_values(vec![ok("a", 1), ok("b", 2)], vec![ok("b", 3)]).unwrap();
+        assert_eq!(merged.get("a"), Some(&Val::from(1i64)));
+        assert_eq!(merged.get("b"), Some(&Val::from(3i64)));
+        // Also an undecryptable one, which the run never sees.
+        assert!(merge_context_values(vec![bad("a")], vec![ok("a", 1)]).is_ok());
+        // One undecryptable variable fails the load, by name: no partial map.
+        for (env_vars, project_vars) in [
+            (vec![ok("a", 1), bad("secret")], vec![]),
+            (vec![ok("secret", 1)], vec![bad("secret")]),
+        ] {
+            let err = merge_context_values(env_vars, project_vars).unwrap_err();
+            assert!(
+                matches!(&err, ContextLoadError::Unreadable(reason) if reason.contains("'secret'")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_load_failures_are_classified_before_the_run_starts() {
+        use hot::db::context::ContextError;
+
+        // What `execute_single_event_handler` returns for each.
+        let unavailable = format!(
+            "{} {RUN_NOT_STARTED_TOKEN}",
+            ContextLoadError::from_read(
+                "environment",
+                &ContextError::Database(sqlx::Error::PoolTimedOut)
+            )
+        );
+        let unreadable = format!(
+            "{} {RUN_NOT_STARTED_TOKEN}",
+            ContextLoadError::Unreadable(
+                "environment context variable 'k' can't be decrypted".into()
+            )
+        );
+
+        // A database failure is retried without spending a delivery, unless
+        // an earlier handler ran: then it is held and counted like any other
+        // setup failure.
+        assert!(should_retry_context_load(&unavailable, false));
+        assert!(!should_retry_context_load(&unavailable, true));
+        assert!(!is_permanent_setup_failure(
+            run_never_started(&unavailable).unwrap()
+        ));
+        // An undecryptable value is never retried: the run fails.
+        assert!(!should_retry_context_load(&unreadable, false));
+        assert!(is_permanent_setup_failure(
+            run_never_started(&unreadable).unwrap()
+        ));
+        // Rows that don't decode are not a database outage.
+        assert!(matches!(
+            ContextLoadError::from_read(
+                "project",
+                &ContextError::Database(sqlx::Error::ColumnNotFound("value".into()))
+            ),
+            ContextLoadError::Unreadable(_)
+        ));
+        // Only the leading token classifies: other errors may quote it.
+        let quoted =
+            format!("Parse errors near {CONTEXT_LOAD_UNAVAILABLE_ERROR} {RUN_NOT_STARTED_TOKEN}");
+        assert!(!should_retry_context_load(&quoted, false));
+        assert!(!is_permanent_setup_failure(
+            "Parse errors near [context-unreadable]"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_context_load_failure_is_an_error_and_is_never_cached() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let services = WorkerExecutionServices::new(Arc::new(db.clone()), &val!({})).await;
+        let key = TenantContextKey {
+            org_id: data.org_id,
+            env_id: data.env_id,
+            project_id: data.project_id,
+        };
+        let stored_with = ContextEncryption::from_master_key([7u8; 32]);
+        let other_key = ContextEncryption::from_master_key([9u8; 32]);
+        let secret = stored_with.encrypt("\"s3cret\"", &data.org_id).unwrap();
+        Context::insert_env(
+            &db,
+            &Uuid::now_v7(),
+            &data.env_id,
+            "API_KEY",
+            &secret,
+            None,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+
+        // A value that can't be decrypted fails the load: the run must not
+        // see null for it.
+        let err = services.context_for(&other_key, key).await.unwrap_err();
+        assert!(
+            matches!(&err, ContextLoadError::Unreadable(reason) if reason.contains("'API_KEY'")),
+            "{err}"
+        );
+        // The failure was not cached: the next load reads the value.
+        let loaded = services.context_for(&stored_with, key).await.unwrap();
+        assert_eq!(loaded.get("API_KEY"), Some(&Val::from("s3cret")));
+
+        // A database that can't be read is an error, not an empty context.
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("the test database is SQLite");
+        };
+        pool.close().await;
+        let uncached = TenantContextKey {
+            project_id: Uuid::now_v7(),
+            ..key
+        };
+        let err = services
+            .context_for(&stored_with, uncached)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ContextLoadError::Unavailable(_)), "{err}");
+    }
+
+    #[test]
+    fn an_event_is_redelivered_for_a_later_handler_only_once_its_executed_runs_finished() {
+        use hot::db::run::EarlierDelivery;
+
+        let (done, running, held) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let recorded: AHashMap<Uuid, EarlierDelivery> = [
+            (done, EarlierDelivery::Finished),
+            (running, EarlierDelivery::Running),
+            (held, EarlierDelivery::Held),
+        ]
+        .into_iter()
+        .collect();
+
+        // Finished runs are skipped by the redelivery, so it is safe.
+        assert!(all_runs_finished(&recorded, &[]));
+        assert!(all_runs_finished(&recorded, &[done]));
+        // A run that would execute again is not: its side effects would repeat.
+        assert!(!all_runs_finished(&recorded, &[done, running]));
+        assert!(!all_runs_finished(&recorded, &[held]));
+        assert!(!all_runs_finished(&recorded, &[Uuid::now_v7()]));
+    }
+
+    async fn always_panics() -> Result<(), WorkerError> {
+        panic!("supervised task panic (expected in this test)")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_supervised_worker_task_restarts_after_a_panic() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let runs = Arc::new(AtomicU32::new(0));
+        let gave_up = Arc::new(tokio::sync::Notify::new());
+        let counter = Arc::clone(&runs);
+        let handle = spawn_supervised_worker_task(
+            "test task".to_string(),
+            Arc::clone(&gave_up),
+            move || {
+                let run = counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if run < 2 {
+                        return always_panics().await;
+                    }
+                    Ok(())
+                }
+            },
+        );
+
+        handle.await.unwrap().unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 3);
+        let gave_up = tokio::time::timeout(std::time::Duration::from_millis(1), gave_up.notified());
+        assert!(
+            gave_up.await.is_err(),
+            "a task that recovered must not restart the worker"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_supervised_worker_task_that_keeps_panicking_asks_for_a_worker_restart() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let runs = Arc::new(AtomicU32::new(0));
+        let gave_up = Arc::new(tokio::sync::Notify::new());
+        let counter = Arc::clone(&runs);
+        let handle = spawn_supervised_worker_task(
+            "test task".to_string(),
+            Arc::clone(&gave_up),
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                always_panics()
+            },
+        );
+
+        assert!(handle.await.unwrap().is_err());
+        assert_eq!(runs.load(Ordering::SeqCst), WORKER_TASK_MAX_QUICK_PANICS);
+        gave_up.notified().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_delivery_that_panics_every_time_is_dead_lettered_and_its_executor_goes_on() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            format!("worker-poison-test-{}", Uuid::new_v4()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        queue.enqueue(test_message()).await.unwrap();
+
+        assert!(!contain_delivery_panic("test executor", async {}).await);
+        let mut panics = 0;
+        loop {
+            let claim =
+                tokio::time::timeout(std::time::Duration::from_secs(5), queue.claim_blocking());
+            // Dead-lettered: nothing is delivered any more.
+            let Ok(Ok(Some(lease))) = claim.await else {
+                break;
+            };
+            let panicked = contain_delivery_panic("test executor", async {
+                let _ = lease.process(|_message| always_panics()).await;
+            })
+            .await;
+            assert!(panicked, "the panic stays in the delivery");
+            panics += 1;
+            assert!(
+                panics <= 10,
+                "a poison message must not be delivered forever"
+            );
+        }
+        // Each panic spent one of the message's attempts.
+        assert_eq!(panics, 3);
     }
 
     #[test]

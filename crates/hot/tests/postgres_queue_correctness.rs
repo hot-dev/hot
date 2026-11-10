@@ -721,6 +721,405 @@ async fn postgres_shutdown_finalize_is_atomic_with_retry_child() {
     drop_schema(&db, &schema).await;
 }
 
+/// A running task owned by `worker`, with two `retry` attempts.
+async fn insert_claimed_with_retry(
+    db: &DatabasePool,
+    test_data: &db::TestData,
+    function_name: &str,
+    worker: &str,
+) -> Uuid {
+    let task_id = Uuid::now_v7();
+    let options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+    Task::insert(
+        db,
+        &task_id,
+        &test_data.env_id,
+        &test_data.stream_id,
+        &test_data.build_id,
+        None,
+        function_name,
+        None,
+        Some(&options),
+        "code",
+        60_000,
+        Some(&test_data.user_id),
+    )
+    .await
+    .unwrap();
+    assert!(Task::claim_for_worker(db, &task_id, worker).await.unwrap());
+    task_id
+}
+
+/// A `retry` policy's retry commits with the failure it follows, and a
+/// failed retry insert takes the terminal write back with it.
+#[tokio::test]
+async fn postgres_policy_retry_commits_with_the_failure() {
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let test_data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+    let error = serde_json::json!({"msg": "boom"});
+
+    let task_id = insert_claimed_with_retry(&db, &test_data, "::test/retried", "worker-a").await;
+    let checkpoint = serde_json::json!({"step": 3});
+    Task::set_checkpoint(&db, &task_id, &checkpoint)
+        .await
+        .unwrap();
+
+    assert!(
+        Task::complete_with_retry(
+            &db,
+            &task_id,
+            &TaskStatus::Failed,
+            Some(&error),
+            None,
+            Some("worker-a"),
+            &task_id,
+        )
+        .await
+        .is_err(),
+        "a retry primary-key failure must abort the transaction"
+    );
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().task_status_id,
+        TaskStatus::Running.as_id(),
+        "the terminal write must roll back with the failed retry insert"
+    );
+
+    // Another worker's fence does not apply, so nothing is written.
+    let fenced = Task::complete_with_retry(
+        &db,
+        &task_id,
+        &TaskStatus::Failed,
+        Some(&error),
+        None,
+        Some("worker-b"),
+        &Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(!fenced.applied && fenced.retry.is_none());
+    assert!(
+        Task::get_retry_child(&db, &task_id, &test_data.env_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let retry_id = Uuid::now_v7();
+    let write = Task::complete_with_retry(
+        &db,
+        &task_id,
+        &TaskStatus::Failed,
+        Some(&error),
+        None,
+        Some("worker-a"),
+        &retry_id,
+    )
+    .await
+    .unwrap();
+    assert!(write.applied);
+    let committed = write.retry.expect("the policy owes a first retry");
+    assert_eq!(
+        (committed.retry_task_id, committed.retry_attempt),
+        (retry_id, 1)
+    );
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().task_status_id,
+        TaskStatus::Failed.as_id()
+    );
+    let retry = Task::get_retry_child(&db, &task_id, &test_data.env_id)
+        .await
+        .unwrap()
+        .expect("the retry is visible as soon as the failure is");
+    assert_eq!(retry.task_id, retry_id);
+    assert_eq!(retry.task_status_id, TaskStatus::Queued.as_id());
+    assert_eq!(retry.parent_task_id, Some(task_id));
+    assert_eq!(
+        retry.info,
+        Some(checkpoint),
+        "the retry starts from the checkpoint"
+    );
+
+    // A replay of the same failure writes no second retry.
+    let replay = Task::complete_with_retry(
+        &db,
+        &task_id,
+        &TaskStatus::Failed,
+        Some(&error),
+        None,
+        Some("worker-a"),
+        &Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(replay.retry.is_none());
+    assert_eq!(
+        Task::get_retry_child(&db, &task_id, &test_data.env_id)
+            .await
+            .unwrap()
+            .map(|task| task.task_id),
+        Some(retry_id)
+    );
+
+    drop_schema(&db, &schema).await;
+}
+
+/// The zombie reaper's write applies only to a row that is still stale by
+/// the database clock and still owned by the worker the reaper saw.
+#[tokio::test]
+async fn postgres_zombie_reap_is_fenced_and_commits_its_retry() {
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let test_data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+    let error = serde_json::json!({"msg": "worker crash"});
+
+    let task_id = insert_claimed_with_retry(&db, &test_data, "::test/reaped", "worker-a").await;
+    assert_eq!(Task::heartbeat(&db, "worker-a").await.unwrap(), 1);
+    assert!(
+        Task::find_zombie_tasks(&db, 60).await.unwrap().is_empty(),
+        "a heartbeat stamped by the database clock is fresh"
+    );
+
+    // A live task: the reaper's write does not apply and inserts no retry.
+    let live = Task::fail_stale_running_with_retry(
+        &db,
+        &task_id,
+        Some("worker-a"),
+        60,
+        Some(&error),
+        &Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(!live.applied && live.retry.is_none());
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().task_status_id,
+        TaskStatus::Running.as_id()
+    );
+
+    let DatabasePool::Postgres(pool) = &db else {
+        panic!("postgres_db returns a Postgres pool");
+    };
+    sqlx::query(
+        "UPDATE hot.task SET last_heartbeat_at = NOW() - interval '10 minutes' WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("the heartbeat should back-date");
+    let zombies = Task::find_zombie_tasks(&db, 60).await.unwrap();
+    assert_eq!(
+        zombies.iter().map(|task| task.task_id).collect::<Vec<_>>(),
+        vec![task_id]
+    );
+
+    // Stale, but another worker owns it now: still not the reaper's.
+    let other_owner = Task::fail_stale_running_with_retry(
+        &db,
+        &task_id,
+        Some("worker-b"),
+        60,
+        Some(&error),
+        &Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(!other_owner.applied && other_owner.retry.is_none());
+
+    let retry_id = Uuid::now_v7();
+    let reaped = Task::fail_stale_running_with_retry(
+        &db,
+        &task_id,
+        Some("worker-a"),
+        60,
+        Some(&error),
+        &retry_id,
+    )
+    .await
+    .unwrap();
+    assert!(reaped.applied);
+    assert_eq!(
+        reaped.retry.map(|retry| retry.retry_task_id),
+        Some(retry_id)
+    );
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().task_status_id,
+        TaskStatus::Failed.as_id()
+    );
+    assert_eq!(
+        Task::get(&db, &retry_id).await.unwrap().parent_task_id,
+        Some(task_id)
+    );
+
+    drop_schema(&db, &schema).await;
+}
+
+/// One delivery sends an email; a stale claim and an expired email settle.
+#[tokio::test]
+async fn postgres_email_send_claim_and_sweep() {
+    use hot::db::email_queue::{
+        EmailQueueEntry, EmailQueueStatus, RECOVERY_GRACE, RECOVERY_WINDOW, SENDING_STALE_AFTER,
+    };
+
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
+    let Some((base_db, schema)) = postgres_db().await else {
+        return;
+    };
+    let db = base_db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Email,
+        org_id: None,
+    });
+    let enqueue = |subject: &'static str| {
+        let db = db.clone();
+        async move {
+            EmailQueueEntry::enqueue(
+                &db,
+                "to@example.com",
+                subject,
+                None,
+                Some("body"),
+                "from@example.com",
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let status = |id: Uuid| {
+        let db = db.clone();
+        async move {
+            EmailQueueEntry::get_by_id(&db, &id)
+                .await
+                .unwrap()
+                .status_id
+        }
+    };
+
+    // Only one delivery wins the send claim.
+    let email = enqueue("claimed once").await;
+    assert!(EmailQueueEntry::claim_send(&db, &email).await.unwrap());
+    assert!(!EmailQueueEntry::claim_send(&db, &email).await.unwrap());
+    assert_eq!(status(email).await, EmailQueueStatus::Sending as i16);
+
+    // A passing failure hands it back for the retry delivery to claim.
+    EmailQueueEntry::release_send(&db, &email, "relay busy")
+        .await
+        .unwrap();
+    assert_eq!(status(email).await, EmailQueueStatus::Pending as i16);
+    assert!(EmailQueueEntry::claim_send(&db, &email).await.unwrap());
+    EmailQueueEntry::mark_sent(&db, &email).await.unwrap();
+    assert_eq!(status(email).await, EmailQueueStatus::Sent as i16);
+
+    // A dead-lettered message fails the email its own delivery left in
+    // sending, and never a pending one: that is the sweep's.
+    let unsent = enqueue("dead lettered").await;
+    assert!(
+        !EmailQueueEntry::fail_sending(&db, &unsent, "dead lettered")
+            .await
+            .unwrap()
+    );
+    assert_eq!(status(unsent).await, EmailQueueStatus::Pending as i16);
+    assert!(EmailQueueEntry::claim_send(&db, &unsent).await.unwrap());
+    assert!(
+        EmailQueueEntry::fail_sending(&db, &unsent, "dead lettered")
+            .await
+            .unwrap()
+    );
+    assert_eq!(status(unsent).await, EmailQueueStatus::Failed as i16);
+
+    // The sweep: a fresh pending email is not overdue, one past the grace is
+    // claimed once, and an undone claim is due again at once.
+    let pending = enqueue("overdue").await;
+    let now = chrono::Utc::now();
+    assert!(
+        EmailQueueEntry::claim_overdue(&db, now, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let later = now + RECOVERY_GRACE + chrono::Duration::seconds(5);
+    let claimed = EmailQueueEntry::claim_overdue(&db, later, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed
+            .iter()
+            .map(|entry| entry.email_queue_id)
+            .collect::<Vec<_>>(),
+        vec![pending]
+    );
+    assert!(
+        EmailQueueEntry::claim_overdue(&db, later, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    EmailQueueEntry::unclaim_overdue(&db, &pending)
+        .await
+        .unwrap();
+    assert_eq!(
+        EmailQueueEntry::claim_overdue(&db, later, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // An email left in `sending` goes back to pending; past the recovery
+    // window everything unsent is failed.
+    let stuck = enqueue("stuck sending").await;
+    assert!(EmailQueueEntry::claim_send(&db, &stuck).await.unwrap());
+    let settled = EmailQueueEntry::settle_stale(
+        &db,
+        chrono::Utc::now() + SENDING_STALE_AFTER + chrono::Duration::minutes(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!((settled.released, settled.failed), (1, 0));
+    assert_eq!(status(stuck).await, EmailQueueStatus::Pending as i16);
+
+    // Its next send fails for a reason that may pass: pending again, and the
+    // expiry below keeps that reason.
+    assert!(EmailQueueEntry::claim_send(&db, &stuck).await.unwrap());
+    EmailQueueEntry::release_send(&db, &stuck, "relay down")
+        .await
+        .unwrap();
+
+    let expired = EmailQueueEntry::settle_stale(
+        &db,
+        chrono::Utc::now() + RECOVERY_WINDOW + chrono::Duration::hours(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!((expired.released, expired.failed), (0, 2));
+    assert_eq!(status(stuck).await, EmailQueueStatus::Failed as i16);
+    assert_eq!(status(pending).await, EmailQueueStatus::Failed as i16);
+    let reason = |id: Uuid| {
+        let db = db.clone();
+        async move {
+            EmailQueueEntry::get_by_id(&db, &id)
+                .await
+                .unwrap()
+                .error_message
+                .unwrap()
+        }
+    };
+    let stuck_reason = reason(stuck).await;
+    assert!(stuck_reason.starts_with("Not sent within the recovery window"));
+    assert!(stuck_reason.ends_with("; last send error: relay down"));
+    assert!(!reason(pending).await.contains("last send error"));
+    assert_eq!(status(email).await, EmailQueueStatus::Sent as i16);
+
+    drop_schema(&base_db, &schema).await;
+}
+
 #[tokio::test]
 async fn redis_success_path_rejects_an_ack_lost_before_commit() {
     let Some(client) = redis_client_if_available().await else {

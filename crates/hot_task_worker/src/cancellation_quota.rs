@@ -86,6 +86,18 @@ pub(super) async fn settle(
     termination: Termination,
     measured: Option<(i64, i64)>,
 ) -> bool {
+    settle_owned_by(db, task_id, Some(worker_id), termination, measured).await
+}
+
+/// [`settle`] for a row owned by `owner`, or by no worker when `None`: a row
+/// that `Task::release_worker` let go before the cancel reached it.
+async fn settle_owned_by(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    owner: Option<&str>,
+    termination: Termination,
+    measured: Option<(i64, i64)>,
+) -> bool {
     if termination == Termination::Unconfirmed {
         tracing::warn!(%task_id, "Cancelled execution termination is unconfirmed; retaining account quota reservation");
         return false;
@@ -117,16 +129,21 @@ pub(super) async fn settle(
             Termination::Confirmed | Termination::AlreadyEnded
         ),
     });
-    match Task::complete(
-        db,
-        task_id,
-        &TaskStatus::Cancelled,
-        Some(&result),
-        Some(duration_ms),
-        Some(worker_id),
-    )
-    .await
-    {
+    let settled = match owner {
+        Some(worker_id) => {
+            Task::complete(
+                db,
+                task_id,
+                &TaskStatus::Cancelled,
+                Some(&result),
+                Some(duration_ms),
+                Some(worker_id),
+            )
+            .await
+        }
+        None => Task::settle_ownerless_cancelled(db, task_id, &result, duration_ms).await,
+    };
+    match settled {
         Ok(settled) => settled,
         Err(error) => {
             tracing::warn!(%task_id, %error, "Failed to settle cancelled execution; quota reservation retained");
@@ -164,13 +181,13 @@ pub(super) async fn reap(
         if coordinator.is_task_active(&task.task_id) {
             continue;
         }
-        let Some(owner) = task.worker_id.as_deref() else {
-            continue;
-        };
+        // `None` after `Task::release_worker`: no worker claims the row, so
+        // only a local container or its deadline can settle it.
+        let owner = task.worker_id.as_deref();
         let container_id = local.get(&task.task_id).cloned().or_else(|| {
             // Only this exact worker generation may trust a saved runtime ID
             // that has already disappeared from its local container listing.
-            (owner == current_worker)
+            (owner == Some(current_worker))
                 .then(|| task.container_id.clone())
                 .flatten()
         });
@@ -188,7 +205,7 @@ pub(super) async fn reap(
             // This generation ran the task, never recorded a container for
             // it, and has none labelled for it: setup failed before one
             // started, so nothing is running.
-            None if owner == current_worker && task.container_id.is_none() => {
+            None if owner == Some(current_worker) && task.container_id.is_none() => {
                 Some(RuntimeState::Stopped)
             }
             // Another worker generation ran it: a lost host, or a restart.
@@ -210,11 +227,11 @@ pub(super) async fn reap(
                 {
                     continue;
                 }
-                tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
+                tracing::warn!(task_id=%task.task_id, worker_id=?owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
                 continue;
             }
             Termination::PastDeadline => {
-                tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Releasing a cancelled execution's quota after its deadline without termination evidence");
+                tracing::warn!(task_id=%task.task_id, worker_id=?owner, "Releasing a cancelled execution's quota after its deadline without termination evidence");
             }
             Termination::Unconfirmed | Termination::Confirmed | Termination::AlreadyEnded => {}
         }
@@ -225,7 +242,7 @@ pub(super) async fn reap(
             org_id: env.org_id,
             env_id: task.env_id,
         });
-        if settle(&exact, &task.task_id, owner, termination, None).await {
+        if settle_owned_by(&exact, &task.task_id, owner, termination, None).await {
             tracing::info!(task_id=%task.task_id, "Recovered cancelled execution; charged reserved maximum and released concurrency");
         }
     }
@@ -430,6 +447,56 @@ mod tests {
             Task::quota_reservation(&db, &id).await.unwrap().duration_ms,
             0
         );
+    }
+    #[tokio::test]
+    async fn a_released_then_cancelled_row_is_settled_without_an_owner() {
+        // An owned row is out of the ownerless path's reach.
+        let (db, owned) = claimed_cancelled().await;
+        assert!(!settle_owned_by(&db, &owned, None, Termination::PastDeadline, None).await);
+
+        // `release_worker` clears the owner of a running row; the cancel
+        // that follows keeps the reservation.
+        let (id, env) = (Uuid::now_v7(), Uuid::now_v7());
+        Task::insert(
+            &db,
+            &id,
+            &env,
+            &Uuid::now_v7(),
+            &Uuid::now_v7(),
+            None,
+            "box",
+            None,
+            None,
+            "container",
+            60000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::claim_for_worker(&db, &id, "owner").await.unwrap());
+        assert!(Task::release_worker(&db, &id, "owner").await.unwrap());
+        assert!(Task::cancel(&db, &id, &env).await.unwrap());
+        let listed = Task::unsettled_cancelled_containers(&db).await.unwrap();
+        let row = listed.iter().find(|task| task.task_id == id).unwrap();
+        assert_eq!(row.worker_id, None);
+        let reserved = Task::quota_reservation(&db, &id).await.unwrap();
+        assert!(reserved.duration_ms > 0);
+
+        // No worker's fence matches it, and no evidence still means no release.
+        assert!(!settle(&db, &id, "owner", Termination::PastDeadline, None).await);
+        assert!(!settle_owned_by(&db, &id, None, Termination::Unconfirmed, None).await);
+        assert!(settle_owned_by(&db, &id, None, Termination::PastDeadline, None).await);
+        let task = Task::get(&db, &id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Cancelled.as_id());
+        assert_eq!(task.duration_ms, Some(reserved.duration_ms));
+        let result = task.result.unwrap();
+        assert_eq!(result["compute-units"], reserved.compute_units);
+        assert_eq!(result["termination-confirmed"], false);
+        assert_eq!(
+            Task::quota_reservation(&db, &id).await.unwrap().duration_ms,
+            0
+        );
+        assert!(!settle_owned_by(&db, &id, None, Termination::PastDeadline, None).await);
     }
     /// Run on a Docker host: cargo test -p hot_task_worker docker_cancellation_requires_exit_before_releasing_quota -- --ignored
     #[tokio::test]

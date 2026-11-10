@@ -34,6 +34,12 @@ locals {
   # A name too long for the whole tag in an account ID keeps a hash of
   # itself, so installations whose names share a prefix never share one.
   account_prefix = length(local.tag) <= 26 ? local.tag : "${substr(local.tag, 0, 20)}-${substr(sha1(local.config.name), 0, 5)}"
+  # A rolling update grows every regional group (each role but the scheduler)
+  # by this many hosts before it removes any, on top of the group's maximum.
+  # Each extra host may open a full PostgreSQL pool, so the database accepts
+  # those beside the connections the contract budgets for the maximums.
+  rollout_surge       = 3
+  rollout_connections = (length(local.roles) - 1) * local.rollout_surge * module.contract.roles.db_pool
   host_config = { for role in keys(local.roles) : role => merge(local.config, {
     roles                = [role]
     migrations           = role == "scheduler"
@@ -318,7 +324,7 @@ resource "google_compute_region_instance_group_manager" "role" {
   update_policy {
     type                  = "PROACTIVE"
     minimal_action        = "REPLACE"
-    max_surge_fixed       = 3
+    max_surge_fixed       = local.rollout_surge
     max_unavailable_fixed = 0
     # No instance_redistribution_type: each of these groups has an autoscaler,
     # and Google allows that setting only on groups without one.

@@ -561,8 +561,18 @@ pub enum EmailError {
     #[error("Email sending is not configured")]
     NotConfigured,
 
+    /// The send failed in a way a later attempt may not: the caller retries.
     #[error("Failed to send email: {0}")]
     SendFailed(String),
+
+    /// This message or its recipient was refused for good (an address that
+    /// can't be mailed, content or a size the relay won't take): sending it
+    /// again gives the same answer. A refusal of the session or the sender
+    /// (credentials, TLS, relaying, an unverified sender) is `SendFailed`,
+    /// however final the provider's reply reads: it says nothing about this
+    /// message, and a fixed configuration sends it.
+    #[error("Email rejected: {0}")]
+    Rejected(String),
 }
 
 #[cfg(test)]

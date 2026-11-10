@@ -77,6 +77,26 @@ impl Task {
         }
     }
 
+    /// Settle a cancelled row that no worker owns: `release_worker` cleared
+    /// its `worker_id` before the cancel landed, so the owner fence of
+    /// `Task::complete` can never match it. Applies only while the row is
+    /// still cancelled, unsettled and ownerless. Returns true when settled.
+    pub async fn settle_ownerless_cancelled(
+        db: &DatabasePool,
+        task_id: &Uuid,
+        result: &Value,
+        duration_ms: i64,
+    ) -> Result<bool, TaskError> {
+        let now = Utc::now();
+        let rows = match db {
+            DatabasePool::Postgres(pool) => sqlx::query("UPDATE task SET stop_time=$2,duration_ms=$3,result=$4,reserved_compute_units=0,reserved_duration_ms=0 WHERE task_id=$1 AND task_status_id=5 AND reserved_duration_ms>0 AND worker_id IS NULL")
+                .bind(task_id).bind(now).bind(duration_ms).bind(result).execute(pool).await?.rows_affected(),
+            DatabasePool::Sqlite(pool) => sqlx::query("UPDATE task SET stop_time=?2,duration_ms=?3,result=?4,reserved_compute_units=0,reserved_duration_ms=0 WHERE task_id=?1 AND task_status_id=5 AND reserved_duration_ms>0 AND worker_id IS NULL")
+                .bind(task_id).bind(now).bind(duration_ms).bind(result.to_string()).execute(pool).await?.rows_affected(),
+        };
+        Ok(rows == 1)
+    }
+
     /// Claim and reserve account capacity in one root-locked transaction.
     /// A quota error leaves the task queued for a later delivery. A false result
     /// means another claim or terminal transition already won.
@@ -245,7 +265,7 @@ impl Task {
                 }
                 .apply_to_connection(&mut tx)
                 .await?;
-                let changed = sqlx::query("UPDATE task SET task_status_id=2,start_time=$2,worker_id=$3,last_heartbeat_at=$2,reserved_compute_units=$4,reserved_duration_ms=$5 WHERE task_id=$1 AND task_status_id=1")
+                let changed = sqlx::query("UPDATE task SET task_status_id=2,start_time=$2,worker_id=$3,last_heartbeat_at=clock_timestamp(),reserved_compute_units=$4,reserved_duration_ms=$5 WHERE task_id=$1 AND task_status_id=1")
                     .bind(task_id).bind(now).bind(worker_id).bind(reserve.compute_units).bind(reserve.duration_ms).execute(&mut *tx).await?.rows_affected();
                 if changed == 0 {
                     tx.rollback().await?;

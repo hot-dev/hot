@@ -696,13 +696,16 @@ impl AppEmailSender for AppEmailEnqueuer {
                 },
             };
             let message: hot::data::msg::Message = msg.into();
+            // One attempt: request handlers (signup, password reset, invites)
+            // await this, and the row written above is already durable.
             if let Err(e) = hot::queue::Queue::enqueue(queue.as_ref(), message).await {
                 tracing::error!(
                     "Failed to enqueue email to hot:email queue (id: {}): {}",
                     email_queue_id,
                     e
                 );
-                // Email is still in DB as pending - worker recovery will pick it up
+                // The email stays pending in the database, and the scheduler's
+                // sweep enqueues it again (`recover_pending_emails`).
             } else {
                 tracing::debug!(
                     "Enqueued app email to {} (queue_id: {})",

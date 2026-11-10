@@ -493,6 +493,7 @@ fn read_blob_result(vm: &VirtualMachine, result: Val, env_id: Uuid) -> Result<Va
 ///
 /// Publishes a message to the task's Redis stream channel (`hot:task:{task_id}`).
 /// The task worker forwards it to the task's receive channel.
+/// If the task failed and was retried, the message goes to the newest retry.
 ///
 /// # Arguments
 /// * `task-id` - Task ID string
@@ -545,13 +546,14 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let sent = tokio::runtime::Handle::current().block_on(async {
         // Only a task in the caller's own environment may receive the message.
-        match tokio::time::timeout(
+        let task_id = match tokio::time::timeout(
             TASK_NATIVE_IO_TIMEOUT,
             crate::db::Task::get_in_env(&db, &task_id, &env_id),
         )
         .await
         {
-            Ok(Ok(_)) => {}
+            // A retried task runs under a new id: message the newest attempt.
+            Ok(Ok(task)) => newest_retry_attempt(&db, task, env_id).await.task_id,
             Ok(Err(crate::db::TaskError::NotFound)) => {
                 return Err(err_val(format!(
                     "::hot::task/send: task not found: {}",
@@ -570,7 +572,7 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                     TASK_NATIVE_IO_TIMEOUT.as_secs()
                 )));
             }
-        }
+        };
 
         let event = crate::stream::StreamEvent::TaskMessage {
             task_id: task_id.to_string(),
@@ -666,6 +668,7 @@ pub fn receive(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 /// Sets the task status to 'cancelled' if it is still queued or running.
 /// For in-flight tasks, also publishes a cancellation message via pub/sub
 /// so the task can cooperatively exit via `::hot::task/receive`.
+/// If the task failed and was retried, the newest retry is the one cancelled.
 ///
 /// # Arguments
 /// * `task-id` - Task ID string
@@ -706,25 +709,9 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let publisher = vm.get_stream_publisher();
 
     let cancelled = tokio::runtime::Handle::current().block_on(async {
-        let was_cancelled = if let Some(db) = &db {
-            match tokio::time::timeout(
-                TASK_NATIVE_IO_TIMEOUT,
-                crate::db::Task::cancel(db, &task_id, &env_id),
-            )
-            .await
-            {
-                Ok(Ok(c)) => c,
-                Ok(Err(e)) => {
-                    tracing::error!(task_id = %task_id, "::hot::task/cancel: DB error: {}", e);
-                    return Err(err_val(format!("::hot::task/cancel: DB error: {}", e)));
-                }
-                Err(_) => {
-                    return Err(err_val(format!(
-                        "::hot::task/cancel: database write timed out after {}s",
-                        TASK_NATIVE_IO_TIMEOUT.as_secs()
-                    )));
-                }
-            }
+        // A retried task runs under a new id: cancel the newest attempt.
+        let (task_id, was_cancelled) = if let Some(db) = &db {
+            cancel_newest_attempt(db, task_id, env_id).await?
         } else {
             return Err(err_val(
                 "::hot::task/cancel: no database available".to_string(),
@@ -735,7 +722,7 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             && let Some(pub_sub) = &publisher
         {
             let event = crate::stream::StreamEvent::TaskMessage {
-                task_id: task_id_str.clone(),
+                task_id: task_id.to_string(),
                 env_id: Some(env_id),
                 payload: serde_json::json!({"$cancel": true}),
             };
@@ -765,9 +752,12 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
 /// Wait for a task to complete and return its full result including CUS and timing.
 ///
-/// Polls Task::get with exponential backoff (100ms -> 200ms -> ... up to 5s).
+/// Polls Task::get every 5% of the time waited so far, no less than 100ms
+/// and no more than 5s apart (see `await_poll_delay_ms`).
 /// Stops when the task reaches a terminal status (completed, failed, timed_out, cancelled).
-/// Returns a TaskResult with all execution details.
+/// A failed or timed-out attempt that was retried is followed to its retry,
+/// so the result is the outcome of the last attempt in the lineage.
+/// Returns a TaskResult with all execution details; `id` stays the awaited id.
 ///
 /// # Arguments
 /// * `task-id` - Task ID string (UUID)
@@ -892,14 +882,31 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let deadline = tokio::time::Instant::now() + wait_budget;
 
         let db = &db;
-        await_task_poll_loop(
+        // A retry is a fresh attempt with its own retry delay and timeout, so
+        // following one extends the wait, still inside the parent's deadline.
+        let retry_deadline = |retry: &crate::db::Task| {
+            let delay = retry
+                .next_retry_at
+                .and_then(|at| (at - chrono::Utc::now()).to_std().ok())
+                .unwrap_or_default();
+            let requested = delay
+                + std::time::Duration::from_millis(
+                    retry.timeout_ms.clamp(1000, MAX_TIMEOUT_MS) as u64
+                );
+            let budget = match execution_context.as_ref() {
+                Some(ctx) => ctx.cap_wait_to_deadline(requested, PARENT_COMPLETION_RESERVE)?,
+                None => requested,
+            };
+            Some(tokio::time::Instant::now() + budget)
+        };
+        await_task_lineage(
             task,
             deadline,
             &is_cancelled,
-            move |read_timeout| async move {
+            move |id: Uuid, read_timeout| async move {
                 match tokio::time::timeout(
                     read_timeout,
-                    crate::db::Task::get_in_env(db, &task_id, &env_id),
+                    crate::db::Task::get_in_env(db, &id, &env_id),
                 )
                 .await
                 {
@@ -909,6 +916,8 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                     Err(_) => Err(PollFailure::TimedOut(read_timeout)),
                 }
             },
+            move |parent: Uuid, read_timeout| lookup_retry_child(db, parent, env_id, read_timeout),
+            &retry_deadline,
         )
         .await
     });
@@ -1054,7 +1063,7 @@ fn backoff_sleep_slice_ms(
 
 /// Sleep out one backoff delay in short slices, capping every slice by the
 /// remaining time to `deadline` so the loop wakes AT the deadline instead of
-/// overshooting it — a full backoff sleep (up to MAX_DELAY_MS) landing past
+/// overshooting it — a full backoff sleep (up to AWAIT_POLL_MAX_DELAY_MS) landing past
 /// the deadline would consume the PARENT_COMPLETION_RESERVE that
 /// `cap_wait_to_deadline` set aside for the parent run's finalization.
 ///
@@ -1109,8 +1118,33 @@ impl std::fmt::Display for PollFailure {
     }
 }
 
+const AWAIT_POLL_MIN_DELAY_MS: u64 = 100;
+const AWAIT_POLL_MAX_DELAY_MS: u64 = 5_000;
+/// The pause before the next poll is this fraction of the wait so far.
+const AWAIT_POLL_ELAPSED_DIVISOR: u64 = 20;
+
+/// How long `::hot::task/await` pauses before its next status poll, having
+/// waited `elapsed` for the attempt it is polling.
+///
+/// Polling is the only completion signal the await has, and each poll reads
+/// the task row. A fixed short interval would read it several times a second
+/// for the hours an await can last, so the pause grows with the wait: 5% of
+/// it, within 100ms to 5s. A task that finishes is then seen no later than 5%
+/// of its own run time after it does (100ms for a 2s task, 500ms for a 10s
+/// one) and never more than 5s late.
+fn await_poll_delay_ms(elapsed: std::time::Duration) -> u64 {
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    (elapsed_ms / AWAIT_POLL_ELAPSED_DIVISOR)
+        .clamp(AWAIT_POLL_MIN_DELAY_MS, AWAIT_POLL_MAX_DELAY_MS)
+}
+
 /// Drive `poll` until `task` reaches a terminal status, the await `deadline`
 /// passes, or `is_cancelled` observes a cancellation.
+///
+/// Polls are spaced by [`await_poll_delay_ms`], counted from this call.
+/// `await_task_lineage` calls it again for each retry it follows, so the
+/// spacing starts over at 100ms there: a retry is a fresh attempt and a
+/// fresh wait, however long the attempt before it ran.
 ///
 /// A timed-out or transport-errored poll is a MISSED poll, not a fatal error:
 /// while the await deadline still has budget the task may yet complete, so
@@ -1131,13 +1165,11 @@ where
     Fut: std::future::Future<Output = Result<crate::db::Task, PollFailure>>,
 {
     const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
-    const INITIAL_DELAY_MS: u64 = 100;
-    const MAX_DELAY_MS: u64 = 5000;
-    // Cap each sleep slice so cancellation is observed within ~250ms even
-    // while the backoff delay grows toward MAX_DELAY_MS.
+    // Cap each sleep slice so cancellation is observed within ~250ms
+    // whatever the poll delay is.
     const CANCEL_POLL_SLICE_MS: u64 = 250;
 
-    let mut delay_ms = INITIAL_DELAY_MS;
+    let started = tokio::time::Instant::now();
     let mut last_poll_failure: Option<String> = None;
 
     while !TERMINAL_STATUSES.contains(&task.status.as_str()) {
@@ -1158,12 +1190,12 @@ where
             });
         }
 
+        let delay_ms = await_poll_delay_ms(started.elapsed());
         if sleep_backoff_capped(delay_ms, CANCEL_POLL_SLICE_MS, deadline, is_cancelled).await {
             return Err(err_val(
                 "::hot::task/await: cancelled while waiting for task".to_string(),
             ));
         }
-        delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
 
         let remaining_to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
         let read_timeout = TASK_NATIVE_IO_TIMEOUT.min(remaining_to_deadline);
@@ -1190,6 +1222,249 @@ where
     }
 
     Ok(task)
+}
+
+// ---------------------------------------------------------------------------
+// Retry lineage — a retry is a new task row under a new id
+// ---------------------------------------------------------------------------
+
+/// How long after a failure with unspent `retry` attempts a retry row that
+/// is not there yet is still looked for.
+///
+/// A worker of this version commits the retry in the transaction that fails
+/// the attempt (`Task::complete_with_retry`,
+/// `Task::fail_stale_running_with_retry`), as a deploy interruption always
+/// has, so for its rows one lookup is the whole answer and nothing waits.
+/// The wait exists only for a rolling deploy: a worker from before that
+/// change inserts the retry after its failure is already visible, and
+/// nothing on the row says which kind of worker wrote it. Remove it once no
+/// such worker can still be running.
+const LEGACY_RETRY_CHILD_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a retry lookup that fails is repeated for a row that points to a
+/// retry.
+const RETRY_LOOKUP_ERROR_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+const RETRY_CHILD_RECHECK_MS: u64 = 100;
+
+/// Only a failed or timed-out attempt is ever retried. `completed` and
+/// `cancelled` are final: lineage is never followed from them.
+fn is_retryable_terminal(status: &str) -> bool {
+    matches!(status, "failed" | "timed_out")
+}
+
+/// Whether `task`'s own row points to a retry: a deploy/shutdown interruption
+/// marks the result `infra_interrupted`, and a `retry` policy leaves attempts
+/// unspent. Either way the retry was committed with the failure, except by a
+/// worker older than [`LEGACY_RETRY_CHILD_GRACE`] describes.
+fn retry_expected(task: &crate::db::Task) -> bool {
+    let infra_interrupted = task
+        .result
+        .as_ref()
+        .and_then(|r| r.get("$val"))
+        .and_then(|v| v.get("infra_interrupted"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    infra_interrupted || retry_attempts_unspent(task)
+}
+
+fn retry_attempts_unspent(task: &crate::db::Task) -> bool {
+    let retry = crate::env::retry::RetryConfig::from_meta(task.options.as_ref());
+    retry.is_enabled() && task.retry_attempt < retry.max_retries
+}
+
+/// What is left of [`LEGACY_RETRY_CHILD_GRACE`] for `parent`, counted from
+/// its failure rather than from this lookup. Zero for a failure no `retry`
+/// policy could follow.
+fn legacy_retry_wait(parent: &crate::db::Task) -> std::time::Duration {
+    if !retry_attempts_unspent(parent) {
+        return std::time::Duration::ZERO;
+    }
+    let since_failure = parent
+        .stop_time
+        .and_then(|at| (chrono::Utc::now() - at).to_std().ok())
+        .unwrap_or_default();
+    LEGACY_RETRY_CHILD_GRACE.saturating_sub(since_failure)
+}
+
+async fn lookup_retry_child(
+    db: &crate::db::DatabasePool,
+    parent: Uuid,
+    env_id: Uuid,
+    read_timeout: std::time::Duration,
+) -> Result<Option<crate::db::Task>, PollFailure> {
+    match tokio::time::timeout(
+        read_timeout,
+        crate::db::Task::get_retry_child(db, &parent, &env_id),
+    )
+    .await
+    {
+        Ok(Ok(child)) => Ok(child),
+        Ok(Err(e)) => Err(PollFailure::Transport(e.to_string())),
+        Err(_) => Err(PollFailure::TimedOut(read_timeout)),
+    }
+}
+
+/// Find the retry of a failed or timed-out `parent`.
+///
+/// One lookup settles it: a retry is committed with the failure it follows.
+/// The lookup is repeated, never past `deadline`, only when it fails for a
+/// row that points to a retry ([`retry_expected`], for at most
+/// [`RETRY_LOOKUP_ERROR_WINDOW`]), or finds nothing for a failure an older
+/// worker may still be about to retry ([`legacy_retry_wait`]). `None` means
+/// the parent's failure stands.
+async fn find_retry_child<C, Fut>(
+    parent: &crate::db::Task,
+    deadline: tokio::time::Instant,
+    is_cancelled: &dyn Fn() -> bool,
+    lookup: &mut C,
+) -> Option<crate::db::Task>
+where
+    C: FnMut(Uuid, std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<crate::db::Task>, PollFailure>>,
+{
+    let started = tokio::time::Instant::now();
+    let error_window = if retry_expected(parent) {
+        RETRY_LOOKUP_ERROR_WINDOW
+    } else {
+        std::time::Duration::ZERO
+    };
+    let give_up_on_errors = (started + error_window).min(deadline);
+    let give_up_on_legacy = (started + legacy_retry_wait(parent)).min(deadline);
+    loop {
+        let to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if to_deadline.is_zero() || is_cancelled() {
+            return None;
+        }
+        let give_up = match lookup(parent.task_id, TASK_NATIVE_IO_TIMEOUT.min(to_deadline)).await {
+            Ok(Some(child)) => return Some(child),
+            Ok(None) => give_up_on_legacy,
+            Err(failure) => {
+                tracing::warn!(
+                    task_id = %parent.task_id,
+                    "retry lookup failed ({}); the task's own outcome stands unless a retry is found",
+                    failure
+                );
+                give_up_on_errors
+            }
+        };
+        let to_give_up = give_up.saturating_duration_since(tokio::time::Instant::now());
+        if to_give_up.is_zero() {
+            return None;
+        }
+        let pause = std::time::Duration::from_millis(RETRY_CHILD_RECHECK_MS).min(to_give_up);
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// `await_task_poll_loop`, continued down the retry lineage: when the awaited
+/// attempt fails or times out and was retried, the wait moves to the retry,
+/// and so on, returning the last attempt's row. `retry_deadline` gives the
+/// wait a retry is allowed; the deadline only ever moves later.
+async fn await_task_lineage<P, PFut, C, CFut>(
+    mut task: crate::db::Task,
+    mut deadline: tokio::time::Instant,
+    is_cancelled: &dyn Fn() -> bool,
+    mut poll: P,
+    mut retry_child: C,
+    retry_deadline: &dyn Fn(&crate::db::Task) -> Option<tokio::time::Instant>,
+) -> Result<crate::db::Task, Val>
+where
+    P: FnMut(Uuid, std::time::Duration) -> PFut,
+    PFut: std::future::Future<Output = Result<crate::db::Task, PollFailure>>,
+    C: FnMut(Uuid, std::time::Duration) -> CFut,
+    CFut: std::future::Future<Output = Result<Option<crate::db::Task>, PollFailure>>,
+{
+    loop {
+        let current = task.task_id;
+        task = await_task_poll_loop(task, deadline, is_cancelled, |read_timeout| {
+            poll(current, read_timeout)
+        })
+        .await?;
+        if !is_retryable_terminal(&task.status) {
+            return Ok(task);
+        }
+        let Some(retry) = find_retry_child(&task, deadline, is_cancelled, &mut retry_child).await
+        else {
+            return Ok(task);
+        };
+        tracing::debug!(
+            task_id = %task.task_id,
+            retry_task_id = %retry.task_id,
+            "::hot::task/await: attempt {} was retried; following the retry",
+            task.status
+        );
+        if let Some(extended) = retry_deadline(&retry) {
+            deadline = deadline.max(extended);
+        }
+        task = retry;
+    }
+}
+
+/// The newest attempt in `task`'s retry lineage: what a caller still holding
+/// an earlier attempt's id means by it. Stops at the first attempt that is
+/// active or final.
+async fn newest_retry_attempt(
+    db: &crate::db::DatabasePool,
+    mut task: crate::db::Task,
+    env_id: Uuid,
+) -> crate::db::Task {
+    let deadline = tokio::time::Instant::now() + TASK_NATIVE_IO_TIMEOUT;
+    let mut lookup =
+        |parent: Uuid, read_timeout| lookup_retry_child(db, parent, env_id, read_timeout);
+    while is_retryable_terminal(&task.status) {
+        match find_retry_child(&task, deadline, &|| false, &mut lookup).await {
+            Some(retry) => task = retry,
+            None => break,
+        }
+    }
+    task
+}
+
+/// Cancel the newest attempt of `task_id`'s lineage. Returns the id acted on
+/// and whether it was cancelled.
+async fn cancel_newest_attempt(
+    db: &crate::db::DatabasePool,
+    task_id: Uuid,
+    env_id: Uuid,
+) -> Result<(Uuid, bool), Val> {
+    let mut target = task_id;
+    for _ in 0..2 {
+        let mut was_active = false;
+        if let Ok(Ok(task)) = tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::get_in_env(db, &target, &env_id),
+        )
+        .await
+        {
+            let newest = newest_retry_attempt(db, task, env_id).await;
+            was_active = matches!(newest.status.as_str(), "queued" | "running");
+            target = newest.task_id;
+        }
+        let cancelled = match tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::cancel(db, &target, &env_id),
+        )
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                tracing::error!(task_id = %target, "::hot::task/cancel: DB error: {}", e);
+                return Err(err_val(format!("::hot::task/cancel: DB error: {}", e)));
+            }
+            Err(_) => {
+                return Err(err_val(format!(
+                    "::hot::task/cancel: database write timed out after {}s",
+                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                )));
+            }
+        };
+        if cancelled || !was_active {
+            return Ok((target, cancelled));
+        }
+        // The attempt went terminal between the lookup and the write. A
+        // deploy fails it and queues its retry in one transaction, so look
+        // once more for a retry to cancel.
+    }
+    Ok((target, false))
 }
 
 // ---------------------------------------------------------------------------
@@ -1806,6 +2081,506 @@ mod tests {
             std::time::Duration::from_millis(100),
             "NotFound must fail on the first poll, not retry to the deadline"
         );
+    }
+
+    #[test]
+    fn await_poll_delay_is_five_percent_of_the_wait_within_100ms_and_5s() {
+        let delay = |ms| await_poll_delay_ms(std::time::Duration::from_millis(ms));
+        assert_eq!(delay(0), 100);
+        assert_eq!(delay(2_000), 100);
+        assert_eq!(delay(2_100), 105);
+        assert_eq!(delay(10_000), 500);
+        assert_eq!(delay(100_000), 5_000);
+        assert_eq!(delay(3_600_000), 5_000, "an hour in, still every 5s");
+        assert_eq!(await_poll_delay_ms(std::time::Duration::MAX), 5_000);
+    }
+
+    /// When each poll of an attempt that finishes on poll number `polls`
+    /// lands, in milliseconds since the await started.
+    async fn poll_times_ms(polls: usize) -> Vec<u64> {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(24 * 3600);
+        let times = std::cell::RefCell::new(Vec::new());
+        let task = await_task_poll_loop(
+            poll_loop_task("running"),
+            deadline,
+            &|| false,
+            |_read_timeout: std::time::Duration| {
+                times.borrow_mut().push(start.elapsed().as_millis() as u64);
+                let done = times.borrow().len() == polls;
+                async move { Ok(poll_loop_task(if done { "completed" } else { "running" })) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(task.status, "completed");
+        times.into_inner()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_spaces_polls_by_the_time_waited() {
+        let times = poll_times_ms(400).await;
+        // Every 100ms for the first two seconds.
+        let first: Vec<u64> = (1..=21).map(|n| n * 100).collect();
+        assert_eq!(times[..21], first[..]);
+        // Then 5% of the wait so far.
+        assert_eq!(times[21..24], [2_205, 2_315, 2_430]);
+        for pair in times.windows(2) {
+            let (at, gap) = (pair[0], pair[1] - pair[0]);
+            assert_eq!(gap, (at / 20).clamp(100, 5_000), "after the poll at {at}ms");
+            // A task that finished just after a poll is seen by the next
+            // one: late by at most 5% of its run time, or 100ms.
+            assert!(gap <= 100 || gap * 20 <= at);
+        }
+        // Past 100s the polls are 5s apart, and the wait got that far.
+        let last = times.len() - 1;
+        assert!(times[last - 1] > 100_000);
+        assert_eq!(times[last] - times[last - 1], 5_000);
+        // Far fewer reads than a fixed 250ms interval over the same wait.
+        assert!((times[last] / 250) as usize > 4 * times.len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_spacing_starts_over_for_a_retry() {
+        let (parent, child) = (Uuid::now_v7(), Uuid::now_v7());
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(3600);
+        // The first attempt fails after a minute; its retry runs for 300ms.
+        let failed_at = start + std::time::Duration::from_secs(60);
+        let child_polls = std::cell::RefCell::new(Vec::new());
+        let task = await_task_lineage(
+            lineage_task(parent, "running"),
+            deadline,
+            &|| false,
+            |id: Uuid, _read_timeout: std::time::Duration| {
+                let now = tokio::time::Instant::now();
+                let row = if id == parent {
+                    let status = if now >= failed_at {
+                        "failed"
+                    } else {
+                        "running"
+                    };
+                    infra_interrupted(lineage_task(parent, status))
+                } else {
+                    child_polls.borrow_mut().push(now);
+                    let done = child_polls.borrow().len() == 3;
+                    lineage_task(child, if done { "completed" } else { "running" })
+                };
+                async move { Ok(row) }
+            },
+            |_parent: Uuid, _read_timeout: std::time::Duration| async move {
+                Ok(Some(lineage_task(child, "queued")))
+            },
+            &|_retry| None,
+        )
+        .await
+        .unwrap();
+        assert_eq!((task.task_id, task.status.as_str()), (child, "completed"));
+        let child_polls = child_polls.into_inner();
+        let followed_at = child_polls[0] - std::time::Duration::from_millis(100);
+        assert!(
+            followed_at >= failed_at,
+            "the retry is polled 100ms after it is followed, not seconds"
+        );
+        assert!(followed_at - failed_at <= std::time::Duration::from_secs(3));
+        let gaps: Vec<_> = child_polls.windows(2).map(|p| p[1] - p[0]).collect();
+        assert_eq!(gaps, [std::time::Duration::from_millis(100); 2]);
+    }
+
+    // -----------------------------------------------------------------------
+    // task/await, cancel and send follow the retry lineage
+    // -----------------------------------------------------------------------
+
+    fn lineage_task(task_id: Uuid, status: &str) -> crate::db::Task {
+        crate::db::Task {
+            task_id,
+            ..poll_loop_task(status)
+        }
+    }
+
+    fn infra_interrupted(mut task: crate::db::Task) -> crate::db::Task {
+        task.result = Some(serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "interrupted", "err": null, "infra_interrupted": true}
+        }));
+        task
+    }
+
+    fn with_retry_budget(mut task: crate::db::Task, attempts: i64) -> crate::db::Task {
+        task.options = Some(serde_json::json!({"retry": attempts}));
+        task
+    }
+
+    /// Await over a scripted lineage: `rows` is what each id polls as, and
+    /// `children` answers each successive retry lookup.
+    async fn await_lineage(
+        first: crate::db::Task,
+        rows: &[crate::db::Task],
+        children: &dyn Fn(Uuid, u32) -> Option<crate::db::Task>,
+    ) -> (crate::db::Task, u32) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let lookups = std::cell::Cell::new(0u32);
+        let task = await_task_lineage(
+            first,
+            deadline,
+            &|| false,
+            |id: Uuid, _read_timeout: std::time::Duration| {
+                let row = rows.iter().find(|row| row.task_id == id).map(|row| {
+                    let mut copy = lineage_task(row.task_id, &row.status);
+                    copy.result = row.result.clone();
+                    copy.options = row.options.clone();
+                    copy
+                });
+                async move { row.ok_or(PollFailure::NotFound) }
+            },
+            |parent: Uuid, _read_timeout: std::time::Duration| {
+                lookups.set(lookups.get() + 1);
+                let child = children(parent, lookups.get());
+                async move { Ok(child) }
+            },
+            &|_retry| None,
+        )
+        .await
+        .expect("the lineage ends in a terminal task");
+        (task, lookups.get())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_follows_an_interrupted_task_to_its_retrys_outcome() {
+        let (parent, child, grandchild) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let start = tokio::time::Instant::now();
+        let (task, _) = await_lineage(
+            lineage_task(parent, "running"),
+            &[
+                infra_interrupted(lineage_task(parent, "failed")),
+                lineage_task(child, "timed_out"),
+                lineage_task(grandchild, "completed"),
+            ],
+            &|id, _| match id {
+                id if id == parent => Some(lineage_task(child, "queued")),
+                id if id == child => Some(lineage_task(grandchild, "running")),
+                _ => None,
+            },
+        )
+        .await;
+        assert_eq!(
+            (task.task_id, task.status.as_str()),
+            (grandchild, "completed")
+        );
+        assert!(
+            tokio::time::Instant::now() - start < std::time::Duration::from_secs(1),
+            "a retry that is already there is followed without a grace wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_never_follows_lineage_from_completed_or_cancelled() {
+        for status in ["completed", "cancelled"] {
+            let id = Uuid::now_v7();
+            let (task, lookups) = await_lineage(
+                with_retry_budget(lineage_task(id, status), 3),
+                &[],
+                &|_, _| Some(lineage_task(Uuid::now_v7(), "running")),
+            )
+            .await;
+            assert_eq!((task.task_id, task.status.as_str()), (id, status));
+            assert_eq!(lookups, 0, "{status} is final");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_returns_a_plain_failure_at_once() {
+        // No retry policy, no interruption marker: one lookup, no waiting.
+        let id = Uuid::now_v7();
+        let start = tokio::time::Instant::now();
+        let (task, lookups) = await_lineage(lineage_task(id, "failed"), &[], &|_, _| None).await;
+        assert_eq!((task.task_id, task.status.as_str()), (id, "failed"));
+        assert_eq!(lookups, 1);
+        assert_eq!(tokio::time::Instant::now(), start);
+
+        // Retry budget spent: the last attempt's failure is final too.
+        let mut last = with_retry_budget(lineage_task(id, "failed"), 2);
+        last.retry_attempt = 2;
+        let (task, lookups) = await_lineage(last, &[], &|_, _| None).await;
+        assert_eq!(task.status, "failed");
+        assert_eq!(lookups, 1);
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_rechecks_for_a_retry_an_older_worker_inserts_late() {
+        // A worker from before the retry was committed with the failure
+        // inserts it after the failure is visible: the row's unspent attempts
+        // make the await look again.
+        let (parent, child) = (Uuid::now_v7(), Uuid::now_v7());
+        let (task, lookups) = await_lineage(
+            with_retry_budget(lineage_task(parent, "failed"), 3),
+            &[lineage_task(child, "completed")],
+            &|_, lookup| (lookup >= 3).then(|| lineage_task(child, "queued")),
+        )
+        .await;
+        assert_eq!((task.task_id, task.status.as_str()), (child, "completed"));
+        assert_eq!(lookups, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_stops_rechecking_after_the_grace_period() {
+        let id = Uuid::now_v7();
+        let start = tokio::time::Instant::now();
+        let (task, _) = await_lineage(
+            with_retry_budget(lineage_task(id, "timed_out"), 3),
+            &[],
+            &|_, _| None,
+        )
+        .await;
+        assert_eq!((task.task_id, task.status.as_str()), (id, "timed_out"));
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            LEGACY_RETRY_CHILD_GRACE
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_takes_one_lookup_once_a_failure_is_older_than_the_legacy_grace() {
+        // Even a pre-atomic worker has inserted its retry by now: one lookup
+        // is the answer, with attempts unspent and no retry row.
+        let id = Uuid::now_v7();
+        let mut failed = with_retry_budget(lineage_task(id, "failed"), 3);
+        failed.stop_time = Some(chrono::Utc::now() - chrono::Duration::seconds(3));
+        let start = tokio::time::Instant::now();
+        let (task, lookups) = await_lineage(failed, &[], &|_, _| None).await;
+        assert_eq!((task.task_id, task.status.as_str()), (id, "failed"));
+        assert_eq!(lookups, 1);
+        assert_eq!(tokio::time::Instant::now(), start);
+
+        // A deploy interruption never waited on a later insert.
+        let interrupted = infra_interrupted(lineage_task(id, "failed"));
+        let (_, lookups) = await_lineage(interrupted, &[], &|_, _| None).await;
+        assert_eq!(lookups, 1);
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn await_gives_a_retry_its_own_wait_inside_the_callers_deadline() {
+        // The first attempt used up nearly all of the original wait; the
+        // retry gets the deadline `retry_deadline` allows it.
+        let (parent, child) = (Uuid::now_v7(), Uuid::now_v7());
+        let start = tokio::time::Instant::now();
+        let task = await_task_lineage(
+            infra_interrupted(lineage_task(parent, "failed")),
+            start + std::time::Duration::from_secs(1),
+            &|| false,
+            |id: Uuid, _read_timeout: std::time::Duration| {
+                let done = tokio::time::Instant::now() - start >= std::time::Duration::from_secs(5);
+                async move { Ok(lineage_task(id, if done { "completed" } else { "running" })) }
+            },
+            |_parent: Uuid, _read_timeout: std::time::Duration| async move {
+                Ok(Some(lineage_task(child, "queued")))
+            },
+            &|_retry| Some(start + std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect("the retry finishes inside its own wait");
+        assert_eq!((task.task_id, task.status.as_str()), (child, "completed"));
+
+        // Without an extension the original deadline still ends the await.
+        let err = await_task_lineage(
+            infra_interrupted(lineage_task(parent, "failed")),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            &|| false,
+            |id: Uuid, _read_timeout: std::time::Duration| async move {
+                Ok(lineage_task(id, "running"))
+            },
+            |_parent: Uuid, _read_timeout: std::time::Duration| async move {
+                Ok(Some(lineage_task(child, "queued")))
+            },
+            &|_retry| None,
+        )
+        .await
+        .expect_err("the deadline check survives a hop");
+        assert!(format!("{err:?}").contains("timeout waiting for task to complete"));
+    }
+
+    async fn insert_lineage_root(db: &crate::db::DatabasePool) -> crate::db::Task {
+        insert_lineage_root_with(db, None).await
+    }
+
+    async fn insert_lineage_root_with(
+        db: &crate::db::DatabasePool,
+        options: Option<&serde_json::Value>,
+    ) -> crate::db::Task {
+        let data = crate::db::insert_test_data(db).await.unwrap();
+        let task_id = Uuid::now_v7();
+        crate::db::Task::insert(
+            db,
+            &task_id,
+            &data.env_id,
+            &data.stream_id,
+            &data.build_id,
+            None,
+            "::app/work",
+            None,
+            options,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::db::Task::get(db, &task_id).await.unwrap()
+    }
+
+    /// A task that fails under a `retry` policy has its retry committed with
+    /// the failure, so the await that sees `failed` finds the retry on its
+    /// first lookup and never spends the legacy grace.
+    #[tokio::test]
+    async fn await_follows_a_policy_retry_without_a_grace_wait() {
+        let db = crate::db::test_db().await;
+        let options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+        let root = insert_lineage_root_with(&db, Some(&options)).await;
+        let env_id = root.env_id;
+        assert!(
+            crate::db::Task::mark_running(&db, &root.task_id)
+                .await
+                .unwrap()
+        );
+        let running = crate::db::Task::get(&db, &root.task_id).await.unwrap();
+
+        let retry_id = Uuid::now_v7();
+        let failure = serde_json::json!({"$type": "::hot::task/Failure", "$val": {"msg": "boom"}});
+        let write = crate::db::Task::complete_with_retry(
+            &db,
+            &root.task_id,
+            &crate::db::TaskStatus::Failed,
+            Some(&failure),
+            None,
+            None,
+            &retry_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(write.retry.map(|retry| retry.retry_task_id), Some(retry_id));
+        // The retry runs to completion before the await looks.
+        assert!(crate::db::Task::mark_running(&db, &retry_id).await.unwrap());
+        assert!(
+            crate::db::Task::complete(
+                &db,
+                &retry_id,
+                &crate::db::TaskStatus::Completed,
+                None,
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        let lookups = std::cell::Cell::new(0u32);
+        let started = std::time::Instant::now();
+        let task = await_task_lineage(
+            running,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+            &|| false,
+            |id: Uuid, _read_timeout: std::time::Duration| {
+                let db = &db;
+                async move {
+                    crate::db::Task::get_in_env(db, &id, &env_id)
+                        .await
+                        .map_err(|e| PollFailure::Transport(e.to_string()))
+                }
+            },
+            |parent: Uuid, read_timeout: std::time::Duration| {
+                lookups.set(lookups.get() + 1);
+                lookup_retry_child(&db, parent, env_id, read_timeout)
+            },
+            &|_retry| None,
+        )
+        .await
+        .expect("the lineage ends in the retry's outcome");
+        assert_eq!(
+            (task.task_id, task.status.as_str()),
+            (retry_id, "completed")
+        );
+        assert_eq!(lookups.get(), 1, "the first lookup finds the retry");
+        assert!(
+            started.elapsed() < LEGACY_RETRY_CHILD_GRACE,
+            "following a committed retry must not wait out the legacy grace"
+        );
+
+        // `cancel` and `send` resolve through the same single lookup.
+        let failed = crate::db::Task::get(&db, &root.task_id).await.unwrap();
+        let newest = newest_retry_attempt(&db, failed, env_id).await;
+        assert_eq!(newest.task_id, retry_id);
+    }
+
+    /// Fail `task` the way a deploy does: `failed` plus a queued retry, in
+    /// one transaction. Returns the retry's id.
+    async fn interrupt_with_retry(db: &crate::db::DatabasePool, task: &crate::db::Task) -> Uuid {
+        let retry_id = Uuid::now_v7();
+        let error = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "interrupted", "err": null, "infra_interrupted": true}
+        });
+        crate::db::Task::finalize_with_infra_retry(
+            db,
+            &task.task_id,
+            &retry_id,
+            3,
+            &error,
+            &error,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        retry_id
+    }
+
+    #[tokio::test]
+    async fn cancel_and_send_resolve_to_the_newest_retry() {
+        let db = crate::db::test_db().await;
+        let root = insert_lineage_root(&db).await;
+        let first_retry = interrupt_with_retry(&db, &root).await;
+        let first_retry_row = crate::db::Task::get(&db, &first_retry).await.unwrap();
+        let second_retry = interrupt_with_retry(&db, &first_retry_row).await;
+
+        // What `send` targets when handed the original id.
+        let root = crate::db::Task::get(&db, &root.task_id).await.unwrap();
+        assert_eq!(root.status, "failed");
+        let newest = newest_retry_attempt(&db, root, first_retry_row.env_id).await;
+        assert_eq!(newest.task_id, second_retry);
+
+        let (target, cancelled) =
+            cancel_newest_attempt(&db, first_retry_row.parent_task_id.unwrap(), newest.env_id)
+                .await
+                .unwrap();
+        assert_eq!((target, cancelled), (second_retry, true));
+        let row = crate::db::Task::get(&db, &second_retry).await.unwrap();
+        assert_eq!(row.status, "cancelled");
+
+        // Nothing left to cancel: the lineage now ends in a final state.
+        let (target, cancelled) = cancel_newest_attempt(&db, first_retry, row.env_id)
+            .await
+            .unwrap();
+        assert_eq!((target, cancelled), (second_retry, false));
+    }
+
+    #[tokio::test]
+    async fn cancelled_task_is_final_even_with_a_retry_row() {
+        let db = crate::db::test_db().await;
+        let root = insert_lineage_root(&db).await;
+        assert!(
+            crate::db::Task::cancel(&db, &root.task_id, &root.env_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::db::Task::insert_retry(&db, &Uuid::now_v7(), &root, 1, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+        let cancelled = crate::db::Task::get(&db, &root.task_id).await.unwrap();
+        let newest = newest_retry_attempt(&db, cancelled, root.env_id).await;
+        assert_eq!(newest.task_id, root.task_id);
     }
 
     // -----------------------------------------------------------------------
