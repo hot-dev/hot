@@ -1,0 +1,336 @@
+::hot::test::compiler-regressions ns
+meta ["test"]
+
+// Programs the compiler, interpreter or JIT got wrong, each fixed in the
+// November 2026 language review. Every test calls its code 150 times, so the
+// default run compares the interpreter with compiled code, and the
+// `--jit.threshold 1` run compiles from the first call.
+
+::alert ::hot::alert
+::t ::hot::type
+
+repeat fn (f: Fn): Any {
+    last(map(range(150), (i) { f() }))
+}
+
+// ----------------------------------------------------------------------------
+// A self-call inside a larger expression is not a tail call. Compiled as
+// one, it abandoned the expression around it: `[nest(..)]` returned `[]`.
+// ----------------------------------------------------------------------------
+
+nest fn (n: Int): Vec { if(lte(n, 0), [], [nest(sub(n, 1))]) }
+
+tree fn (n: Int): Map {
+    if(lte(n, 0), {leaf: true}, {l: tree(sub(n, 1)), r: tree(sub(n, 1))})
+}
+
+path fn (n: Int): Str { if(lte(n, 0), "", `/${n}${path(sub(n, 1))}`) }
+
+piped fn (n: Int): Int { if(lte(n, 0), 0, piped(sub(n, 1)) |> add(1)) }
+
+field fn (n: Int): Any { if(lte(n, 0), {v: {v: 7}}, field(sub(n, 1)).v) }
+
+spread fn (n: Int): Map { if(lte(n, 0), {z: 0}, {...spread(sub(n, 1)), a: n}) }
+
+subject fn (n: Int): Int {
+    if(lte(n, 0), 0, match subject(sub(n, 1)) {
+        0 => { 100 }
+        _ => { 200 }
+    })
+}
+
+every fn cond-all (n: Int) {
+    gt(n, 0) => rec { every(sub(n, 1)) }
+    gt(n, -1) => me { n }
+}
+
+test-self-call-inside-an-expression-keeps-the-expression
+meta ["test"] fn () {
+    repeat(() {
+        assert-eq([[[]]], nest(2), "vec literal")
+        assert-eq({l: {leaf: true}, r: {leaf: true}}, tree(1), "map literal")
+        assert-eq("/3/2/1", path(3), "template")
+        assert-eq(3, piped(3), "pipe")
+        assert-eq({v: 7}, field(1), "field access")
+        assert-eq({z: 0, a: 2}, spread(2), "map spread")
+        assert-eq(200, subject(2), "match subject")
+        assert-eq({rec: {me: 0}, me: 1}, every(1), "cond-all arm")
+    })
+}
+
+// ----------------------------------------------------------------------------
+// A reference alone on its line is a statement, not the name of a binding
+// whose value is the next statement.
+// ----------------------------------------------------------------------------
+
+lone-path fn (m: Map): Map {
+    m.xs[0]
+    length(m.xs)
+    m
+}
+
+lone-name fn (): Int {
+    a 1
+    a
+    length([1, 2, 3])
+    a
+}
+
+test-reference-alone-on-a-line-binds-nothing
+meta ["test"] fn () {
+    repeat(() {
+        assert-eq({xs: [10, 20]}, lone-path({xs: [10, 20]}), "a path stays a read")
+        assert-eq(1, lone-name(), "a name stays a read")
+        lambda (m) {
+            m.a.b
+            length("xyz")
+            m
+        }
+
+        assert-eq({a: {b: 1}}, lambda({a: {b: 1}}), "in a lambda body")
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Map literals: a repeated key takes the later position, spreads included.
+// ----------------------------------------------------------------------------
+
+test-repeated-map-key-keeps-later-spreads
+meta ["test"] fn () {
+    b {x: 1}
+    c {y: 2}
+    assert-eq({x: 1, a: 2, y: 2}, {...b, a: 1, a: 2, ...c}, "the spread after it survives")
+    assert-eq({a: 2}, {a: 1, ...{a: 5}, a: 2}, "later keys win over a spread between")
+}
+
+// ----------------------------------------------------------------------------
+// A namespace alias may end in a keyword segment (`::hot::type`).
+// ----------------------------------------------------------------------------
+
+test-alias-to-a-namespace-named-by-a-keyword
+meta ["test"] fn () {
+    assert(::t/is-type(1, Int), "::t names ::hot::type")
+}
+
+// ----------------------------------------------------------------------------
+// Closures capture a name they rebind or write into.
+// ----------------------------------------------------------------------------
+
+counter fn (m: Map): Fn {
+    f (x) {
+        m.count x
+        m
+    }
+
+    f
+}
+
+bump fn (): Fn {
+    y 10
+    f (x) {
+        y add(y, x)
+        y
+    }
+
+    f
+}
+
+after-arm fn (y: Int): Fn {
+    f (x) {
+        r cond {
+            gt(x, 0) => {
+                y 100
+                y
+            }
+            => { 0 }
+        }
+
+        add(r, y)
+    }
+
+    f
+}
+
+test-closure-captures-a-name-it-rebinds
+meta ["test"] fn () {
+    counted counter({a: 1})
+    bumped bump()
+    summed after-arm(5)
+    repeat(() {
+        assert-eq({a: 1, count: 7}, counted(7), "deep-path write keeps the captured map")
+        assert-eq(11, bumped(1), "rebinding reads the captured value first")
+        assert-eq(105, summed(1), "an arm's rebinding ends with the arm")
+        m {a: 1}
+        assert-eq(
+            [{a: 1, count: 1}, {a: 1, count: 2}],
+            map([1, 2], (x) {
+                m.count x
+                m
+            }),
+            "a lambda passed on captures it too"
+        )
+    })
+}
+
+// ----------------------------------------------------------------------------
+// A parallel binding that reads a sibling inside a literal waits for it.
+// ----------------------------------------------------------------------------
+
+gather fn (): Map {
+    parallel {
+        a add(1, 0)
+        b {x: a}
+        c [a, a]
+        d {...b, y: a}
+    }
+}
+
+test-parallel-binding-reads-a-sibling-inside-a-literal
+meta ["test"] fn () {
+    assert-eq({a: 1, b: {x: 1}, c: [1, 1], d: {x: 1, y: 1}}, gather())
+}
+
+// A call from a parallel branch into a hot-std constructor left the branch's
+// other values alone (the branch shared the constructor's registers).
+branch fn (): Map {
+    parallel {
+        a [add(40, 2), ::alert/Alert("chan", {k: 1}).channel, add(1, 1)]
+    }
+}
+
+test-parallel-branch-keeps-its-values-across-a-call
+meta ["test"] fn () {
+    assert-eq({a: [42, "chan", 2]}, branch())
+}
+
+// ----------------------------------------------------------------------------
+// The first function compiled (a hot-std constructor) is callable directly.
+// ----------------------------------------------------------------------------
+
+test-first-compiled-function-is-callable
+meta ["test"] fn () {
+    made ::alert/Alert("chan", {k: 1})
+    assert-eq("chan", made.channel)
+    assert-eq({k: 1}, made.data)
+}
+
+// ----------------------------------------------------------------------------
+// Laziness follows the overload a call's arity selects.
+// ----------------------------------------------------------------------------
+
+pick fn (lazy a) { "one-lazy" }
+pick fn (a, b) { [a, b] }
+
+test-lazy-parameter-follows-the-arity-called
+meta ["test"] fn () {
+    repeat(() {
+        assert-eq(["x", 2], pick(first(["x"]), 2), "the two-argument overload is eager")
+        assert-eq("one-lazy", pick(fail("never forced")), "the one-argument overload is lazy")
+    })
+}
+
+// ----------------------------------------------------------------------------
+// A template of more than 127 interpolations keeps all its parts.
+// ----------------------------------------------------------------------------
+
+test-long-template-keeps-every-part
+meta ["test"] fn () {
+    x "ab"
+    long `${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}${x}`
+    assert-eq(260, length(long))
+}
+
+// ----------------------------------------------------------------------------
+// Dec literals that are equal but written differently stay as written.
+// ----------------------------------------------------------------------------
+
+test-dec-literals-keep-their-scale
+meta ["test"] fn () {
+    a 2.50
+    b 2.5
+    assert-eq("2.50", Str(a))
+    assert-eq("2.5", Str(b))
+}
+
+// ----------------------------------------------------------------------------
+// pow: a square root is exact, and a negative base has no fractional power.
+// ----------------------------------------------------------------------------
+
+test-pow-of-a-half-and-of-a-negative-base
+meta ["test"] fn () {
+    assert-eq(3.0, pow(9, 0.5), "square root of a square")
+    assert-eq("3", Str(pow(9, 0.5)), "an exact root isn't padded with zeros")
+    assert-eq("0.5", Str(pow(0.25, 0.5)))
+    assert-eq(0.5, pow(0.25, 0.5))
+    assert-eq(-8, pow(-2, 3), "a whole exponent keeps its sign")
+    assert(is-err(pow(-8, 0.5)), "no real square root")
+    assert(is-err(pow(-8.0, 1.5)), "no real fractional power")
+}
+
+// ----------------------------------------------------------------------------
+// A flow with no default arm is null when no arm matches, compiled or not.
+// ----------------------------------------------------------------------------
+
+pos fn (n: Int) { if(gt(n, 0), n) }
+half fn (n: Int) { if(gt(n, 0), 0.5) }
+word fn (n: Int) { if(gt(n, 0), "even") }
+sign fn cond (n: Int) {
+    gt(n, 0) => { 1 }
+}
+
+kind fn (n: Int) {
+    match n {
+        1 => { "one" }
+    }
+}
+
+test-flow-with-no-default-arm-is-null-when-unmatched
+meta ["test"] fn () {
+    repeat(() {
+        assert-eq(1, pos(1))
+        assert(is-null(pos(-1)), "Int arm")
+        assert-eq("fallback", or(pos(-5), "fallback"))
+        assert(is-null(half(-1)), "Dec arm")
+        assert-eq([3, null], [3, word(-3)], "Str arm")
+        assert(is-null(sign(-1)), "cond")
+        assert(is-null(kind(2)), "match")
+        assert-eq("one", kind(1))
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Tail-call loops: a nested `if` as the argument, and a `Result` parameter.
+// ----------------------------------------------------------------------------
+
+label fn (n: Int, acc: Str): Str {
+    if(lte(n, 0), acc, label(sub(n, 1), if(eq(n, 3), "s", if(eq(n, 2), "t", "u"))))
+}
+
+trail fn (n: Int, acc: Str): Str {
+    if(lte(n, 0), acc, trail(sub(n, 1), concat(acc, if(eq(mod(n, 3), 0), "s", if(eq(mod(n, 3), 1), "t", "u")))))
+}
+
+keep fn (n: Int, r: Result): Str {
+    if(lte(n, 0), if(is-err(r), "kept-err", "kept-ok"), keep(sub(n, 1), err("fresh")))
+}
+
+test-tail-call-loops-keep-their-values
+meta ["test"] fn () {
+    repeat(() {
+        assert-eq("u", label(400, ""), "nested if as the next argument")
+        assert-eq("sutsutsut", trail(9, ""))
+        assert-eq("kept-err", keep(3, 1), "a Result parameter takes an Err as it is")
+    })
+}
+
+// ----------------------------------------------------------------------------
+// `length` of a Vec, alone in its function.
+// ----------------------------------------------------------------------------
+
+count fn (xs: Vec): Int { length(xs) }
+
+test-length-alone
+meta ["test"] fn () {
+    xs range(1000)
+    repeat(() { assert-eq(1000, count(xs)) })
+}

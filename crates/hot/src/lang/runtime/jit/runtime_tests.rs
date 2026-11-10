@@ -544,7 +544,7 @@ fn a_compiled_lambda_owns_its_dec_constants() {
     let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
     let mut jit = JitRuntimeState::new(0, &conf);
     let (compiled, args) = jit
-        .compiled_lambda(&program, &lambda, &[], &[], CallNames::default())
+        .compiled_lambda(&program, &lambda, &[], &[], 0, CallNames::default())
         .expect("the lambda compiles")
         .expect("the lambda compiles at once");
     assert_eq!(compiled._dec_constants.len(), 1);
@@ -821,4 +821,38 @@ fib fn cond (n: Int): Int {
     // fib(5) makes 15 calls, fib(6) 25.
     assert_eq!(fib_calls(val!({"mode": "disabled"})), 40);
     assert_eq!(fib_calls(val!({"mode": "enabled", "threshold": 1})), 40);
+}
+
+#[test]
+fn profiling_counts_the_stable_signature_without_losing_others() {
+    // The fast path counts a repeat of the stable signature apart from the
+    // map; a different signature has to see those counts.
+    let ints = [Val::Int(1), Val::Int(2)];
+    let strs = [Val::from("a"), Val::from("b")];
+    let mut profile = JitFunctionProfile::default();
+    for _ in 0..5 {
+        profile.record_call(&ints);
+    }
+    assert_eq!(profile.call_count, 5);
+    assert_eq!(profile.stable_signature, Some(TypeSig::from_args(&ints)));
+    for _ in 0..3 {
+        profile.record_call(&strs);
+    }
+    assert_eq!(profile.call_count, 8);
+    assert_eq!(
+        profile.stable_signature,
+        Some(TypeSig::from_args(&ints)),
+        "five calls outweigh three"
+    );
+    for _ in 0..4 {
+        profile.record_call(&strs);
+    }
+    assert_eq!(
+        profile.stable_signature,
+        Some(TypeSig::from_args(&strs)),
+        "seven calls outweigh five"
+    );
+    assert!(TypeSig::from_args(&ints).matches_args(&ints));
+    assert!(!TypeSig::from_args(&ints).matches_args(&strs));
+    assert!(!TypeSig::from_args(&ints).matches_args(&ints[..1]));
 }

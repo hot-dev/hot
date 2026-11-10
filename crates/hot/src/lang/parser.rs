@@ -29,7 +29,6 @@ pub struct ErrorLocation {
 pub struct ParseError {
     pub message: String,
     pub location: ErrorLocation,
-    pub source_context: Option<String>, // For ariadne pretty printing
 }
 
 impl std::fmt::Display for ParseError {
@@ -127,7 +126,9 @@ pub struct Parser {
     token_index: usize,
     current_namespace: NsPath,
     file_path: Option<PathBuf>,
-    source_content: Option<String>, // Store source for error reporting
+    /// Source text for error reporting. Shared, so the sub-parser of each
+    /// template `${}` expression takes a reference instead of a copy.
+    source_content: Option<Arc<str>>,
     /// The characters of `source_content`, which token positions index.
     /// Collected when a template literal first needs them.
     source_chars: Option<Arc<[char]>>,
@@ -293,7 +294,7 @@ impl Parser {
 
     pub fn with_file_context(mut self, file_path: String, source_content: String) -> Self {
         self.file_path = Some(PathBuf::from(file_path));
-        self.source_content = Some(source_content);
+        self.source_content = Some(source_content.into());
         self
     }
 
@@ -527,9 +528,8 @@ impl Parser {
                     column: first_error.column,
                     position: first_error.position,
                     length: 1,
-                    file: first_error.file.clone(),
+                    file: first_error.file.clone().or_else(|| self.file_path.clone()),
                 },
-                source_context: Some(source.to_string()),
             });
         }
 
@@ -537,7 +537,7 @@ impl Parser {
         self.token_index = 0;
         // `where` clauses keep their predicate's source text.
         if self.source_content.is_none() {
-            self.source_content = Some(source.to_string());
+            self.source_content = Some(source.into());
         }
 
         // Parse into a program with an initial default namespace.
@@ -1838,7 +1838,6 @@ impl Parser {
                     length: 1,
                     file: None,
                 },
-                source_context: None,
             });
         }
         *current = Some(next);
@@ -2231,11 +2230,19 @@ impl Parser {
             }
 
             // Expect an identifier
+            // A segment may be a keyword (`::hot::type`), as everywhere else
+            // a namespace path is read.
             let (ident, ident_end) = match &next_info {
                 Some((TokenType::Identifier(name), pos, len)) => {
                     let ident = name.clone();
                     let end = pos + len;
                     self.next(); // consume identifier
+                    (ident, end)
+                }
+                Some((TokenType::Keyword(keyword), pos, len)) => {
+                    let ident = keyword.as_str().to_string();
+                    let end = pos + len;
+                    self.next(); // consume keyword
                     (ident, end)
                 }
                 _ => break,
@@ -3979,8 +3986,13 @@ impl Parser {
                     src: None,
                 }));
                 let stored = Val::Box(Box::new(crate::lang::ast::AstNode(var_value)));
-                map.insert(Val::from(key), stored);
-                entry_index += 1;
+                Self::insert_map_entry(
+                    &mut map,
+                    &mut spread_entries,
+                    &mut entry_index,
+                    Val::from(key),
+                    stored,
+                );
             } else {
                 self.expect_token(&TokenType::Colon)?;
                 let value = self.parse_value()?;
@@ -3989,8 +4001,13 @@ impl Parser {
                     Value::Val(v, _) => v.clone(),
                     _ => Val::Box(Box::new(crate::lang::ast::AstNode(value.clone()))),
                 };
-                map.insert(Val::from(key), stored);
-                entry_index += 1;
+                Self::insert_map_entry(
+                    &mut map,
+                    &mut spread_entries,
+                    &mut entry_index,
+                    Val::from(key),
+                    stored,
+                );
             }
 
             // Skip newlines after value
@@ -4020,6 +4037,39 @@ impl Parser {
                 spread_entries,
             })
         }
+    }
+
+    /// Add `key: value` to a map literal as its newest entry.
+    ///
+    /// A repeated key replaces the earlier entry and takes the later
+    /// position, so later keys win over any spread written between the two.
+    /// Spread positions index every entry of the literal, spreads included:
+    /// dropping the earlier entry moves each later one down a slot.
+    /// (`IndexMap::insert` alone kept the first slot while the entry count
+    /// still advanced, which misplaced or dropped later spreads.)
+    fn insert_map_entry(
+        map: &mut IndexMap<Val, Val>,
+        spread_entries: &mut [(usize, Value)],
+        entry_index: &mut usize,
+        key: Val,
+        value: Val,
+    ) {
+        if let Some((base_index, _, _)) = map.shift_remove_full(&key) {
+            let mut slot = base_index;
+            for (spread_slot, _) in spread_entries.iter() {
+                if *spread_slot <= slot {
+                    slot += 1;
+                }
+            }
+            for (spread_slot, _) in spread_entries.iter_mut() {
+                if *spread_slot > slot {
+                    *spread_slot -= 1;
+                }
+            }
+            *entry_index -= 1;
+        }
+        map.insert(key, value);
+        *entry_index += 1;
     }
 
     /// Parse a map key - allows keywords as unquoted keys in map context
@@ -4278,7 +4328,6 @@ impl Parser {
                                     length: 1,
                                     file: self.file_path.clone(),
                                 },
-                                source_context: None,
                             });
                         }
                     },
@@ -4292,7 +4341,6 @@ impl Parser {
                                 length: 1,
                                 file: self.file_path.clone(),
                             },
-                            source_context: None,
                         });
                     }
                 };
@@ -4404,7 +4452,6 @@ impl Parser {
                             length: 1,
                             file: self.file_path.clone(),
                         },
-                        source_context: None,
                     });
                 }
             },
@@ -4418,7 +4465,6 @@ impl Parser {
                         length: 1,
                         file: self.file_path.clone(),
                     },
-                    source_context: None,
                 });
             }
         };
@@ -4443,7 +4489,6 @@ impl Parser {
                                 length: 1,
                                 file: self.file_path.clone(),
                             },
-                            source_context: None,
                         });
                     }
                 },
@@ -4457,7 +4502,6 @@ impl Parser {
                             length: 1,
                             file: self.file_path.clone(),
                         },
-                        source_context: None,
                     });
                 }
             }
@@ -4547,7 +4591,6 @@ impl Parser {
                                 length: 1,
                                 file: self.file_path.clone(),
                             },
-                            source_context: None,
                         });
                     }
                 },
@@ -4561,7 +4604,6 @@ impl Parser {
                             length: 1,
                             file: self.file_path.clone(),
                         },
-                        source_context: None,
                     });
                 }
             };
@@ -4595,6 +4637,65 @@ impl Parser {
     }
 
     /// Parse block expression after opening brace is already consumed
+    /// The next token that isn't a newline, and whether it is on the line of
+    /// the last token read. (Reading a value may already have taken the
+    /// newline after it, so the next token alone doesn't say.)
+    fn next_statement_token(&self) -> (Option<&Token>, bool) {
+        let mut ahead = 0;
+        while self
+            .peek_n(ahead)
+            .is_some_and(|token| matches!(token.token_type, TokenType::Newline))
+        {
+            ahead += 1;
+        }
+        let next = self.peek_n(ahead);
+        let last_line = self.tokens[..self.token_index.min(self.tokens.len())]
+            .iter()
+            .rev()
+            .find(|token| !matches!(token.token_type, TokenType::Newline))
+            .map(|token| token.line);
+        let same_line = match (next, last_line) {
+            (Some(next), Some(last_line)) => next.line == last_line,
+            _ => false,
+        };
+        (next, same_line)
+    }
+
+    /// Keep a reference that is a statement of its own from binding the
+    /// next statement.
+    ///
+    /// In a body, `name value` is a reference directly before an expression,
+    /// and the compiler binds every such pair. So a reference alone on its
+    /// line (`total`, `m.xs[0]`) took the next line's value: `m.xs[0]` then
+    /// `println("x")` deep-assigned the printed text into `m`. Such a
+    /// reference goes in a block of its own, where nothing follows it.
+    ///
+    /// Left as they are: the last statement of a body, the head of a pipe
+    /// continued on the next line, and a name whose `meta` and value start
+    /// on the next line.
+    fn isolate_lone_reference(&self, expr: Value) -> Value {
+        if !matches!(expr, Value::Ref(Ref::Var(_))) {
+            return expr;
+        }
+        let (next, same_line) = self.next_statement_token();
+        let stays_bare = same_line
+            || match next.map(|token| &token.token_type) {
+                None | Some(TokenType::RightBrace | TokenType::Eof | TokenType::PipeOp) => true,
+                Some(TokenType::Identifier(name)) => name == "meta",
+                Some(_) => false,
+            };
+        if stays_bare {
+            return expr;
+        }
+        Value::Flow(Flow {
+            flow_type: FlowType::Serial,
+            expressions: vec![expr],
+            result_modifier: None,
+            src: None,
+            aliases: Vec::new(),
+        })
+    }
+
     fn parse_block_expression_after_brace(&mut self) -> ParseResult<Value> {
         let mut expressions = Vec::new();
 
@@ -4664,6 +4765,7 @@ impl Parser {
                 self.parse_spaced_paren_binding(&mut expressions)?;
             } else {
                 let expr = self.parse_value()?;
+                let expr = self.isolate_lone_reference(expr);
                 expressions.push(expr);
             }
 
@@ -4904,7 +5006,6 @@ impl Parser {
                             length: 2,
                             file: self.file_path.clone(),
                         },
-                        source_context: self.source_content.clone(),
                     });
                 }
 
@@ -4939,12 +5040,7 @@ impl Parser {
     /// source text is scanned the way `parse_template_literal_parts` scans
     /// the content. `None` when the parser has no source text.
     fn template_expression_starts(&mut self, template: &Token) -> Option<Vec<SourcePoint>> {
-        if self.source_chars.is_none() {
-            self.source_chars = self
-                .source_content
-                .as_deref()
-                .map(|source| source.chars().collect());
-        }
+        self.ensure_source_chars();
         let chars = self.source_chars.as_deref()?;
         let end = (template.position + template.length).min(chars.len());
         let mut starts = Vec::new();
@@ -5027,7 +5123,6 @@ impl Parser {
                     length: 1,
                     file: self.file_path.clone(),
                 },
-                source_context: self.source_content.clone(),
             });
         }
 
@@ -5044,7 +5139,7 @@ impl Parser {
             expr_parser.source_content = self.source_content.clone();
             expr_parser.source_chars = self.source_chars.clone();
         } else {
-            expr_parser.source_content = Some(expr_str.to_string());
+            expr_parser.source_content = Some(expr_str.into());
         }
         expr_parser.where_salt = Some(format!(
             "{}template{}",
@@ -6134,7 +6229,16 @@ impl Parser {
                         }
                     }
 
-                    if let Some(next_token) = next_non_newline_token {
+                    // A name alone on its line is a statement of its own:
+                    // the next line doesn't supply its value. The exception
+                    // is a definition whose `meta` starts the next line.
+                    let value_is_on_a_later_line = next_non_newline_token.is_some_and(|next| {
+                        next.line != token.line
+                            && !matches!(&next.token_type, TokenType::Identifier(s) if s == "meta")
+                    });
+                    if value_is_on_a_later_line {
+                        false
+                    } else if let Some(next_token) = next_non_newline_token {
                         match &next_token.token_type {
                             // Clear assignment patterns
                             TokenType::LeftBrace => true, // identifier { ... } (map literal)
@@ -6153,103 +6257,11 @@ impl Parser {
                             TokenType::Null => true,      // identifier null
                             TokenType::DoubleColon => true, // identifier ::ns::ref
                             TokenType::Colon => true, // identifier: Type value (type annotation)
-                            TokenType::Dot => {
-                                // identifier.path... could be a deep path assignment or a method call
-                                // Need to look ahead to determine which
-                                // For now, trace forward through the path to see if it ends with
-                                // an assignment pattern (value, append, etc.) or a function call
-                                let mut path_lookahead = lookahead_index + 1;
-                                let mut found_assignment_pattern = false;
-
-                                // Skip through property accesses and index accesses
-                                while let Some(prop_token) = self.peek_n(path_lookahead) {
-                                    // Skip identifier (property name)
-                                    if !matches!(prop_token.token_type, TokenType::Identifier(_)) {
-                                        break;
-                                    }
-                                    path_lookahead += 1;
-
-                                    // Check what comes after the property
-                                    if let Some(after_prop) = self.peek_n(path_lookahead) {
-                                        match &after_prop.token_type {
-                                            TokenType::Dot => {
-                                                // Continue following the path
-                                                path_lookahead += 1;
-                                            }
-                                            TokenType::LeftBracket => {
-                                                // Check if it's [] (append) or [n] (index)
-                                                path_lookahead += 1;
-                                                if let Some(bracket_content) =
-                                                    self.peek_n(path_lookahead)
-                                                {
-                                                    if matches!(
-                                                        bracket_content.token_type,
-                                                        TokenType::RightBracket
-                                                    ) {
-                                                        // Empty brackets - this is append syntax
-                                                        found_assignment_pattern = true;
-                                                    } else if matches!(
-                                                        bracket_content.token_type,
-                                                        TokenType::Int(_)
-                                                    ) {
-                                                        // Index - continue checking
-                                                        path_lookahead += 1; // skip the int
-                                                        if let Some(close_bracket) =
-                                                            self.peek_n(path_lookahead)
-                                                            && matches!(
-                                                                close_bracket.token_type,
-                                                                TokenType::RightBracket
-                                                            )
-                                                        {
-                                                            path_lookahead += 1;
-                                                            // Check what's after the index
-                                                            if let Some(after_index) =
-                                                                self.peek_n(path_lookahead)
-                                                            {
-                                                                match &after_index.token_type {
-                                                                    TokenType::Dot => {
-                                                                        path_lookahead += 1;
-                                                                        continue;
-                                                                    }
-                                                                    TokenType::LeftParen => {
-                                                                        // Method call
-                                                                        break;
-                                                                    }
-                                                                    _ => {
-                                                                        // Value assignment
-                                                                        found_assignment_pattern =
-                                                                            true;
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                found_assignment_pattern = true;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                break;
-                                            }
-                                            TokenType::LeftParen => {
-                                                // This is a method call, not an assignment
-                                                break;
-                                            }
-                                            TokenType::Newline | TokenType::RightBrace => {
-                                                // End of expression - this is a read, not an assignment
-                                                break;
-                                            }
-                                            _ => {
-                                                // Something else follows - likely an assignment value
-                                                found_assignment_pattern = true;
-                                                break;
-                                            }
-                                        }
-                                    } else {
-                                        break;
-                                    }
-                                }
-
-                                found_assignment_pattern
-                            }
+                            // `value.field`, like `value[index]` above, is a
+                            // read when the whole path ends its statement or
+                            // feeds a pipe, and a deep assignment target only
+                            // when a value follows it.
+                            TokenType::Dot => !self.adjacent_path_is_standalone(&token),
                             TokenType::Identifier(s) if s == "meta" => true, // identifier meta {...} value
                             TokenType::Implements => true, // identifier -> TargetType fn ...
                             TokenType::Keyword(KeywordKind::Serial) => true, // identifier serial { ... }
@@ -6359,6 +6371,31 @@ impl Parser {
             } else {
                 // Parse as standalone expression (function calls, etc.)
                 let expr = self.parse_value()?;
+                if !matches!(expr, Value::Ref(Ref::Var(_))) {
+                    expressions.push(expr);
+                    continue;
+                }
+
+                // A reference directly before another expression is a
+                // binding: the lookahead above doesn't recognize every value
+                // (`total do thunk`, `classify fn match (..) {..}`), and the
+                // compiler binds the pair. That must not also catch a
+                // reference that is a statement of its own.
+                let (next, same_line) = self.next_statement_token();
+                let line_continues = same_line
+                    && !matches!(
+                        next.map(|token| &token.token_type),
+                        None | Some(TokenType::RightBrace | TokenType::Eof)
+                    );
+                if line_continues {
+                    let value = self.parse_value()?;
+                    expressions.push(expr);
+                    expressions.push(value);
+                    continue;
+                }
+
+                // `total` or `m.xs[0]` alone on its line.
+                let expr = self.isolate_lone_reference(expr);
                 expressions.push(expr);
             }
         }
@@ -6923,6 +6960,7 @@ impl Parser {
             })
             .filter(|t| t.position >= start)
             .map_or(start, |t| t.position + t.length);
+        self.ensure_source_chars();
         let source = self.source_text(start, end);
         let src = Source::new(
             self.file_path.as_ref().map(|p| p.display().to_string()),
@@ -6942,15 +6980,25 @@ impl Parser {
         })
     }
 
-    /// Source text between two token positions, for diagnostics.
+    /// Build the character table token positions index, once per source.
+    fn ensure_source_chars(&mut self) {
+        if self.source_chars.is_none() {
+            self.source_chars = self
+                .source_content
+                .as_deref()
+                .map(|source| source.chars().collect());
+        }
+    }
+
+    /// Source text between two token positions, for diagnostics. Call
+    /// [`Self::ensure_source_chars`] first: without the table this reads
+    /// nothing.
     fn source_text(&self, start: usize, end: usize) -> String {
-        self.source_content
+        self.source_chars
             .as_deref()
-            .map(|s| {
-                s.chars()
-                    .skip(start)
-                    .take(end.saturating_sub(start))
-                    .collect::<String>()
+            .map(|chars| {
+                let end = end.min(chars.len());
+                chars[start.min(end)..end].iter().collect::<String>()
             })
             .unwrap_or_default()
             .trim()
@@ -7151,7 +7199,6 @@ impl Parser {
                 length: token.length.max(1),
                 file: self.file_path.clone(),
             },
-            source_context: self.source_content.clone(),
         }
     }
 
@@ -7307,7 +7354,6 @@ impl Parser {
                     length: 1, // Default length, could be improved
                     file: self.file_path.clone(),
                 },
-                source_context: self.source_content.clone(),
             }
         } else {
             // If no current token, we're at EOF - use the end of source position
@@ -7338,7 +7384,6 @@ impl Parser {
                     length: 0, // EOF has no length
                     file: self.file_path.clone(),
                 },
-                source_context: self.source_content.clone(),
             }
         }
     }
@@ -7443,7 +7488,6 @@ impl Parser {
                                             length: 1,
                                             file: self.file_path.clone(),
                                         },
-                                        source_context: self.source_content.clone(),
                                     });
                                 }
                             }
@@ -7457,7 +7501,6 @@ impl Parser {
                                     length: 1,
                                     file: self.file_path.clone(),
                                 },
-                                source_context: self.source_content.clone(),
                             });
                         }
                     }
@@ -7471,7 +7514,6 @@ impl Parser {
                                 length: 1,
                                 file: self.file_path.clone(),
                             },
-                            source_context: self.source_content.clone(),
                         });
                     }
                 }
@@ -7508,8 +7550,6 @@ impl Parser {
 
     /// Parse simple types (Int, Str, Bool, custom types, Any, literals for enum unions)
     fn parse_simple_type(&mut self) -> ParseResult<TypeExpr> {
-        let file_path = self.file_path.clone();
-        let source_content = self.source_content.clone();
         let token = self.peek().ok_or_else(|| ParseError {
             message: "Expected type name".to_string(),
             location: ErrorLocation {
@@ -7517,9 +7557,8 @@ impl Parser {
                 column: 1,
                 position: 0,
                 length: 1,
-                file: file_path,
+                file: self.file_path.clone(),
             },
-            source_context: source_content,
         })?;
 
         match &token.token_type {
@@ -7583,7 +7622,6 @@ impl Parser {
                     length: 1,
                     file: self.file_path.clone(),
                 },
-                source_context: self.source_content.clone(),
             }),
         }
     }

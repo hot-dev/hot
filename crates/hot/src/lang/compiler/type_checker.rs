@@ -777,6 +777,22 @@ pub struct TypeChecker {
     /// Where each variant type (`::ns/Enum.Variant`) was last read by name.
     /// A use found later, such as in the type a body returns, reports there.
     variant_reads: AHashMap<String, Source>,
+    /// Counts changes to the registries an annotation resolves against
+    /// (`qualified_types`, `custom_constructors`, `core_types`,
+    /// `known_types`). Every write to one of them bumps it, which retires
+    /// `annotation_scratch`.
+    registry_generation: u64,
+    /// Annotations already parsed by [`Self::parse_type_annotation_pure`],
+    /// with the checker that parses them.
+    annotation_scratch: std::cell::RefCell<Option<AnnotationScratch>>,
+}
+
+/// A checker holding a copy of the type registries, and the annotations it
+/// has parsed. Valid for one `registry_generation`.
+struct AnnotationScratch {
+    generation: u64,
+    checker: Box<TypeChecker>,
+    parsed: AHashMap<String, TypeExpr>,
 }
 
 impl Default for TypeChecker {
@@ -816,6 +832,8 @@ impl TypeChecker {
             current_def_src: None,
             piped_type: None,
             variant_reads: AHashMap::new(),
+            registry_generation: 0,
+            annotation_scratch: std::cell::RefCell::new(None),
         }
     }
 
@@ -1112,6 +1130,7 @@ impl TypeChecker {
             self.core_variables.len(),
         );
 
+        self.register_all_function_signatures(program);
         for (_ns_path, namespace) in &program.namespaces {
             self.check_namespace(namespace)?;
         }
@@ -1296,6 +1315,7 @@ impl TypeChecker {
         }
         for name in local {
             let short = Self::short_type_name(&name);
+            self.registry_generation += 1;
             self.qualified_types.insert(name, TypeExpr::Named(short));
         }
     }
@@ -1315,6 +1335,7 @@ impl TypeChecker {
             self.resolve_alias_base(&qualified);
         }
         let resolved = self.ast_type_to_type_expr_in_namespace(&alias.base, &alias.namespace);
+        self.registry_generation += 1;
         self.qualified_types.insert(name.to_string(), resolved);
     }
 
@@ -1658,16 +1679,45 @@ impl TypeChecker {
     /// the regular parser; we only call it for declared annotations, which
     /// are the simple cases the parser already handles deterministically.
     fn parse_type_annotation_pure(&self, annotation: &str) -> TypeExpr {
+        // Most annotations are a built-in name, which needs no registry.
+        if let Some(builtin) = self.try_resolve_builtin_type(annotation.trim()) {
+            return builtin;
+        }
+
         // The mutating path is only "mutating" because it might emit errors;
-        // for the pre-pass we discard those by routing through a temporary
-        // checker. In practice the existing `parse_type_annotation` is
-        // side-effect-free for valid annotations.
-        let mut tmp = TypeChecker::new();
-        tmp.qualified_types = self.qualified_types.clone();
-        tmp.custom_constructors = self.custom_constructors.clone();
-        tmp.core_types = self.core_types.clone();
-        tmp.known_types = self.known_types.clone();
-        tmp.parse_type_annotation(annotation, None)
+        // for the pre-pass we discard those by routing through a scratch
+        // checker. Its answer depends only on the annotation and the four
+        // registries copied here, so one scratch serves every annotation
+        // until a registry changes. (Building a checker and cloning the
+        // registries per annotation made the pre-pass cost annotations x
+        // types: most of the type check on a large project.)
+        let mut slot = self.annotation_scratch.borrow_mut();
+        if slot
+            .as_ref()
+            .is_none_or(|scratch| scratch.generation != self.registry_generation)
+        {
+            let mut checker = Box::new(TypeChecker::new());
+            checker.qualified_types = self.qualified_types.clone();
+            checker.custom_constructors = self.custom_constructors.clone();
+            checker.core_types = self.core_types.clone();
+            checker.known_types = self.known_types.clone();
+            *slot = Some(AnnotationScratch {
+                generation: self.registry_generation,
+                checker,
+                parsed: AHashMap::new(),
+            });
+        }
+        let scratch = slot.as_mut().expect("scratch was just ensured");
+        if let Some(parsed) = scratch.parsed.get(annotation) {
+            return parsed.clone();
+        }
+        let parsed = scratch.checker.parse_type_annotation(annotation, None);
+        // Only the type is wanted; drop whatever the parse reported.
+        scratch.checker.errors = CompilerErrors::new();
+        scratch
+            .parsed
+            .insert(annotation.to_string(), parsed.clone());
+        parsed
     }
 
     /// Register a top-level `(var, value)` pair, picking up `TypeDef`s,
@@ -1684,6 +1734,7 @@ impl TypeChecker {
                 let short = var.sym.name().to_string();
                 let qualified = format!("{}/{}", ns_str, short);
 
+                self.registry_generation += 1;
                 self.known_types.insert(short.clone());
 
                 // Pre-register enum/literal-union metadata first so the
@@ -1725,12 +1776,15 @@ impl TypeChecker {
                     TypeExpr::Named(qualified.clone())
                 };
 
+                self.registry_generation += 1;
                 self.qualified_types.insert(qualified.clone(), resolved);
                 if type_def.constructor_functions.is_some() {
+                    self.registry_generation += 1;
                     self.custom_constructors.insert(qualified.clone());
                 }
 
                 if CoreVariableRegistry::has_core_metadata(var) {
+                    self.registry_generation += 1;
                     self.core_types.insert(short, qualified);
                 }
 
@@ -2759,6 +2813,7 @@ impl TypeChecker {
             Value::TypeDef(type_def) => {
                 let short = type_def.name.name().to_string();
                 let qualified = format!("{}/{}", ns_str, short);
+                self.registry_generation += 1;
                 self.known_types.insert(short.clone());
 
                 if !self.qualified_types.contains_key(&qualified) {
@@ -3405,7 +3460,8 @@ impl TypeChecker {
                 .is_some_and(|(enum_fqn, _)| arrow(enum_fqn))
     }
 
-    fn check_namespace(&mut self, namespace: &Namespace) -> CompilerResult<()> {
+    /// Make `namespace` the one being checked, and return its path.
+    fn enter_namespace(&mut self, namespace: &Namespace) -> String {
         let ns_path = namespace.path.to_string();
         // Reset the global scope so previous namespaces' top-level bindings
         // can't leak in via short-name lookup. Cross-namespace access still
@@ -3420,9 +3476,29 @@ impl TypeChecker {
             alias_map.insert(alias.to_string(), target.to_string());
         }
         self.context.set_current_aliases(alias_map);
+        ns_path
+    }
 
-        // First pass: collect function signatures for all arities.
-        //
+    /// Register the signatures of every namespace before any body is
+    /// checked. A call is checked against the signatures registered so far,
+    /// so a call into a namespace checked later found none and passed
+    /// unchecked, while the same call the other way round was reported.
+    ///
+    /// Whatever these parses report, `check_namespace` reports again when it
+    /// registers its own namespace's signatures: they are dropped here.
+    fn register_all_function_signatures(&mut self, program: &Program) {
+        let errors = self.errors.errors.len();
+        let warnings = self.errors.warnings.len();
+        for namespace in program.namespaces.values() {
+            let ns_path = self.enter_namespace(namespace);
+            self.register_function_signatures(namespace, &ns_path);
+        }
+        self.errors.errors.truncate(errors);
+        self.errors.warnings.truncate(warnings);
+    }
+
+    /// Collect `namespace`'s function signatures, for all arities.
+    fn register_function_signatures(&mut self, namespace: &Namespace, ns_path: &str) {
         // A function may be defined in two ways that both produce multiple arities:
         //   1. Comma-joined arities in a single `fn` form → Value::Fn(Vec<FnDef>).
         //   2. Repeated top-level `name fn (...) { ... }` declarations → the parser
@@ -3472,8 +3548,13 @@ impl TypeChecker {
             self.context
                 .replace_function_signatures(qualified_name, signatures);
         }
+    }
 
-        // Second pass: infer types for all variables
+    fn check_namespace(&mut self, namespace: &Namespace) -> CompilerResult<()> {
+        let ns_path = self.enter_namespace(namespace);
+        self.register_function_signatures(namespace, &ns_path);
+
+        // Infer types for all variables
         for (var, value) in &namespace.scope.vars {
             let var_name = var.sym.name().to_string();
 
@@ -3520,6 +3601,7 @@ impl TypeChecker {
     fn infer_value_type(&mut self, value: &Value) -> TypeExpr {
         match value {
             Value::Val(val, type_info) => {
+                self.check_literal_expressions(val);
                 if let Some(ann) = type_info {
                     if ann == "Map" && matches!(val, Val::Map(_)) {
                         return self.infer_val_type(val);
@@ -3777,11 +3859,50 @@ impl TypeChecker {
                 }
             }
 
-            // Other value types default to Any for now
-            Value::MapWithSpread { .. } => {
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for entry in base_entries.values() {
+                    self.check_literal_expressions(entry);
+                }
+                for (_, spread) in spread_entries {
+                    self.infer_value_type(spread);
+                }
                 TypeExpr::Map(Box::new(TypeExpr::Any), Box::new(TypeExpr::Any))
             }
+            // Other value types default to Any for now
             _ => TypeExpr::Any,
+        }
+    }
+
+    /// Check the expressions a literal holds. A Map or Vec literal keeps
+    /// each entry that isn't itself a literal as a boxed expression, at any
+    /// depth, and the literal's own type is inferred without looking inside
+    /// them: a call written in a literal (`{total: sum(a, b, c)}`) went
+    /// unchecked, as did a `match` there. Their types still don't feed the
+    /// literal's.
+    fn check_literal_expressions(&mut self, val: &Val) {
+        match val {
+            Val::Box(boxed) => {
+                if let Some(node) = boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                    self.infer_value_type(&node.0);
+                } else if let Some(call) = boxed.as_any().downcast_ref::<crate::lang::ast::FnCall>()
+                {
+                    self.infer_value_type(&Value::FnCall(call.clone()));
+                }
+            }
+            Val::Map(entries) => {
+                for entry in entries.values() {
+                    self.check_literal_expressions(entry);
+                }
+            }
+            Val::Vec(elements) => {
+                for element in elements.iter() {
+                    self.check_literal_expressions(element);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -7133,6 +7254,58 @@ mod tests {
             "only `caller` should mismatch, got: {:?}",
             checker.errors.errors
         );
+    }
+
+    /// The arity mismatches `source` is reported for.
+    fn arity_mismatches(source: &str) -> usize {
+        use crate::lang::errors::CompilerError;
+        let program = crate::lang::parser::parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        checker
+            .errors
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::ArityMismatch { .. }))
+            .count()
+    }
+
+    #[test]
+    fn calls_inside_literals_are_checked() {
+        // A literal's entries are boxed expressions, which were never
+        // walked: each of these passed `hot check` and failed when run.
+        let source = r#"
+        ::t ns
+        f fn (x: Int): Int { x }
+        in-map fn (): Any { {a: f(1, 2, 3)} }
+        in-vec fn (): Any { [f(1, 2, 3)] }
+        in-spread fn (base: Map): Any { {...base, a: f(1, 2, 3)} }
+        nested fn (): Any { {a: [{b: f(1, 2, 3)}]} }
+        fine fn (): Any { {a: f(1), b: [f(2)]} }
+        "#;
+        assert_eq!(arity_mismatches(source), 4);
+    }
+
+    #[test]
+    fn calls_into_a_later_namespace_are_checked() {
+        // Signatures were registered as each namespace was checked, so a
+        // call into one checked later was skipped. Both orders report now.
+        let caller_first = r#"
+        ::a ns
+        call-b fn (): Int { ::b/fb(1, 2, 3) }
+
+        ::b ns
+        fb fn (x: Int): Int { x }
+        "#;
+        let callee_first = r#"
+        ::b ns
+        fb fn (x: Int): Int { x }
+
+        ::a ns
+        call-b fn (): Int { ::b/fb(1, 2, 3) }
+        "#;
+        assert_eq!(arity_mismatches(caller_first), 1);
+        assert_eq!(arity_mismatches(callee_first), 1);
     }
 
     #[test]

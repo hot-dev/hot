@@ -1466,7 +1466,6 @@ mod tests {
                 length: 1,
                 file: Some("source.hot".into()),
             },
-            source_context: Some(source.to_string()),
         };
 
         let console = DevDiagnosticOutput::for_target(LogTarget::Stdout, true);

@@ -166,20 +166,21 @@ pub(crate) fn prune_superseded_entries(
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path == keep || !path.is_file() {
-            continue;
-        }
         let name = entry.file_name();
         let name = name.to_string_lossy();
         // `{prefix}-{key}{suffix}` — the trailing `-` keeps `pkg-lib-<hash>`
         // from matching a longer unit name that merely starts the same way.
+        // The name is tested before the file is: a `stat` of every entry of
+        // a shared directory, for every unit saved, was most of a first run.
         if name.starts_with(prefix)
             && name[prefix.len()..].starts_with('-')
             && name.ends_with(suffix)
             && is_managed_cache_file_name(&name)
         {
-            let _ = std::fs::remove_file(&path);
+            let path = entry.path();
+            if path != keep && path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }
@@ -196,10 +197,6 @@ pub(crate) fn prune_legacy_unscoped_entries(dir: &std::path::Path, unit_fs_id: &
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let Some(rest) = name
@@ -212,7 +209,10 @@ pub(crate) fn prune_legacy_unscoped_entries(dir: &std::path::Path, unit_fs_id: &
             .strip_suffix(suffix)
             .is_some_and(|key| is_lower_hex(key, 16))
         {
-            let _ = std::fs::remove_file(&path);
+            let path = entry.path();
+            if path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }
@@ -231,7 +231,7 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
     let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path == keep || !path.is_file() {
+        if path == keep {
             continue;
         }
         let name = entry.file_name();
@@ -258,15 +258,28 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
         } else {
             CACHE_PRUNE_AFTER
         };
+        // One `stat`, of a managed file only, gives both its kind and age.
         let stale = entry
             .metadata()
-            .and_then(|m| m.modified())
             .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|metadata| metadata.modified().ok())
             .and_then(|mtime| now.duration_since(mtime).ok())
             .is_some_and(|age| age > max_age);
         if stale {
             let _ = std::fs::remove_file(&path);
         }
+    }
+}
+
+/// [`prune_stale_cache_files`], at most once per directory per process. The
+/// sweep reads every entry's age, and one run saves a unit per package: by
+/// the second save there is nothing new for it to find.
+pub(crate) fn prune_stale_cache_files_once(dir: &std::path::Path, keep: &std::path::Path) {
+    static SWEPT: std::sync::LazyLock<parking_lot::Mutex<ahash::AHashSet<std::path::PathBuf>>> =
+        std::sync::LazyLock::new(|| parking_lot::Mutex::new(ahash::AHashSet::new()));
+    if SWEPT.lock().insert(dir.to_path_buf()) {
+        prune_stale_cache_files(dir, keep);
     }
 }
 

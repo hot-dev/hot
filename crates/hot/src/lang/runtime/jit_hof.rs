@@ -1500,6 +1500,13 @@ pub fn run_pipeline(plan: &PipelinePlan, source: &Val) -> FusedRun {
         Val::Vec(items) => items,
         _ => return FusedRun::Deopt,
     };
+    // A lone `length` is the Vec's length. Counting it as a pipeline cloned
+    // every element, so `length(xs)` in a loop was quadratic.
+    if let [stage] = plan.stages.as_slice()
+        && stage.stage == HofStage::Length
+    {
+        return FusedRun::Produced(Val::Int(items.len() as i64));
+    }
     run_pipeline_items(plan, items.iter().cloned())
 }
 

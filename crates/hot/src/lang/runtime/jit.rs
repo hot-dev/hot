@@ -54,6 +54,27 @@ thread_local! {
     /// `owned_fused_plan`).
     static COMPILE_FUSED_PLANS: std::cell::RefCell<Vec<std::pin::Pin<Box<PipelinePlan>>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The values the code being compiled on this thread has baked into it
+    /// (see `baked_owned_val`).
+    static COMPILE_BAKED_VALS: std::cell::RefCell<Vec<Arc<Val>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// An owned-value handle to `val` for the code being compiled to hold as a
+/// constant: a name, a literal, an empty collection to start from.
+///
+/// The compiled function owns the value, and frees it with its code. The
+/// code never drops such a handle (it is `compile_time_owned`), so a handle
+/// made with `new_owned_val` had no owner at all: every compile leaked its
+/// constants, a failed one included, and each VM compiles afresh.
+fn baked_owned_val(val: Val) -> i64 {
+    let val = Arc::new(val);
+    let raw = Arc::as_ptr(&val) as i64;
+    if owned_trace_enabled() {
+        eprintln!("BAKE {raw:#x}");
+    }
+    COMPILE_BAKED_VALS.with(|vals| vals.borrow_mut().push(val));
+    raw
 }
 
 /// Where the code being compiled reads the Dec constant `value`: memory the
@@ -406,6 +427,16 @@ impl TypeSig {
             args,
         }
     }
+
+    /// Allocation-free equivalent of `*self == Self::from_args(args)`.
+    pub fn matches_args(&self, args: &[Val]) -> bool {
+        self.args.len() == args.len()
+            && self
+                .args
+                .iter()
+                .zip(args)
+                .all(|(tag, arg)| tag.matches_val(arg))
+    }
 }
 
 impl JitTypeTag {
@@ -462,6 +493,9 @@ pub struct JitFunctionProfile {
     /// (`unsupported.*`) reason. Compiling one again would fail again, so
     /// each is tried once rather than on every call.
     pub failed_signatures: AHashSet<TypeSig>,
+    /// Calls with `stable_signature` not yet added to its count in
+    /// `observed_signatures` (see [`Self::record_call`]).
+    stable_hits: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -474,20 +508,44 @@ pub struct LambdaJitKey {
     capture_function_names: Vec<Option<String>>,
 }
 
+/// A hash of what a lambda is, apart from what it captured and was passed.
+fn lambda_structural_hash(lambda: &LambdaInfo) -> u64 {
+    // Hashing the full instruction list on every lambda call is O(body);
+    // the structural fields are immutable, so compute once and cache.
+    lambda.structural_hash_cache.get_or_compute(|| {
+        let mut hasher = DefaultHasher::new();
+        lambda.parameters.hash(&mut hasher);
+        lambda.instructions.hash(&mut hasher);
+        lambda.register_count.hash(&mut hasher);
+        lambda.capture_vars.hash(&mut hasher);
+        lambda.defining_namespace.hash(&mut hasher);
+        lambda.is_lazy_param.hash(&mut hasher);
+        hasher.finish()
+    })
+}
+
+/// How often a lambda has been called, by its structural hash alone. Kept
+/// apart from the per-signature profiles, which cost a key of two
+/// signatures and several allocations to reach: most lambdas are called a
+/// few times and never get near compiling, and those pay only this count.
+#[derive(Debug, Clone, Copy, Default)]
+struct LambdaCallCount {
+    calls: u32,
+    /// Past the threshold: calls now go to the per-signature profiles.
+    profiled: bool,
+    /// Calls in a row, once profiled, that found nothing compiled and
+    /// nothing left to try.
+    misses: u32,
+    /// The lambda doesn't compile: stop looking.
+    gave_up: bool,
+}
+
+/// Misses in a row after which a lambda is left to the interpreter.
+const LAMBDA_GIVE_UP_AFTER_MISSES: u32 = 64;
+
 impl LambdaJitKey {
     fn new(lambda: &LambdaInfo, args: &[Val], captures: &[Val]) -> Self {
-        // Hashing the full instruction list on every lambda call is O(body);
-        // the structural fields are immutable, so compute once and cache.
-        let structural_hash = lambda.structural_hash_cache.get_or_compute(|| {
-            let mut hasher = DefaultHasher::new();
-            lambda.parameters.hash(&mut hasher);
-            lambda.instructions.hash(&mut hasher);
-            lambda.register_count.hash(&mut hasher);
-            lambda.capture_vars.hash(&mut hasher);
-            lambda.defining_namespace.hash(&mut hasher);
-            lambda.is_lazy_param.hash(&mut hasher);
-            hasher.finish()
-        });
+        let structural_hash = lambda_structural_hash(lambda);
 
         Self {
             structural_hash,
@@ -769,6 +827,11 @@ struct ActiveFlowState {
     /// this is set, every branch result is promoted to `OwnedVal` so the merged
     /// register has one uniform, memory-safe kind. Computed once at `BeginFlow`.
     force_owned_result: bool,
+    /// A `cond` or `match` with no default arm: when no arm is taken its
+    /// result is Null, which the result register holds as the raw `0` it was
+    /// loaded with. `EndFlow` gives that path a real Null once the result is
+    /// an owned value.
+    unmatched_is_null: bool,
 }
 
 /// A compiled function's module, which frees the function's code memory when
@@ -828,6 +891,9 @@ pub struct JitCompiledFunction {
     /// The fused pipelines the code runs, held for it (see
     /// `owned_fused_plan`).
     _fused_plans: Vec<std::pin::Pin<Box<PipelinePlan>>>,
+    /// The values the code holds as constants, held for it (see
+    /// `baked_owned_val`).
+    _baked_vals: Vec<Arc<Val>>,
     /// The code opens flow contexts in the VM for the inline flows it
     /// traces; a call closes any an early return left open.
     traces_flows: bool,
@@ -877,8 +943,28 @@ impl JitCompiledFunction {
         let vm_ptr = get_jit_vm_ptr();
         let flow_depth = (self.traces_flows && !vm_ptr.is_null())
             .then(|| unsafe { &*vm_ptr }.flow_context_depth());
-        let raw_args = self.signature.encode_args(args, &self.arg_layout)?;
-        let mut raw_result = vec![0u64; self.result_word_len];
+        // The arguments and the result cross in word buffers: on the stack
+        // for the usual few, so entering compiled code allocates nothing.
+        const INLINE_WORDS: usize = 16;
+        let mut inline_args = [0u64; INLINE_WORDS];
+        let mut heap_args = Vec::new();
+        let arg_words = self.arg_layout.word_len();
+        let raw_args: &mut [u64] = if arg_words <= INLINE_WORDS {
+            &mut inline_args[..arg_words]
+        } else {
+            heap_args.resize(arg_words, 0);
+            &mut heap_args
+        };
+        self.signature
+            .encode_args(args, &self.arg_layout, raw_args)?;
+        let mut inline_result = [0u64; INLINE_WORDS];
+        let mut heap_result = Vec::new();
+        let raw_result: &mut [u64] = if self.result_word_len <= INLINE_WORDS {
+            &mut inline_result[..self.result_word_len]
+        } else {
+            heap_result.resize(self.result_word_len, 0);
+            &mut heap_result
+        };
         let fn_ptr = self.module.get_finalized_function(self.func_id);
         let jit_fn: unsafe extern "C" fn(*const u8, *mut u8, i64) -> i64 =
             unsafe { mem::transmute(fn_ptr) };
@@ -890,7 +976,7 @@ impl JitCompiledFunction {
             )
         };
         let result = match ret {
-            0 => self.result_kind.decode_result(&raw_result),
+            0 => self.result_kind.decode_result(raw_result),
             JIT_STACK_EXHAUSTED => Err(limits::stack_budget_exhausted_message()),
             JIT_RECURSION_LIMIT => {
                 let max = max_recursion_depth();
@@ -909,12 +995,19 @@ impl JitCompiledFunction {
     }
 }
 
-fn synthetic_function_info_from_lambda(
-    program: &mut BytecodeProgram,
+/// The function a lambda compiles as, and the program to compile it against.
+///
+/// That is `program` itself unless the lambda calls a function it captured:
+/// the call then loads the function by a constant the program doesn't have,
+/// and only then is the program copied to add it. (Copying it for every
+/// lambda made a compile cost as much as the whole program is large.)
+fn synthetic_function_info_from_lambda<'p>(
+    program: &'p BytecodeProgram,
     lambda: &LambdaInfo,
     captures: &[Val],
     effective_arity: usize,
-) -> Result<FunctionInfo, String> {
+) -> Result<(FunctionInfo, std::borrow::Cow<'p, BytecodeProgram>), String> {
+    let mut program = std::borrow::Cow::Borrowed(program);
     let arity = u8::try_from(effective_arity)
         .map_err(|_| unsupported_jit_bailout("lambda_arity", "lambda arity exceeds u8"))?;
     let mut param_names = Vec::with_capacity(lambda.capture_vars.len() + lambda.parameters.len());
@@ -943,6 +1036,7 @@ fn synthetic_function_info_from_lambda(
             {
                 let function_const = program.constants.len() as u32;
                 program
+                    .to_mut()
                     .constants
                     .push(Constant::FunctionRef(function_name.clone().into()));
                 *instruction = Instruction::LoadConst {
@@ -953,7 +1047,7 @@ fn synthetic_function_info_from_lambda(
         }
     }
 
-    Ok(FunctionInfo {
+    let function_info = FunctionInfo {
         name: "<lambda>".to_string(),
         namespace: lambda.defining_namespace.clone(),
         arity,
@@ -966,7 +1060,8 @@ fn synthetic_function_info_from_lambda(
         instructions,
         register_count: lambda.register_count,
         source: None,
-    })
+    };
+    Ok((function_info, program))
 }
 
 impl Default for JitFunctionProfile {
@@ -980,6 +1075,7 @@ impl Default for JitFunctionProfile {
             cumulative_compile_time_ms: 0,
             do_not_jit: false,
             failed_signatures: AHashSet::new(),
+            stable_hits: 0,
         }
     }
 }
@@ -987,6 +1083,24 @@ impl Default for JitFunctionProfile {
 impl JitFunctionProfile {
     pub fn record_call(&mut self, args: &[Val]) {
         self.call_count = self.call_count.saturating_add(1);
+
+        // Nearly every call repeats the stable signature, and one more of it
+        // leaves it the most seen. Count those apart, so the usual call
+        // builds no signature and touches no map: profiling every call that
+        // way cost about a fifth of the interpreter's time.
+        if let Some(stable) = &self.stable_signature
+            && stable.matches_args(args)
+        {
+            self.stable_hits = self.stable_hits.saturating_add(1);
+            return;
+        }
+        if self.stable_hits > 0
+            && let Some(stable) = &self.stable_signature
+            && let Some(count) = self.observed_signatures.get_mut(stable)
+        {
+            *count = count.saturating_add(self.stable_hits);
+        }
+        self.stable_hits = 0;
 
         let sig = TypeSig::from_args(args);
         let count = self.observed_signatures.entry(sig.clone()).or_insert(0);
@@ -1019,6 +1133,7 @@ pub struct JitRuntimeState {
     compiled_functions: Vec<Vec<Rc<JitCompiledFunction>>>,
     lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
     compiled_lambdas: AHashMap<LambdaJitKey, Rc<JitCompiledFunction>>,
+    lambda_calls: AHashMap<u64, LambdaCallCount>,
 }
 
 /// Cap on compiled signature specializations per function.
@@ -1036,6 +1151,59 @@ impl JitRuntimeState {
             compiled_functions: vec![Vec::new(); function_count],
             lambda_profiles: AHashMap::new(),
             compiled_lambdas: AHashMap::new(),
+            lambda_calls: AHashMap::new(),
+        }
+    }
+
+    /// Count a call of `lambda`, and say whether to look for compiled code
+    /// for it: `None` to interpret this call, or the calls already counted,
+    /// which start the lambda's first per-signature profile.
+    ///
+    /// Call this before building the arguments [`Self::compiled_lambda`]
+    /// takes. Until a lambda nears the threshold it has nothing compiled,
+    /// and one that can't be compiled never will.
+    pub fn admit_lambda_call(&mut self, lambda: &LambdaInfo) -> Option<u32> {
+        if !self.config.is_enabled()
+            || matches!(
+                self.code_memory_status.availability,
+                JitAvailability::Unsupported
+            )
+            || lambda.is_lazy_param
+        {
+            return None;
+        }
+        let threshold = self.config.threshold;
+        let count = self
+            .lambda_calls
+            .entry(lambda_structural_hash(lambda))
+            .or_default();
+        if count.gave_up {
+            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        if count.profiled {
+            return Some(0);
+        }
+        count.calls = count.calls.saturating_add(1);
+        if count.calls < threshold {
+            GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        count.profiled = true;
+        Some(count.calls - 1)
+    }
+
+    /// Record whether a profiled call of `lambda` found compiled code.
+    fn note_lambda_outcome(&mut self, lambda: &LambdaInfo, compiled: bool) {
+        if let Some(count) = self.lambda_calls.get_mut(&lambda_structural_hash(lambda)) {
+            if compiled {
+                count.misses = 0;
+            } else {
+                count.misses = count.misses.saturating_add(1);
+                if count.misses >= LAMBDA_GIVE_UP_AFTER_MISSES {
+                    count.gave_up = true;
+                }
+            }
         }
     }
 
@@ -1218,7 +1386,7 @@ impl JitRuntimeState {
         captures: &[Val],
         names: CallNames<'_>,
     ) -> Result<Option<Val>, String> {
-        match self.compiled_lambda(program, lambda, args, captures, names)? {
+        match self.compiled_lambda(program, lambda, args, captures, 0, names)? {
             Some((compiled, effective_args)) => call_compiled_lambda(&compiled, &effective_args),
             None => Ok(None),
         }
@@ -1226,12 +1394,16 @@ impl JitRuntimeState {
 
     /// The compiled code for calling `lambda`, compiled once the lambda is
     /// hot, with the arguments it takes: its captures, then `args`.
+    ///
+    /// `prior_calls` is what [`Self::admit_lambda_call`] returned: the calls
+    /// counted before this lambda had a profile of its own.
     pub fn compiled_lambda(
         &mut self,
         program: &BytecodeProgram,
         lambda: &LambdaInfo,
         args: &[Val],
         captures: &[Val],
+        prior_calls: u32,
         names: CallNames<'_>,
     ) -> Result<Option<CompiledLambdaCall>, String> {
         if !self.config.is_enabled()
@@ -1257,6 +1429,7 @@ impl JitRuntimeState {
         // entries out from under a held reference.
         if let Some(compiled) = self.compiled_lambdas.get(&key).map(Rc::clone) {
             if compiled.matches_args(&effective_args) {
+                self.note_lambda_outcome(lambda, true);
                 return Ok(Some((compiled, effective_args)));
             }
 
@@ -1268,7 +1441,11 @@ impl JitRuntimeState {
         let profile = self.lambda_profiles.entry(key.clone()).or_default();
         if profile.do_not_jit || profile.call_count > self.config.threshold {
             GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+            self.note_lambda_outcome(lambda, false);
             return Ok(None);
+        }
+        if profile.call_count == 0 {
+            profile.call_count = prior_calls;
         }
         profile.record_call(&effective_args);
 
@@ -1279,13 +1456,8 @@ impl JitRuntimeState {
             return Ok(None);
         }
 
-        let mut synthetic_program = program.clone();
-        let function_info = synthetic_function_info_from_lambda(
-            &mut synthetic_program,
-            lambda,
-            captures,
-            effective_args.len(),
-        )?;
+        let (function_info, synthetic_program) =
+            synthetic_function_info_from_lambda(program, lambda, captures, effective_args.len())?;
         let start = std::time::Instant::now();
         match compile_supported_function(
             &synthetic_program,
@@ -1306,6 +1478,7 @@ impl JitRuntimeState {
                 let compiled = Rc::new(compiled);
                 self.compiled_lambdas
                     .insert(key.clone(), Rc::clone(&compiled));
+                self.note_lambda_outcome(lambda, true);
                 Ok(Some((compiled, effective_args)))
             }
             Err(err) => {
@@ -1627,7 +1800,12 @@ impl TypeSig {
     /// Encode `args` into the raw JIT ABI buffer. `layout` is the compile-time
     /// `AbiLayout` cached on the compiled entry; callers must have verified the
     /// signature with `matches_args` first (checked again in debug builds).
-    fn encode_args(&self, args: &[Val], layout: &AbiLayout) -> Result<Vec<u64>, String> {
+    fn encode_args(
+        &self,
+        args: &[Val],
+        layout: &AbiLayout,
+        words: &mut [u64],
+    ) -> Result<(), String> {
         debug_assert!(
             self.arity as usize == args.len()
                 && self
@@ -1638,17 +1816,17 @@ impl TypeSig {
             "JIT type guard mismatch"
         );
 
-        let mut words = vec![0u64; layout.word_len()];
+        debug_assert_eq!(words.len(), layout.word_len());
 
         for (idx, (tag, arg)) in self.args.iter().zip(args.iter()).enumerate() {
             let offset = layout.offset(idx)?;
             match (tag, arg) {
-                (JitTypeTag::Null, Val::Null) => write_i64(&mut words, offset, 0),
-                (JitTypeTag::Int, Val::Int(n)) => write_i64(&mut words, offset, *n),
+                (JitTypeTag::Null, Val::Null) => write_i64(words, offset, 0),
+                (JitTypeTag::Int, Val::Int(n)) => write_i64(words, offset, *n),
                 (JitTypeTag::Bool, Val::Bool(b)) => {
-                    write_i64(&mut words, offset, if *b { 1 } else { 0 })
+                    write_i64(words, offset, if *b { 1 } else { 0 })
                 }
-                (JitTypeTag::Dec, Val::Dec(d)) => write_dec(&mut words, offset, *d),
+                (JitTypeTag::Dec, Val::Dec(d)) => write_dec(words, offset, *d),
                 (
                     JitTypeTag::Str
                     | JitTypeTag::Vec
@@ -1658,12 +1836,12 @@ impl TypeSig {
                     | JitTypeTag::Byte
                     | JitTypeTag::Bytes,
                     value,
-                ) => write_i64(&mut words, offset, new_owned_val(value.clone())),
+                ) => write_i64(words, offset, new_owned_val(value.clone())),
                 _ => return Err(format!("Unsupported JIT argument type: {:?}", tag)),
             }
         }
 
-        Ok(words)
+        Ok(())
     }
 }
 
@@ -2093,6 +2271,7 @@ fn compile_with_return_kind(
     COMPILE_DEC_CONSTANTS.with(|constants| constants.borrow_mut().clear());
     COMPILE_FLOW_TRACES.with(|traces| traces.borrow_mut().clear());
     COMPILE_FUSED_PLANS.with(|plans| plans.borrow_mut().clear());
+    COMPILE_BAKED_VALS.with(|vals| vals.borrow_mut().clear());
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
@@ -2164,6 +2343,7 @@ fn compile_with_return_kind(
         COMPILE_DEC_CONSTANTS.with(|constants| mem::take(&mut *constants.borrow_mut()));
     let flow_traces = COMPILE_FLOW_TRACES.with(|traces| mem::take(&mut *traces.borrow_mut()));
     let fused_plans = COMPILE_FUSED_PLANS.with(|plans| mem::take(&mut *plans.borrow_mut()));
+    let baked_vals = COMPILE_BAKED_VALS.with(|vals| mem::take(&mut *vals.borrow_mut()));
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
@@ -2173,6 +2353,7 @@ fn compile_with_return_kind(
         traces_flows: !flow_traces.is_empty(),
         _flow_traces: flow_traces,
         _fused_plans: fused_plans,
+        _baked_vals: baked_vals,
         func_id,
         arg_layout,
         result_word_len,
@@ -5245,11 +5426,11 @@ fn materialize_string_const_for_trampoline(
                 _ => None,
             }
         {
-            let val = new_owned_val(Val::Str(s.to_string().into()));
+            let val = baked_owned_val(Val::Str(s.to_string().into()));
             return builder.ins().iconst(types::I64, val);
         }
     }
-    let null_val = new_owned_val(Val::Null);
+    let null_val = baked_owned_val(Val::Null);
     builder.ins().iconst(types::I64, null_val)
 }
 
@@ -5314,8 +5495,8 @@ fn emit_empty_accumulator(
     modifier: FlowResultModifier,
 ) -> cranelift_codegen::ir::Value {
     let empty = match modifier {
-        FlowResultModifier::Map => new_owned_val(Val::map(indexmap::IndexMap::new())),
-        FlowResultModifier::Vec => new_owned_val(Val::vec(Vec::new())),
+        FlowResultModifier::Map => baked_owned_val(Val::map(indexmap::IndexMap::new())),
+        FlowResultModifier::Vec => baked_owned_val(Val::vec(Vec::new())),
         FlowResultModifier::One => {
             unreachable!("flow accumulator only created for Map/Vec modifiers")
         }
@@ -5339,7 +5520,7 @@ fn emit_accumulate(
     let acc = builder.use_var(acc_var);
     let call = match modifier {
         FlowResultModifier::Map => {
-            let key = new_owned_val(Val::Str(key()?.into()));
+            let key = baked_owned_val(Val::Str(key()?.into()));
             let key = builder.ins().iconst(types::I64, key);
             builder
                 .ins()
@@ -5738,25 +5919,33 @@ fn prescan_return_kind(
         Some(RawKind::Bool) => Some(JitValueKind::Bool),
         _ => None,
     };
-    // Each open flow: whether it accumulates (Map/Vec), and the kinds its
-    // branches produce.
-    let mut flows: Vec<(bool, Vec<Option<RawKind>>)> = Vec::new();
+    // Each open flow: whether it accumulates (Map/Vec), the kinds its
+    // branches produce, and whether it can end with no branch taken (a
+    // `cond` or `match` with no default arm), which makes its result Null.
+    let mut flows: Vec<(bool, Vec<Option<RawKind>>, bool)> = Vec::new();
 
     for (inst_ip, inst) in instructions.iter().enumerate() {
         match inst {
             Instruction::BeginFlow {
-                result_modifier, ..
+                flow_type,
+                result_modifier,
+                ..
             } => {
+                let can_end_unmatched = matches!(flow_type, FlowType::Cond | FlowType::Match)
+                    && find_matching_end_flow(instructions, inst_ip).is_ok_and(|end_ip| {
+                        flow_can_end_unmatched(instructions, program, inst_ip, end_ip)
+                    });
                 flows.push((
                     matches!(
                         result_modifier,
                         FlowResultModifier::Map | FlowResultModifier::Vec
                     ),
                     Vec::new(),
+                    can_end_unmatched,
                 ));
             }
             Instruction::CondBranchEnd { result, .. } => {
-                if let Some((_, kinds)) = flows.last_mut() {
+                if let Some((_, kinds, _)) = flows.last_mut() {
                     kinds.push(reg_kinds.get(result).copied());
                 }
             }
@@ -6041,11 +6230,19 @@ fn prescan_return_kind(
             // self-call's result `Null`.
             Instruction::EndFlow { dest } => {
                 let kind = match flows.pop() {
-                    Some((true, _)) => Some(RawKind::OwnedVal),
-                    Some((false, kinds)) if !kinds.is_empty() => Some(match kinds[0] {
-                        Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
-                        _ => RawKind::OwnedVal,
-                    }),
+                    Some((true, _, _)) => Some(RawKind::OwnedVal),
+                    Some((false, kinds, can_end_unmatched)) if !kinds.is_empty() => {
+                        Some(match kinds[0] {
+                            // The unmatched path's Null is a kind of its own
+                            // beside the branches' (see
+                            // `flow_branches_have_mixed_kinds`).
+                            Some(first) if can_end_unmatched && first != RawKind::Null => {
+                                RawKind::OwnedVal
+                            }
+                            Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
+                            _ => RawKind::OwnedVal,
+                        })
+                    }
                     _ => None,
                 };
                 match kind {
@@ -6415,7 +6612,7 @@ impl<'a> EmitCtx<'a> {
                 .stack_store(types::I64, eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
-        let name_val = new_owned_val(Val::Str(fn_name.to_string().into()));
+        let name_val = baked_owned_val(Val::Str(fn_name.to_string().into()));
         let name_ptr = builder.ins().iconst(types::I64, name_val);
         let count_val = builder.ins().iconst(types::I64, count as i64);
         let call = builder.ins().call(
@@ -7292,13 +7489,24 @@ impl<'a> EmitCtx<'a> {
             }
         }
         dropped.extend_from_slice(&self.open_accumulators);
-        if dropped.is_empty() {
-            return Ok(());
-        }
         let null = builder.ins().iconst(types::I64, 0);
         for var in dropped {
             drop_owned_var(builder, &self.helper_refs, var);
             builder.def_var(var, null);
+        }
+        // Every other register starts the next iteration null too, as it
+        // starts a call. One may still hold a pointer it no longer owns: a
+        // branch result handed on to its flow's result register, or a baked
+        // constant. Code on another path drops a register before writing it
+        // wherever a first pass finds it null or owned, so on a later pass it
+        // would free that value a second time.
+        for (idx, &var) in self.registers.iter().enumerate() {
+            let owned_here = self.register_kinds[idx] == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx)
+                && !open_results.contains(&idx);
+            if !owned_here {
+                builder.def_var(var, null);
+            }
         }
         Ok(())
     }
@@ -7341,7 +7549,7 @@ impl<'a> EmitCtx<'a> {
                                 RawKind::OwnedVal,
                                 builder
                                     .ins()
-                                    .iconst(types::I64, new_owned_val(Val::Str(s.clone()))),
+                                    .iconst(types::I64, baked_owned_val(Val::Str(s.clone()))),
                             )
                         }
                     }
@@ -7371,7 +7579,7 @@ impl<'a> EmitCtx<'a> {
                                 RawKind::OwnedVal,
                                 builder
                                     .ins()
-                                    .iconst(types::I64, new_owned_val(Val::Str(s.clone()))),
+                                    .iconst(types::I64, baked_owned_val(Val::Str(s.clone()))),
                             )
                         }
                     }
@@ -7388,7 +7596,7 @@ impl<'a> EmitCtx<'a> {
                         self.thunk_registry.insert(*dest, lambda_info.clone());
                         let base_lambda = builder
                             .ins()
-                            .iconst(types::I64, new_owned_val(Val::Box(b.clone())));
+                            .iconst(types::I64, baked_owned_val(Val::Box(b.clone())));
 
                         let mut capture_names: Vec<cranelift_codegen::ir::Value> = Vec::new();
                         let mut capture_values: Vec<cranelift_codegen::ir::Value> = Vec::new();
@@ -7425,7 +7633,8 @@ impl<'a> EmitCtx<'a> {
                                         "JIT late capture: a lambda reads '{var_name}', which this body binds after creating it"
                                     ));
                                 }
-                                let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
+                                let name_val =
+                                    baked_owned_val(Val::Str(var_name.to_string().into()));
                                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                                 let call =
                                     builder.ins().call(self.helper_refs.lookup_var, &[name_ptr]);
@@ -7433,7 +7642,7 @@ impl<'a> EmitCtx<'a> {
                                 capture_temps.push(Some(looked_up));
                                 looked_up
                             };
-                            let name_val = new_owned_val(Val::Str(var_name.to_string().into()));
+                            let name_val = baked_owned_val(Val::Str(var_name.to_string().into()));
                             let name_ptr = builder.ins().iconst(types::I64, name_val);
                             capture_names.push(name_ptr);
                             capture_values.push(owned);
@@ -7484,7 +7693,7 @@ impl<'a> EmitCtx<'a> {
                     }
                     Some(Constant::Val(v)) => (
                         RawKind::OwnedVal,
-                        builder.ins().iconst(types::I64, new_owned_val(v.clone())),
+                        builder.ins().iconst(types::I64, baked_owned_val(v.clone())),
                     ),
                     other => {
                         return Err(format!(
@@ -7513,7 +7722,7 @@ impl<'a> EmitCtx<'a> {
                     self.define_register(builder, *dest, kind, value)?;
                     self.jump_to_next(builder, ip)?;
                 } else {
-                    let name_val = new_owned_val(Val::Str(name.to_string().into()));
+                    let name_val = baked_owned_val(Val::Str(name.to_string().into()));
                     let name_raw = builder.ins().iconst(types::I64, name_val);
                     if let Ok(idx) = self.remap_reg(*dest) {
                         self.compile_time_owned.insert(idx);
@@ -7536,7 +7745,7 @@ impl<'a> EmitCtx<'a> {
                 function_name,
             } => {
                 let name = constant_string(self.program, *function_name)?;
-                let val = new_owned_val(Val::Str(name.to_string().into()));
+                let val = baked_owned_val(Val::Str(name.to_string().into()));
                 let value = builder.ins().iconst(types::I64, val);
                 self.define_register(builder, *dest, RawKind::OwnedVal, value)?;
                 if let Ok(idx) = self.remap_reg(*dest) {
@@ -8008,7 +8217,7 @@ impl<'a> EmitCtx<'a> {
             } => {
                 let (obj_val, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop_name = constant_string(self.program, *property)?;
-                let prop_val = new_owned_val(Val::Str(prop_name.to_string().into()));
+                let prop_val = baked_owned_val(Val::Str(prop_name.to_string().into()));
                 let prop_const = builder.ins().iconst(types::I64, prop_val);
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
@@ -8127,7 +8336,7 @@ impl<'a> EmitCtx<'a> {
             } => {
                 let (src_val, src_temp) = self.owned_operand(builder, *src)?;
                 let type_info_val = match self.program.constants.get(*type_info as usize) {
-                    Some(Constant::Val(v)) => new_owned_val(v.clone()),
+                    Some(Constant::Val(v)) => baked_owned_val(v.clone()),
                     _ => {
                         return Err(format!(
                             "ConstructTyped: invalid type_info constant {}",
@@ -8163,7 +8372,7 @@ impl<'a> EmitCtx<'a> {
                     }
                     self.define_register(builder, *dest, kind, value)?;
                 } else {
-                    let name_val = new_owned_val(Val::Str(name.to_string().into()));
+                    let name_val = baked_owned_val(Val::Str(name.to_string().into()));
                     let name_raw = builder.ins().iconst(types::I64, name_val);
                     let call = builder
                         .ins()
@@ -8175,8 +8384,8 @@ impl<'a> EmitCtx<'a> {
                         0,
                     );
                     let default_val = match self.program.constants.get(*default_value as usize) {
-                        Some(Constant::Val(v)) => new_owned_val(v.clone()),
-                        _ => new_owned_val(Val::Null),
+                        Some(Constant::Val(v)) => baked_owned_val(v.clone()),
+                        _ => baked_owned_val(Val::Null),
                     };
                     let default_raw = builder.ins().iconst(types::I64, default_val);
                     let result = builder.ins().select(is_found, resolved, default_raw);
@@ -8193,12 +8402,12 @@ impl<'a> EmitCtx<'a> {
                 // variant type such as `OnErr` is a boxed TypeRef, so that
                 // `OnErr.Preserve` reads a variant rather than Null.
                 let val = match self.program.constants.get(*type_ref as usize) {
-                    Some(Constant::Val(v)) => new_owned_val(v.clone()),
+                    Some(Constant::Val(v)) => baked_owned_val(v.clone()),
                     Some(Constant::VariantTypeRef(type_ref)) => {
-                        new_owned_val(Val::Box(Box::new(type_ref.clone())))
+                        baked_owned_val(Val::Box(Box::new(type_ref.clone())))
                     }
-                    Some(Constant::TypeRef(name)) => new_owned_val(Val::Str(name.clone())),
-                    _ => new_owned_val(Val::Null),
+                    Some(Constant::TypeRef(name)) => baked_owned_val(Val::Str(name.clone())),
+                    _ => baked_owned_val(Val::Null),
                 };
                 let value = builder.ins().iconst(types::I64, val);
                 self.define_register(builder, *dest, RawKind::OwnedVal, value)?;
@@ -8216,7 +8425,7 @@ impl<'a> EmitCtx<'a> {
             } => {
                 let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop = constant_string(self.program, *property)?;
-                let prop_val = new_owned_val(Val::Str(prop.to_string().into()));
+                let prop_val = baked_owned_val(Val::Str(prop.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
                 let default_val = match self.program.constants.get(*default_value as usize) {
                     Some(Constant::Val(value)) => value.clone(),
@@ -8227,7 +8436,9 @@ impl<'a> EmitCtx<'a> {
                         ));
                     }
                 };
-                let default_ptr = builder.ins().iconst(types::I64, new_owned_val(default_val));
+                let default_ptr = builder
+                    .ins()
+                    .iconst(types::I64, baked_owned_val(default_val));
                 let call = builder.ins().call(
                     self.helper_refs.dot_access_or_default,
                     &[obj_ptr, prop_ptr, default_ptr],
@@ -8283,9 +8494,9 @@ impl<'a> EmitCtx<'a> {
             }
             Instruction::WrapOk { dest, src } => {
                 let (src_ptr, src_temp) = self.owned_operand(builder, *src)?;
-                let ok_key = new_owned_val(Val::Str("ok".into()));
+                let ok_key = baked_owned_val(Val::Str("ok".into()));
                 let key_ptr = builder.ins().iconst(types::I64, ok_key);
-                let empty_map = new_owned_val(Val::map(indexmap::IndexMap::new()));
+                let empty_map = baked_owned_val(Val::map(indexmap::IndexMap::new()));
                 let map_ptr = builder.ins().iconst(types::I64, empty_map);
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
@@ -8455,7 +8666,7 @@ impl<'a> EmitCtx<'a> {
                 let object_idx = self.remap_reg(*object)?;
                 let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop_name = constant_string(self.program, *property)?;
-                let prop_val = new_owned_val(Val::Str(prop_name.to_string().into()));
+                let prop_val = baked_owned_val(Val::Str(prop_name.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
                 let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 let call = builder
@@ -8525,10 +8736,10 @@ impl<'a> EmitCtx<'a> {
                 value,
             } => {
                 let ns_name = constant_string(self.program, *namespace)?;
-                let ns_val = new_owned_val(Val::Str(ns_name.to_string().into()));
+                let ns_val = baked_owned_val(Val::Str(ns_name.to_string().into()));
                 let ns_ptr = builder.ins().iconst(types::I64, ns_val);
                 let name = constant_string(self.program, *var_name)?;
-                let name_val = new_owned_val(Val::Str(name.to_string().into()));
+                let name_val = baked_owned_val(Val::Str(name.to_string().into()));
                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                 let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
                 builder
@@ -8540,7 +8751,7 @@ impl<'a> EmitCtx<'a> {
             }
             Instruction::SetNamespace { namespace } => {
                 let ns_name = constant_string(self.program, *namespace)?;
-                let ns_val = new_owned_val(Val::Str(ns_name.to_string().into()));
+                let ns_val = baked_owned_val(Val::Str(ns_name.to_string().into()));
                 let ns_ptr = builder.ins().iconst(types::I64, ns_val);
                 builder
                     .ins()
@@ -8612,7 +8823,7 @@ impl<'a> EmitCtx<'a> {
                 scope_depth,
             } => {
                 let name = constant_string(self.program, *var_name)?;
-                let name_val = new_owned_val(Val::Str(name.to_string().into()));
+                let name_val = baked_owned_val(Val::Str(name.to_string().into()));
                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                 let depth_val = builder.ins().iconst(types::I64, *scope_depth as i64);
                 let call = builder
@@ -8629,7 +8840,7 @@ impl<'a> EmitCtx<'a> {
                 scope_depth,
             } => {
                 let name = constant_string(self.program, *var_name)?;
-                let name_val = new_owned_val(Val::Str(name.to_string().into()));
+                let name_val = baked_owned_val(Val::Str(name.to_string().into()));
                 let name_ptr = builder.ins().iconst(types::I64, name_val);
                 let depth_val = builder.ins().iconst(types::I64, *scope_depth as i64);
                 let call = builder
@@ -8670,7 +8881,7 @@ impl<'a> EmitCtx<'a> {
                         .is_some_and(|node| spec_keeps_raw_kind(self.program, node, src_kind, 0));
                 let spec_raw = builder
                     .ins()
-                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                    .iconst(types::I64, baked_owned_val(spec_val.clone()));
                 let (src_val, src_temp) = self.owned_operand(builder, *src)?;
                 let test_flag = builder.ins().iconst(types::I64, i64::from(*test));
                 let call = builder.ins().call(
@@ -8747,7 +8958,7 @@ impl<'a> EmitCtx<'a> {
                 };
                 let spec_raw = builder
                     .ins()
-                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                    .iconst(types::I64, baked_owned_val(spec_val.clone()));
                 let mask_raw = builder.ins().iconst(types::I64, i64::from(*mask));
                 let each_raw = builder.ins().iconst(types::I64, i64::from(*each));
                 let value = builder.use_var(var);
@@ -9185,6 +9396,9 @@ fn build_supported_body(
                     last_pipe_reg: None,
                     pipe_steps: 0,
                     force_owned_result,
+                    unmatched_is_null: accumulator_var.is_none()
+                        && matches!(flow_type, FlowType::Cond | FlowType::Match)
+                        && flow_can_end_unmatched(instructions, program, ip, end_ip),
                 });
                 // A traced inline flow is a call record of its own, and the
                 // flow of the calls made in it, as in the interpreter.
@@ -9234,7 +9448,7 @@ fn build_supported_body(
                     builder.ins().brif(cond, enter_block, &[], skip_block, &[]);
                     builder.switch_to_block(enter_block);
                     builder.seal_block(enter_block);
-                    let name = new_owned_val(Val::from(constant_string(program, *branch_name)?));
+                    let name = baked_owned_val(Val::from(constant_string(program, *branch_name)?));
                     let name = builder.ins().iconst(types::I64, name);
                     builder.ins().call(ctx.helper_refs.flow_branch, &[name]);
                     builder.ins().jump(execute_block, &[]);
@@ -9410,6 +9624,34 @@ fn build_supported_body(
                     let kind = flow
                         .merged_result_kind
                         .unwrap_or(ctx.register_kind(result_reg)?);
+                    if flow.unmatched_is_null && kind == RawKind::OwnedVal {
+                        // No owned value is 0, so a 0 here is the register's
+                        // initial Null: no arm stored a result.
+                        let result_idx = ctx.remap_reg(result_reg)?;
+                        let slot = ctx.registers[result_idx];
+                        let current = builder.use_var(slot);
+                        let unmatched_block = builder.create_block();
+                        let matched_block = builder.create_block();
+                        let is_unmatched = builder.ins().icmp_imm_s(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal,
+                            current,
+                            0,
+                        );
+                        builder
+                            .ins()
+                            .brif(is_unmatched, unmatched_block, &[], matched_block, &[]);
+                        builder.switch_to_block(unmatched_block);
+                        builder.seal_block(unmatched_block);
+                        let null = builder.ins().iconst(types::I64, 0);
+                        let boxed_null =
+                            promote_to_owned(builder, &ctx.helper_refs, RawKind::Null, null)?;
+                        builder.def_var(slot, boxed_null);
+                        builder.ins().jump(matched_block, &[]);
+                        builder.switch_to_block(matched_block);
+                        builder.seal_block(matched_block);
+                        ctx.compile_time_owned.remove(&result_idx);
+                        ctx.register_kinds[result_idx] = Some(RawKind::OwnedVal);
+                    }
                     if *dest != result_reg {
                         let raw = ctx.reg_value(builder, result_reg)?;
                         ctx.define_register(builder, *dest, kind, raw)?;
@@ -9466,12 +9708,21 @@ fn build_supported_body(
                     if actual_kind == param_kind {
                         continue;
                     }
+                    // A `Result` parameter takes its argument as it is, an
+                    // Err included: preparing it here would consume the
+                    // Result and halt on an Err the function means to
+                    // inspect. The call through the VM passes it intact.
+                    let takes_result = program
+                        .result_params
+                        .get(&function_id)
+                        .is_some_and(|flags| flags.get(idx).copied().unwrap_or(false));
                     if actual_kind == RawKind::OwnedVal
                         && matches!(
                             param_kind,
                             RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null
                         )
                         && !ctx.error_capture_active
+                        && !takes_result
                     {
                         owned_raws.push(idx);
                         continue;
@@ -10008,6 +10259,7 @@ fn flow_branches_have_mixed_kinds(
 
     let mut merged: Option<RawKind> = None;
     let mut depth = 0usize;
+    let mut has_default = false;
 
     for (ip, inst) in instructions
         .iter()
@@ -10015,6 +10267,9 @@ fn flow_branches_have_mixed_kinds(
         .take(end_ip)
         .skip(begin_ip + 1)
     {
+        if depth == 0 && is_default_branch(instructions, program, ip) {
+            has_default = true;
+        }
         // Track nested flows so only this flow's own branch ends are inspected.
         match inst {
             Instruction::BeginFlow { .. } => {
@@ -10129,7 +10384,63 @@ fn flow_branches_have_mixed_kinds(
         }
     }
 
-    false
+    // With no default arm the flow can end with none taken, and its result is
+    // then Null: one more kind beside the arms'. (Tagging that path with the
+    // arms' kind read the untouched result register as an Int `0`, a Bool
+    // `false`, or a pointer.)
+    !has_default && merged.is_some_and(|kind| kind != RawKind::Null)
+}
+
+/// Whether the branch `ip` starts always runs. The compiler writes a default
+/// arm (`=>`, an `if`'s else) as a branch on a `true` loaded just before it.
+fn is_default_branch(instructions: &[Instruction], program: &BytecodeProgram, ip: usize) -> bool {
+    let Some(Instruction::CondBranchStart { condition, .. }) = instructions.get(ip) else {
+        return false;
+    };
+    ip.checked_sub(1)
+        .and_then(|previous| instructions.get(previous))
+        .is_some_and(|previous| {
+            matches!(
+                previous,
+                Instruction::LoadConst { dest, constant }
+                    if dest == condition
+                        && matches!(
+                            program.constants.get(*constant as usize),
+                            Some(Constant::Val(Val::Bool(true)))
+                        )
+            )
+        })
+}
+
+/// Whether the flow from `begin_ip` to `end_ip` has arms and can end with
+/// none of them taken: it has no default arm.
+fn flow_can_end_unmatched(
+    instructions: &[Instruction],
+    program: &BytecodeProgram,
+    begin_ip: usize,
+    end_ip: usize,
+) -> bool {
+    let mut depth = 0usize;
+    let mut has_arm = false;
+    for (ip, inst) in instructions
+        .iter()
+        .enumerate()
+        .take(end_ip)
+        .skip(begin_ip + 1)
+    {
+        match inst {
+            Instruction::BeginFlow { .. } => depth += 1,
+            Instruction::EndFlow { .. } => depth = depth.saturating_sub(1),
+            Instruction::CondBranchStart { .. } if depth == 0 => {
+                if is_default_branch(instructions, program, ip) {
+                    return false;
+                }
+                has_arm = true;
+            }
+            _ => {}
+        }
+    }
+    has_arm
 }
 
 /// The raw kind of a call the emitter lowers to an intrinsic (see
@@ -10862,7 +11173,7 @@ fn emit_consume_err(
         Consumer::Op => (CONSUMER_OP, 0, 0),
         Consumer::Core(core, index) => (
             CONSUMER_CORE,
-            new_owned_val(Val::Str(core_call_name(core).into())),
+            baked_owned_val(Val::Str(core_call_name(core).into())),
             index,
         ),
         Consumer::Function(function_id, index) => {
@@ -11519,7 +11830,7 @@ fn emit_consume_check(
     raw: cranelift_codegen::ir::Value,
     core: &str,
 ) -> cranelift_codegen::ir::Block {
-    let name = new_owned_val(Val::Str(core.into()));
+    let name = baked_owned_val(Val::Str(core.into()));
     let name = builder.ins().iconst(types::I64, name);
     let call = builder
         .ins()
