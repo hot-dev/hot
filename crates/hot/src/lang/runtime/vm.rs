@@ -1124,7 +1124,8 @@ impl VirtualMachine {
         tracing::debug!("VM: Initializing with thread_count = {}", thread_count);
         tracing::debug!("VM: Isolation mode enabled = {}", isolation_enabled);
 
-        let jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        jit.attach_shared(&program);
         let function_count = program.functions.len();
 
         let mut vm = Self {
@@ -9680,6 +9681,9 @@ impl VirtualMachine {
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
         self.poll_execution_cancelled()
             .map_err(|error| error.to_string())?;
+        if self.jit.has_shared_candidates(function_id) {
+            self.adopt_shared_code(function_id);
+        }
         let Some(compiled) = self.jit.compiled_function(function_id, args) else {
             return Ok(None);
         };
@@ -9704,6 +9708,20 @@ impl VirtualMachine {
             self.end_traced_call(call_id, value);
         }
         result.map(Some)
+    }
+
+    /// Take the code other VMs running this program compiled for
+    /// `function_id`, where it suits this VM (see `JitRuntimeState::adopt_shared`).
+    #[cold]
+    fn adopt_shared_code(&mut self, function_id: u32) {
+        let shadows = self.native_core_shadows();
+        let param_arrows = self.param_arrows(function_id);
+        self.jit.adopt_shared(
+            function_id,
+            CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
+                .traced(self.traces_calls())
+                .param_arrows(&param_arrows),
+        );
     }
 
     /// Run `compiled`, the code for calling `function_id` with `args`.

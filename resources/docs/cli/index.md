@@ -684,6 +684,7 @@ These options work with most commands:
 | `--jit.mode <MODE>` | JIT compilation: enabled, disabled (default: enabled on supported platforms) |
 | `--jit.threshold <N>` | Calls before a function is JIT-compiled |
 | `--jit.hof.fusion <BOOL>` | JIT higher-order-function pipeline fusion (default: true) |
+| `--jit.share <BOOL>` | Share JIT-compiled code between the runs of one build (default: true) |
 | `--db.uri <URI>` | Database connection URI |
 | `--db.migration-uri <URI>` | Schema-owner URI for migrations on PostgreSQL (see [Self-Hosted PostgreSQL](/docs/configuration/postgres)) |
 | `--log.level <LEVEL>` | Log level: off, trace, debug, error, warn, info |

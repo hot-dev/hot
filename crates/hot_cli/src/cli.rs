@@ -122,6 +122,14 @@ pub(crate) struct GlobalOptions {
     pub(crate) jit_hof_fusion: Option<bool>,
 
     #[arg(
+        long = "jit.share",
+        value_name = "BOOL",
+        help = "Share JIT-compiled code between the runs of one build (default: true)",
+        global = true
+    )]
+    pub(crate) jit_share: Option<bool>,
+
+    #[arg(
         long = "db.uri",
         value_name = "URI",
         help = "Database connection URI",

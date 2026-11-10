@@ -6494,6 +6494,28 @@ caller(true)"#;
         with_ast: bool,
         edit: impl FnOnce(&mut crate::lang::bytecode::BytecodeProgram),
     ) -> Result<Val, String> {
+        let (compiler, hot_ast) = compile_with_std(source, resolve_imports, with_ast)?;
+        let mut program = compiler.get_program_arc();
+        edit(Arc::make_mut(&mut program));
+        let mut vm = VirtualMachine::new(
+            program,
+            hot_ast,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            compiler.get_core_variables_arc(),
+            conf,
+        );
+
+        vm.execute().map_err(|e| format!("{:?}", e))
+    }
+
+    /// `source` compiled with hot-std, and its AST when asked for.
+    fn compile_with_std(
+        source: &str,
+        resolve_imports: bool,
+        with_ast: bool,
+    ) -> Result<(Compiler, Option<Arc<crate::lang::ast::HotAst>>), String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -6541,19 +6563,150 @@ caller(true)"#;
 
         let hot_ast = with_ast
             .then(|| Arc::new(crate::lang::ast::HotAst::from_program(combined_program)));
-        let mut program = compiler.get_program_arc();
-        edit(Arc::make_mut(&mut program));
-        let mut vm = VirtualMachine::new(
-            program,
-            hot_ast,
-            compiler.get_function_mapping_arc(),
-            compiler.get_core_functions_arc(),
-            compiler.get_type_implementations_arc(),
-            compiler.get_core_variables_arc(),
-            conf,
-        );
+        Ok((compiler, hot_ast))
+    }
 
-        vm.execute().map_err(|e| format!("{:?}", e))
+    /// Runs of one compiled program, each in a VM of its own, as a worker
+    /// runs a build: `(result, functions and lambdas run on another VM's
+    /// compiled code)` for each conf.
+    fn runs_of_one_program(source: &str, confs: &[Val]) -> Vec<(Val, usize)> {
+        let (compiler, _) = compile_with_std(source, false, false).expect("compiles");
+        let program = compiler.get_program_arc();
+        let function_mapping = compiler.get_function_mapping_arc();
+        let core_functions = compiler.get_core_functions_arc();
+        let type_implementations = compiler.get_type_implementations_arc();
+        let core_variables = compiler.get_core_variables_arc();
+        confs
+            .iter()
+            .map(|conf| {
+                let mut vm = VirtualMachine::new(
+                    Arc::clone(&program),
+                    None,
+                    Arc::clone(&function_mapping),
+                    Arc::clone(&core_functions),
+                    Arc::clone(&type_implementations),
+                    Arc::clone(&core_variables),
+                    Some(conf.clone()),
+                );
+                let result = vm.execute().expect("runs");
+                (result, vm.jit_state_mut().shared_taken())
+            })
+            .collect()
+    }
+
+    const SHARED_CODE_PROGRAM: &str = r#"::t ns
+square fn (x: Int): Int { mul(x, x) }
+sum-squares fn (n: Int): Int { reduce(range(n), (acc, x) { add(acc, square(x)) }, 0) }
+label fn (n: Int): Str { if(gt(n, 100), "big", "small") }
+[sum-squares(50), sum-squares(60), label(sum-squares(3)), label(sum-squares(70))]"#;
+
+    /// Each VM compiled for itself, so every run of a build warmed up and
+    /// compiled the same functions again.
+    #[test]
+    fn vms_of_one_program_share_compiled_code() {
+        let eager = val!({"jit": {"threshold": 1}});
+        // A threshold this run never reaches: whatever it runs compiled, it
+        // took from the first run.
+        let cold = val!({"jit": {"threshold": 1000000}});
+        let alone = val!({"jit": {"threshold": 1000000, "share": false}});
+        let interpreted = val!({"jit": {"mode": "disabled"}});
+        let runs = runs_of_one_program(
+            SHARED_CODE_PROGRAM,
+            &[eager.clone(), cold, alone, interpreted, eager],
+        );
+        let expected = val!([40425, 70210, "small", "big"]);
+        for (index, (result, _)) in runs.iter().enumerate() {
+            assert_eq!(*result, expected, "run {index}");
+        }
+        let taken: Vec<usize> = runs.iter().map(|(_, taken)| *taken).collect();
+        assert_eq!(taken[0], 0, "the first run has nothing to take");
+        assert!(taken[1] >= 3, "the second run takes the first's code: {taken:?}");
+        assert_eq!(taken[2], 0, "`jit.share: false` compiles for itself");
+        assert_eq!(taken[3], 0, "the interpreter takes none");
+        assert!(taken[4] >= 3, "{taken:?}");
+    }
+
+    /// The same program in VMs on several threads at once: they publish to
+    /// and take from one table, and run the same code.
+    #[test]
+    fn vms_on_several_threads_share_compiled_code() {
+        let (compiler, _) = compile_with_std(SHARED_CODE_PROGRAM, false, false).expect("compiles");
+        let program = compiler.get_program_arc();
+        let function_mapping = compiler.get_function_mapping_arc();
+        let core_functions = compiler.get_core_functions_arc();
+        let type_implementations = compiler.get_type_implementations_arc();
+        let core_variables = compiler.get_core_variables_arc();
+        let expected = val!([40425, 70210, "small", "big"]);
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let program = &program;
+                let function_mapping = &function_mapping;
+                let core_functions = &core_functions;
+                let type_implementations = &type_implementations;
+                let core_variables = &core_variables;
+                let expected = &expected;
+                scope.spawn(move || {
+                    for run in 0..20 {
+                        let threshold = if (thread + run) % 3 == 0 { 1 } else { 2 };
+                        let mut vm = VirtualMachine::new(
+                            Arc::clone(program),
+                            None,
+                            Arc::clone(function_mapping),
+                            Arc::clone(core_functions),
+                            Arc::clone(type_implementations),
+                            Arc::clone(core_variables),
+                            Some(val!({"jit": {"threshold": threshold}})),
+                        );
+                        assert_eq!(vm.execute().expect("runs"), *expected);
+                    }
+                });
+            }
+        });
+    }
+
+    /// What sharing saves a worker: many short runs of one build. Prints
+    /// the time of each way; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn time_runs_of_one_program_with_and_without_shared_code() {
+        let source = r#"::t ns
+square fn (x: Int): Int { mul(x, x) }
+sum-squares fn (n: Int): Int { reduce(range(n), (acc, x) { add(acc, square(x)) }, 0) }
+score fn (m: Map): Int { add(mul(get(m, "a"), 3), length(get(m, "tags"))) }
+rank fn (items: Vec): Vec { items |> map((m) { score(m) }) |> filter((s) { gt(s, 10) }) }
+handle fn (n: Int): Int {
+    items map(range(n), (i) { {a: i, tags: [i, i]} })
+    add(sum-squares(n), length(rank(items)))
+}
+handle(400)"#;
+        for (size, source) in [
+            ("nothing", "::t ns\n1".to_string()),
+            ("small", source.to_string()),
+            ("large", source.replace("handle(400)", "handle(6000)")),
+        ] {
+            let source = source.as_str();
+            println!("-- {size}");
+            for (name, conf) in [
+                ("interpreter", val!({"jit": {"mode": "disabled"}})),
+                ("jit, each VM alone", val!({"jit": {"share": false}})),
+                ("jit, shared", val!({})),
+            ] {
+                let confs = vec![conf; 300];
+                let before = crate::lang::runtime::jit::global_jit_stats();
+                let start = std::time::Instant::now();
+                let runs = runs_of_one_program(source, &confs);
+                let elapsed = start.elapsed();
+                let after = crate::lang::runtime::jit::global_jit_stats();
+                let taken: usize = runs.iter().map(|(_, taken)| *taken).sum();
+                println!(
+                    "{name:<20} {:>8.2} ms per run ({} runs, {taken} taken, {} compiled, {} bailed out)",
+                    elapsed.as_secs_f64() * 1000.0 / runs.len() as f64,
+                    runs.len(),
+                    after.compilations - before.compilations,
+                    after.bailouts - before.bailouts,
+                );
+            }
+    }
     }
 
     /// An Int op's overflow, a zero divisor, and a call of a value that isn't

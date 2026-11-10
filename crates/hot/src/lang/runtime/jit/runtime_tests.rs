@@ -856,3 +856,48 @@ fn profiling_counts_the_stable_signature_without_losing_others() {
     assert!(!TypeSig::from_args(&ints).matches_args(&strs));
     assert!(!TypeSig::from_args(&ints).matches_args(&ints[..1]));
 }
+
+/// Code compiled in one VM runs in another only where what it was compiled
+/// on holds: a name it found unbound, and called as the core function, must
+/// be unbound there too, and the two VMs must trace and fuse alike.
+#[test]
+fn shared_code_is_taken_only_where_its_facts_hold() {
+    let program = BytecodeProgram::new();
+    let core_functions = indexmap::IndexMap::new();
+    let shadows =
+        crate::lang::runtime::native_core::NativeCoreShadows::new(&program, &core_functions);
+    let facts = ShareFacts {
+        traced: false,
+        fusing: false,
+        param_arrows: Box::new([ParamArrows::None]),
+        unbound: Box::new([("::t".into(), "first".into())]),
+    };
+    let arrows = [ParamArrows::None];
+
+    let unbound = indexmap::IndexMap::new();
+    let names = CallNames::new(&unbound, &core_functions, &shadows).param_arrows(&arrows);
+    assert!(facts.hold_for(&names));
+    assert!(
+        !facts.hold_for(&names.traced(true)),
+        "one VM traces its calls"
+    );
+    assert!(
+        !facts.hold_for(&names.fusing(true)),
+        "one VM fuses pipelines"
+    );
+    assert!(
+        !facts.hold_for(&names.param_arrows(&[ParamArrows::FromAny])),
+        "a conversion can reach the parameter here"
+    );
+
+    let mut bound = indexmap::IndexMap::new();
+    bound.insert(
+        "::t".to_string(),
+        indexmap::IndexMap::from([("first".to_string(), Val::Int(1))]),
+    );
+    let names = CallNames::new(&bound, &core_functions, &shadows).param_arrows(&arrows);
+    assert!(
+        !facts.hold_for(&names),
+        "this VM's namespace binds the name"
+    );
+}
