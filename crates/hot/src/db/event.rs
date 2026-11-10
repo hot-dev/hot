@@ -16,6 +16,13 @@ pub enum EventError {
     AlreadyExists(Uuid),
 }
 
+/// SQLite's `created_at` holds text in two shapes: `YYYY-MM-DD HH:MM:SS` from
+/// the column default and RFC 3339 with a `T` from an explicit bind. Compared
+/// as text, a `T` row sorts after every space-separated time on its day, so
+/// the exact cutoff goes through `julianday`. The date-only bound comes first
+/// because it is correct for both shapes as text and can use an index.
+const SQLITE_CREATED_SINCE: &str = " AND created_at >= ? AND julianday(created_at) >= julianday(?)";
+
 /// Where a resend of a publish stands with its event's enqueue (see
 /// [`Event::claim_enqueue`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +350,7 @@ impl Event {
                 // project_id filter removed
 
                 if time_range_cutoff.is_some() {
-                    query.push_str(" AND created_at >= ?");
+                    query.push_str(SQLITE_CREATED_SINCE);
                 }
 
                 let id_search = IdSearch::parse(search_term);
@@ -378,7 +385,9 @@ impl Event {
                 // project_id filter removed
 
                 if let Some(cutoff) = time_range_cutoff {
-                    db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
+                    db_query = db_query
+                        .bind(cutoff.format("%Y-%m-%d").to_string())
+                        .bind(cutoff.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
                 }
 
                 if let Some(search) = &id_search
@@ -540,7 +549,7 @@ impl Event {
                 // project_id filter removed
 
                 if time_range_cutoff.is_some() {
-                    query.push_str(" AND created_at >= ?");
+                    query.push_str(SQLITE_CREATED_SINCE);
                 }
 
                 let id_search = IdSearch::parse(search_term);
@@ -570,7 +579,9 @@ impl Event {
                 // project_id filter removed
 
                 if let Some(cutoff) = time_range_cutoff {
-                    db_query = db_query.bind(cutoff.format("%Y-%m-%d %H:%M:%S").to_string());
+                    db_query = db_query
+                        .bind(cutoff.format("%Y-%m-%d").to_string())
+                        .bind(cutoff.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
                 }
 
                 if let Some(search) = &id_search
@@ -833,11 +844,15 @@ impl Event {
                 )))
             })?;
 
+        // The row and its stream counters commit together. A caller told the
+        // insert failed must be able to rely on the row, and with it the outbox
+        // lease that would still deliver the event, not being there.
         let inserted = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
                 // Keep PostgreSQL's database-clock DEFAULT now() as the
                 // authoritative durable-creation timestamp.
-                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING")
+                let inserted = sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING")
                     .bind(event_id)
                     .bind(env_id)
                     .bind(stream_id)
@@ -848,9 +863,18 @@ impl Event {
                     .bind(access_id)
                     .bind(enqueue_leased_until)
                     .bind(enqueue_payload)
-                    .execute(pg_pool)
+                    .execute(&mut *tx)
                     .await?
-                    .rows_affected()
+                    .rows_affected();
+                if inserted > 0 {
+                    // A successful insert only changes the event count and activity time.
+                    sqlx::query("UPDATE stream SET total_events = total_events + 1, last_activity_at = now() WHERE stream_id = $1")
+                        .bind(stream_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                inserted
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 // Bind this explicitly so SQLite retains sub-second precision
@@ -862,8 +886,15 @@ impl Event {
                         e
                     )))
                 })?;
+                let enqueue_payload = enqueue_payload
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| {
+                        EventError::Database(sqlx::Error::Protocol(error.to_string()))
+                    })?;
 
-                sqlx::query(
+                let mut tx = sqlite_pool.begin().await?;
+                let inserted = sqlx::query(
                     "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
                 )
                     .bind(event_id)
@@ -876,27 +907,23 @@ impl Event {
                     .bind(created_by_user_id)
                     .bind(access_id)
                     .bind(enqueue_leased_until)
-                    .bind(enqueue_payload.map(serde_json::to_string).transpose().map_err(|error| EventError::Database(sqlx::Error::Protocol(error.to_string())))?)
-                    .execute(sqlite_pool)
+                    .bind(enqueue_payload)
+                    .execute(&mut *tx)
                     .await?
-                    .rows_affected()
+                    .rows_affected();
+                if inserted > 0 {
+                    // A successful insert only changes the event count and activity time.
+                    sqlx::query("UPDATE stream SET total_events = total_events + 1, last_activity_at = datetime('now') WHERE stream_id = ?")
+                        .bind(stream_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                inserted
             }
         };
-        if inserted == 0 {
-            return Ok(false);
-        }
 
-        // A successful insert only changes the event count and activity time.
-        crate::db::stream::Stream::record_event_inserted(db, stream_id)
-            .await
-            .map_err(|e| {
-                EventError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to update stream metrics: {}",
-                    e
-                )))
-            })?;
-
-        Ok(true)
+        Ok(inserted > 0)
     }
 
     pub async fn enqueue_payload(
@@ -1368,6 +1395,127 @@ mod tests {
                 .unwrap(),
             EnqueueClaim::Settled
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_stream_counter_update_leaves_no_event_row() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let event_id = Uuid::now_v7();
+        let insert = async || {
+            Event::insert_event_with_outbox(
+                &db,
+                &event_id,
+                &data.env_id,
+                &data.stream_id,
+                "order:created",
+                &serde_json::json!({}),
+                Utc::now(),
+                &data.user_id,
+                None,
+                &serde_json::json!({"queue": "hot:event"}),
+            )
+            .await
+        };
+        let total_events = async || {
+            sqlx::query_scalar::<_, i64>("SELECT total_events FROM stream WHERE stream_id=?")
+                .bind(data.stream_id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        };
+        let before = total_events().await;
+
+        sqlx::query(
+            "CREATE TRIGGER stream_counter_fails BEFORE UPDATE OF total_events ON stream \
+             BEGIN SELECT RAISE(ABORT, 'stream counter unavailable'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(insert().await.is_err());
+        // The send failed, so no row and no outbox lease may be left to
+        // deliver the event behind the caller's back.
+        assert!(matches!(
+            Event::get_event(&db, &event_id).await,
+            Err(EventError::NotFound)
+        ));
+        assert!(
+            Event::due_enqueues(&db, Utc::now() + Duration::hours(1), 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        sqlx::query("DROP TRIGGER stream_counter_fails")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(insert().await.unwrap());
+        assert_eq!(total_events().await, before + 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_time_range_cutoff_splits_events_of_the_same_day() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        // One row as `insert_event` writes it, and one as the column default does.
+        let bound = Uuid::now_v7();
+        Event::insert_event(
+            &db,
+            &bound,
+            &data.env_id,
+            &data.stream_id,
+            "order:created",
+            &serde_json::json!({}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let defaulted = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id) VALUES (?, ?, ?, 'order:created', '{}', ?, ?)",
+        )
+        .bind(defaulted)
+        .bind(data.env_id)
+        .bind(data.stream_id)
+        .bind(Utc::now())
+        .bind(data.user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let since = async |cutoff| {
+            let listed = Event::get_events_by_env_filtered(
+                &db,
+                &data.env_id,
+                None,
+                cutoff,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .len() as i64;
+            let counted = Event::get_filtered_count_by_env(&db, &data.env_id, None, cutoff, None)
+                .await
+                .unwrap();
+            assert_eq!(listed, counted);
+            counted
+        };
+        let now = Utc::now();
+        assert_eq!(since(Some(now - Duration::minutes(5))).await, 2);
+        // Both rows are from today, and both are older than a cutoff still ahead.
+        assert_eq!(since(Some(now + Duration::minutes(5))).await, 0);
     }
 
     #[tokio::test]

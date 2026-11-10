@@ -2,7 +2,8 @@
 //!
 //! Slow safety-net poller for pending alert deliveries (email, Slack,
 //! PagerDuty, webhook). Most deliveries flow through the `hot:alert`
-//! queue with sub-second latency via the notification worker; this poller
+//! queue with sub-second latency via the worker's notification executor
+//! (see `server.rs`); this poller
 //! exists only to catch deliveries that slipped past the queue path
 //! (e.g. enqueued before the worker started, or worker crash mid-process).
 //! As a result the interval is intentionally coarse — tightening it just
@@ -17,7 +18,7 @@ use tokio::sync::watch;
 
 /// Default interval between alert delivery processing runs (in seconds).
 /// Raised from 10s → 60s in Phase 4d: real-time deliveries now go through
-/// the `hot:alert` Redis Stream consumed by the notification worker, so
+/// the `hot:alert` Redis Stream consumed by the notification executor, so
 /// this poll is a slow safety net rather than the primary path.
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 

@@ -186,16 +186,81 @@ impl SmtpEmailProvider {
 impl EmailProvider for SmtpEmailProvider {
     async fn send(&self, email: &Email, from: &str) -> Result<(), EmailError> {
         let message = build_message(email, from)?;
-        self.transport
-            .send(message)
-            .await
-            .map(|_| ())
-            .map_err(|e| EmailError::SendFailed(format!("SMTP delivery failed: {e}")))
+        self.transport.send(message).await.map(|_| ()).map_err(|e| {
+            let reason = format!("SMTP delivery failed: {e}");
+            if refuses_the_message(&e) {
+                EmailError::Rejected(reason)
+            } else {
+                EmailError::SendFailed(reason)
+            }
+        })
     }
 
     fn is_configured(&self) -> bool {
         true
     }
+}
+
+/// Whether a failed send is the relay's final answer about this message or
+/// its recipient, which no retry changes. Every other failure may pass and is
+/// retried: no connection, TLS, a timeout, a 4yz reply, and a 5yz reply about
+/// the session or the sender (see `reply_refuses_the_message`).
+fn refuses_the_message(error: &lettre::transport::smtp::Error) -> bool {
+    use std::error::Error as _;
+
+    // lettre gives the reply code, and the reply's text as the error's source.
+    // It does not say which command was refused.
+    let Some(code) = error.status().filter(|_| error.is_permanent()) else {
+        return false;
+    };
+    let text = error.source().map(ToString::to_string).unwrap_or_default();
+    reply_refuses_the_message(u16::from(code), &text)
+}
+
+/// Whether the SMTP reply `code` with `text` refuses the message or its
+/// recipient: a mailbox that cannot be mailed, or content or a size the relay
+/// will not take.
+///
+/// A 5yz reply alone does not say so. A relay also answers 5yz to credentials
+/// it does not accept, a session without TLS, a client or sender it does not
+/// serve, and a sender over quota. Those refuse every message until the
+/// configuration is fixed, and failing a queued email for one would lose mail
+/// a retry sends. The command that was refused is not known here, so the reply
+/// has to name the message or recipient itself:
+///
+/// - with an enhanced status code (RFC 3463), by its subject: the recipient's
+///   address (5.1.1 to 5.1.4, 5.1.6, 5.1.10), the recipient's mailbox (5.2.x),
+///   a message too big for the system (5.3.4), or the content (5.6.x). The
+///   sender's address (5.1.7, 5.1.8), the mail system, the network, the
+///   protocol and security or policy (5.7.x, which is also authentication,
+///   relaying and sender authorization) are not;
+/// - without one, only 551 (user not local) and 552 (storage or size
+///   exceeded). Relays answer a bare 550, 553 or 554 to an unknown mailbox and
+///   to an unverified sender or an unwelcome client alike.
+fn reply_refuses_the_message(code: u16, text: &str) -> bool {
+    // Replies that are only ever about the service or the authentication.
+    if !(500..600).contains(&code) || matches!(code, 521 | 530 | 534 | 535 | 538) {
+        return false;
+    }
+    match enhanced_status(text) {
+        Some((1, detail)) => matches!(detail, 1..=4 | 6 | 10),
+        Some((3, detail)) => detail == 4,
+        Some((subject, _)) => matches!(subject, 2 | 6),
+        None => matches!(code, 551 | 552),
+    }
+}
+
+/// The subject and detail of the permanent (class 5) enhanced status code
+/// that `text` starts with, if it has one.
+fn enhanced_status(text: &str) -> Option<(u16, u16)> {
+    let mut parts = text.split_whitespace().next()?.split('.');
+    let mut number = || {
+        let part = parts.next()?;
+        let digits = (1..=3).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
+        digits.then(|| part.parse::<u16>().ok()).flatten()
+    };
+    let (class, subject, detail) = (number()?, number()?, number()?);
+    (class == 5 && parts.next().is_none()).then_some((subject, detail))
 }
 
 fn build_message(email: &Email, from: &str) -> Result<Message, EmailError> {
@@ -212,7 +277,7 @@ fn build_message(email: &Email, from: &str) -> Result<Message, EmailError> {
         )));
     }
     let to: Mailbox = email.to.parse().map_err(|e| {
-        EmailError::SendFailed(format!("Invalid recipient address {:?}: {e}", email.to))
+        EmailError::Rejected(format!("Invalid recipient address {:?}: {e}", email.to))
     })?;
     let builder = Message::builder()
         .from(from)
@@ -355,7 +420,7 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
         assert!(raw.contains("plain body") && raw.contains("<p>html body</p>"));
         assert!(matches!(
             build_message(&Email::new("not an address", "x"), "a@example.com"),
-            Err(EmailError::SendFailed(_))
+            Err(EmailError::Rejected(_))
         ));
     }
 
@@ -474,6 +539,217 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
             .unwrap();
         assert!(data.contains("From: \"Hot Dev\" <hot@acme.com>"), "{data}");
         assert!(data.contains("from the app"), "{data}");
+    }
+
+    #[test]
+    fn only_replies_about_the_recipient_or_the_message_are_rejections() {
+        let rejections = [
+            (
+                550,
+                "5.1.1 The email account that you tried to reach does not exist",
+            ),
+            (550, "5.1.2 Bad destination system address"),
+            (501, "5.1.3 Bad recipient address syntax"),
+            (
+                553,
+                "5.1.3 The recipient address is not a valid RFC 5321 address",
+            ),
+            (551, "5.1.6 Recipient has moved"),
+            (556, "5.1.10 Recipient address has null MX"),
+            (
+                550,
+                "5.2.1 The email account that you tried to reach is disabled",
+            ),
+            (552, "5.2.2 The recipient's inbox is out of storage space"),
+            (552, "5.2.3 Your message exceeded the message size limits"),
+            (552, "5.3.4 Message size exceeds fixed limit"),
+            (554, "5.6.0 Mail message is malformed"),
+            (550, "5.6.1 Media not supported"),
+            (551, "User not local; please try <other@example.com>"),
+            (
+                552,
+                "Requested mail action aborted: exceeded storage allocation",
+            ),
+        ];
+        for (code, text) in rejections {
+            assert!(reply_refuses_the_message(code, text), "{code} {text}");
+        }
+
+        let retried = [
+            // Authentication and the session's security.
+            (530, "5.7.0 Must issue a STARTTLS command first"),
+            (530, "5.7.0 Authentication required"),
+            (530, "Authentication required"),
+            (534, "5.7.9 Application-specific password required"),
+            (535, "5.7.8 Username and Password not accepted"),
+            (535, "Authentication Credentials Invalid"),
+            (
+                538,
+                "5.7.11 Encryption required for requested authentication mechanism",
+            ),
+            (
+                535,
+                "5.2.1 an authentication reply, whatever status it carries",
+            ),
+            // A relay that does not serve this client.
+            (521, "5.3.2 This host does not accept mail"),
+            (554, "No SMTP service here"),
+            (554, "5.7.1 Service unavailable; client host blocked"),
+            (550, "5.7.1 Relaying denied"),
+            (550, "5.7.1 Client host rejected: Access denied"),
+            (550, "Access denied"),
+            // The sender, its authorization and its quota.
+            (501, "5.1.7 Bad sender address syntax"),
+            (550, "5.1.8 Sender address rejected: Domain not found"),
+            (550, "5.7.1 Sender address rejected: not owned by user"),
+            (
+                550,
+                "5.7.26 Unauthenticated email from example.com is not accepted",
+            ),
+            (550, "5.4.5 Daily user sending limit exceeded"),
+            (
+                550,
+                "The from address does not match a verified Sender Identity",
+            ),
+            (554, "Message rejected: Email address is not verified"),
+            // The mail system and the protocol.
+            (550, "5.3.0 Other mail system problem"),
+            (554, "5.3.5 System incorrectly configured"),
+            (500, "5.5.2 Syntax error, command unrecognized"),
+            (503, "5.5.1 Bad sequence of commands"),
+            (554, "Transaction failed"),
+            // Without an enhanced status code a 550 or 553 does not say whom
+            // it refuses, and other address statuses do not either.
+            (550, "No such user here"),
+            (553, "Sender address rejected"),
+            (550, "5.1.0 Address rejected"),
+            // Not an enhanced status code of a permanent reply.
+            (550, "5.1 no detail"),
+            (550, "4.1.1 class of another reply"),
+            (550, "5.1.1.2 too many parts"),
+            (550, "5.1.x no number"),
+            (550, ""),
+            // Not a permanent reply.
+            (450, "4.2.1 Mailbox busy"),
+            (451, "4.7.1 Greylisted, try again later"),
+            (452, "4.2.2 Mailbox full"),
+            (250, "2.1.5 Ok"),
+        ];
+        for (code, text) in retried {
+            assert!(!reply_refuses_the_message(code, text), "{code} {text}");
+        }
+
+        assert_eq!(enhanced_status("5.1.10 null MX"), Some((1, 10)));
+        assert_eq!(enhanced_status("5.7.8"), Some((7, 8)));
+        assert_eq!(enhanced_status("no code"), None);
+    }
+
+    /// A plaintext relay that greets every session with `greeting`, offers
+    /// AUTH, and answers a command that starts with one of the `replies`'
+    /// prefixes with that reply instead of accepting it.
+    async fn scripted_relay(
+        greeting: &'static str,
+        replies: &'static [(&'static str, &'static str)],
+    ) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (read, mut write) = tokio::io::split(socket);
+                    let mut lines = BufReader::new(read).lines();
+                    let mut reply = greeting;
+                    while write.write_all(reply.as_bytes()).await.is_ok()
+                        && write.write_all(b"\r\n").await.is_ok()
+                    {
+                        let Ok(Some(line)) = lines.next_line().await else {
+                            break;
+                        };
+                        let command = line.to_ascii_uppercase();
+                        let scripted = replies.iter().find(|(on, _)| command.starts_with(on));
+                        reply = match scripted {
+                            Some((_, reply)) => reply,
+                            None if command.starts_with("EHLO") => "250-test\r\n250 AUTH PLAIN",
+                            None => "250 ok",
+                        };
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Sends one message through the relay on `port`, with credentials.
+    async fn send_through(port: u16) -> EmailError {
+        let provider = SmtpEmailProvider::new(&SmtpSettings {
+            host: "127.0.0.1".into(),
+            port,
+            security: SmtpSecurity::None,
+            username: Some("hot".into()),
+            password: Some("pw".into()),
+            timeout: Duration::from_secs(5),
+            ca_cert: None,
+        })
+        .unwrap();
+        provider
+            .send(
+                &Email::new("ops@example.com", "Hello").with_text("body"),
+                "Hot <hot@example.com>",
+            )
+            .await
+            .expect_err("the relay refuses the send")
+    }
+
+    #[tokio::test]
+    async fn a_relay_refusing_the_session_or_the_sender_is_retried_not_rejected() {
+        const GREETING: &str = "220 test ESMTP";
+        let retried: [(&str, &[(&str, &str)]); 7] = [
+            // Rotated or wrong credentials: every queued email meets this.
+            (
+                GREETING,
+                &[("AUTH", "535 5.7.8 Username and Password not accepted")],
+            ),
+            (
+                GREETING,
+                &[("AUTH", "535 Authentication Credentials Invalid")],
+            ),
+            (
+                GREETING,
+                &[("MAIL", "530 5.7.0 Must issue a STARTTLS command first")],
+            ),
+            (
+                GREETING,
+                &[(
+                    "MAIL",
+                    "550 The from address does not match a verified Sender Identity",
+                )],
+            ),
+            (GREETING, &[("RCPT", "550 5.7.1 Relaying denied")]),
+            (
+                GREETING,
+                &[("RCPT", "451 4.7.1 Greylisted, try again later")],
+            ),
+            ("554 5.7.1 Service unavailable; client host blocked", &[]),
+        ];
+        for (greeting, replies) in retried {
+            let error = send_through(scripted_relay(greeting, replies).await).await;
+            assert!(matches!(error, EmailError::SendFailed(_)), "{error}");
+        }
+
+        let rejected: [&[(&str, &str)]; 3] = [
+            &[("RCPT", "550 5.1.1 User unknown")],
+            // A reply of several lines, as Gmail sends.
+            &[(
+                "RCPT",
+                "550-5.1.1 The email account that you tried to reach\r\n550 5.1.1 does not exist",
+            )],
+            &[("DATA", "552 5.3.4 Message size exceeds fixed limit")],
+        ];
+        for replies in rejected {
+            let error = send_through(scripted_relay(GREETING, replies).await).await;
+            assert!(matches!(error, EmailError::Rejected(_)), "{error}");
+            assert!(error.to_string().contains("5."), "{error}");
+        }
     }
 
     /// Sends one message over SMTPS to a relay whose certificate the test CA

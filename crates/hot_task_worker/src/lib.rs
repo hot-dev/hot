@@ -224,11 +224,25 @@ const KATA_TIMEOUT_CLEANUP_ENVELOPE: std::time::Duration = std::time::Duration::
 /// it without two constants drifting apart.
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Ceiling on one heartbeat write. Shorter than `HEARTBEAT_INTERVAL`, so a
+/// call hung on a stalled database is abandoned before the next tick is due
+/// instead of silently swallowing several of them.
+const HEARTBEAT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Pause before re-trying a heartbeat that failed or timed out. A worker
+/// coming out of a database stall refreshes its rows within this long of the
+/// database answering again, not a whole `HEARTBEAT_INTERVAL` later.
+const HEARTBEAT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// A `running` task whose `last_heartbeat_at` is older than this is
 /// considered a zombie (its owning worker is dead or hung). Set to
-/// 2 × `HEARTBEAT_INTERVAL` so a worker that misses one tick is still
-/// considered alive but a worker that misses two consecutive ticks is not.
-const ZOMBIE_HEARTBEAT_STALE_SECS: i64 = 30;
+/// 4 × `HEARTBEAT_INTERVAL`: a live worker cut off from the database for up
+/// to ~40s (one interval of age before the stall, plus the stall, plus
+/// `HEARTBEAT_RETRY_DELAY`) is back under it before a reaper can act, and the
+/// reaper's write re-checks staleness anyway
+/// (`Task::fail_stale_running_with_retry`).
+/// Must stay below `QUOTA_HEARTBEAT_FRESH_SECS` (`hot::db::task`).
+const ZOMBIE_HEARTBEAT_STALE_SECS: i64 = 4 * HEARTBEAT_INTERVAL.as_secs() as i64;
 
 /// How often the background reaper re-checks for zombie tasks. Running once
 /// at startup is not enough: a previous worker's last heartbeat may have been
@@ -244,6 +258,15 @@ const ZOMBIE_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// fail the still-running row and enqueue a duplicate run.
 const ADOPTION_DB_ATTEMPTS: usize = 3;
 const ADOPTION_DB_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How often a container whose task could not be loaded at startup is tried
+/// for adoption again (`retry_deferred_adoptions`).
+const DEFERRED_ADOPTION_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long such a container is kept running, unwatched, for a database that
+/// does not answer. Long enough to outlast a failover or a restart of the
+/// database. This worker's reaper spares the task meanwhile; once the limit
+/// passes the container is stopped and the reaper takes the task.
+const DEFERRED_ADOPTION_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Maximum time a claimed code task will park waiting for a `code_semaphore`
 /// permit before releasing its queue lease and deferring the message back to the
@@ -564,6 +587,125 @@ fn validate_task_orphan_idle_ms(
     Ok(())
 }
 
+/// Floor for the task delivery keepalive interval, so a tiny (test-sized)
+/// orphan idle doesn't turn the keepalive into a busy loop on Redis.
+const TASK_KEEPALIVE_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often a task delivery being processed has its pending entry touched:
+/// a third of the orphan idle, so a live delivery gets two touches inside
+/// every reclaim window and one failed touch doesn't expose it.
+fn task_keepalive_interval(task_orphan_idle_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(task_orphan_idle_ms / 3).max(TASK_KEEPALIVE_MIN_INTERVAL)
+}
+
+/// The touch loop of [`spawn_task_delivery_keepalive`]. Dropping it aborts
+/// the loop, so it stops however processing ends.
+struct TaskDeliveryKeepalive(tokio::task::JoinHandle<()>);
+
+impl Drop for TaskDeliveryKeepalive {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Keep a Redis task delivery's pending entry from going idle while this
+/// worker processes it. A task may run for hours, and the janitor reclaims an
+/// entry idle for `queue.task-orphan-idle-ms`: the reclaimed copy is answered
+/// "task is still running" and requeued every few seconds for the rest of the
+/// run, and the ACK of the original then fails. The touch does not count as a
+/// delivery. The task lease and the row's heartbeat still decide who owns the
+/// task, so a touch that finds the entry reclaimed only stops the loop.
+///
+/// None for memory and SQLite queues, which have no pending entry to reclaim
+/// this way (a SQLite lease renews itself while it is processed).
+fn spawn_task_delivery_keepalive(
+    lease: &hot::queue::ProcessingQueueLease<TaskRequest>,
+    task_orphan_idle_ms: u64,
+) -> Option<TaskDeliveryKeepalive> {
+    let keepalive = match lease {
+        hot::queue::ProcessingQueueLease::Memory(_)
+        | hot::queue::ProcessingQueueLease::Sqlite(_) => return None,
+        hot::queue::ProcessingQueueLease::Redis(lease) => lease.keepalive()?,
+    };
+    let interval = task_keepalive_interval(task_orphan_idle_ms);
+    Some(TaskDeliveryKeepalive(tokio::spawn(async move {
+        use hot::queue::streams::PendingTouch;
+        // The entry's idle clock has run since Redis delivered it, so the
+        // first touch is due an interval after that: a short task costs
+        // Redis nothing.
+        let mut delay = interval.saturating_sub(keepalive.delivered_at().elapsed());
+        loop {
+            tokio::time::sleep(delay).await;
+            match keepalive.touch().await {
+                Ok(PendingTouch::Touched) => delay = interval,
+                Ok(PendingTouch::Reclaimed) => {
+                    tracing::warn!(
+                        msg_id = keepalive.msg_id(),
+                        "Task delivery was reclaimed by another consumer while it was processed"
+                    );
+                    break;
+                }
+                Ok(PendingTouch::Trimmed) => {
+                    tracing::warn!(
+                        msg_id = keepalive.msg_id(),
+                        "Task delivery was trimmed from the stream while it was processed"
+                    );
+                    break;
+                }
+                Ok(PendingTouch::Acked) => break,
+                // Try again sooner, so one failed touch doesn't add a whole
+                // interval to the gap between two that succeed.
+                Err(error) => {
+                    tracing::debug!(
+                        msg_id = keepalive.msg_id(),
+                        "Task delivery keepalive touch failed: {}",
+                        error
+                    );
+                    delay = interval / 2;
+                }
+            }
+        }
+    })))
+}
+
+/// Backoff between failed claims on one task processor. A queue that refuses
+/// the claim (Redis down, or read-only during a failover) would otherwise
+/// spin the processor loop and log an error on every pass.
+#[derive(Debug, Default)]
+struct ClaimErrorBackoff {
+    /// Failed claims since the last one that succeeded.
+    failures: u32,
+    last_logged: Option<std::time::Instant>,
+}
+
+impl ClaimErrorBackoff {
+    const INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(5);
+    const LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Record a failed claim. Returns how long to wait before the next one,
+    /// and whether to log this failure: the first of a streak is logged, then
+    /// one every `LOG_EVERY`.
+    fn failed(&mut self, now: std::time::Instant) -> (std::time::Duration, bool) {
+        let delay = Self::INITIAL
+            .saturating_mul(1 << self.failures.min(8))
+            .min(Self::MAX);
+        self.failures = self.failures.saturating_add(1);
+        let log = self
+            .last_logged
+            .is_none_or(|at| now.saturating_duration_since(at) >= Self::LOG_EVERY);
+        if log {
+            self.last_logged = Some(now);
+        }
+        (delay, log)
+    }
+
+    /// A claim succeeded.
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 async fn reconcile_dead_lettered_tasks(
     db: &DatabasePool,
     publisher: &StreamPubSub,
@@ -593,10 +735,75 @@ async fn reconcile_dead_lettered_task_request(
     publisher: &StreamPubSub,
     request: &TaskRequest,
 ) -> bool {
-    let failure = task_failure_json(
+    settle_dead_lettered_task_request(
+        db,
+        publisher,
+        request,
         "Task worker lease expired and the queue retry limit was exhausted",
-        None,
-    );
+        false,
+    )
+    .await
+}
+
+/// Fail the task of a queue message a processor just saw dead-lettered, if no
+/// worker has claimed it. Its deliveries failed before the claim, and without
+/// this the row stays queued: the reconciler would enqueue it again, to fail
+/// the same way, for as long as the cause lasts. A running task is left to
+/// the worker that claimed it, or to the zombie reaper when that worker is
+/// gone, and a terminal one is already settled.
+async fn fail_dead_lettered_queued_task(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    message: &RecoveredQueueMessage,
+) -> bool {
+    let request = match message.decode::<TaskRequest>() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(
+                "Could not decode dead-lettered task queue message: {}",
+                error
+            );
+            return false;
+        }
+    };
+    fail_dead_lettered_queued_request(db, publisher, &request).await
+}
+
+/// [`fail_dead_lettered_queued_task`], for a request already decoded.
+async fn fail_dead_lettered_queued_request(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    request: &TaskRequest,
+) -> bool {
+    let failed = settle_dead_lettered_task_request(
+        db,
+        publisher,
+        request,
+        "Task was not started: every delivery of its queue message failed before a worker \
+         could claim it, and the queue retry limit was exhausted",
+        true,
+    )
+    .await;
+    if failed {
+        tracing::warn!(
+            task_id = request.task_id,
+            "Marked queued task failed after its queue message was dead-lettered"
+        );
+    }
+    failed
+}
+
+/// Fail the task a dead-lettered queue message names, with `reason`, and
+/// publish its completion. `only_if_queued` leaves a task some worker has
+/// claimed alone: the write is conditional on the row still being queued.
+async fn settle_dead_lettered_task_request(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    request: &TaskRequest,
+    reason: &str,
+    only_if_queued: bool,
+) -> bool {
+    let failure = task_failure_json(reason, None);
     let Ok(task_id) = Uuid::parse_str(&request.task_id) else {
         tracing::warn!(
             task_id = request.task_id,
@@ -632,6 +839,30 @@ async fn reconcile_dead_lettered_task_request(
         env_id: task.env_id,
     });
     let db = &scoped_db;
+    if only_if_queued {
+        // The guarded write decides; `complete_task_with_event` below then
+        // finds its own failure in the row and only publishes it.
+        match tokio::time::timeout(
+            DB_CALL_TIMEOUT,
+            Task::fail_if_queued(db, &task_id, Some(&failure)),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                tracing::info!(task_id = %task_id, "Dead-lettered task is no longer queued; leaving it to its owner");
+                return false;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(task_id = %task_id, "Cannot fail dead-lettered queued task: {error}");
+                return false;
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task_id, "Timed out failing dead-lettered queued task");
+                return false;
+            }
+        }
+    }
     let duration_override = (task.task_status_id == TaskStatus::Queued.as_id()).then_some(0);
     if !complete_task_with_event(
         db,
@@ -1357,19 +1588,40 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     let hb_worker_id = worker_id.clone();
     let heartbeat_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await; // first tick is immediate, skip it
         loop {
             interval.tick().await;
             // Draining tasks still belong to this worker. Keep their leases
             // alive until shutdown has finalized them and aborts this handle.
-            match Task::heartbeat(&hb_db, &hb_worker_id).await {
-                Ok(count) if count > 0 => {
-                    tracing::debug!("Heartbeat updated for {} task(s)", count);
+            //
+            // Each write is bounded, and a failed one is retried shortly
+            // instead of at the next tick: after a database stall the rows
+            // must be fresh again before a reaper pass sees them.
+            loop {
+                match tokio::time::timeout(
+                    HEARTBEAT_CALL_TIMEOUT,
+                    Task::heartbeat(&hb_db, &hb_worker_id),
+                )
+                .await
+                {
+                    Ok(Ok(count)) => {
+                        if count > 0 {
+                            tracing::debug!("Heartbeat updated for {} task(s)", count);
+                        }
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Heartbeat update failed: {}", e);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_secs = HEARTBEAT_CALL_TIMEOUT.as_secs(),
+                            "Heartbeat update timed out"
+                        );
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Heartbeat update failed: {}", e);
-                }
-                _ => {}
+                tokio::time::sleep(HEARTBEAT_RETRY_DELAY).await;
             }
         }
     });
@@ -1556,11 +1808,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 processor_idx,
                 "Task processor started with dedicated queue consumer"
             );
+            let mut claim_backoff = ClaimErrorBackoff::default();
             loop {
                 if coord_c.is_shutting_down() {
                     break;
                 }
 
+                let mut claim_failed = false;
                 let result = tokio::select! {
                     biased;
                     _ = task_loop_shutdown_rx.changed() => break,
@@ -1568,7 +1822,20 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                         match claim {
                             Ok(Some(lease_handle)) => {
                                 let queue_timing = lease_handle.timing();
-                                lease_handle.process(|request: TaskRequest| {
+                                // Dropped, which stops it, once the delivery
+                                // is settled, on every way out of this arm.
+                                let _keepalive = spawn_task_delivery_keepalive(
+                                    &lease_handle,
+                                    task_orphan_idle_ms,
+                                );
+                                // Kept for a last attempt only: the queue
+                                // does not hand the request back if it fails.
+                                let last_attempt = delivery_last_attempt(&lease_handle);
+                                let mut last_request = None;
+                                let processed = lease_handle.process(|request: TaskRequest| {
+                                    if last_attempt {
+                                        last_request = Some(request.clone());
+                                    }
                                     let db = Arc::clone(&db_c);
                                     let tq2 = Arc::clone(&tq);
                                     let stream_pub = Arc::clone(&stream_pub_c);
@@ -1611,22 +1878,78 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                                         .await
                                     }
                                 })
-                                .await
+                                .await;
+                                // The SQLite and in-memory queues dead-letter
+                                // a message on its last failed attempt without
+                                // reporting `DeadLettered`, so its task is
+                                // failed here.
+                                if let (Err(error), Some(request)) = (&processed, &last_request)
+                                    && last_attempt_dead_lettered(last_attempt, error.as_ref())
+                                {
+                                    fail_dead_lettered_queued_request(
+                                        &db_c,
+                                        &stream_pub_c,
+                                        request,
+                                    )
+                                    .await;
+                                }
+                                processed
                             }
                             Ok(None) => Ok(None),
-                            Err(e) => Err(e),
+                            Err(e) => {
+                                // The in-memory queue dead-letters a spent
+                                // message as it is claimed. That is the
+                                // message's end, settled below, not a queue
+                                // that refused the claim.
+                                claim_failed = !matches!(
+                                    e.downcast_ref::<hot::queue::QueueProcessingError>(),
+                                    Some(hot::queue::QueueProcessingError::DeadLettered(_))
+                                );
+                                Err(e)
+                            }
                         }
                     }
                 };
+                if !claim_failed {
+                    claim_backoff.reset();
+                }
 
                 match result {
                     Ok(Some(())) | Ok(None) => {}
+                    // The queue refused the claim (Redis down, or read-only
+                    // during a failover): wait before asking again.
+                    Err(e) if claim_failed => {
+                        let (delay, log) = claim_backoff.failed(std::time::Instant::now());
+                        if log {
+                            tracing::error!(
+                                processor_idx,
+                                consecutive_failures = claim_backoff.failures,
+                                "Task queue claim failed, retrying with backoff: {}",
+                                e
+                            );
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = task_loop_shutdown_rx.changed() => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
+                    }
                     // Expected while the backend is down, and explained in
                     // the backend's own warnings.
                     Err(e) if is_box_task_deferral(e.as_ref(), &boxes_c) => {
                         tracing::debug!("Box task deferred: {}", e);
                     }
                     Err(e) => {
+                        // No delivery of a dead-lettered message is left to
+                        // run its task, so fail it here. The Redis queue
+                        // reports one this way as the message is processed
+                        // and the in-memory queue as it is claimed; see
+                        // `last_attempt_dead_lettered` for the rest.
+                        if let Some(hot::queue::QueueProcessingError::DeadLettered(message)) =
+                            e.downcast_ref::<hot::queue::QueueProcessingError>()
+                        {
+                            fail_dead_lettered_queued_task(&db_c, &stream_pub_c, message).await;
+                        }
                         tracing::error!("Task processing error: {}", e);
                     }
                 }
@@ -1782,22 +2105,32 @@ async fn reap_zombie_tasks(
             }
         });
 
-        match Task::complete(
+        // Conditional on the row STILL being the zombie listed above (same
+        // owner, still stale by the database clock): the listing is a
+        // snapshot, and earlier iterations of this loop await. A worker that
+        // was only cut off from the database, or that adopted the task, has
+        // refreshed the row by now and must keep it.
+        // The retry its `retry` policy still owes is committed in the same
+        // transaction, and only if this update applied.
+        let retry_task_id = mint_retry_task_id(&task.task_id);
+        match Task::fail_stale_running_with_retry(
             db,
             &task.task_id,
-            &db::TaskStatus::Failed,
+            task.worker_id.as_deref(),
+            ZOMBIE_HEARTBEAT_STALE_SECS,
             Some(&error),
-            None,
-            None,
+            &retry_task_id,
         )
         .await
         {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::info!(task_id = %task.task_id, "Zombie task became terminal before reaper update; skipping stale event and retry");
+            Ok(write) if write.applied => {}
+            Ok(_) => {
+                discard_minted_retry_id(&task.task_id, &retry_task_id);
+                tracing::info!(task_id = %task.task_id, "Zombie candidate is no longer stale, or became terminal, before the reaper update; skipping event and retry");
                 continue;
             }
             Err(e) => {
+                discard_minted_retry_id(&task.task_id, &retry_task_id);
                 tracing::error!(task_id = %task.task_id, "Failed to reap zombie task: {}", e);
                 continue;
             }
@@ -1817,8 +2150,7 @@ async fn reap_zombie_tasks(
             tracing::warn!(task_id = %task.task_id, "Failed to publish zombie reap event: {}", e);
         }
 
-        // Attempt retry if the task had retry config
-        maybe_retry_zombie_task(db, &task, task_queue).await;
+        enqueue_committed_zombie_retry(db, &task, task_queue).await;
         if task.task_type == "container" {
             finish_adopted_task_run(db, &task).await;
         }
@@ -1950,63 +2282,22 @@ async fn reconcile_queued_tasks(
     }
 }
 
-/// Retry a zombie task if it has retry config and retries remain.
-/// Reconstructs a `TaskRequest` from the DB row and enqueues it.
-async fn maybe_retry_zombie_task(
+/// Hand the retry of a reaped or orphaned task to the queue, with a
+/// `TaskRequest` rebuilt from the task's row.
+///
+/// The retry row itself was committed with the terminal failure
+/// (`Task::fail_stale_running_with_retry` in the reaper,
+/// [`complete_task_with_retry_and_event`] elsewhere), which also decided
+/// whether the task's `retry` policy owed one. Call this only after that
+/// write applied.
+async fn enqueue_committed_zombie_retry(
     db: &DatabasePool,
     task: &Task,
     task_queue: &ProcessingQueue<TaskRequest>,
 ) {
-    let options = match &task.options {
-        Some(opts) => opts,
-        None => return,
+    let Some(retry) = committed_retry_to_enqueue(db, &task.task_id, &task.env_id).await else {
+        return;
     };
-
-    let retry_config = RetryConfig::from_meta(Some(options));
-    if !retry_config.is_enabled() {
-        return;
-    }
-
-    if task.retry_attempt >= retry_config.max_retries {
-        tracing::info!(
-            task_id = %task.task_id,
-            attempt = task.retry_attempt,
-            max = retry_config.max_retries,
-            "Zombie task exhausted all retries",
-        );
-        return;
-    }
-
-    let next_attempt = task.retry_attempt + 1;
-    let delay_ms = retry_config.delay_for_attempt(next_attempt);
-    let next_retry_at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
-    let new_task_id = Uuid::now_v7();
-
-    match Task::insert_retry(db, &new_task_id, task, next_attempt, next_retry_at).await {
-        Ok(true) => {}
-        Ok(false) => {
-            // The (parent, attempt) unique key says another writer — e.g. the
-            // failure path's maybe_retry_task, or a crashed earlier reap that
-            // got as far as insert_retry — already created this retry row.
-            // Skip the enqueue: the row's creator owns delivery, and if it
-            // crashed before enqueueing, reconcile_queued_tasks re-enqueues
-            // the stale queued row, so the retry cannot be stranded.
-            tracing::info!(
-                task_id = %task.task_id,
-                attempt = next_attempt,
-                "Zombie retry row already exists for this attempt — skipping duplicate retry"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::error!(
-                task_id = %task.task_id,
-                new_task_id = %new_task_id,
-                "Failed to insert retry for zombie task: {}", e,
-            );
-            return;
-        }
-    }
 
     let org_id = match hot::db::Env::get_env(db, &task.env_id).await {
         Ok(env) => Some(env.org_id.to_string()),
@@ -2024,7 +2315,7 @@ async fn maybe_retry_zombie_task(
     // project_id/project_name are not stored on the task row, but org_id is
     // needed for quota and feature resolution in container execution.
     let retry_request = TaskRequest {
-        task_id: new_task_id.to_string(),
+        task_id: retry.task_id.to_string(),
         env_id: task.env_id.to_string(),
         stream_id: task.stream_id.to_string(),
         build_id: task.build_id.to_string(),
@@ -2042,22 +2333,7 @@ async fn maybe_retry_zombie_task(
             .unwrap_or_default()
             .as_millis() as u64,
     };
-
-    if delay_ms > 0 {
-        let tq = task_queue.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
-            if let Err(e) = tq.enqueue(retry_request).await {
-                tracing::error!(new_task_id = %new_task_id, "Failed to enqueue zombie retry: {}", e);
-            } else {
-                tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued after delay");
-            }
-        });
-    } else if let Err(e) = task_queue.enqueue(retry_request).await {
-        tracing::error!(new_task_id = %new_task_id, "Failed to enqueue zombie retry: {}", e);
-    } else {
-        tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Zombie retry enqueued immediately");
-    }
+    enqueue_retry_request(task_queue, &retry, retry_request).await;
 }
 
 fn validate_task_request_matches_db(
@@ -2146,29 +2422,126 @@ async fn task_message_should_execute(
     ))
 }
 
+/// Whether a worker error on this delivery is the one that dead-letters its
+/// message. The SQLite and in-memory queues know, and move the message to
+/// the DLQ themselves when it happens; Redis counts deliveries instead and
+/// reports the dead-lettering at the next one.
+fn delivery_last_attempt(lease: &hot::queue::ProcessingQueueLease<TaskRequest>) -> bool {
+    use hot::queue::ProcessingQueueLease;
+    match lease {
+        ProcessingQueueLease::Memory(lease) => lease.last_attempt(),
+        ProcessingQueueLease::Sqlite(_) | ProcessingQueueLease::Redis(_) => lease.last_attempt(),
+    }
+}
+
+/// Whether a delivery's processing error dead-lettered its message on a
+/// queue that does not say so with `QueueProcessingError::DeadLettered`.
+/// `last_attempt` is the lease's own answer, taken before processing
+/// ([`delivery_last_attempt`]). The SQLite and in-memory queues give one, and
+/// there a worker error is the failure that counts: an infrastructure
+/// deferral of a task spends no retry budget, and a lease lost before the
+/// release is reported as a different error.
+fn last_attempt_dead_lettered(
+    last_attempt: bool,
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> bool {
+    last_attempt
+        && matches!(
+            error.downcast_ref::<hot::queue::QueueProcessingError>(),
+            Some(hot::queue::QueueProcessingError::WorkerError(_))
+        )
+}
+
+/// The error for a lookup that failed before the task was claimed. A
+/// `transient` one (the database did not answer, `db::is_unavailable_error`)
+/// defers the delivery without spending its retry budget; any other, a
+/// database error that would recur at every delivery included, is returned as
+/// it is, so the budget runs out and the message is dead-lettered. How the processor loop learns
+/// of that depends on the queue, and in each case it then fails the
+/// still-queued task. Redis reports the dead-lettering, with the message, at
+/// the next delivery. The last attempt on SQLite and on the in-memory queue
+/// is recognized as it fails (`last_attempt_dead_lettered`). The in-memory
+/// queue also dead-letters at the claim a message whose deliveries were
+/// dropped or deferred out of retries, and reports that with the message too.
+fn pre_claim_lookup_error<E>(
+    what: &str,
+    error: E,
+    transient: bool,
+    backoff: std::time::Duration,
+) -> Box<dyn std::error::Error + Send + Sync>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    if transient {
+        Box::new(QueueInfrastructureError::new(
+            format!("{what}: {error}"),
+            backoff,
+        ))
+    } else {
+        Box::new(error)
+    }
+}
+
+/// The project of a task about to be claimed, active or not.
+/// `Project::get_project` reports a deactivated project as `NotFound`, which
+/// here would read as the task's own failure and get a task failed that only
+/// has to wait for its project to be active again. So a project it does not
+/// find is looked up once more without that filter, on the same scoped pool:
+/// `NotFound` from here means no such project exists.
+async fn load_task_project(
+    db: &DatabasePool,
+    project_id: &Uuid,
+) -> Result<Project, hot::db::ProjectError> {
+    match Project::get_project(db, project_id).await {
+        Err(hot::db::ProjectError::NotFound) => {
+            Project::get_project_including_inactive(db, project_id).await
+        }
+        result => result,
+    }
+}
+
+/// The queue backend recorded in a task's timing.
+fn queue_backend_label(queue: &ProcessingQueue<TaskRequest>) -> &'static str {
+    match queue {
+        ProcessingQueue::Memory(_) => "memory",
+        ProcessingQueue::Sqlite(_) => "sqlite",
+        ProcessingQueue::Redis(_) => "redis",
+    }
+}
+
 /// Load the task row before execution. `Ok(None)` means the row provably does
 /// not exist (`TaskError::NotFound`), which is the only outcome where ACKing
-/// the queue message and skipping is safe. Every other failure (transport
-/// error, closed/saturated pool, timeout) leaves the row's state unknown and
-/// must defer the delivery instead — a fast pool error would otherwise ACK a
-/// redelivery for a row this worker keeps alive with its batch heartbeat,
-/// leaving the task stuck in `running` forever.
+/// the queue message and skipping is safe. A failure of the database to
+/// answer (transport error, closed/saturated pool, timeout) leaves the row's
+/// state unknown and must defer the delivery instead — a fast pool error
+/// would otherwise ACK a redelivery for a row this worker keeps alive with
+/// its batch heartbeat, leaving the task stuck in `running` forever. A row
+/// that cannot be read at all (it does not decode) is never ACKed either, but
+/// spends the delivery's retry budget like any other pre-claim failure
+/// ([`pre_claim_lookup_error`]) instead of being redelivered forever.
 async fn load_task_for_execution(
     db: &DatabasePool,
     task_id: &Uuid,
     infra_retry_backoff_ms: u64,
-) -> Result<Option<Task>, QueueInfrastructureError> {
+) -> Result<Option<Task>, Box<dyn std::error::Error + Send + Sync>> {
+    let backoff = std::time::Duration::from_millis(infra_retry_backoff_ms);
     match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
         Ok(Ok(task)) => Ok(Some(task)),
         Ok(Err(hot::db::TaskError::NotFound)) => Ok(None),
-        Ok(Err(e)) => Err(QueueInfrastructureError::new(
-            format!("failed to load task {} before execution: {}", task_id, e),
-            std::time::Duration::from_millis(infra_retry_backoff_ms),
-        )),
-        Err(_) => Err(QueueInfrastructureError::new(
+        Ok(Err(e)) => {
+            let transient =
+                matches!(&e, hot::db::TaskError::Database(e) if db::is_unavailable_error(e));
+            Err(pre_claim_lookup_error(
+                &format!("failed to load task {task_id} before execution"),
+                e,
+                transient,
+                backoff,
+            ))
+        }
+        Err(_) => Err(Box::new(QueueInfrastructureError::new(
             format!("timed out loading task {} before execution", task_id),
-            std::time::Duration::from_millis(infra_retry_backoff_ms),
-        )),
+            backoff,
+        ))),
     }
 }
 
@@ -2574,9 +2947,9 @@ async fn process_task_inner(
             tracing::warn!(
                 task_id = %task_id,
                 backoff_ms = infra_retry_backoff_ms,
-                "Failed to load task before execution; deferring queue message: {}", e,
+                "Failed to load task before execution; leaving its queue message unacknowledged: {}", e,
             );
-            return Err(Box::new(e));
+            return Err(e);
         }
     };
 
@@ -2640,8 +3013,16 @@ async fn process_task_inner(
     let env = Env::get_env_uncached(&db, &task.env_id)
         .await
         .map_err(|error| {
-            QueueInfrastructureError::new(
-                format!("Cannot resolve task environment: {error}"),
+            // An environment that is not found defers as it always has; a
+            // database error that would recur at every delivery does not.
+            let transient = match &error {
+                hot::db::EnvError::Database(e) => db::is_unavailable_error(e),
+                hot::db::EnvError::NotFound => true,
+            };
+            pre_claim_lookup_error(
+                "Cannot resolve task environment",
+                error,
+                transient,
                 std::time::Duration::from_millis(infra_retry_backoff_ms),
             )
         })?;
@@ -2652,19 +3033,61 @@ async fn process_task_inner(
     {
         return Err("Queued task organization does not match durable ownership".into());
     }
-    if !hot::db::Org::is_environment_admitted(&db, &env.env_id).await? {
+    // A database that does not answer says nothing about the task: defer the
+    // delivery instead of spending its retry budget, which would dead-letter
+    // the message over a short outage. A build or project that is not there,
+    // or a database error that would recur at every delivery, is the task's
+    // own failure and stays a plain error.
+    let pre_claim_backoff = std::time::Duration::from_millis(infra_retry_backoff_ms);
+    let admitted = hot::db::Org::is_environment_admitted(&db, &env.env_id)
+        .await
+        .map_err(|error| {
+            let transient =
+                matches!(&error, hot::db::OrgError::Database(e) if db::is_unavailable_error(e));
+            pre_claim_lookup_error(
+                "Cannot check task environment admission",
+                error,
+                transient,
+                pre_claim_backoff,
+            )
+        })?;
+    if !admitted {
         return Ok(()); // Durable queued task is rediscovered after reactivation.
     }
     let db = Arc::new(db.with_scope(DatabaseScope::Environment {
         org_id: env.org_id,
         env_id: env.env_id,
     }));
-    let build = Build::get_build(&db, &task.build_id).await?;
-    let project = Project::get_project(&db, &build.project_id).await?;
+    let build = Build::get_build(&db, &task.build_id)
+        .await
+        .map_err(|error| {
+            let transient =
+                matches!(&error, hot::db::BuildError::Database(e) if db::is_unavailable_error(e));
+            pre_claim_lookup_error(
+                "Cannot load task build",
+                error,
+                transient,
+                pre_claim_backoff,
+            )
+        })?;
+    let project = load_task_project(&db, &build.project_id)
+        .await
+        .map_err(|error| {
+            let transient =
+                matches!(&error, hot::db::ProjectError::Database(e) if db::is_unavailable_error(e));
+            pre_claim_lookup_error(
+                "Cannot load task project",
+                error,
+                transient,
+                pre_claim_backoff,
+            )
+        })?;
     if project.env_id != task.env_id {
         return Err("Task build does not belong to durable task environment".into());
     }
     if !project.active {
+        // As for an environment that is not admitted: the row stays queued
+        // and is rediscovered once the project is active again.
         return Ok(());
     }
     // During a rolling upgrade, a code task of a build made by a newer Hot of
@@ -2699,7 +3122,7 @@ async fn process_task_inner(
             .max(0)
     });
     let initial_timing = serde_json::json!({
-        "queue_backend": if queue_timing.enqueued_at.is_some() { "redis" } else { "memory" },
+        "queue_backend": queue_backend_label(&task_queue),
         "enqueued_at": queue_timing.enqueued_at.map(|value| value.to_rfc3339()),
         "claimed_at": queue_timing.claimed_at.to_rfc3339(),
         "publish_wait_ms": publish_wait_ms,
@@ -2811,6 +3234,10 @@ async fn process_task_inner(
     let _running = TASK_ACTIVITY.start();
 
     let terminal_state_db = Arc::clone(&db);
+    // What the lease-loss arm below needs to stop a container task's
+    // containers once it has dropped the future that watched them.
+    let abandoned_container =
+        (request.task_type == "container").then(|| (Arc::clone(&boxes), request.task_id.clone()));
     let execute_task = async {
         if request.task_type == "container" {
             // Keep the explicit/derived container max as a hard task count in
@@ -2989,6 +3416,13 @@ async fn process_task_inner(
                     backoff_ms = infra_retry_backoff_ms,
                     "Task lease lost while processing; cancelling local work and deferring queue message"
                 );
+                // Choosing this arm dropped `execute_task`. A code task's VM
+                // stops on its cancel token. A container has none: it would
+                // run on, unwatched, with its slot, budget and data volume
+                // already released, so stop it before the row is released.
+                if let Some((boxes, trace_id)) = &abandoned_container {
+                    stop_abandoned_task_containers(boxes, trace_id).await;
+                }
                 Err(Box::new(QueueInfrastructureError::new(
                     "task lease lost while processing",
                     std::time::Duration::from_millis(infra_retry_backoff_ms),
@@ -3020,7 +3454,11 @@ async fn process_task_inner(
         execute_task.await
     };
 
-    coordinator.unregister_task(&task_id);
+    // The task stays registered until its row is released below. Every
+    // processor of this worker shares one worker ID, and the release is keyed
+    // on it: unregistered first, another processor here could register and
+    // claim a redelivered copy, and the late release would then clear the
+    // owner of that fresh claim, whose fenced terminal write is rejected.
     if result.is_ok() {
         let terminal_is_durable = matches!(
             tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(&terminal_state_db, &task_id)).await,
@@ -3048,13 +3486,71 @@ async fn process_task_inner(
                     tracing::warn!(task_id = %task_id, "Timed out releasing task worker ownership");
                 }
             }
+            coordinator.unregister_task(&task_id);
             return Err(Box::new(QueueInfrastructureError::new(
                 "task terminal state was not persisted",
                 std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
             )));
         }
+    } else {
+        // An error (a lost lease, a failed setup step) can also end
+        // processing with the row still running and owned by this worker.
+        release_unfinished_task(&terminal_state_db, &task_id, &worker_id).await;
     }
+    coordinator.unregister_task(&task_id);
     result
+}
+
+/// Release a task this worker claimed and stopped processing without a
+/// terminal state. Nothing here runs it any more, but the batch heartbeat
+/// would keep its row `running`, and every redelivery deferred, for as long
+/// as this worker lives. Released, the zombie reaper reconciles it. A row
+/// this worker never claimed, or one already terminal, is left as it is.
+/// Returns whether a row was released.
+async fn release_unfinished_task(db: &DatabasePool, task_id: &Uuid, worker_id: &str) -> bool {
+    match tokio::time::timeout(
+        DB_CALL_TIMEOUT,
+        Task::release_worker(db, task_id, worker_id),
+    )
+    .await
+    {
+        Ok(Ok(true)) => {
+            tracing::warn!(
+                task_id = %task_id,
+                "Task processing failed with the task still running; released it for the zombie reaper"
+            );
+            true
+        }
+        Ok(Ok(false)) => false,
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, "Failed to release task worker ownership: {}", e);
+            false
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task_id, "Timed out releasing task worker ownership");
+            false
+        }
+    }
+}
+
+/// Stop the containers of a task whose processing future was dropped while
+/// they may be running, as nothing in this worker watches them any more.
+/// Dropping the future skips the executor's own cleanup. Bounded like every
+/// other cleanup; what it misses is left to orphan cleanup.
+async fn stop_abandoned_task_containers(boxes: &BoxRuntime, trace_id: &str) {
+    let Some(executor) = boxes.executor() else {
+        return;
+    };
+    let reap = async {
+        executor.cleanup_task_containers(trace_id).await;
+        executor.cleanup_after_timeout(trace_id, true).await;
+    };
+    if !bounded_cleanup(KATA_TIMEOUT_CLEANUP_ENVELOPE, reap).await {
+        tracing::warn!(
+            task_id = trace_id,
+            "Container cleanup after a lost task lease timed out"
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3084,7 +3580,11 @@ async fn finish_container_setup_timeout<G: Send>(
         &format!("Container task timed out during {phase}"),
         Some(serde_json::json!({"phase": phase})),
     );
-    let persisted = complete_container_setup(
+    // A setup timeout is a terminal failure of THIS attempt exactly like the
+    // runtime failure/timeout arms one await later: the user's retry budget
+    // is honored the same way, the retry committed with the fenced terminal
+    // write and enqueued only after it persisted.
+    let persisted = complete_container_setup_with_retry(
         db,
         stream_publisher,
         task_id,
@@ -3094,17 +3594,12 @@ async fn finish_container_setup_timeout<G: Send>(
         task_type,
         TaskStatus::TimedOut,
         Some(&error),
-        None,
         Some(worker_id),
     )
     .await;
     if persisted {
         publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
-        // A setup timeout is a terminal failure of THIS attempt exactly like
-        // the runtime failure/timeout arms one await later: honor the user's
-        // retry budget through the same gate, strictly after the fenced
-        // terminal write persisted (persist-before-retry).
-        maybe_retry_task(db, task_queue, task_id, request).await;
+        enqueue_committed_retry(db, task_queue, task_id, request).await;
     }
 
     if let Some(handle) = file_server_handle
@@ -3374,7 +3869,7 @@ async fn recover_containers(
 ) {
     cancellation_quota::reap(db, executor, coordinator, worker_id).await;
 
-    let adopted = adopt_orphaned_containers(
+    let adoption = adopt_orphaned_containers(
         executor,
         db,
         stream_publisher,
@@ -3385,32 +3880,185 @@ async fn recover_containers(
     .await;
 
     // Monitor any adopted containers in background poll tasks
-    for (adopted_task_id, adopted_container_id, adopted_ownership_resolved, adopted_bundle_lease) in
-        adopted
-    {
+    for adopted in adoption.adopted {
+        spawn_adopted_container_monitor(
+            adopted,
+            executor,
+            db,
+            stream_publisher,
+            task_queue,
+            coordinator,
+            worker_id,
+        );
+    }
+
+    if !adoption.deferred.is_empty() {
         let db = Arc::clone(db);
         let sp = Arc::clone(stream_publisher);
         let tq = Arc::clone(task_queue);
         let ex = Arc::clone(executor);
         let coord = Arc::clone(coordinator);
-        let monitor_worker_id = worker_id.to_string();
+        let worker_id = worker_id.to_string();
         tokio::spawn(async move {
-            let _running = TASK_ACTIVITY.start();
-            // The container may bind-mount resources from its build's extraction.
-            let _bundle_lease = adopted_bundle_lease;
-            monitor_adopted_container(
-                adopted_task_id,
-                adopted_container_id,
-                &db,
-                &sp,
-                &tq,
-                &ex,
-                &coord,
-                &monitor_worker_id,
-                adopted_ownership_resolved,
-            )
-            .await;
+            retry_deferred_adoptions(adoption.deferred, &ex, &db, &sp, &tq, &coord, &worker_id)
+                .await;
         });
+    }
+}
+
+/// Watch an adopted container from a background poll task.
+fn spawn_adopted_container_monitor(
+    adopted: AdoptedContainer,
+    executor: &Arc<executor::BoxExecutor>,
+    db: &Arc<DatabasePool>,
+    stream_publisher: &Arc<StreamPubSub>,
+    task_queue: &Arc<ProcessingQueue<TaskRequest>>,
+    coordinator: &Arc<shutdown::TaskShutdownCoordinator>,
+    worker_id: &str,
+) {
+    let db = Arc::clone(db);
+    let sp = Arc::clone(stream_publisher);
+    let tq = Arc::clone(task_queue);
+    let ex = Arc::clone(executor);
+    let coord = Arc::clone(coordinator);
+    let monitor_worker_id = worker_id.to_string();
+    tokio::spawn(async move {
+        let _running = TASK_ACTIVITY.start();
+        // The container may bind-mount resources from its build's extraction.
+        let _bundle_lease = adopted.bundle_lease;
+        monitor_adopted_container(
+            adopted.task_id,
+            adopted.container_id,
+            &db,
+            &sp,
+            &tq,
+            &ex,
+            &coord,
+            &monitor_worker_id,
+            adopted.ownership_resolved,
+        )
+        .await;
+    });
+}
+
+/// Adopt, once the database answers, the containers startup had to leave
+/// running because it could not load their tasks. Each is held as active
+/// with the coordinator meanwhile (`defer_adoption`), so this worker's
+/// zombie reaper does not fail a row whose container is live here.
+///
+/// A container still not adopted after [`DEFERRED_ADOPTION_LIMIT`] is
+/// stopped and let go: nothing would ever watch it, and the reaper can then
+/// fail its task and run the retry without a second copy beside it.
+async fn retry_deferred_adoptions(
+    deferred: Vec<(Uuid, String)>,
+    executor: &Arc<executor::BoxExecutor>,
+    db: &Arc<DatabasePool>,
+    stream_publisher: &Arc<StreamPubSub>,
+    task_queue: &Arc<ProcessingQueue<TaskRequest>>,
+    coordinator: &Arc<shutdown::TaskShutdownCoordinator>,
+    worker_id: &str,
+) {
+    drive_deferred_adoptions(
+        coordinator,
+        deferred,
+        DEFERRED_ADOPTION_RETRY_INTERVAL,
+        DEFERRED_ADOPTION_LIMIT,
+        |task_id: Uuid, container_id: String| async move {
+            match adopt_orphaned_container(
+                executor,
+                db,
+                stream_publisher,
+                task_queue,
+                coordinator,
+                worker_id,
+                task_id,
+                &container_id,
+            )
+            .await
+            {
+                ContainerAdoption::Deferred => true,
+                ContainerAdoption::Settled => false,
+                ContainerAdoption::Adopted {
+                    ownership_resolved,
+                    bundle_lease,
+                } => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        container_id = %container_id,
+                        "Adopted a container whose adoption was deferred at startup"
+                    );
+                    spawn_adopted_container_monitor(
+                        AdoptedContainer {
+                            task_id,
+                            container_id,
+                            ownership_resolved,
+                            bundle_lease,
+                        },
+                        executor,
+                        db,
+                        stream_publisher,
+                        task_queue,
+                        coordinator,
+                        worker_id,
+                    );
+                    false
+                }
+            }
+        },
+        |task_id: Uuid, container_id: String| async move {
+            tracing::error!(
+                task_id = %task_id,
+                container_id = %container_id,
+                limit_secs = DEFERRED_ADOPTION_LIMIT.as_secs(),
+                "Could not load an orphaned container's task in time to adopt it; stopping the container so the zombie reaper's retry runs alone"
+            );
+            kill_and_remove_with_timeout(executor, &container_id, Some(&task_id)).await;
+        },
+    )
+    .await;
+}
+
+/// The loop of [`retry_deferred_adoptions`]. `attempt` tries one adoption
+/// again and says whether it is still deferred; `abandon` stops a container
+/// whose adoption ran out of time. Either way the task then stops being held
+/// as active for its deferred adoption: `attempt` has registered an adopted
+/// task by the time it returns, so the task is never unprotected in between.
+/// A worker shutting down leaves the containers to the next one.
+async fn drive_deferred_adoptions<Attempt, Attempting, Abandon, Abandoning>(
+    coordinator: &shutdown::TaskShutdownCoordinator,
+    mut deferred: Vec<(Uuid, String)>,
+    interval: std::time::Duration,
+    limit: std::time::Duration,
+    mut attempt: Attempt,
+    mut abandon: Abandon,
+) where
+    Attempt: FnMut(Uuid, String) -> Attempting,
+    Attempting: std::future::Future<Output = bool>,
+    Abandon: FnMut(Uuid, String) -> Abandoning,
+    Abandoning: std::future::Future<Output = ()>,
+{
+    let started = std::time::Instant::now();
+    while !deferred.is_empty() {
+        tokio::time::sleep(interval).await;
+        if coordinator.is_shutting_down() {
+            break;
+        }
+        let out_of_time = started.elapsed() >= limit;
+        let mut still_deferred = Vec::new();
+        for (task_id, container_id) in deferred {
+            if attempt(task_id, container_id.clone()).await {
+                if !out_of_time {
+                    still_deferred.push((task_id, container_id));
+                    continue;
+                }
+                abandon(task_id, container_id).await;
+            }
+            coordinator.finish_deferred_adoption(&task_id);
+        }
+        deferred = still_deferred;
+    }
+    for (task_id, _) in &deferred {
+        coordinator.finish_deferred_adoption(task_id);
     }
 }
 
@@ -4995,7 +5643,7 @@ async fn process_container_task(
                     "infra-failure": is_infra_failure,
                 })),
             );
-            let persisted = complete_task_with_event(
+            let persisted = complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -5016,7 +5664,7 @@ async fn process_container_task(
                 check_cus_thresholds(&db, org_id, env_id, &usage_stats_cache).await;
             }
             if persisted {
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::error!(
                 task_id = %task_id,
@@ -5036,7 +5684,7 @@ async fn process_container_task(
                     "compute-units": compute_units,
                 })),
             );
-            let persisted = complete_task_with_event(
+            let persisted = complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -5057,7 +5705,7 @@ async fn process_container_task(
                 check_cus_thresholds(&db, org_id, env_id, &usage_stats_cache).await;
             }
             if persisted {
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::warn!(
                 task_id = %task_id,
@@ -5669,7 +6317,7 @@ async fn process_code_task(
             }
             Err(_) => {
                 let error = task_failure_json("Task timed out during setup", None);
-                if complete_task_with_event(
+                if complete_task_with_retry_and_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -5685,7 +6333,7 @@ async fn process_code_task(
                 .await
                 {
                     publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                    maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                    enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
                 }
                 tracing::warn!(task_id = %task_id, timeout_ms, "Task timed out during setup");
                 return Ok(());
@@ -5707,7 +6355,7 @@ async fn process_code_task(
             };
             let error =
                 task_failure_json(&format!("Task arguments could not be read: {reason}"), None);
-            if complete_task_with_event(
+            if complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -5723,7 +6371,7 @@ async fn process_code_task(
             .await
             {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::error!(task_id = %task_id, "Task arguments could not be read: {reason}");
             return Ok(());
@@ -5743,8 +6391,46 @@ async fn process_code_task(
     let task_env_id = env_id;
     let cancel_notify_fwd = Arc::clone(&cancel_notify);
     let mut sub =
-        await_claimed_task_deadline(task_deadline, stream_publisher.subscribe_task(task_id))
-            .await??;
+        match await_claimed_task_deadline(task_deadline, stream_publisher.subscribe_task(task_id))
+            .await
+        {
+            Ok(Ok(sub)) => sub,
+            // The row is claimed, so fail it as the setup steps above do: an
+            // error returned from here would leave it running.
+            outcome => {
+                let (status, message) = match outcome {
+                    Ok(Err(e)) => (
+                        TaskStatus::Failed,
+                        format!("Task message channel could not be opened: {e}"),
+                    ),
+                    _ => (
+                        TaskStatus::TimedOut,
+                        "Task timed out during setup".to_string(),
+                    ),
+                };
+                let error = task_failure_json(&message, None);
+                if complete_task_with_retry_and_event(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    &function_name,
+                    &task_type,
+                    status,
+                    Some(&error),
+                    None,
+                    Some(&worker_id),
+                )
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                    enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
+                }
+                tracing::error!(task_id = %task_id, "{message}");
+                return Ok(());
+            }
+        };
     let inbox_forwarder = tokio::spawn(async move {
         loop {
             match sub.next().await {
@@ -6000,7 +6686,7 @@ async fn process_code_task(
     match execution_result {
         Ok(Ok(Ok((terminal, result_json)))) => {
             if let Some((status, alert_name)) = terminal {
-                if complete_task_with_event(
+                if complete_task_with_retry_and_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -6018,7 +6704,7 @@ async fn process_code_task(
                     publish_task_alert(&db, org_id, env_id, &task_id, alert_name, &result_json)
                         .await;
                     if status == TaskStatus::Failed {
-                        maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                        enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
                     }
                 }
                 tracing::info!(
@@ -6070,7 +6756,7 @@ async fn process_code_task(
                             &format!("Task finished, but its result could not be stored: {e}"),
                             None,
                         );
-                        if complete_task_with_event(
+                        if complete_task_with_retry_and_event(
                             &db,
                             &stream_publisher,
                             &task_id,
@@ -6094,7 +6780,7 @@ async fn process_code_task(
                                 &error,
                             )
                             .await;
-                            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                            enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
                         }
                         tracing::error!(task_id = %task_id, "Task result could not be stored: {e}");
                     }
@@ -6103,7 +6789,7 @@ async fn process_code_task(
         }
         Ok(Ok(Err(e))) => {
             let error = task_failure_json(&e, None);
-            if complete_task_with_event(
+            if complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -6119,13 +6805,13 @@ async fn process_code_task(
             .await
             {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::error!(task_id = %task_id, "Task execution error: {}", e);
         }
         Ok(Err(e)) => {
             let error = task_failure_json(&format!("Task panicked: {}", e), None);
-            if complete_task_with_event(
+            if complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -6141,7 +6827,7 @@ async fn process_code_task(
             .await
             {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::error!(task_id = %task_id, "Task panicked: {}", e);
         }
@@ -6162,7 +6848,7 @@ async fn process_code_task(
             // rows, `complete_task_with_event` reports not-persisted, and the
             // alert + retry below are suppressed — the winning writer already
             // published its own event and retry.
-            if complete_task_with_event(
+            if complete_task_with_retry_and_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -6178,7 +6864,7 @@ async fn process_code_task(
             .await
             {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                enqueue_committed_retry(&db, &task_queue, &task_id, &request).await;
             }
             tracing::warn!(task_id = %task_id, timeout_ms, "Task timed out — VM cancel signalled");
         }
@@ -6493,11 +7179,8 @@ fn json_numeric_tolerant_eq(a: &serde_json::Value, b: &serde_json::Value) -> boo
     }
 }
 
-/// `duration_ms_override` is threaded verbatim to [`Task::complete`]:
-/// container tasks pass their billable execution-window snapshot so the
-/// row's `duration_ms` doesn't degrade to the claim-to-persist stop-start
-/// span (which would fold setup and teardown into billing reads); all other
-/// callers pass `None` for the historical computed duration.
+/// [`persist_terminal_task_with_retry`] for a write that carries no retry.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn persist_terminal_task(
     db: &DatabasePool,
@@ -6509,21 +7192,80 @@ async fn persist_terminal_task(
     attempt_timeout: std::time::Duration,
     max_attempts: usize,
 ) -> bool {
+    persist_terminal_task_with_retry(
+        db,
+        task_id,
+        status,
+        result,
+        duration_ms_override,
+        fence_worker,
+        None,
+        attempt_timeout,
+        max_attempts,
+    )
+    .await
+}
+
+/// `duration_ms_override` is threaded verbatim to [`Task::complete`]:
+/// container tasks pass their billable execution-window snapshot so the
+/// row's `duration_ms` doesn't degrade to the claim-to-persist stop-start
+/// span (which would fold setup and teardown into billing reads); all other
+/// callers pass `None` for the historical computed duration.
+///
+/// `retry_task_id` is `Some` where a failure may be retried under the task's
+/// `retry` policy: the write then goes through [`Task::complete_with_retry`],
+/// which commits the retry row (under this id) with the terminal state.
+#[allow(clippy::too_many_arguments)]
+async fn persist_terminal_task_with_retry(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    status: &TaskStatus,
+    result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+    retry_task_id: Option<&Uuid>,
+    attempt_timeout: std::time::Duration,
+    max_attempts: usize,
+) -> bool {
     let mut persisted = false;
     for attempt in 1..=max_attempts {
-        match tokio::time::timeout(
-            attempt_timeout,
-            Task::complete(
-                db,
-                task_id,
-                status,
-                result,
-                duration_ms_override,
-                fence_worker,
-            ),
-        )
-        .await
-        {
+        let write = async {
+            match retry_task_id {
+                Some(retry_task_id) => Task::complete_with_retry(
+                    db,
+                    task_id,
+                    status,
+                    result,
+                    duration_ms_override,
+                    fence_worker,
+                    retry_task_id,
+                )
+                .await
+                .map(|write| {
+                    if let Some(retry) = &write.retry {
+                        tracing::info!(
+                            task_id = %task_id,
+                            retry_task_id = %retry.retry_task_id,
+                            attempt = retry.retry_attempt,
+                            "Committed the task's retry with its terminal failure"
+                        );
+                    }
+                    write.applied
+                }),
+                None => {
+                    Task::complete(
+                        db,
+                        task_id,
+                        status,
+                        result,
+                        duration_ms_override,
+                        fence_worker,
+                    )
+                    .await
+                }
+            }
+        };
+        match tokio::time::timeout(attempt_timeout, write).await {
             Ok(Ok(true)) => {
                 persisted = true;
                 break;
@@ -6682,9 +7424,10 @@ async fn persist_terminal_task(
 /// Returns whether OUR terminal state is durable. `false` means another actor
 /// won the terminal race (or persistence failed outright): the caller must
 /// suppress every follow-up keyed to the outcome — `publish_task_alert` and
-/// `maybe_retry_task`/`maybe_retry_zombie_task` — because the winning writer
-/// publishes its own, and retrying an un-persisted (or cancelled) failure
-/// double-runs the task.
+/// `enqueue_committed_retry`/`enqueue_committed_zombie_retry` — because the
+/// winning writer publishes its own, and retrying an un-persisted (or
+/// cancelled) failure double-runs the task. The retry row itself can only
+/// exist if our write applied: see [`complete_task_with_retry_and_event`].
 #[allow(clippy::too_many_arguments)]
 async fn complete_task_with_event(
     db: &DatabasePool,
@@ -6699,18 +7442,95 @@ async fn complete_task_with_event(
     duration_ms_override: Option<i64>,
     fence_worker: Option<&str>,
 ) -> bool {
+    finish_task_with_event(
+        db,
+        publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        status,
+        result,
+        duration_ms_override,
+        fence_worker,
+        false,
+    )
+    .await
+}
+
+/// [`complete_task_with_event`] for the outcomes a task's `retry` policy
+/// covers. A `failed` or `timed_out` write commits the retry the policy still
+/// owes in the same transaction (`Task::complete_with_retry`), so the failure
+/// is never visible without it; any other status is written as usual.
+///
+/// Returns what `complete_task_with_event` does. On `true` the caller
+/// publishes its alert and hands the committed retry to the queue with
+/// [`enqueue_committed_retry`] or [`enqueue_committed_zombie_retry`].
+#[allow(clippy::too_many_arguments)]
+async fn complete_task_with_retry_and_event(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    function_name: &str,
+    task_type: &str,
+    status: TaskStatus,
+    result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+) -> bool {
+    finish_task_with_event(
+        db,
+        publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        status,
+        result,
+        duration_ms_override,
+        fence_worker,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_task_with_event(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    function_name: &str,
+    task_type: &str,
+    status: TaskStatus,
+    result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+    commit_retry: bool,
+) -> bool {
+    // Only the caller's own failure is retried: a success that has to be
+    // stored as the oversized-result failure below is not. One id serves
+    // every attempt of the write, so a replay cannot add a row.
+    let retryable = matches!(status, TaskStatus::Failed | TaskStatus::TimedOut);
+    let retry_task_id = (commit_retry && retryable).then(|| mint_retry_task_id(task_id));
     // A task:complete event is only truthful after the terminal row is
     // durable. Retry briefly, then leave the row non-terminal; process_task's
     // postcondition will withhold the queue ACK and release heartbeat ownership
     // so the zombie reaper can reconcile it.
     let result_size = result.map_or(0, |result| result.to_string().len());
-    let persisted = persist_terminal_task(
+    let persisted = persist_terminal_task_with_retry(
         db,
         task_id,
         &status,
         result,
         duration_ms_override,
         fence_worker,
+        retry_task_id.as_ref(),
         hot::blob::timeout_for_size(TASK_COMPLETION_DB_TIMEOUT, result_size),
         TASK_COMPLETION_ATTEMPTS,
     )
@@ -6731,13 +7551,14 @@ async fn complete_task_with_event(
         Some(failure) => (
             TaskStatus::Failed,
             Some(failure),
-            persist_terminal_task(
+            persist_terminal_task_with_retry(
                 db,
                 task_id,
                 &TaskStatus::Failed,
                 Some(failure),
                 duration_ms_override,
                 fence_worker,
+                retry_task_id.as_ref(),
                 TASK_COMPLETION_DB_TIMEOUT,
                 TASK_COMPLETION_ATTEMPTS,
             )
@@ -6746,6 +7567,9 @@ async fn complete_task_with_event(
         None => (status, result, persisted),
     };
     if !persisted {
+        if let Some(retry_task_id) = &retry_task_id {
+            discard_minted_retry_id(task_id, retry_task_id);
+        }
         tracing::error!(
             task_id = %task_id,
             "Terminal task state was not persisted; suppressing completion events, alerts, and retries"
@@ -6851,11 +7675,72 @@ async fn complete_container_setup(
     _duration_ms_override: Option<i64>,
     fence_worker: Option<&str>,
 ) -> bool {
+    finish_container_setup(
+        db,
+        publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        status,
+        result,
+        fence_worker,
+        false,
+    )
+    .await
+}
+
+/// [`complete_container_setup`] for a setup outcome the task's `retry` policy
+/// covers; see [`complete_task_with_retry_and_event`].
+#[allow(clippy::too_many_arguments)]
+async fn complete_container_setup_with_retry(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    function_name: &str,
+    task_type: &str,
+    status: TaskStatus,
+    result: Option<&serde_json::Value>,
+    fence_worker: Option<&str>,
+) -> bool {
+    finish_container_setup(
+        db,
+        publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        status,
+        result,
+        fence_worker,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_container_setup(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    function_name: &str,
+    task_type: &str,
+    status: TaskStatus,
+    result: Option<&serde_json::Value>,
+    fence_worker: Option<&str>,
+    commit_retry: bool,
+) -> bool {
     let mut result = result.cloned().unwrap_or_else(|| serde_json::json!({}));
     if let Some(map) = result.as_object_mut() {
         map.insert("compute-units".into(), serde_json::json!(0));
     }
-    let completed = complete_task_with_event(
+    let completed = finish_task_with_event(
         db,
         publisher,
         task_id,
@@ -6867,6 +7752,7 @@ async fn complete_container_setup(
         Some(&result),
         Some(0),
         fence_worker,
+        commit_retry,
     )
     .await;
     if !completed
@@ -7063,170 +7949,193 @@ async fn check_cus_thresholds_inner(
     }
 }
 
-/// Check whether a failed task should be retried based on its options.retry config.
-/// If retries remain, creates a new task row with incremented retry_attempt and enqueues it.
-async fn maybe_retry_task(
+/// Retry ids this process has handed to a terminal write and not yet matched
+/// against the committed retry row, by failing task. See
+/// [`committed_retry_to_enqueue`].
+static MINTED_RETRY_IDS: std::sync::LazyLock<std::sync::Mutex<MintedRetryIds>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Failing task id to the retry ids minted for it, each with when.
+type MintedRetryIds = HashMap<Uuid, Vec<(Uuid, std::time::Instant)>>;
+
+/// How long a minted retry id waits for its enqueue. One still unmatched
+/// after this belongs to a write whose caller never came to enqueue; were it
+/// dropped early, the queued-task reconciler would enqueue the retry.
+const MINTED_RETRY_ID_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// Failing tasks tracked before expired ids are looked for.
+const MINTED_RETRY_IDS_PRUNE_ABOVE: usize = 1024;
+
+/// A new id for the retry row a terminal write of `parent_task_id` may
+/// commit, remembered so that only a writer in this process whose own
+/// transaction inserted that row enqueues it.
+fn mint_retry_task_id(parent_task_id: &Uuid) -> Uuid {
+    let retry_task_id = Uuid::now_v7();
+    let now = std::time::Instant::now();
+    let mut minted = MINTED_RETRY_IDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if minted.len() >= MINTED_RETRY_IDS_PRUNE_ABOVE {
+        minted.retain(|_, ids| {
+            ids.retain(|(_, at)| now.duration_since(*at) < MINTED_RETRY_ID_TTL);
+            !ids.is_empty()
+        });
+    }
+    minted
+        .entry(*parent_task_id)
+        .or_default()
+        .push((retry_task_id, now));
+    retry_task_id
+}
+
+/// Forget a minted id whose write did not apply: it names no row.
+fn discard_minted_retry_id(parent_task_id: &Uuid, retry_task_id: &Uuid) {
+    let mut minted = MINTED_RETRY_IDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(ids) = minted.get_mut(parent_task_id) {
+        ids.retain(|(id, _)| id != retry_task_id);
+        if ids.is_empty() {
+            minted.remove(parent_task_id);
+        }
+    }
+}
+
+/// The ids minted here for `parent_task_id`'s retry, which are then forgotten.
+fn take_minted_retry_ids(parent_task_id: &Uuid) -> Vec<Uuid> {
+    MINTED_RETRY_IDS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(parent_task_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// The still-queued retry committed with `parent_task_id`'s terminal failure
+/// (`Task::complete_with_retry`, `Task::fail_stale_running_with_retry`), if
+/// its `retry` policy owed one and a write of this process committed it.
+///
+/// Read back rather than carried from the write, so a terminal write that
+/// committed on an attempt whose answer was lost still gets its retry
+/// enqueued. A retry that is no longer `queued` was already delivered.
+///
+/// A terminal write also reports success when it finds the row already
+/// failed with its own payload, which two unfenced writers of the same
+/// failure both do. Only one transaction inserted the retry row, under the id
+/// its writer minted ([`mint_retry_task_id`]), and every attempt of one write
+/// carries the same id: so the row's id tells the writer that committed it,
+/// lost answer or not, from one that only found the failure in place. The
+/// first enqueue here for a task takes every id minted for it, so the retry
+/// is enqueued once. A row under nobody's id here was committed by another
+/// process, which enqueues it; if that process died first, the queued-task
+/// reconciler does, as for any writer that stops before its enqueue.
+async fn committed_retry_to_enqueue(
     db: &DatabasePool,
-    task_queue: &ProcessingQueue<TaskRequest>,
-    failed_task_id: &Uuid,
-    original_request: &TaskRequest,
-) {
-    // This re-read is defence in depth behind the call-site persistence
-    // gates AND the only source of the retry budget (`options` lives on the
-    // row, not on the queue request). The caller only reaches here after the
-    // terminal failure was durably persisted, so a transient transport
-    // error/timeout must not silently drop the owed retry — retry the read
-    // briefly. Only a row that provably should not retry may skip: a missing
-    // row (NotFound) or one whose status is not a terminal failure.
-    const RETRY_CHECK_READ_ATTEMPTS: usize = 3;
-    let mut loaded = None;
-    for attempt in 1..=RETRY_CHECK_READ_ATTEMPTS {
-        match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, failed_task_id)).await {
-            Ok(Ok(t)) => {
-                loaded = Some(t);
-                break;
-            }
-            Ok(Err(db::TaskError::NotFound)) => {
+    parent_task_id: &Uuid,
+    env_id: &Uuid,
+) -> Option<Task> {
+    const READ_ATTEMPTS: usize = 3;
+    let minted = take_minted_retry_ids(parent_task_id);
+    for attempt in 1..=READ_ATTEMPTS {
+        match tokio::time::timeout(
+            DB_CALL_TIMEOUT,
+            Task::get_retry_child(db, parent_task_id, env_id),
+        )
+        .await
+        {
+            Ok(Ok(child)) => {
+                let child =
+                    child.filter(|child| child.task_status_id == TaskStatus::Queued.as_id())?;
+                if minted.contains(&child.task_id) {
+                    return Some(child);
+                }
                 tracing::info!(
-                    task_id = %failed_task_id,
-                    "Retry check: task row no longer exists; skipping retry"
+                    task_id = %parent_task_id,
+                    retry_task_id = %child.task_id,
+                    "The task's retry was committed by another writer of the same failure; leaving its enqueue to that writer"
                 );
-                return;
+                return None;
             }
             Ok(Err(e)) => {
-                tracing::warn!(
-                    task_id = %failed_task_id,
-                    attempt,
-                    "Retry check: couldn't load task: {}", e
-                );
+                tracing::warn!(task_id = %parent_task_id, attempt, "Couldn't look up the task's retry: {}", e);
             }
             Err(_) => {
-                tracing::warn!(
-                    task_id = %failed_task_id,
-                    attempt,
-                    "Retry check: Task::get timed out"
-                );
+                tracing::warn!(task_id = %parent_task_id, attempt, "Timed out looking up the task's retry");
             }
         }
-        if attempt < RETRY_CHECK_READ_ATTEMPTS {
+        if attempt < READ_ATTEMPTS {
             tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
         }
     }
-    let Some(task) = loaded else {
-        // Proceeding blindly is not an option: without the row we cannot see
-        // whether retries are configured at all, or how much budget is left.
-        tracing::error!(
-            task_id = %failed_task_id,
-            "Retry check: task row unreadable after {} attempts — DROPPING the owed retry because its retry budget (options) cannot be loaded",
-            RETRY_CHECK_READ_ATTEMPTS,
-        );
-        return;
-    };
+    // The retry row, if one was committed, is durable: only its queue entry
+    // is late.
+    tracing::error!(
+        task_id = %parent_task_id,
+        "Couldn't look up the task's retry after {} attempts; if one was committed, the queued-task reconciler enqueues it",
+        READ_ATTEMPTS,
+    );
+    None
+}
 
-    // Defence in depth behind the call-site persistence gates: only a row
-    // that actually shows a terminal failure may spawn a retry. A Cancelled
-    // row (cancellation won the terminal race), a still-active row (our
-    // terminal write never landed), or a Completed row must never be re-run.
-    if !matches!(
-        TaskStatus::from_id(task.task_status_id),
-        Some(TaskStatus::Failed | TaskStatus::TimedOut)
-    ) {
-        tracing::info!(
-            task_id = %failed_task_id,
-            status = task.task_status_id,
-            "Retry check: task row is not a terminal failure; skipping retry"
-        );
-        return;
-    }
-
-    let options = match &task.options {
-        Some(opts) => opts,
-        None => return,
-    };
-
-    let retry_config = RetryConfig::from_meta(Some(options));
-    if !retry_config.is_enabled() {
-        return;
-    }
-
-    let current_attempt = task.retry_attempt;
-    if current_attempt >= retry_config.max_retries {
-        tracing::info!(
-            task_id = %failed_task_id,
-            attempt = current_attempt,
-            max = retry_config.max_retries,
-            "Task exhausted all retries"
-        );
-        return;
-    }
-
-    let next_attempt = current_attempt + 1;
-    let delay_ms = retry_config.delay_for_attempt(next_attempt);
-    let next_retry_at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
-    let new_task_id = Uuid::now_v7();
-
-    match tokio::time::timeout(
-        DB_CALL_TIMEOUT,
-        Task::insert_retry(db, &new_task_id, &task, next_attempt, next_retry_at),
-    )
-    .await
-    {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => {
-            // The (parent, attempt) unique key says another writer — e.g. the
-            // zombie reaper, or a crashed earlier attempt that got as far as
-            // insert_retry — already created this retry row. Skip the
-            // enqueue: the row's creator owns delivery, and if it crashed
-            // before enqueueing, reconcile_queued_tasks re-enqueues the stale
-            // queued row, so the retry cannot be stranded.
-            tracing::info!(
-                task_id = %failed_task_id,
-                attempt = next_attempt,
-                "Retry row already exists for this attempt — skipping duplicate retry"
-            );
-            return;
-        }
-        Ok(Err(e)) => {
-            tracing::error!(
-                task_id = %failed_task_id,
-                new_task_id = %new_task_id,
-                "Failed to insert retry task: {}", e
-            );
-            return;
-        }
-        Err(_) => {
-            tracing::error!(
-                task_id = %failed_task_id,
-                new_task_id = %new_task_id,
-                "Task::insert_retry timed out — skipping retry"
-            );
-            return;
-        }
-    }
-
-    let mut retry_request = original_request.clone();
-    retry_request.task_id = new_task_id.to_string();
-    retry_request.created_at_unix_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    // If there's a delay, spawn a delayed enqueue; otherwise enqueue immediately
-    if delay_ms > 0 {
+/// Enqueue `retry_request` for the committed retry row `retry`, once the
+/// row's `next_retry_at` has come. A failed enqueue leaves the row queued for
+/// `reconcile_queued_tasks`.
+async fn enqueue_retry_request(
+    task_queue: &ProcessingQueue<TaskRequest>,
+    retry: &Task,
+    retry_request: TaskRequest,
+) {
+    let new_task_id = retry.task_id;
+    let attempt = retry.retry_attempt;
+    let delay = retry
+        .next_retry_at
+        .and_then(|at| (at - chrono::Utc::now()).to_std().ok())
+        .unwrap_or_default();
+    if !delay.is_zero() {
         let tq = task_queue.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
+            tokio::time::sleep(delay).await;
             if let Err(e) = tq.enqueue(retry_request).await {
                 tracing::error!(new_task_id = %new_task_id, "Failed to enqueue retry task: {}", e);
             } else {
-                tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued after delay");
+                tracing::debug!(new_task_id = %new_task_id, attempt, "Retry task enqueued after delay");
             }
         });
     } else if let Err(e) = task_queue.enqueue(retry_request).await {
         tracing::error!(new_task_id = %new_task_id, "Failed to enqueue retry task: {}", e);
     } else {
-        tracing::debug!(new_task_id = %new_task_id, attempt = next_attempt, "Retry task enqueued immediately");
+        tracing::debug!(new_task_id = %new_task_id, attempt, "Retry task enqueued immediately");
     }
+}
+
+/// Hand the retry of a failed task to the queue.
+///
+/// The retry row itself was committed with the terminal failure by
+/// [`complete_task_with_retry_and_event`], which also decided whether the
+/// task's `retry` policy owed one. Call this only after that write reported
+/// the failure persisted.
+async fn enqueue_committed_retry(
+    db: &DatabasePool,
+    task_queue: &ProcessingQueue<TaskRequest>,
+    failed_task_id: &Uuid,
+    original_request: &TaskRequest,
+) {
+    let Ok(env_id) = Uuid::parse_str(&original_request.env_id) else {
+        tracing::error!(task_id = %failed_task_id, "Task request has an invalid env ID; leaving any retry to the queued-task reconciler");
+        return;
+    };
+    let Some(retry) = committed_retry_to_enqueue(db, failed_task_id, &env_id).await else {
+        return;
+    };
+
+    let mut retry_request = original_request.clone();
+    retry_request.task_id = retry.task_id.to_string();
+    retry_request.created_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    enqueue_retry_request(task_queue, &retry, retry_request).await;
 }
 
 /// Run blocking setup while transferring ownership of the execution permit
@@ -7839,6 +8748,104 @@ async fn register_adopted_task(
     })
 }
 
+/// When the runtime says an exited container started and finished, where it
+/// keeps such a record. Docker reports the zero time for a moment that never
+/// happened, which is not a time.
+async fn exited_container_window(
+    executor: &executor::BoxExecutor,
+    container_id: &str,
+) -> (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let state = match executor {
+        executor::BoxExecutor::Docker(docker_exec) => tokio::time::timeout(
+            DB_CALL_TIMEOUT,
+            docker_exec.docker.inspect_container(container_id, None),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|info| info.state),
+        #[cfg(all(target_os = "linux", feature = "kata"))]
+        executor::BoxExecutor::Kata(_) => None,
+    };
+    let time = |value: Option<&String>| {
+        chrono::DateTime::parse_from_rfc3339(value?)
+            .ok()
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .filter(|at| at.timestamp() > 0)
+    };
+    match &state {
+        Some(state) => (
+            time(state.started_at.as_ref()),
+            time(state.finished_at.as_ref()),
+        ),
+        None => (None, None),
+    }
+}
+
+/// Billable duration of a container found already exited at worker start.
+/// The default `stop - start` span would run from the claim to this restart
+/// and so charge for however long no worker was running. It ends at the
+/// container's own exit (`ran_until`) instead, starts at the container's own
+/// start when that falls inside the claim, and is capped at the task's
+/// timeout, which also bounds the estimate when the runtime kept no exit
+/// time. `None` (no claim time on the row) keeps the default computation.
+fn unattended_exit_duration_ms(
+    task: &Task,
+    ran_from: Option<chrono::DateTime<chrono::Utc>>,
+    ran_until: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    let claimed_at = task.start_time?;
+    let from = ran_from
+        .filter(|at| *at >= claimed_at)
+        .unwrap_or(claimed_at);
+    let until = ran_until.filter(|at| *at >= from).unwrap_or(now);
+    Some(
+        until
+            .signed_duration_since(from)
+            .num_milliseconds()
+            .clamp(0, task.timeout_ms.max(0)),
+    )
+}
+
+/// A container adopted from a previous worker, for its monitor.
+/// `ownership_resolved` is `false` when the adoption-time `Task::set_worker`
+/// kept failing on transport errors; the monitor must then repair ownership
+/// from its poll loop so heartbeat coverage lands as soon as the DB
+/// recovers, ahead of the reaper's staleness horizon.
+struct AdoptedContainer {
+    task_id: Uuid,
+    container_id: String,
+    ownership_resolved: bool,
+    bundle_lease: hot::bundle_extractions::BundleLease,
+}
+
+/// What [`adopt_orphaned_containers`] found.
+#[derive(Default)]
+struct OrphanAdoption {
+    adopted: Vec<AdoptedContainer>,
+    /// `(task_id, container_id)` of containers left running because the
+    /// database could not say what their task is.
+    deferred: Vec<(Uuid, String)>,
+}
+
+/// What became of one container a previous worker left.
+enum ContainerAdoption {
+    /// Nothing is left to watch: the container was removed, or its task
+    /// finished, or the task is already in flight here.
+    Settled,
+    /// The task is registered as active and its container needs a monitor.
+    Adopted {
+        ownership_resolved: bool,
+        bundle_lease: hot::bundle_extractions::BundleLease,
+    },
+    /// The task could not be loaded, and the container was left as it is.
+    Deferred,
+}
+
 /// Adopt orphaned containers from a previous worker crash.
 ///
 /// Queries the executor's runtime for containers managed by `hot-task-worker`,
@@ -7852,12 +8859,10 @@ async fn register_adopted_task(
 ///   fail with a clear "container lost during worker restart" message).
 /// - If the task is already terminal: just remove the container.
 ///
-/// Returns a list of `(task_id, container_id, ownership_resolved)` triples
-/// for containers that were adopted and need continued monitoring.
-/// `ownership_resolved` is `false` when the adoption-time `Task::set_worker`
-/// kept failing on transport errors; the monitor must then repair ownership
-/// from its poll loop so heartbeat coverage lands as soon as the DB
-/// recovers, ahead of the reaper's staleness horizon.
+/// Returns the containers that were adopted and need continued monitoring,
+/// and those whose task the database could not produce: the latter are held
+/// as active with the coordinator (`defer_adoption`) and need
+/// [`retry_deferred_adoptions`].
 async fn adopt_orphaned_containers(
     executor: &executor::BoxExecutor,
     db: &DatabasePool,
@@ -7865,13 +8870,13 @@ async fn adopt_orphaned_containers(
     task_queue: &ProcessingQueue<TaskRequest>,
     coordinator: &shutdown::TaskShutdownCoordinator,
     worker_id: &str,
-) -> Vec<(Uuid, String, bool, hot::bundle_extractions::BundleLease)> {
-    let mut adopted = Vec::new();
+) -> OrphanAdoption {
+    let mut adoption = OrphanAdoption::default();
 
     #[cfg(all(target_os = "linux", feature = "kata"))]
     if matches!(executor, executor::BoxExecutor::Kata(_)) {
         cleanup_kata_orphans(executor, db, stream_publisher, task_queue).await;
-        return adopted;
+        return adoption;
     }
 
     let containers = match executor {
@@ -7890,7 +8895,7 @@ async fn adopt_orphaned_containers(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Failed to list containers for adoption: {}", e);
-                    return adopted;
+                    return adoption;
                 }
             }
         }
@@ -7899,7 +8904,7 @@ async fn adopt_orphaned_containers(
     };
 
     if containers.is_empty() {
-        return adopted;
+        return adoption;
     }
 
     tracing::info!(
@@ -7931,168 +8936,239 @@ async fn adopt_orphaned_containers(
             }
         };
 
-        let task = match Task::get(db, &task_id).await {
-            Ok(t) => t,
-            Err(_) => {
-                tracing::debug!(
-                    task_id = %task_id,
-                    container_id = %container_id,
-                    "Orphaned container's task not found in DB, removing"
-                );
-                kill_and_remove_with_timeout(executor, &container_id, Some(&task_id)).await;
-                continue;
-            }
-        };
-
-        let is_running_in_db = task.task_status_id == TaskStatus::Running.as_id();
-
-        if !is_running_in_db {
-            tracing::debug!(
-                task_id = %task_id,
-                container_id = %container_id,
-                status = %task.status,
-                "Task already terminal, removing orphaned container"
-            );
-            kill_and_remove_with_timeout(executor, &container_id, Some(&task_id)).await;
-            continue;
-        }
-
-        // Task is running in DB — check if container is actually alive
-        match executor.inspect_status(&container_id).await {
-            Ok(None) => {
-                // Container is still running — adopt it. Register with the
-                // shutdown coordinator BEFORE taking DB ownership: the dead
-                // worker's un-ACKed queue message will be XAUTOCLAIMed and
-                // redelivered, and `task_message_should_execute` must see the
-                // adopted task as active (withhold ACK, defer) instead of
-                // releasing ownership out from under the live container.
-                if !register_adopted_task(coordinator, db, &task).await {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        container_id = %container_id,
-                        "Skipping container adoption; task could not be registered as active"
-                    );
-                    continue;
-                }
-                tracing::debug!(
-                    task_id = %task_id,
-                    container_id = %container_id,
-                    "Adopting running container (updating worker_id)"
-                );
-                // Ownership (worker_id + fresh heartbeat) is required so the
-                // batch heartbeat covers the adopted row, but it is
-                // repairable: a transient DB fault here must not abandon the
-                // live container. Retry briefly, then hand repair to the
-                // monitor's poll loop (every 2s — well inside the reaper's
-                // ZOMBIE_HEARTBEAT_STALE_SECS horizon once the DB recovers).
-                let mut ownership_resolved = false;
-                for attempt in 1..=ADOPTION_DB_ATTEMPTS {
-                    ownership_resolved = try_adopt_task_ownership(db, &task_id, worker_id).await;
-                    if ownership_resolved {
-                        break;
-                    }
-                    if attempt < ADOPTION_DB_ATTEMPTS {
-                        tokio::time::sleep(ADOPTION_DB_RETRY_BACKOFF * attempt as u32).await;
-                    }
-                }
-                if !ownership_resolved {
-                    tracing::error!(
-                        task_id = %task_id,
-                        container_id = %container_id,
-                        "Adoption could not take DB ownership after {} attempts; keeping the container managed and repairing ownership from the monitor loop. Until repair lands, the row's heartbeat stays stale and the zombie reaper may double-run the task.",
-                        ADOPTION_DB_ATTEMPTS,
-                    );
-                }
-                adopted.push((
-                    task_id,
-                    container_id,
-                    ownership_resolved,
-                    BUNDLE_EXTRACTIONS.lease(task.build_id),
-                ));
-            }
-            Ok(Some(exit_code)) => {
-                // Container stopped — complete the task
-                tracing::debug!(
-                    task_id = %task_id,
-                    container_id = %container_id,
-                    exit_code,
-                    "Orphaned container already stopped, completing task"
-                );
-                let (stdout, stderr) = executor
-                    .collect_logs(&container_id)
-                    .await
-                    .unwrap_or_default();
-                executor.remove_container(&container_id).await;
-
-                let status = if exit_code == 0 {
-                    TaskStatus::Completed
-                } else {
-                    TaskStatus::Failed
-                };
-                let result_json = serde_json::json!({
-                    "exit-code": exit_code,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "adopted": true,
-                });
-                // Not fenced: the row is still owned by the dead worker at
-                // this point (the container was never adopted).
-                let persisted = complete_task_with_event(
-                    db,
-                    stream_publisher,
-                    &task_id,
-                    task.env_id,
-                    task.stream_id,
-                    &task.function_name,
-                    &task.task_type,
-                    status.clone(),
-                    Some(&result_json),
-                    None,
-                    None,
-                )
-                .await;
-                if persisted && status == TaskStatus::Failed {
-                    maybe_retry_zombie_task(db, &task, task_queue).await;
-                }
-            }
-            Err(e) => {
-                // Inspect failed (container might have been removed) — fail the task
-                tracing::warn!(
-                    task_id = %task_id,
-                    container_id = %container_id,
-                    "Failed to inspect orphaned container: {}", e
-                );
-                tracing::error!(task_id = %task_id, "Container lost during adoption: {}", e);
-                let error = task_failure_json("Container lost during worker restart", None);
-                if complete_task_with_event(
-                    db,
-                    stream_publisher,
-                    &task_id,
-                    task.env_id,
-                    task.stream_id,
-                    &task.function_name,
-                    &task.task_type,
-                    TaskStatus::Failed,
-                    Some(&error),
-                    None,
-                    None,
-                )
-                .await
-                {
-                    maybe_retry_zombie_task(db, &task, task_queue).await;
-                }
+        match adopt_orphaned_container(
+            executor,
+            db,
+            stream_publisher,
+            task_queue,
+            coordinator,
+            worker_id,
+            task_id,
+            &container_id,
+        )
+        .await
+        {
+            ContainerAdoption::Settled => {}
+            ContainerAdoption::Adopted {
+                ownership_resolved,
+                bundle_lease,
+            } => adoption.adopted.push(AdoptedContainer {
+                task_id,
+                container_id,
+                ownership_resolved,
+                bundle_lease,
+            }),
+            ContainerAdoption::Deferred => {
+                // Held as active from here, before the reaper's first pass.
+                coordinator.defer_adoption(task_id);
+                adoption.deferred.push((task_id, container_id));
             }
         }
     }
 
-    if !adopted.is_empty() {
+    if !adoption.adopted.is_empty() {
         tracing::info!(
             "Adopted {} container(s) from previous worker",
-            adopted.len()
+            adoption.adopted.len()
         );
     }
 
-    adopted
+    adoption
+}
+
+/// [`adopt_orphaned_containers`] for one Docker container labelled with
+/// `task_id`. Also what a deferred adoption runs again later
+/// ([`retry_deferred_adoptions`]).
+#[allow(clippy::too_many_arguments)]
+async fn adopt_orphaned_container(
+    executor: &executor::BoxExecutor,
+    db: &DatabasePool,
+    stream_publisher: &StreamPubSub,
+    task_queue: &ProcessingQueue<TaskRequest>,
+    coordinator: &shutdown::TaskShutdownCoordinator,
+    worker_id: &str,
+    task_id: Uuid,
+    container_id: &str,
+) -> ContainerAdoption {
+    // Only a row that provably does not exist condemns the container. A
+    // transport error says nothing about the task, which may be running
+    // live in this container: retry it, then leave the container alone
+    // and the adoption to a later attempt.
+    let lookup = retry_with_backoff(ADOPTION_DB_ATTEMPTS, ADOPTION_DB_RETRY_BACKOFF, || async {
+        match Task::get(db, &task_id).await {
+            Ok(task) => Ok(Some(task)),
+            Err(db::TaskError::NotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .await;
+    let task = match lookup {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::debug!(
+                task_id = %task_id,
+                container_id = %container_id,
+                "Orphaned container's task not found in DB, removing"
+            );
+            kill_and_remove_with_timeout(executor, container_id, Some(&task_id)).await;
+            return ContainerAdoption::Settled;
+        }
+        Err(e) => {
+            tracing::error!(
+                task_id = %task_id,
+                container_id = %container_id,
+                "Failed to load an orphaned container's task after {} attempts; leaving the container untouched and its adoption for a later attempt: {}",
+                ADOPTION_DB_ATTEMPTS,
+                e,
+            );
+            return ContainerAdoption::Deferred;
+        }
+    };
+
+    let is_running_in_db = task.task_status_id == TaskStatus::Running.as_id();
+
+    if !is_running_in_db {
+        tracing::debug!(
+            task_id = %task_id,
+            container_id = %container_id,
+            status = %task.status,
+            "Task already terminal, removing orphaned container"
+        );
+        kill_and_remove_with_timeout(executor, container_id, Some(&task_id)).await;
+        return ContainerAdoption::Settled;
+    }
+
+    // Task is running in DB — check if container is actually alive
+    match executor.inspect_status(container_id).await {
+        Ok(None) => {
+            // Container is still running — adopt it. Register with the
+            // shutdown coordinator BEFORE taking DB ownership: the dead
+            // worker's un-ACKed queue message will be XAUTOCLAIMed and
+            // redelivered, and `task_message_should_execute` must see the
+            // adopted task as active (withhold ACK, defer) instead of
+            // releasing ownership out from under the live container.
+            if !register_adopted_task(coordinator, db, &task).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    container_id = %container_id,
+                    "Skipping container adoption; task could not be registered as active"
+                );
+                return ContainerAdoption::Settled;
+            }
+            tracing::debug!(
+                task_id = %task_id,
+                container_id = %container_id,
+                "Adopting running container (updating worker_id)"
+            );
+            // Ownership (worker_id + fresh heartbeat) is required so the
+            // batch heartbeat covers the adopted row, but it is
+            // repairable: a transient DB fault here must not abandon the
+            // live container. Retry briefly, then hand repair to the
+            // monitor's poll loop (every 2s — well inside the reaper's
+            // ZOMBIE_HEARTBEAT_STALE_SECS horizon once the DB recovers).
+            let mut ownership_resolved = false;
+            for attempt in 1..=ADOPTION_DB_ATTEMPTS {
+                ownership_resolved = try_adopt_task_ownership(db, &task_id, worker_id).await;
+                if ownership_resolved {
+                    break;
+                }
+                if attempt < ADOPTION_DB_ATTEMPTS {
+                    tokio::time::sleep(ADOPTION_DB_RETRY_BACKOFF * attempt as u32).await;
+                }
+            }
+            if !ownership_resolved {
+                tracing::error!(
+                    task_id = %task_id,
+                    container_id = %container_id,
+                    "Adoption could not take DB ownership after {} attempts; keeping the container managed and repairing ownership from the monitor loop. Until repair lands, the row's heartbeat stays stale and the zombie reaper may double-run the task.",
+                    ADOPTION_DB_ATTEMPTS,
+                );
+            }
+            ContainerAdoption::Adopted {
+                ownership_resolved,
+                bundle_lease: BUNDLE_EXTRACTIONS.lease(task.build_id),
+            }
+        }
+        Ok(Some(exit_code)) => {
+            // Container stopped — complete the task
+            tracing::debug!(
+                task_id = %task_id,
+                container_id = %container_id,
+                exit_code,
+                "Orphaned container already stopped, completing task"
+            );
+            // It exited while no worker was watching; bill it to its own
+            // exit, not to this restart. Read before the container goes.
+            let (ran_from, ran_until) = exited_container_window(executor, container_id).await;
+            let unattended_duration_ms =
+                unattended_exit_duration_ms(&task, ran_from, ran_until, chrono::Utc::now());
+            let (stdout, stderr) = executor
+                .collect_logs(container_id)
+                .await
+                .unwrap_or_default();
+            executor.remove_container(container_id).await;
+
+            let status = if exit_code == 0 {
+                TaskStatus::Completed
+            } else {
+                TaskStatus::Failed
+            };
+            let result_json = serde_json::json!({
+                "exit-code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "adopted": true,
+            });
+            // Not fenced: the row is still owned by the dead worker at
+            // this point (the container was never adopted).
+            let persisted = complete_task_with_retry_and_event(
+                db,
+                stream_publisher,
+                &task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                &task.task_type,
+                status.clone(),
+                Some(&result_json),
+                unattended_duration_ms,
+                None,
+            )
+            .await;
+            if persisted && status == TaskStatus::Failed {
+                enqueue_committed_zombie_retry(db, &task, task_queue).await;
+            }
+            ContainerAdoption::Settled
+        }
+        Err(e) => {
+            // Inspect failed (container might have been removed) — fail the task
+            tracing::warn!(
+                task_id = %task_id,
+                container_id = %container_id,
+                "Failed to inspect orphaned container: {}", e
+            );
+            tracing::error!(task_id = %task_id, "Container lost during adoption: {}", e);
+            let error = task_failure_json("Container lost during worker restart", None);
+            if complete_task_with_retry_and_event(
+                db,
+                stream_publisher,
+                &task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                &task.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                None,
+            )
+            .await
+            {
+                enqueue_committed_zombie_retry(db, &task, task_queue).await;
+            }
+            ContainerAdoption::Settled
+        }
+    }
 }
 
 /// Force-clean any containers left in the kata-containerd `hot-box`
@@ -8187,7 +9263,7 @@ async fn cleanup_kata_orphans(
             "Container lost during worker restart (kata orphan cleanup)",
             None,
         );
-        if complete_task_with_event(
+        if complete_task_with_retry_and_event(
             db,
             stream_publisher,
             &task_id,
@@ -8202,7 +9278,7 @@ async fn cleanup_kata_orphans(
         )
         .await
         {
-            maybe_retry_zombie_task(db, &task, task_queue).await;
+            enqueue_committed_zombie_retry(db, &task, task_queue).await;
         }
     }
 }
@@ -8323,7 +9399,7 @@ async fn monitor_adopted_container(
                 // happens in this poll loop), so the row may still carry the
                 // dead worker's id; the payload comparison in
                 // `persist_terminal_task` still suppresses duplicate events.
-                let persisted = complete_task_with_event(
+                let persisted = complete_task_with_retry_and_event(
                     db,
                     stream_publisher,
                     &task_id,
@@ -8339,7 +9415,7 @@ async fn monitor_adopted_container(
                 .await;
 
                 if persisted && status == TaskStatus::Failed {
-                    maybe_retry_zombie_task(db, &task, task_queue).await;
+                    enqueue_committed_zombie_retry(db, &task, task_queue).await;
                 }
                 finish_adopted_task_run(db, &task).await;
 
@@ -8386,7 +9462,7 @@ async fn monitor_adopted_container(
                             "adopted": true,
                         })),
                     );
-                    if complete_task_with_event(
+                    if complete_task_with_retry_and_event(
                         db,
                         stream_publisher,
                         &task_id,
@@ -8401,7 +9477,7 @@ async fn monitor_adopted_container(
                     )
                     .await
                     {
-                        maybe_retry_zombie_task(db, &task, task_queue).await;
+                        enqueue_committed_zombie_retry(db, &task, task_queue).await;
                     }
                     finish_adopted_task_run(db, &task).await;
                     return;
@@ -8420,7 +9496,7 @@ async fn monitor_adopted_container(
                             "adopted": true,
                         })),
                     );
-                    if complete_task_with_event(
+                    if complete_task_with_retry_and_event(
                         db,
                         stream_publisher,
                         &task_id,
@@ -8435,7 +9511,7 @@ async fn monitor_adopted_container(
                     )
                     .await
                     {
-                        maybe_retry_zombie_task(db, &task, task_queue).await;
+                        enqueue_committed_zombie_retry(db, &task, task_queue).await;
                     }
                     finish_adopted_task_run(db, &task).await;
                     return;
@@ -8931,6 +10007,345 @@ mod tests {
         request.org_id = Some(data.org_id.to_string());
         insert_test_task(db, &task).await;
         (request, task)
+    }
+
+    #[test]
+    fn claim_error_backoff_doubles_to_a_cap_and_limits_its_log() {
+        let mut backoff = ClaimErrorBackoff::default();
+        let start = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+
+        assert_eq!(backoff.failed(start), (ms(250), true), "first is logged");
+        assert_eq!(backoff.failed(start), (ms(500), false));
+        assert_eq!(backoff.failed(start), (ms(1_000), false));
+        assert_eq!(backoff.failed(start), (ms(2_000), false));
+        assert_eq!(backoff.failed(start), (ms(4_000), false));
+        assert_eq!(backoff.failed(start), (ClaimErrorBackoff::MAX, false));
+        for _ in 0..100 {
+            assert_eq!(backoff.failed(start).0, ClaimErrorBackoff::MAX);
+        }
+        let later = start + ClaimErrorBackoff::LOG_EVERY;
+        assert_eq!(backoff.failed(later), (ClaimErrorBackoff::MAX, true));
+        assert_eq!(backoff.failed(later), (ClaimErrorBackoff::MAX, false));
+
+        backoff.reset();
+        assert_eq!(
+            backoff.failed(later),
+            (ms(250), true),
+            "a claim that succeeded starts the next streak over"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_delivery_keepalive_covers_only_redis_deliveries() {
+        // Two touches inside every reclaim window, at the default idle and
+        // at a test-sized one.
+        assert_eq!(
+            task_keepalive_interval(120_000),
+            std::time::Duration::from_secs(40)
+        );
+        assert_eq!(task_keepalive_interval(300), TASK_KEEPALIVE_MIN_INTERVAL);
+
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            format!("{{hot:task}}-keepalive-{}", Uuid::now_v7()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        assert_eq!(queue_backend_label(&queue), "memory");
+        let (request, _, _, _, _) = make_task_request_and_row();
+        queue.enqueue(request).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+        assert!(spawn_task_delivery_keepalive(&lease, 120_000).is_none());
+    }
+
+    #[test]
+    fn pre_claim_lookup_error_defers_only_a_database_failure() {
+        let backoff = std::time::Duration::from_millis(1_000);
+        let transient = pre_claim_lookup_error(
+            "Cannot load task build",
+            hot::db::BuildError::Database(sqlx::Error::PoolTimedOut),
+            true,
+            backoff,
+        );
+        let infra = transient
+            .downcast_ref::<QueueInfrastructureError>()
+            .expect("a database failure defers the delivery");
+        assert_eq!(infra.backoff(), backoff);
+        assert!(infra.to_string().contains("Cannot load task build"));
+
+        let missing = pre_claim_lookup_error(
+            "Cannot load task build",
+            hot::db::BuildError::NotFound,
+            false,
+            backoff,
+        );
+        assert!(
+            missing.downcast_ref::<QueueInfrastructureError>().is_none(),
+            "a missing build spends the delivery's retry budget"
+        );
+        assert!(matches!(
+            missing.downcast_ref::<hot::db::BuildError>(),
+            Some(hot::db::BuildError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_delivery_fails_a_queued_task_and_spares_a_claimed_one() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let reason = "Task was not started";
+
+        let (request, task) = queued_test_task(&db).await;
+        assert!(settle_dead_lettered_task_request(&db, &publisher, &request, reason, true).await);
+        let failed = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        assert!(
+            failed
+                .result
+                .as_ref()
+                .is_some_and(|result| result.to_string().contains(reason))
+        );
+        // Settled once: a second dead-lettered copy changes nothing.
+        assert!(!settle_dead_lettered_task_request(&db, &publisher, &request, reason, true).await);
+
+        let (mut running_request, mut running) = (request.clone(), task);
+        running.task_id = Uuid::now_v7();
+        running_request.task_id = running.task_id.to_string();
+        insert_test_task(&db, &running).await;
+        assert!(
+            Task::claim_for_worker(&db, &running.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !settle_dead_lettered_task_request(&db, &publisher, &running_request, reason, true)
+                .await
+        );
+        let row = Task::get(&db, &running.task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(row.worker_id.as_deref(), Some("worker-a"));
+        assert_eq!(row.result, None);
+    }
+
+    /// A queued task whose project is deactivated waits, as one of an
+    /// environment that is not admitted does: its delivery is acknowledged
+    /// and the row stays queued. A task whose project does not exist fails
+    /// each delivery, and once the SQLite queue has dead-lettered its message
+    /// the task is failed.
+    #[tokio::test]
+    async fn a_deactivated_projects_task_stays_queued_and_a_missing_projects_fails() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-project-wait-{}", Uuid::now_v7()));
+        let queue = Arc::new(ProcessingQueue::Sqlite(
+            hot::queue::sqlite::SqliteQueue::<TaskRequest>::new_at(
+                "{hot:task}-project-wait".to_string(),
+                directory.join("queue"),
+            )
+            .unwrap()
+            .with_serialization(Serialization::Json),
+        ));
+        let publisher = Arc::new(
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap(),
+        );
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let boxes = Arc::new(BoxRuntime::pending(executor::Backend::Docker));
+        let coordinator = Arc::new(shutdown::TaskShutdownCoordinator::new());
+        let queued = |build_id: Uuid| {
+            let db = Arc::clone(&db);
+            async move {
+                let task_id = Uuid::now_v7();
+                Task::insert(
+                    &db,
+                    &task_id,
+                    &data.env_id,
+                    &data.stream_id,
+                    &build_id,
+                    None,
+                    "::app/fn",
+                    None,
+                    None,
+                    "code",
+                    60_000,
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut request =
+                    synthesize_task_request_from_row(&Task::get(&db, &task_id).await.unwrap());
+                request.org_id = Some(data.org_id.to_string());
+                (task_id, request)
+            }
+        };
+        // One delivery, as the processor loop makes it: whether it was the
+        // message's last attempt, and how processing ended.
+        let deliver = || async {
+            let lease = queue.claim_blocking().await.unwrap().unwrap();
+            let (timing, last_attempt) = (lease.timing(), lease.last_attempt());
+            let processed = lease
+                .process(|request: TaskRequest| {
+                    process_task(
+                        request,
+                        Arc::clone(&db),
+                        Arc::clone(&queue),
+                        Arc::clone(&publisher),
+                        Arc::clone(&cache),
+                        Arc::new(hot::run_slots::RunSlots::new(1)),
+                        Arc::new(Semaphore::new(1)),
+                        Arc::new(Semaphore::new(1)),
+                        resource_budget::ResourceBudget::new(1_024, 10_240),
+                        val!({}),
+                        None,
+                        Arc::clone(&boxes),
+                        Arc::new(directory.join("volumes")),
+                        Arc::new(box_limits::BoxDefaults::default()),
+                        Arc::new(Mutex::new(HashMap::new())),
+                        Arc::clone(&coordinator),
+                        Arc::new(task_lease::NoopTaskLease),
+                        timing,
+                        "worker-test".to_string(),
+                    )
+                })
+                .await;
+            (last_attempt, processed)
+        };
+
+        // The project exists and is deactivated.
+        Project::toggle_active(&db, &data.project_id, false, &data.user_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Project::get_project(&db, &data.project_id).await,
+            Err(hot::db::ProjectError::NotFound)
+        ));
+        let project = load_task_project(&db, &data.project_id).await.unwrap();
+        assert!(!project.active);
+        let (waiting, request) = queued(data.build_id).await;
+        queue.enqueue(request).await.unwrap();
+        let (_, processed) = deliver().await;
+        assert!(
+            matches!(processed, Ok(Some(()))),
+            "the delivery is acknowledged, not failed"
+        );
+        assert!(queue.is_empty().await.unwrap());
+        let row = Task::get(&db, &waiting).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Queued.as_id());
+        assert_eq!((row.worker_id, row.result), (None, None));
+        assert!(!coordinator.is_task_active(&waiting));
+
+        // The build names a project that does not exist.
+        let missing = Uuid::now_v7();
+        assert!(matches!(
+            load_task_project(&db, &missing).await,
+            Err(hot::db::ProjectError::NotFound)
+        ));
+        let orphan_build = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &orphan_build,
+            &missing,
+            "orphan",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let (orphan, request) = queued(orphan_build).await;
+        queue.enqueue(request.clone()).await.unwrap();
+        let mut deliveries = 0;
+        loop {
+            let (last_attempt, processed) = deliver().await;
+            deliveries += 1;
+            let error = processed.unwrap_err();
+            let Some(hot::queue::QueueProcessingError::WorkerError(inner)) =
+                error.downcast_ref::<hot::queue::QueueProcessingError>()
+            else {
+                panic!("a missing project spends the retry budget: {error}");
+            };
+            assert!(matches!(
+                inner.downcast_ref::<hot::db::ProjectError>(),
+                Some(hot::db::ProjectError::NotFound)
+            ));
+            assert_eq!(
+                last_attempt_dead_lettered(last_attempt, error.as_ref()),
+                last_attempt
+            );
+            if last_attempt {
+                break;
+            }
+            assert_eq!(
+                Task::get(&db, &orphan).await.unwrap().task_status_id,
+                TaskStatus::Queued.as_id()
+            );
+        }
+        assert!(deliveries > 1, "the message was retried first");
+        assert!(
+            queue.is_empty().await.unwrap(),
+            "the message is dead-lettered"
+        );
+        assert!(fail_dead_lettered_queued_request(&db, &publisher, &request).await);
+        let failed = Task::get(&db, &orphan).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        // The waiting task is still waiting.
+        assert_eq!(
+            Task::get(&db, &waiting).await.unwrap().task_status_id,
+            TaskStatus::Queued.as_id()
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn only_a_worker_error_on_the_last_attempt_reads_as_dead_lettered() {
+        use hot::queue::QueueProcessingError;
+        let worker = || -> Box<dyn std::error::Error + Send + Sync> {
+            Box::new(QueueProcessingError::WorkerError("no such build".into()))
+        };
+        assert!(last_attempt_dead_lettered(true, worker().as_ref()));
+        assert!(
+            !last_attempt_dead_lettered(false, worker().as_ref()),
+            "the message has attempts left, or its queue cannot tell"
+        );
+        let deferred: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(QueueProcessingError::QueueError(Box::new(
+                QueueInfrastructureError::new("busy", std::time::Duration::ZERO),
+            )));
+        assert!(!last_attempt_dead_lettered(true, deferred.as_ref()));
+        let plain: Box<dyn std::error::Error + Send + Sync> = "lease lost".into();
+        assert!(!last_attempt_dead_lettered(true, plain.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_task_is_released_only_by_the_worker_that_runs_it() {
+        let db = hot::db::test_db().await;
+        let (_, task) = queued_test_task(&db).await;
+        assert!(
+            !release_unfinished_task(&db, &task.task_id, "worker-a").await,
+            "a queued row was never claimed"
+        );
+        assert!(
+            Task::claim_for_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        assert!(!release_unfinished_task(&db, &task.task_id, "worker-b").await);
+        assert_eq!(
+            Task::get(&db, &task.task_id)
+                .await
+                .unwrap()
+                .worker_id
+                .as_deref(),
+            Some("worker-a")
+        );
+
+        assert!(release_unfinished_task(&db, &task.task_id, "worker-a").await);
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(row.worker_id, None, "the zombie reaper takes it from here");
+        assert!(!release_unfinished_task(&db, &task.task_id, "worker-a").await);
     }
 
     fn panic_recovery(
@@ -9610,7 +11025,62 @@ mod tests {
         let err = load_task_for_execution(&closed_db, &Uuid::now_v7(), 25)
             .await
             .expect_err("an unknown row state must defer the queue message");
-        assert_eq!(err.backoff(), std::time::Duration::from_millis(25));
+        let infra = err
+            .downcast_ref::<QueueInfrastructureError>()
+            .expect("a database that does not answer defers the delivery");
+        assert_eq!(infra.backoff(), std::time::Duration::from_millis(25));
+    }
+
+    #[tokio::test]
+    async fn preflight_load_spends_the_retry_budget_on_a_row_that_cannot_be_read() {
+        let db = hot::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        sqlx::query("UPDATE task SET timeout_ms = 'not a number' WHERE task_id = ?")
+            .bind(task.task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // The row fails to decode at every delivery: never ACKed, and never
+        // deferred without a budget either.
+        let err = load_task_for_execution(&db, &task.task_id, 25)
+            .await
+            .expect_err("a row that cannot be read is not loaded");
+        assert!(
+            err.downcast_ref::<QueueInfrastructureError>().is_none(),
+            "a deterministic database error must spend the delivery's retry budget: {err}"
+        );
+        assert!(matches!(
+            err.downcast_ref::<hot::db::TaskError>(),
+            Some(hot::db::TaskError::Database(_))
+        ));
+    }
+
+    #[test]
+    fn only_a_database_that_does_not_answer_defers_a_delivery() {
+        for error in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::WorkerCrashed,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(db::is_unavailable_error(&error), "{error}");
+        }
+        for error in [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::ColumnNotFound("timeout_ms".into()),
+            sqlx::Error::ColumnDecode {
+                index: "timeout_ms".into(),
+                source: "mismatched types".into(),
+            },
+            sqlx::Error::Decode("mismatched types".into()),
+        ] {
+            assert!(!db::is_unavailable_error(&error), "{error}");
+        }
     }
 
     #[test]
@@ -10357,7 +11827,7 @@ mod tests {
 
         // Cancellation already won the terminal race: the failure completion
         // must report not-persisted, which is the callers' signal to skip
-        // publish_task_alert and maybe_retry_task.
+        // publish_task_alert and enqueue_committed_retry.
         let (_request, task, _, _, _) = make_task_request_and_row();
         insert_test_task(&db, &task).await;
         assert!(
@@ -10484,207 +11954,451 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_check_skips_rows_that_are_not_terminal_failures() {
+    async fn reaper_fails_only_rows_past_the_stale_threshold() {
         let db = hot::db::test_db().await;
-        let queue_name = format!("{{hot:task}}-retry-guard-{}", Uuid::now_v7());
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
         let queue = ProcessingQueue::<TaskRequest>::new(
             QueueType::Memory,
-            queue_name,
+            format!("{{hot:task}}-reaper-threshold-{}", Uuid::now_v7()),
             None,
             Serialization::Json,
         )
         .unwrap();
-        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 100}});
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
 
-        // A Cancelled row must never spawn a retry, even with retry config —
-        // the call-site gate can be bypassed by a stale caller, so
-        // maybe_retry_task re-reads the row itself.
+        // Another worker's task, last heard from `age` ago on today's date.
+        let mut rows = Vec::new();
+        for age in [
+            // Two missed heartbeats: a live worker riding out a database stall.
+            HEARTBEAT_INTERVAL * 2 + HEARTBEAT_CALL_TIMEOUT,
+            std::time::Duration::from_secs(ZOMBIE_HEARTBEAT_STALE_SECS as u64 + 30),
+        ] {
+            let (_, task, _, _, _) = make_task_request_and_row();
+            insert_test_task(&db, &task).await;
+            assert!(
+                Task::claim_for_worker(&db, &task.task_id, "other-worker")
+                    .await
+                    .unwrap()
+            );
+            sqlx::query("UPDATE task SET last_heartbeat_at = ? WHERE task_id = ?")
+                .bind(chrono::Utc::now() - chrono::Duration::from_std(age).unwrap())
+                .bind(task.task_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            rows.push(task.task_id);
+        }
+
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+        assert_eq!(
+            Task::get(&db, &rows[0]).await.unwrap().task_status_id,
+            TaskStatus::Running.as_id(),
+            "a worker that missed two heartbeats is not dead"
+        );
+        assert_eq!(
+            Task::get(&db, &rows[1]).await.unwrap().task_status_id,
+            TaskStatus::Failed.as_id(),
+            "a same-day stale row past the threshold must be reaped"
+        );
+    }
+
+    #[test]
+    fn a_container_that_exited_unattended_is_billed_to_its_own_exit() {
+        let secs = chrono::Duration::seconds;
+        let now = chrono::Utc::now();
+        let claimed_at = now - secs(3600);
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.start_time = Some(claimed_at);
+        task.timeout_ms = 600_000;
+        let billed = |task: &Task, from: Option<i64>, until: Option<i64>| {
+            unattended_exit_duration_ms(
+                task,
+                from.map(|s| claimed_at + secs(s)),
+                until.map(|s| claimed_at + secs(s)),
+                now,
+            )
+        };
+
+        // Started 5s after the claim, exited 30s later; the worker came back
+        // an hour after the claim.
+        assert_eq!(billed(&task, Some(5), Some(35)), Some(30_000));
+        // No start on record: from the claim. A start before the claim is
+        // not this claim's start.
+        assert_eq!(billed(&task, None, Some(35)), Some(35_000));
+        assert_eq!(billed(&task, Some(-50), Some(35)), Some(35_000));
+        // No exit on record: until now, but never past the timeout. The
+        // same cap applies to a container that overran with no one to stop it.
+        assert_eq!(billed(&task, Some(5), None), Some(600_000));
+        assert_eq!(billed(&task, Some(5), Some(1800)), Some(600_000));
+        // Without a claim time the default computation stays in charge.
+        task.start_time = None;
+        assert_eq!(billed(&task, Some(5), Some(35)), None);
+    }
+
+    fn retry_test_queue(label: &str) -> ProcessingQueue<TaskRequest> {
+        ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            format!("{{hot:task}}-{label}-{}", Uuid::now_v7()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap()
+    }
+
+    /// A running task with a `retry` policy, as its request and row.
+    async fn insert_running_task_with_retry(db: &DatabasePool) -> (TaskRequest, Task) {
         let (request, mut task, _, _, _) = make_task_request_and_row();
-        task.options = Some(retry_options.clone());
-        insert_test_task(&db, &task).await;
-        Task::mark_running(&db, &task.task_id).await.unwrap();
+        task.options = Some(serde_json::json!({"retry": {"attempts": 2, "delay": 0}}));
+        insert_test_task(db, &task).await;
+        Task::mark_running(db, &task.task_id).await.unwrap();
+        (request, task)
+    }
+
+    /// Fail `task` at a call site its `retry` policy covers.
+    async fn fail_with_retry(db: &DatabasePool, publisher: &StreamPubSub, task: &Task) -> bool {
+        complete_task_with_retry_and_event(
+            db,
+            publisher,
+            &task.task_id,
+            task.env_id,
+            task.stream_id,
+            &task.function_name,
+            &task.task_type,
+            TaskStatus::Failed,
+            Some(&task_failure_json("boom", None)),
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_failure_commits_its_retry_before_anything_is_enqueued() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("retry-atomic");
+
+        // The retry row is there as soon as the failure is, with the queue
+        // still untouched.
+        let (request, task) = insert_running_task_with_retry(&db).await;
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        let retry = Task::get_retry_child(&db, &task.task_id, &task.env_id)
+            .await
+            .unwrap()
+            .expect("the retry is committed with the failure");
+        assert_eq!(
+            (retry.retry_attempt, retry.task_status_id),
+            (1, TaskStatus::Queued.as_id())
+        );
+        assert_eq!(queue.len().await.unwrap(), 0);
+
+        // A replay of the same terminal write is our own: no second retry.
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        assert_eq!(Task::get_count_by_env(&db, &task.env_id).await.unwrap(), 2);
+
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+            .await
+            .expect("the committed retry must be enqueued")
+            .unwrap()
+            .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    #[tokio::test]
+    async fn a_lost_terminal_race_commits_no_retry() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("retry-guard");
+
+        // Cancellation won: the failure is not ours to write, or to retry.
+        let (request, task) = insert_running_task_with_retry(&db).await;
         assert!(
             Task::cancel(&db, &task.task_id, &task.env_id)
                 .await
                 .unwrap()
         );
-        maybe_retry_task(&db, &queue, &task.task_id, &request).await;
+        assert!(!fail_with_retry(&db, &publisher, &task).await);
+        // A caller that ignored the gate still finds nothing to enqueue.
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
         assert_eq!(
             Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
             1,
-            "a cancelled row must not insert a retry task"
+            "a cancelled row must not get a retry task"
         );
 
-        // Positive control: a Failed row with retry budget inserts exactly
-        // one retry row.
-        let (request, mut failed, _, _, _) = make_task_request_and_row();
-        failed.options = Some(retry_options);
-        insert_test_task(&db, &failed).await;
-        Task::mark_running(&db, &failed.task_id).await.unwrap();
-        let error = task_failure_json("boom", None);
+        // A failure at a call site the policy does not cover gets none either.
+        let (request, task) = insert_running_task_with_retry(&db).await;
         assert!(
-            Task::complete(
+            complete_task_with_event(
                 &db,
-                &failed.task_id,
-                &TaskStatus::Failed,
-                Some(&error),
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                &task.task_type,
+                TaskStatus::Failed,
+                Some(&task_failure_json("boom", None)),
                 None,
-                None
+                None,
             )
             .await
-            .unwrap()
         );
-        maybe_retry_task(&db, &queue, &failed.task_id, &request).await;
-        assert_eq!(
-            Task::get_count_by_env(&db, &failed.env_id).await.unwrap(),
-            2,
-            "a terminal failure with retry budget must insert its retry task"
-        );
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
+        assert_eq!(Task::get_count_by_env(&db, &task.env_id).await.unwrap(), 1);
+
+        // Retries spent: the last attempt's failure stands alone.
+        let (_, mut spent, _, _, _) = make_task_request_and_row();
+        spent.options = Some(serde_json::json!({"retry": 2}));
+        spent.retry_attempt = 2;
+        insert_test_task(&db, &spent).await;
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
+        sqlx::query("UPDATE task SET retry_attempt = 2 WHERE task_id = ?")
+            .bind(spent.task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Task::mark_running(&db, &spent.task_id).await.unwrap();
+        assert!(fail_with_retry(&db, &publisher, &spent).await);
+        assert_eq!(Task::get_count_by_env(&db, &spent.env_id).await.unwrap(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(queue.len().await.unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn retry_skips_enqueue_when_retry_row_already_exists() {
+    async fn a_retry_that_was_already_delivered_is_not_enqueued_again() {
         let db = hot::db::test_db().await;
-        let queue_name = format!("{{hot:task}}-retry-dup-{}", Uuid::now_v7());
-        let queue = ProcessingQueue::<TaskRequest>::new(
-            QueueType::Memory,
-            queue_name,
-            None,
-            Serialization::Json,
-        )
-        .unwrap();
-        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("retry-delivered");
 
-        let (request, mut task, _, _, _) = make_task_request_and_row();
-        task.options = Some(retry_options.clone());
-        insert_test_task(&db, &task).await;
-        Task::mark_running(&db, &task.task_id).await.unwrap();
-        let error = task_failure_json("boom", None);
-        assert!(
-            Task::complete(
-                &db,
-                &task.task_id,
-                &TaskStatus::Failed,
-                Some(&error),
-                None,
-                None
-            )
+        // The reconciler got to the committed retry first and a worker
+        // claimed it.
+        let (request, task) = insert_running_task_with_retry(&db).await;
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        let retry = Task::get_retry_child(&db, &task.task_id, &task.env_id)
             .await
             .unwrap()
-        );
+            .unwrap();
+        assert!(Task::mark_running(&db, &retry.task_id).await.unwrap());
 
-        // Another writer (e.g. the zombie reaper, or a crashed earlier
-        // attempt) already created the retry row for attempt 1 but never
-        // enqueued it.
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
         let row = Task::get(&db, &task.task_id).await.unwrap();
+        enqueue_committed_zombie_retry(&db, &row, &queue).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(queue.len().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_second_writer_of_the_same_failure_does_not_enqueue_its_retry_again() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("retry-once");
+
+        // The first writer commits the failure with its retry, and enqueues it.
+        let (request, task) = insert_running_task_with_retry(&db).await;
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
+        let _enqueued =
+            tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+                .await
+                .expect("the committed retry must be enqueued")
+                .unwrap()
+                .expect("memory queue claim should yield the enqueued retry");
+
+        // A second unfenced writer with the same payload finds the failure in
+        // place. Its write counts as persisted, but the retry row is not the
+        // one it would have inserted, so it is not its to enqueue.
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        enqueue_committed_retry(&db, &queue, &task.task_id, &request).await;
+        assert!(fail_with_retry(&db, &publisher, &task).await);
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        enqueue_committed_zombie_retry(&db, &row, &queue).await;
+        let again = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            queue.claim_blocking(),
+        )
+        .await;
         assert!(
-            Task::insert_retry(&db, &Uuid::now_v7(), &row, 1, chrono::Utc::now())
+            !matches!(again, Ok(Ok(Some(_)))),
+            "the retry must be enqueued once"
+        );
+        assert_eq!(Task::get_count_by_env(&db, &task.env_id).await.unwrap(), 2);
+        assert!(take_minted_retry_ids(&task.task_id).is_empty());
+
+        // An id whose write did not apply is forgotten with it.
+        let (_, cancelled) = insert_running_task_with_retry(&db).await;
+        assert!(
+            Task::cancel(&db, &cancelled.task_id, &cancelled.env_id)
                 .await
                 .unwrap()
         );
-
-        // maybe_retry_task must treat the duplicate insert as already-retried
-        // and skip its enqueue — the existing row is recovered by
-        // reconcile_queued_tasks, never by a second retry row.
-        maybe_retry_task(&db, &queue, &task.task_id, &request).await;
-        // Sleep past the (clamped, 100ms min) retry delay so a buggy delayed
-        // enqueue would have landed before the assertion.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(
-            queue.len().await.unwrap(),
-            0,
-            "a duplicate retry must not be enqueued"
-        );
-        assert_eq!(
-            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
-            2,
-            "no second retry row may be created"
-        );
-
-        // Positive control: with no pre-existing retry row the same path
-        // inserts the retry row and enqueues exactly one request.
-        let (request, mut fresh, _, _, _) = make_task_request_and_row();
-        fresh.options = Some(retry_options);
-        insert_test_task(&db, &fresh).await;
-        Task::mark_running(&db, &fresh.task_id).await.unwrap();
-        assert!(
-            Task::complete(
-                &db,
-                &fresh.task_id,
-                &TaskStatus::Failed,
-                Some(&error),
-                None,
-                None
-            )
-            .await
-            .unwrap()
-        );
-        maybe_retry_task(&db, &queue, &fresh.task_id, &request).await;
-        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
-        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
-            .await
-            .expect("a fresh failure with budget must enqueue its retry")
-            .unwrap()
-            .expect("memory queue claim should yield the enqueued retry");
+        assert!(!fail_with_retry(&db, &publisher, &cancelled).await);
+        assert!(take_minted_retry_ids(&cancelled.task_id).is_empty());
     }
 
     #[tokio::test]
-    async fn zombie_retry_skips_enqueue_when_retry_row_already_exists() {
+    async fn reaper_spares_a_task_whose_adoption_is_deferred() {
         let db = hot::db::test_db().await;
-        let queue_name = format!("{{hot:task}}-zombie-dup-{}", Uuid::now_v7());
-        let queue = ProcessingQueue::<TaskRequest>::new(
-            QueueType::Memory,
-            queue_name,
-            None,
-            Serialization::Json,
-        )
-        .unwrap();
-        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("deferred-adoption");
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
 
-        let (_request, mut task, _, _, _) = make_task_request_and_row();
-        task.options = Some(retry_options.clone());
+        // A dead worker's task, long past the stale threshold, whose
+        // container this worker found running but could not adopt yet.
+        let (_, task, _, _, _) = make_task_request_and_row();
         insert_test_task(&db, &task).await;
-        let row = Task::get(&db, &task.task_id).await.unwrap();
-
-        // The failure path already created the budget retry for attempt 1
-        // (row.retry_attempt + 1) — the reaper racing it must not double it.
         assert!(
-            Task::insert_retry(
-                &db,
-                &Uuid::now_v7(),
-                &row,
-                row.retry_attempt + 1,
-                chrono::Utc::now()
-            )
+            Task::claim_for_worker(&db, &task.task_id, "other-worker")
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE task SET last_heartbeat_at = ? WHERE task_id = ?")
+            .bind(chrono::Utc::now() - chrono::Duration::seconds(ZOMBIE_HEARTBEAT_STALE_SECS + 30))
+            .bind(task.task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        coordinator.defer_adoption(task.task_id);
+        assert!(coordinator.is_task_active(&task.task_id));
+
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Running.as_id(),
+            "a container waiting to be adopted here must not get a second run"
+        );
+
+        // Adoption given up, and the container stopped: the reaper's now.
+        coordinator.finish_deferred_adoption(&task.task_id);
+        assert!(!coordinator.is_task_active(&task.task_id));
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Failed.as_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_adoptions_are_retried_and_stopped_when_out_of_time() {
+        use std::sync::Mutex as StdMutex;
+
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        let (adoptable, unreadable) = (Uuid::now_v7(), Uuid::now_v7());
+        for task_id in [adoptable, unreadable] {
+            coordinator.defer_adoption(task_id);
+        }
+        let attempts = StdMutex::new(HashMap::<Uuid, usize>::new());
+        let stopped = StdMutex::new(Vec::new());
+        let (held, tried, abandoned) = (&coordinator, &attempts, &stopped);
+
+        drive_deferred_adoptions(
+            &coordinator,
+            vec![
+                (adoptable, "container-a".to_string()),
+                (unreadable, "container-b".to_string()),
+            ],
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(40),
+            |task_id: Uuid, _container_id: String| async move {
+                // Held as active for as long as its adoption is still tried.
+                assert!(held.is_task_active(&task_id));
+                let mut attempts = tried.lock().unwrap();
+                let attempt = attempts.entry(task_id).or_default();
+                *attempt += 1;
+                // The database answers for one task on the second attempt,
+                // and never for the other.
+                task_id == unreadable || *attempt < 2
+            },
+            |task_id: Uuid, container_id: String| async move {
+                abandoned.lock().unwrap().push((task_id, container_id));
+            },
+        )
+        .await;
+
+        let attempts = attempts.into_inner().unwrap();
+        assert_eq!(attempts[&adoptable], 2, "an adoption that settled is done");
+        assert!(attempts[&unreadable] > 2);
+        assert_eq!(
+            stopped.into_inner().unwrap(),
+            vec![(unreadable, "container-b".to_string())],
+            "only a container that ran out of time is stopped"
+        );
+        for task_id in [adoptable, unreadable] {
+            assert!(!coordinator.is_task_active(&task_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn reaper_commits_a_zombies_retry_with_its_failure() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue = retry_test_queue("zombie-retry");
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
+
+        // Two tasks of a dead worker with a `retry` policy: one past the
+        // stale threshold, one that only missed a heartbeat.
+        let mut rows = Vec::new();
+        for age_secs in [ZOMBIE_HEARTBEAT_STALE_SECS + 30, 1] {
+            let (_, mut task, _, _, _) = make_task_request_and_row();
+            task.options = Some(serde_json::json!({"retry": {"attempts": 2, "delay": 0}}));
+            insert_test_task(&db, &task).await;
+            assert!(
+                Task::claim_for_worker(&db, &task.task_id, "dead-worker")
+                    .await
+                    .unwrap()
+            );
+            sqlx::query("UPDATE task SET last_heartbeat_at = ? WHERE task_id = ?")
+                .bind(chrono::Utc::now() - chrono::Duration::seconds(age_secs))
+                .bind(task.task_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            rows.push(task);
+        }
+
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+
+        let reaped = Task::get(&db, &rows[0].task_id).await.unwrap();
+        assert_eq!(reaped.task_status_id, TaskStatus::Failed.as_id());
+        let retry = Task::get_retry_child(&db, &reaped.task_id, &reaped.env_id)
             .await
             .unwrap()
-        );
-
-        maybe_retry_zombie_task(&db, &row, &queue).await;
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(
-            queue.len().await.unwrap(),
-            0,
-            "a duplicate zombie retry must not be enqueued"
-        );
-        assert_eq!(
-            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
-            2,
-            "no second retry row may be created"
-        );
-
-        // Positive control: a fresh zombie with budget inserts + enqueues.
-        let (_request, mut fresh, _, _, _) = make_task_request_and_row();
-        fresh.options = Some(retry_options);
-        insert_test_task(&db, &fresh).await;
-        let fresh_row = Task::get(&db, &fresh.task_id).await.unwrap();
-        maybe_retry_zombie_task(&db, &fresh_row, &queue).await;
-        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
+            .expect("the zombie's retry is committed with its failure");
+        assert_eq!(retry.retry_attempt, 1);
         tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
             .await
-            .expect("a fresh zombie with budget must enqueue its retry")
+            .expect("the zombie's retry must be enqueued")
             .unwrap()
             .expect("memory queue claim should yield the enqueued retry");
+
+        // The live task keeps its row and gets no retry.
+        let live = Task::get(&db, &rows[1].task_id).await.unwrap();
+        assert_eq!(live.task_status_id, TaskStatus::Running.as_id());
+        assert!(
+            Task::get_retry_child(&db, &live.task_id, &live.env_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Each attempt of a real task reads the attempt it is and the retry

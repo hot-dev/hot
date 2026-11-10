@@ -466,6 +466,77 @@ run "scalable_maximums_fit_the_connection_budget" {
   expect_failures = [var.installation]
 }
 
+# Each private subnet of a new /20 AWS network holds 11 addresses. The default
+# maximums (4, 4, 2, and 1), the scheduler, and two internal load balancers
+# need 14 while a new host image rolls.
+run "scalable_maximums_fit_the_private_subnets_of_a_new_aws_network" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "network" : { "cidr" : "10.68.0.0/20" },
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds" }, "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files" } }
+    }
+  }
+  expect_failures = [var.installation]
+}
+
+run "scalable_maximums_a_small_aws_network_holds_are_accepted" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "app_exposure" : "public",
+      "network" : { "cidr" : "10.68.0.0/20" },
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds" }, "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files" } },
+      "scaling" : { "app" : { "min" : 2, "max" : 3 }, "api" : { "min" : 2, "max" : 3 } }
+    }
+  }
+  assert {
+    condition     = output.roles.groups.app.max + output.roles.groups.api.max + output.roles.groups.worker.max + output.roles.groups["task-worker"].max == 9
+    error_message = "Maximums of 3, 3, 2, and 1, the scheduler, and one internal load balancer are the 11 addresses a /20 network's private subnet holds."
+  }
+}
+
+run "default_scalable_maximums_fit_a_slash_19_aws_network" {
+  command = plan
+  variables {
+    installation = {
+      "preset" : "scalable",
+      "name" : "hot-example",
+      "cloud" : "aws",
+      "region" : "us-east-1",
+      "zone" : "us-east-1a",
+      "host_image" : "ami-0123456789abcdef0",
+      "app_hostname" : "app.hot.internal",
+      "api_hostname" : "api.hot.internal",
+      "network" : { "cidr" : "10.68.0.0/19" },
+      "data" : { "postgres" : { "mode" : "managed" }, "valkey" : { "mode" : "managed" } },
+      "storage" : { "build" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "builds" }, "file" : { "backend" : "s3", "bucket" : "acme-hot", "region" : "us-east-1", "prefix" : "files" } }
+    }
+  }
+  assert {
+    condition     = output.configuration.network.cidr == "10.68.0.0/19"
+    error_message = "The default maximums need 14 addresses of the 27 a /19 network's private subnet holds."
+  }
+}
+
 run "scalable_installations_need_shared_data_and_storage" {
   command = plan
   variables {

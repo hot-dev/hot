@@ -26,6 +26,10 @@ zstd = { workspace = true }
 parking_lot = { workspace = true }
 sqlx = { workspace = true }
 
+# `_exit` for the shutdown's exit bound, which must not run exit handlers.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

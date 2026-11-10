@@ -74,7 +74,9 @@ variable "installation" {
         # Managed only. An empty node_type follows the size.
         node_type         = optional(string, "")
         high_availability = optional(bool, false)
-        # AWS only: raise to set a new AUTH token; see infra/README.md. GCP
+        # AWS only: raise to give the cache a new AUTH token. The cache keeps
+        # the token before it until the next raise, so a leaked token stops
+        # working only after a second one; see infra/README.md. GCP
         # authenticates with the host's IAM identity instead.
         auth_token_version = optional(number, 1)
         endpoint           = optional(object({ deny_cidrs = optional(list(string), []) }), {})
@@ -216,7 +218,8 @@ variable "installation" {
     # Every instance's pool (20 connections) at the maximums, plus the
     # scheduler and room for administration, within the connections the
     # database tier of the size accepts. The GCP stacks set Cloud SQL's
-    # max_connections to this budget; its memory-based default is lower.
+    # max_connections from this budget, as its memory-based default is lower;
+    # the scalable one adds the pools of a rolling update's extra hosts.
     condition = var.installation.preset != "scalable" || (
       (var.installation.scaling.app.max + var.installation.scaling.api.max + var.installation.scaling.worker.max
       + var.installation.scaling.task_worker.max + 1) * 20 + 40
@@ -294,6 +297,20 @@ variable "installation" {
         var.installation.preset == "single-machine" && contains([var.installation.app_exposure, var.installation.api_exposure], "public") ? 19 : 20
     ), false)
     error_message = "A new AWS network needs a /16 to /20 network.cidr, or /16 to /19 with a public endpoint."
+  }
+  validation {
+    # A scalable installation's hosts share two private subnets, each 8 bits
+    # longer than the new network, less the 5 addresses AWS keeps. Every
+    # group spreads its hosts over both, and a refresh for a new host image
+    # runs each at up to twice its size, so one subnet holds every role's
+    # maximum, the scheduler, and an interface of each internal load balancer.
+    # A range the rule above refuses is left to it.
+    condition = var.installation.preset != "scalable" || var.installation.cloud != "aws" || var.installation.network.mode != "new" || try(
+      (var.installation.scaling.app.max + var.installation.scaling.api.max + var.installation.scaling.worker.max
+        + var.installation.scaling.task_worker.max + 1
+      + length([for exposure in [var.installation.app_exposure, var.installation.api_exposure] : exposure if exposure != "public"]))
+    <= pow(2, 24 - tonumber(split("/", var.installation.network.cidr)[1])) - 5, true)
+    error_message = "The scaling maximums need more addresses than a private subnet of the new AWS network holds: the sum of the four maximums, plus 1 for the scheduler and 1 for each private endpoint, may be at most 11 on a /20 network.cidr, 27 on a /19, 59 on a /18, 123 on a /17, and 251 on a /16. Lower the maximums, or choose a larger network.cidr before the network exists."
   }
   validation {
     condition     = contains(["local", "managed", "existing"], var.installation.data.postgres.mode) && contains(["local", "managed", "existing"], var.installation.data.valkey.mode) && can(regex("^[a-z_][a-z0-9_]{0,62}$", var.installation.data.postgres.runtime_role)) && !contains(["hot_owner", "hot_admin", "postgres"], var.installation.data.postgres.runtime_role)
@@ -591,7 +608,7 @@ locals {
   }
   # Each scalable instance's PostgreSQL pool, and the connections the
   # database tier of each size accepts, leaving room for administration. The
-  # GCP stacks set Cloud SQL's max_connections to that budget.
+  # GCP stacks set Cloud SQL's max_connections from that budget.
   db_pool_per_instance = 20
   scaling              = var.installation.scaling
 }
@@ -637,7 +654,7 @@ locals {
   gar_mirror    = regex("^(?:([a-z0-9-]+)-docker\\.pkg\\.dev)?", local.registry_host)
 }
 output "database_connections" {
-  description = "The PostgreSQL connections the size's database tier is planned for, which the scalable maximums must fit. The GCP stacks set Cloud SQL's max_connections to it."
+  description = "The PostgreSQL connections the size's database tier is planned for, which the scalable maximums must fit. The GCP stacks set Cloud SQL's max_connections from it; the scalable one adds a rolling update's extra hosts."
   value       = lookup({ small = 400, medium = 800, large = 1600 }, var.installation.size, 400)
 }
 output "dashboard" {

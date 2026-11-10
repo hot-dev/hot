@@ -19,6 +19,15 @@ pub struct DatabaseEventPublisher {
     shutdown_initiated: Arc<AtomicBool>,
 }
 
+/// Why a committed event's enqueue packet did not come back.
+pub(crate) enum PendingMessageError {
+    /// The read failed. The packet is still stored under its lease, so outbox
+    /// recovery delivers the event.
+    Unread(String),
+    /// No packet a queue could take is stored: nothing will deliver the event.
+    Unusable(String),
+}
+
 impl DatabaseEventPublisher {
     pub(crate) fn enable_outbox(&self, queue_name: &str) {
         *self.outbox_queue.write().unwrap() = Some(queue_name.to_string());
@@ -42,14 +51,20 @@ impl DatabaseEventPublisher {
         &self,
         ctx: &ExecutionContext,
         event_id: uuid::Uuid,
-    ) -> Result<crate::data::msg::Message, String> {
-        let db = self.outbox_db(ctx).await?;
+    ) -> Result<crate::data::msg::Message, PendingMessageError> {
+        let db = self
+            .outbox_db(ctx)
+            .await
+            .map_err(PendingMessageError::Unread)?;
         let payload = crate::db::event::Event::enqueue_payload(&db, &event_id)
             .await
-            .map_err(|error| error.to_string())?
-            .ok_or("Event enqueue packet was not stored")?;
-        serde_json::from_value(payload)
-            .map_err(|error| format!("Cannot decode event enqueue packet: {error}"))
+            .map_err(|error| PendingMessageError::Unread(error.to_string()))?
+            .ok_or_else(|| {
+                PendingMessageError::Unusable("Event enqueue packet was not stored".into())
+            })?;
+        serde_json::from_value(payload).map_err(|error| {
+            PendingMessageError::Unusable(format!("Cannot decode event enqueue packet: {error}"))
+        })
     }
     pub(crate) async fn finish_enqueue(
         &self,
@@ -355,6 +370,7 @@ impl DatabaseEventProcessor {
                 .map_err(|e| format!("Failed to serialize event data: {}", e))?;
 
             let outbox_queue = self.outbox_queue.read().unwrap().clone();
+            let has_outbox = outbox_queue.is_some();
             let inserted = if let Some(queue) = outbox_queue {
                 let stored_event = Event {
                     event_data: event_data_val,
@@ -398,6 +414,23 @@ impl DatabaseEventProcessor {
                 .await
             };
             if let Err(e) = inserted {
+                // A commit whose acknowledgment was lost still stored the row
+                // and its outbox packet, and the outbox delivers from there.
+                // Reporting a failed send would have the caller send again.
+                if has_outbox
+                    && !matches!(e, crate::db::event::EventError::AlreadyExists(_))
+                    && matches!(
+                        crate::db::event::Event::enqueue_payload(db, &event.event_id).await,
+                        Ok(Some(_))
+                    )
+                {
+                    tracing::warn!(
+                        event_id = %event.event_id,
+                        "Event insert reported an error after it committed; the outbox owns its delivery: {}",
+                        e
+                    );
+                    return Ok(());
+                }
                 self.release_unstored_event(db, ctx, event).await;
                 return Err(format!("Database error: {}", e));
             }

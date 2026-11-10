@@ -10,7 +10,9 @@ Implemented:
   Local/existing S3 choices for builds and files/blobs. An installation's name
   ends in a letter or digit. `network.cidr` and `client_cidrs` are IPv4 networks
   without host bits, in prefix form, and a new AWS network is /16 to /20 (/19 for
-  a single machine with a public endpoint). S3 and GCS prefixes take letters,
+  a single machine with a public endpoint). A scalable installation's scaling
+  maximums must also fit that network's private subnets
+  ([Resizing](#resizing)). S3 and GCS prefixes take letters,
   digits, `.`, `_`, `-`, and `/` separators, and an S3 region lowercase letters,
   digits, and `-`. Plan refuses anything else.
 - AWS and GCP OpenTofu roots with pinned providers and committed lockfiles.
@@ -142,7 +144,9 @@ Implemented:
   migrates, and grants as for an existing database.
   - On GCP, `storage_gb` and the size set only the starting disk, which Cloud
     SQL grows as it fills ([Resizing](#resizing)), and the stacks set
-    `max_connections` to the size's budget (400, 800, or 1,600).
+    `max_connections` to the size's budget (400, 800, or 1,600). A scalable
+    installation adds 240: a rolling update starts up to 3 extra hosts in each of
+    its 4 regional groups, each with a pool of 20, before it removes any.
   - The administrator password never enters OpenTofu state. RDS keeps it in
     its own secret. On GCP it is generated during apply and written only to
     write-only attributes on Cloud SQL and on a Secret Manager secret. If an
@@ -168,7 +172,10 @@ Implemented:
     It requires an AUTH token, which, like the GCP database password, is
     generated during apply and written only to write-only attributes, on
     ElastiCache and on a Secrets Manager secret. Raise
-    `data.valkey.auth_token_version` to set a new one. Do the same if an apply
+    `data.valkey.auth_token_version` to add a new one. The cache then accepts
+    it and the token before it, and no older one, so a leaked token stops
+    working at the second raise
+    ([Rotating secrets and certificates](#rotating-secrets-and-certificates)). Raise it too if an apply
     that creates the cache fails after the cache exists: the retry stores a new
     token the cache does not have, and hosts fail to log in until it is raised.
   - GCP: a Memorystore for Valkey 8.0 instance with cluster mode disabled,
@@ -1200,7 +1207,8 @@ project ([Real-account qualification](#real-account-qualification)).
     public, run `tofu state mv 'google_compute_managed_ssl_certificate.public[0]' 'google_compute_managed_ssl_certificate.public["api"]'`
     before applying, or the old certificate is destroyed before the proxy update.
   - GCP, managed PostgreSQL: the new `max_connections` flag restarts Cloud SQL once
-    on the first apply.
+    on the first apply. A scalable installation's flag later grew by 240, for a
+    rolling update's extra hosts, and that apply restarts Cloud SQL once more.
   - GCP, a release account shared between installations: the first apply replaces
     its project bindings with conditional ones, and removing the old ones affects
     the others, so apply every installation that shares it before its next
@@ -1395,7 +1403,8 @@ exercised on a real account.
   are on S3 or GCS, each already moved
   ([Moving data off the host](#moving-data-off-the-host),
   [Moving builds and files to a bucket](#moving-builds-and-files-to-a-bucket)).
-- The scaling maximums fit the size's connection budget.
+- The scaling maximums fit the size's connection budget and, on a new AWS
+  network, its private subnets ([Resizing](#resizing)).
 - TLS will end on the hosts with the operator secret's certificate, for
   public endpoints too; the single machine's ACM or Google-managed
   certificate is no longer used. Clients must trust the operator's.
@@ -2330,7 +2339,7 @@ PEM header.
 | Secret | Protects | Rotation | Effect |
 | --- | --- | --- | --- |
 | Managed database administrator | The RDS `hot_admin` or Cloud SQL `postgres` login, used only by `prepare-postgres` on the host that migrates | AWS: RDS keeps it in its own secret; `aws secretsmanager rotate-secret --secret-id ARN` rotates it now. GCP: raise `data.postgres.admin_password_version` and apply. The agent reads the current value whenever it delivers secrets | None beyond what any input change does ([Resizing](#resizing)) |
-| ElastiCache AUTH token | Every Hot service's Valkey connection | Raise `data.valkey.auth_token_version` and apply: the cache gets a new token, then the secret does. The input change redeploys the installed release on an AWS single machine, or refreshes every scalable group, and that delivers it. The same step recovers an apply that failed after creating the cache but before storing its token, when hosts fail AUTH. Not exercised: the stack sets no `auth_token_update_strategy` and `apply_immediately = false`, so whether the old token works until every host has the new one is not established | As for [Resizing](#resizing) |
+| ElastiCache AUTH token | Every Hot service's Valkey connection | Raise `data.valkey.auth_token_version` and apply: the cache gets a new token, then the secret does. The input change redeploys the installed release on an AWS single machine, or refreshes every scalable group, and that delivers it. The cache keeps accepting the token before it, so hosts stay connected meanwhile: the stack names no `auth_token_update_strategy`, and ElastiCache then rotates, holding the two newest tokens. The provider sends the change at once, whatever `apply_immediately` says. To retire a leaked token, raise the version a second time once every host has the new one: that raise drops the leaked token. The same step recovers an apply that failed after creating the cache but before storing its token, when hosts fail AUTH. Not exercised on a real cache | As for [Resizing](#resizing) |
 | Memorystore | Valkey connections on GCP | Nothing to rotate: hosts use short-lived IAM tokens | |
 | State passphrase | OpenTofu state and plans | Not provided: `encryption.tf` has one key and no `fallback` | |
 
@@ -2680,6 +2689,13 @@ through its group's rolling update:
 New hosts deploy their role's pointer, and schedules pause while the
 scheduler's instance is replaced, so silence alerts first. New `scaling`
 bounds must keep 1 ≤ `min` ≤ `max` ≤ 20 and fit the connection budget.
+On a new AWS network they must also fit a private subnet, which is 8 bits
+longer than `network.cidr` and cannot grow once the network exists: the four
+maximums, plus 1 for the scheduler and 1 for each private endpoint, come to at
+most 11 on a /20, 27 on a /19, 59 on a /18, 123 on a /17, and 251 on a /16. A
+refresh runs each group at up to twice its size across the two subnets, so each
+subnet holds every role's maximum. An existing network's subnets are yours to
+size the same way.
 AWS moves each group's desired capacity into the new bounds, and GCP's
 autoscalers take them, for a fixed count (`min` equal to `max`) too. On AWS,
 hosts protected by an autoscaled group leave through the rolling refresh or idle
@@ -2749,7 +2765,9 @@ says:
   - Whether `send-command` rejects `expires` against a document that does not
     declare it, and whether an instance refresh shrinks a group with more protected
     hosts than its desired capacity.
-  - Rotating the ElastiCache AUTH token.
+  - Rotating the ElastiCache AUTH token: that hosts stay connected through one raise
+    of `data.valkey.auth_token_version`, and that the token from before it is refused
+    after a second.
   - A port forward under the example policy in
     [Reaching a private installation](#reaching-a-private-installation), on both presets:
     `start-session` with no `--document-name` must be `AccessDenied`, and with the

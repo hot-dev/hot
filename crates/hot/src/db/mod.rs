@@ -32,6 +32,41 @@ pub(crate) async fn collect_decodable<T>(
     Ok(collect_decodable_page(rows).await?.0)
 }
 
+/// Whether `error` is the database failing to answer, which says nothing
+/// about the statement or the rows it was for: the connection or the pool
+/// failed, the statement timed out, or the transaction was turned away for
+/// concurrency. The same statement can succeed later. One that cannot
+/// succeed as written (a row that does not decode, a missing column, a type
+/// mismatch, a constraint) is not such an error.
+pub fn is_unavailable_error(error: &sqlx::Error) -> bool {
+    // Decided by what is known to be the statement's or the row's own
+    // failure, and everything else counts as the database not answering. The
+    // callers fail queued work on an error that is not this one, so an error
+    // class nobody listed (the server out of memory or disk, a rejected login
+    // after a password rotation, a schema a migration has not reached yet)
+    // must wait rather than fail the work.
+    match error {
+        sqlx::Error::RowNotFound
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::ColumnIndexOutOfBounds { .. }
+        | sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::Decode(_)
+        | sqlx::Error::Encode(_)
+        | sqlx::Error::TypeNotFound { .. } => false,
+        // SQLSTATE classes 22 (data exception) and 23 (integrity constraint
+        // violation) are about the values, on either backend's own codes too.
+        sqlx::Error::Database(database) => {
+            !(database.is_unique_violation()
+                || database.is_foreign_key_violation()
+                || database.is_check_violation()
+                || database
+                    .code()
+                    .is_some_and(|code| code.starts_with("22") || code.starts_with("23")))
+        }
+        _ => true,
+    }
+}
+
 /// Macro to log database errors consistently
 #[macro_export]
 macro_rules! log_db_error {
@@ -1042,7 +1077,13 @@ const MIN_POSTGRES_MAJOR: u32 = 18;
 const MIN_POSTGRES_VERSION_NUM: u32 = MIN_POSTGRES_MAJOR * 10_000;
 const MIGRATION_LOCK_RETRIES: u32 = 5;
 /// Indexes that `-- no-transaction` migrations build concurrently.
-const CONCURRENT_INDEXES: &[&str] = &["call_env_start_time_size_idx", "event_outbox_due_idx"];
+const CONCURRENT_INDEXES: &[&str] = &[
+    "call_env_start_time_size_idx",
+    "event_outbox_due_idx",
+    "event_env_event_time_idx",
+    "event_stream_event_time_idx",
+    "email_queue_sending_idx",
+];
 /// Taken around every migrator's work, and only ever polled for.
 const MIGRATOR_LOCK: i64 = 0x484f_545f_4d49_4752;
 const MIGRATOR_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(250);

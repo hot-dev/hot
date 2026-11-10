@@ -204,11 +204,15 @@ async fn claim(
             Ok(Ok(Some(lease))) => return Some(lease),
             // Redis returns after its own blocking window.
             Ok(Ok(None)) => continue,
-            // Memory dead-letters an exhausted message when it is claimed.
+            // Memory dead-letters an exhausted message when it is claimed,
+            // and hands its payload back.
             Ok(Err(error))
                 if matches!(
                     error.downcast_ref::<QueueProcessingError>(),
-                    Some(QueueProcessingError::RetryLimitExceeded)
+                    Some(
+                        QueueProcessingError::DeadLettered(_)
+                            | QueueProcessingError::RetryLimitExceeded
+                    )
                 ) =>
             {
                 continue;
@@ -239,6 +243,16 @@ async fn succeed(lease: ProcessingQueueLease<Job>) -> Job {
         .await
         .expect("processing should succeed")
         .expect("a processed job")
+}
+
+/// Hold a lease as a worker that stopped mid-message does: never settled or
+/// released.
+fn abandon(lease: ProcessingQueueLease<Job>) {
+    match lease {
+        // A live SQLite lease renews itself until it is settled or dropped.
+        ProcessingQueueLease::Sqlite(lease) => lease.abandon(),
+        lease => std::mem::forget(lease),
+    }
 }
 
 async fn fail(lease: ProcessingQueueLease<Job>) {
@@ -406,7 +420,7 @@ mod cases {
         stopped.enqueue(Job { id: 1 }).await.unwrap();
 
         // A worker that stops mid-message never releases its lease.
-        std::mem::forget(expect_claim(&stopped).await);
+        abandon(expect_claim(&stopped).await);
 
         // A live lease is not reclaimed.
         assert_eq!(survivor.recover_orphaned_items().await.unwrap(), 0);
@@ -516,7 +530,7 @@ mod cases {
         let stopped = harness.consumer("conformance-stopped");
         let survivor = harness.consumer("conformance-survivor");
         stopped.enqueue(Job { id: 1 }).await.unwrap();
-        std::mem::forget(expect_claim(&stopped).await);
+        abandon(expect_claim(&stopped).await);
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let purged = survivor.purge_old_pending(100).await.unwrap();

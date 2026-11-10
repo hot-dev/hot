@@ -467,8 +467,21 @@ where
     /// retries. False when the backend can't tell.
     pub fn last_attempt(&self) -> bool {
         match self {
+            ProcessingQueueLease::Memory(lease) => lease.last_attempt(),
             ProcessingQueueLease::Sqlite(lease) => lease.last_attempt(),
-            ProcessingQueueLease::Memory(_) | ProcessingQueueLease::Redis(_) => false,
+            ProcessingQueueLease::Redis(_) => false,
+        }
+    }
+
+    /// Deliveries of this message that already counted toward its retry
+    /// limit: 0 for a first delivery. On Redis this is the count carried
+    /// across counted infrastructure retries (a lower bound: a pending
+    /// entry's own redeliveries are counted only as it is processed).
+    pub fn prior_attempts(&self) -> usize {
+        match self {
+            ProcessingQueueLease::Memory(lease) => lease.prior_attempts(),
+            ProcessingQueueLease::Sqlite(lease) => lease.prior_attempts(),
+            ProcessingQueueLease::Redis(lease) => lease.prior_attempts(),
         }
     }
 
@@ -497,6 +510,58 @@ where
             ProcessingQueueLease::Memory(lease) => lease.process(worker).await,
             ProcessingQueueLease::Sqlite(lease) => lease.process(worker).await,
             ProcessingQueueLease::Redis(lease) => lease.process(worker).await,
+        }
+    }
+
+    /// On shutdown, give up this delivery without starting it. Returns
+    /// whether the queue took it back for another worker to claim at once,
+    /// with no attempt spent and its next delivery marked redelivered.
+    ///
+    /// Only a delivery that is the message's own to start is handed back.
+    /// One that takes over from a delivery that never settled
+    /// ([`recovered`](Self::recovered)) may be what stopped the worker that
+    /// held it, and a handover would make it an ordinary delivery again. It
+    /// stays claimed instead (false) until the queue's orphan recovery
+    /// takes it, still recovered and with its attempts counted. The same
+    /// goes for a Redis delivery this consumer no longer owns, which another
+    /// worker may be running.
+    ///
+    /// A handover never dead-letters the message: it fails no attempt.
+    pub async fn hand_back_unstarted(self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        match self {
+            ProcessingQueueLease::Redis(lease) => lease
+                .hand_back_unstarted()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+            ProcessingQueueLease::Sqlite(lease) if lease.recovered() => {
+                lease.abandon();
+                Ok(false)
+            }
+            // SQLite and memory take a delivery back the way they take an
+            // uncounted infrastructure retry, before any handler runs.
+            lease => match lease
+                .process(|_message| async {
+                    Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            "worker shut down before starting the delivery",
+                            Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await
+            {
+                // The lease was lost first: the message has a new delivery.
+                Ok(_) => Ok(false),
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<QueueProcessingError>(),
+                        Some(QueueProcessingError::QueueError(_))
+                    ) =>
+                {
+                    Ok(true)
+                }
+                Err(error) => Err(error),
+            },
         }
     }
 }
@@ -699,6 +764,83 @@ impl<T> ProcessingQueue<T> {
                 .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .consumer_has_pending()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        }
+    }
+
+    /// On graceful shutdown, once this handle claims nothing more: hand the
+    /// deliveries its consumer holds that no worker has started back to the
+    /// queue, so another worker gets them at once and no attempt is spent
+    /// (see `RedisStreamQueue::release_unstarted`). Returns how many.
+    /// Redeliveries and started deliveries stay for the orphan recovery, as
+    /// with [`ProcessingQueueLease::hand_back_unstarted`].
+    ///
+    /// Only Redis consumers hold such deliveries (a prefetch buffer and a
+    /// PEL). A SQLite claim takes one row per lease, and a memory queue does
+    /// not outlive its process: both return `Ok(0)`.
+    pub async fn release_unstarted(&self) -> Result<usize, Box<dyn Error + Send + Sync>>
+    where
+        T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        match self {
+            ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => Ok(0),
+            ProcessingQueue::Redis(q) => q
+                .release_unstarted()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        }
+    }
+
+    /// On graceful shutdown, once this handle claims nothing more: hand the
+    /// consumer's own pending retries `delivery_ids` to another worker.
+    /// These are deliveries the caller started, saw fail with an ordinary
+    /// worker error and has not started again. Each keeps its counted
+    /// starts, so the retry limit holds, and its next delivery is marked
+    /// redelivered but not recovered (see
+    /// `RedisStreamQueue::hand_back_retries`). Returns how many.
+    ///
+    /// Only a Redis retry stays with its consumer. SQLite and memory return
+    /// a failed delivery to the queue as it fails: both return `Ok(0)`.
+    pub async fn hand_back_retries(
+        &self,
+        delivery_ids: &[String],
+    ) -> Result<usize, Box<dyn Error + Send + Sync>>
+    where
+        T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        match self {
+            ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => Ok(0),
+            ProcessingQueue::Redis(q) => q
+                .hand_back_retries(delivery_ids)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        }
+    }
+
+    /// At the very end of a shutdown: hand the deliveries `delivery_ids`,
+    /// which this consumer was still running when its drain timed out, to
+    /// another worker once `not_before` has passed. The caller must be
+    /// certain its process ends before that. Each keeps its counted starts,
+    /// and its next delivery is [`recovered`](ProcessingQueueLease::recovered)
+    /// and marked redelivered (see
+    /// `RedisStreamQueue::hand_back_interrupted`). Returns how many,
+    /// counting again any that an earlier call already handed back.
+    ///
+    /// Only Redis leaves such a delivery with its consumer for as long as
+    /// the orphan idle. SQLite and memory return `Ok(0)`.
+    pub async fn hand_back_interrupted(
+        &self,
+        delivery_ids: &[String],
+        not_before: Duration,
+    ) -> Result<usize, Box<dyn Error + Send + Sync>>
+    where
+        T: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        match self {
+            ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => Ok(0),
+            ProcessingQueue::Redis(q) => q
+                .hand_back_interrupted(delivery_ids, not_before)
                 .await
                 .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
         }
@@ -1302,11 +1444,15 @@ impl RedisQueueAdmin {
             }
 
             // Dead-letter streams have no consumer groups; deleting them is
-            // safe. So are delayed retries, which have left the stream.
+            // safe. So are delayed retries, which have left the stream, and
+            // the records of interrupted hand-backs, whose pending entries
+            // were acknowledged above.
             for key in [
                 format!("{}:deadletter", queue_name),
                 format!("{}:delayed", queue_name),
                 format!("{}:delayed:entries", queue_name),
+                format!("{}:interrupted", queue_name),
+                format!("{}:interrupted:entries", queue_name),
             ] {
                 let deleted: i64 = ::redis::cmd("DEL")
                     .arg(&key)
