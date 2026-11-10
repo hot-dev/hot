@@ -435,6 +435,7 @@ pub(crate) async fn run_dev(
         jit_mode: None,
         jit_threshold: None,
         jit_hof_fusion: None,
+        jit_share: None,
         db_uri: None,
         db_migration_uri: None,
         profile: None,

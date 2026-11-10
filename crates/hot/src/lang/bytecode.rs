@@ -1123,6 +1123,37 @@ impl Default for SourceMap {
     }
 }
 
+/// Where the JIT keeps the code it shares between the VMs that run a program
+/// (see `SharedJitCode`). The code lives as long as the program does. A copy
+/// of the program starts with none: a copy is made to be changed.
+#[derive(Default)]
+pub struct JitShareSlot(std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+
+impl JitShareSlot {
+    pub(crate) fn get_or_init(
+        &self,
+        init: impl FnOnce() -> std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> &std::sync::Arc<dyn std::any::Any + Send + Sync> {
+        self.0.get_or_init(init)
+    }
+}
+
+impl Clone for JitShareSlot {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl fmt::Debug for JitShareSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "JitShareSlot(shared)"
+        } else {
+            "JitShareSlot(empty)"
+        })
+    }
+}
+
 /// Compiled bytecode program
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BytecodeProgram {
@@ -1163,6 +1194,9 @@ pub struct BytecodeProgram {
     /// constants, never a wrong id).
     #[serde(skip)]
     constant_index: AHashMap<u64, Vec<ConstantId>>,
+    /// Compiled code shared by the VMs that run this program.
+    #[serde(skip)]
+    pub(crate) jit_shared: JitShareSlot,
 }
 
 impl fmt::Display for FlowType {
@@ -1611,6 +1645,7 @@ impl BytecodeProgram {
             local_functions: AHashSet::new(),
             result_params: AHashMap::new(),
             constant_index: AHashMap::new(),
+            jit_shared: JitShareSlot::default(),
         }
     }
 

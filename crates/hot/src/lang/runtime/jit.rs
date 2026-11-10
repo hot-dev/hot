@@ -16,15 +16,14 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{Linkage, Module};
 use fastnum::D256;
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::mem;
-use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 mod native_parity_tests;
@@ -34,6 +33,9 @@ use numeric_err::{Consumer, ErrUseScope, NumericErrUse, numeric_err_use};
 mod runtime_tests;
 
 static GLOBAL_JIT_COMPILE_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Compiled functions and lambdas a VM took from another VM running the same
+/// program, instead of compiling them again.
+static GLOBAL_JIT_SHARED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_JIT_BAILOUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_LAMBDA_JIT_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -57,6 +59,14 @@ thread_local! {
     /// The values the code being compiled on this thread has baked into it
     /// (see `baked_owned_val`).
     static COMPILE_BAKED_VALS: std::cell::RefCell<Vec<Arc<Val>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// The names the compile in progress found unbound in its function's
+    /// namespace, as `(namespace, name)`: a call of one went straight to
+    /// the core function (see `ShareFacts`).
+    static COMPILE_UNBOUND_NAMES: std::cell::RefCell<Vec<(String, String)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -221,6 +231,10 @@ pub struct JitConfig {
     /// `HOT_JIT_HOF_FUSION`. Disabling falls back to the per-element lambda-JIT
     /// / interpreter path with no behavior change.
     pub hof_fusion: bool,
+    /// Whether the VMs that run one program share their compiled code (see
+    /// `SharedJitCode`). Defaults on; conf `jit.share` turns it off, and
+    /// each VM then compiles for itself.
+    pub share: bool,
 }
 
 impl Default for JitConfig {
@@ -229,6 +243,7 @@ impl Default for JitConfig {
             mode: JitMode::Enabled,
             threshold: 100,
             hof_fusion: true,
+            share: true,
         }
     }
 }
@@ -259,6 +274,7 @@ impl JitConfig {
 
         cfg.threshold = conf.get_int_or_default("jit.threshold", 100).max(1) as u32;
         cfg.hof_fusion = conf.get_bool_or_default("jit.hof.fusion", true);
+        cfg.share = conf.get_bool_or_default("jit.share", true);
 
         // Gate on platform availability — disable on unsupported targets
         // regardless of what conf says.
@@ -860,6 +876,13 @@ impl std::ops::DerefMut for CodeModule {
     }
 }
 
+// SAFETY: once a function is compiled its module is only held, to be freed
+// with the function: the code is called through the entry address read when
+// it was finalized (`JitCompiledFunction::entry`), which never touches the
+// module. So VMs on several threads can hold and run one compiled function.
+unsafe impl Send for CodeModule {}
+unsafe impl Sync for CodeModule {}
+
 impl Drop for CodeModule {
     fn drop(&mut self) {
         // SAFETY: the module is taken only here, once, and nothing calls its
@@ -876,12 +899,45 @@ thread_local! {
     static CODE_MODULES_FREED: Cell<usize> = const { Cell::new(0) };
 }
 
+/// What a compiled function took from the VM that compiled it, beyond the
+/// program and the argument types. Another VM running the same program can
+/// run the code when these hold for it too.
+struct ShareFacts {
+    /// See [`CallNames::traced`].
+    traced: bool,
+    /// See [`CallNames::fusing`].
+    fusing: bool,
+    /// See [`CallNames::param_arrows`].
+    param_arrows: Box<[ParamArrows]>,
+    /// Names the function's namespace didn't bind, so that a call of one
+    /// went straight to the core function: `(namespace, name)`.
+    unbound: Box<[(Box<str>, Box<str>)]>,
+}
+
+impl ShareFacts {
+    fn hold_for(&self, names: &CallNames<'_>) -> bool {
+        self.traced == names.traced
+            && self.fusing == names.fusing
+            && *self.param_arrows == *names.param_arrows
+            && !self.unbound.iter().any(|(namespace, name)| {
+                names
+                    .namespace_variables
+                    .and_then(|namespaces| namespaces.get(&**namespace))
+                    .is_some_and(|variables| variables.contains_key(&**name))
+            })
+    }
+}
+
 pub struct JitCompiledFunction {
     signature: TypeSig,
     result_kind: JitValueKind,
     /// See `needs_vm_scope`.
     needs_vm_scope: bool,
-    module: CodeModule,
+    /// Held for the code's memory, which it frees. Never read: see `entry`.
+    _module: CodeModule,
+    /// The address of the code.
+    entry: usize,
+    share: ShareFacts,
     /// The Dec constants the code reads, held for it (see
     /// `owned_dec_constant`).
     _dec_constants: Vec<std::pin::Pin<Box<D256>>>,
@@ -897,7 +953,6 @@ pub struct JitCompiledFunction {
     /// The code opens flow contexts in the VM for the inline flows it
     /// traces; a call closes any an early return left open.
     traces_flows: bool,
-    func_id: FuncId,
     /// Argument ABI layout, computed once at compile time. Rebuilding it per
     /// call allocated two Vecs on every VM->JIT boundary crossing.
     arg_layout: AbiLayout,
@@ -965,7 +1020,7 @@ impl JitCompiledFunction {
             heap_result.resize(self.result_word_len, 0);
             &mut heap_result
         };
-        let fn_ptr = self.module.get_finalized_function(self.func_id);
+        let fn_ptr = self.entry as *const u8;
         let jit_fn: unsafe extern "C" fn(*const u8, *mut u8, i64) -> i64 =
             unsafe { mem::transmute(fn_ptr) };
         let ret = unsafe {
@@ -1114,6 +1169,74 @@ impl JitFunctionProfile {
     }
 }
 
+/// The compiled code of one program, for every VM that runs it.
+///
+/// A VM used to compile for itself alone, so each run of a build, each test
+/// and each parallel branch warmed up and compiled the same functions again.
+/// Now a VM publishes what it compiles here, and takes what is here in
+/// place of compiling (see `ShareFacts` for when it can).
+///
+/// The program holds this (`BytecodeProgram::jit_shared`), so the code is
+/// freed with it.
+#[derive(Default)]
+pub struct SharedJitCode {
+    /// Each function's code, in the order it was published. A VM reads on
+    /// from where it last stopped.
+    functions: Mutex<Vec<(FunctionId, Arc<JitCompiledFunction>)>>,
+    lambdas: Mutex<AHashMap<LambdaJitKey, Vec<Arc<JitCompiledFunction>>>>,
+}
+
+/// How many functions, and how many lambdas, a program's shared code holds.
+const MAX_SHARED_CODE: usize = 16_384;
+/// How many versions of one lambda (by `ShareFacts`) it holds.
+const MAX_SHARED_LAMBDA_VERSIONS: usize = 4;
+
+impl SharedJitCode {
+    fn of(program: &BytecodeProgram) -> Option<Arc<Self>> {
+        let slot = program
+            .jit_shared
+            .get_or_init(|| Arc::new(SharedJitCode::default()));
+        Arc::clone(slot).downcast::<SharedJitCode>().ok()
+    }
+
+    fn publish_function(&self, function_id: FunctionId, code: &Arc<JitCompiledFunction>) {
+        let mut functions = self.functions.lock().unwrap_or_else(|e| e.into_inner());
+        if functions.len() < MAX_SHARED_CODE {
+            functions.push((function_id, Arc::clone(code)));
+        }
+    }
+
+    fn publish_lambda(&self, key: &LambdaJitKey, code: &Arc<JitCompiledFunction>) {
+        let mut lambdas = self.lambdas.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(versions) = lambdas.get_mut(key) {
+            if versions.len() < MAX_SHARED_LAMBDA_VERSIONS {
+                versions.push(Arc::clone(code));
+            }
+        } else if lambdas.len() < MAX_SHARED_CODE {
+            lambdas.insert(key.clone(), vec![Arc::clone(code)]);
+        }
+    }
+
+    fn lambda(
+        &self,
+        key: &LambdaJitKey,
+        names: &CallNames<'_>,
+    ) -> Option<Arc<JitCompiledFunction>> {
+        let lambdas = self.lambdas.lock().unwrap_or_else(|e| e.into_inner());
+        lambdas
+            .get(key)?
+            .iter()
+            .find(|code| code.share.hold_for(names))
+            .map(Arc::clone)
+    }
+
+    /// The structural hashes of the lambdas with code here.
+    fn lambda_hashes(&self) -> AHashSet<u64> {
+        let lambdas = self.lambdas.lock().unwrap_or_else(|e| e.into_inner());
+        lambdas.keys().map(|key| key.structural_hash).collect()
+    }
+}
+
 pub struct JitRuntimeState {
     pub config: JitConfig,
     pub code_memory_status: CodeMemoryStatus,
@@ -1124,16 +1247,27 @@ pub struct JitRuntimeState {
     // *new* entries. A plain borrow into these containers across the call
     // would dangle if the map rehashed / the slot moved. Callers must clone
     // the `Rc` out and drop the container borrow before invoking `call`.
-    // (`Rc`, not `Arc`: the JIT state is owned by a single-threaded VM.)
+    // (`Arc`: the code is shared with the other VMs that run the program.)
     //
     // Each function holds a small vec of per-signature entries so a second
     // hot signature can compile instead of interpreting forever (lookup is a
     // linear allocation-free `matches_args` scan; the vec is capped at
     // `MAX_COMPILED_SIGS_PER_FUNCTION`).
-    compiled_functions: Vec<Vec<Rc<JitCompiledFunction>>>,
+    compiled_functions: Vec<Vec<Arc<JitCompiledFunction>>>,
     lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
-    compiled_lambdas: AHashMap<LambdaJitKey, Rc<JitCompiledFunction>>,
+    compiled_lambdas: AHashMap<LambdaJitKey, Arc<JitCompiledFunction>>,
     lambda_calls: AHashMap<u64, LambdaCallCount>,
+    /// The program's shared code, once attached (see `attach_shared`).
+    shared: Option<Arc<SharedJitCode>>,
+    /// How much of `SharedJitCode::functions` this VM has read.
+    shared_seen: usize,
+    /// Published code this VM hasn't looked at yet, by function. Empty, or
+    /// as long as `compiled_functions`.
+    shared_candidates: Vec<Vec<Arc<JitCompiledFunction>>>,
+    /// Lambdas that had shared code when this VM attached.
+    shared_lambda_hashes: AHashSet<u64>,
+    /// Functions and lambdas this VM runs on code another VM compiled.
+    shared_taken: usize,
 }
 
 /// Cap on compiled signature specializations per function.
@@ -1152,7 +1286,112 @@ impl JitRuntimeState {
             lambda_profiles: AHashMap::new(),
             compiled_lambdas: AHashMap::new(),
             lambda_calls: AHashMap::new(),
+            shared: None,
+            shared_seen: 0,
+            shared_candidates: Vec::new(),
+            shared_lambda_hashes: AHashSet::new(),
+            shared_taken: 0,
         }
+    }
+
+    /// How many functions and lambdas this VM runs on code another VM
+    /// compiled.
+    pub fn shared_taken(&self) -> usize {
+        self.shared_taken
+    }
+
+    /// Join the VMs that run `program`: take the code they compiled, and
+    /// give them what this one compiles.
+    pub fn attach_shared(&mut self, program: &BytecodeProgram) {
+        if !self.config.is_enabled()
+            || !self.config.share
+            || matches!(
+                self.code_memory_status.availability,
+                JitAvailability::Unsupported
+            )
+        {
+            return;
+        }
+        let Some(shared) = SharedJitCode::of(program) else {
+            return;
+        };
+        self.shared_lambda_hashes = shared.lambda_hashes();
+        self.shared = Some(shared);
+        self.read_published();
+    }
+
+    /// Note the code published since this VM last looked, for
+    /// [`Self::adopt_shared`] to check when its function is called.
+    fn read_published(&mut self) {
+        let Some(shared) = &self.shared else {
+            return;
+        };
+        let published = shared.functions.lock().unwrap_or_else(|e| e.into_inner());
+        if published.len() == self.shared_seen {
+            return;
+        }
+        if self.shared_candidates.is_empty() {
+            self.shared_candidates = vec![Vec::new(); self.compiled_functions.len()];
+        }
+        for (function_id, code) in &published[self.shared_seen..] {
+            let index = *function_id as usize;
+            let own = self
+                .compiled_functions
+                .get(index)
+                .is_some_and(|entries| entries.iter().any(|entry| Arc::ptr_eq(entry, code)));
+            if !own && let Some(candidates) = self.shared_candidates.get_mut(index) {
+                candidates.push(Arc::clone(code));
+            }
+        }
+        self.shared_seen = published.len();
+    }
+
+    /// Whether other VMs published code for `function_id` that this one
+    /// hasn't looked at.
+    #[inline]
+    pub fn has_shared_candidates(&self, function_id: FunctionId) -> bool {
+        self.shared_candidates
+            .get(function_id as usize)
+            .is_some_and(|candidates| !candidates.is_empty())
+    }
+
+    /// Take the code other VMs published for `function_id`, where what it
+    /// was compiled on holds in this VM too.
+    pub fn adopt_shared(&mut self, function_id: FunctionId, names: CallNames<'_>) {
+        let Some(candidates) = self
+            .shared_candidates
+            .get_mut(function_id as usize)
+            .map(mem::take)
+        else {
+            return;
+        };
+        let names = names.fusing(self.config.hof_fusion_enabled());
+        let Some(entries) = self.compiled_functions.get_mut(function_id as usize) else {
+            return;
+        };
+        for code in candidates {
+            if entries.len() >= MAX_COMPILED_SIGS_PER_FUNCTION {
+                break;
+            }
+            if code.share.hold_for(&names)
+                && !entries
+                    .iter()
+                    .any(|entry| entry.signature == code.signature)
+            {
+                entries.push(code);
+                self.shared_taken += 1;
+                GLOBAL_JIT_SHARED_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// The shared code for a lambda, if this VM can run it.
+    fn shared_lambda(
+        &self,
+        key: &LambdaJitKey,
+        names: &CallNames<'_>,
+    ) -> Option<Arc<JitCompiledFunction>> {
+        self.shared.as_ref()?.lambda(key, names)
     }
 
     /// Count a call of `lambda`, and say whether to look for compiled code
@@ -1185,7 +1424,12 @@ impl JitRuntimeState {
             return Some(0);
         }
         count.calls = count.calls.saturating_add(1);
-        if count.calls < threshold {
+        // A lambda another VM compiled is looked up on its first call.
+        if count.calls < threshold
+            && !self
+                .shared_lambda_hashes
+                .contains(&lambda_structural_hash(lambda))
+        {
             GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
             return None;
         }
@@ -1267,7 +1511,7 @@ impl JitRuntimeState {
         &mut self,
         function_id: FunctionId,
         args: &[Val],
-    ) -> Option<Rc<JitCompiledFunction>> {
+    ) -> Option<Arc<JitCompiledFunction>> {
         let entries = self.compiled_functions.get(function_id as usize)?;
         if entries.is_empty() {
             return None;
@@ -1275,7 +1519,7 @@ impl JitRuntimeState {
         if let Some(entry) = entries
             .iter()
             .find(|entry| entry.matches_args(args))
-            .map(Rc::clone)
+            .map(Arc::clone)
         {
             return Some(entry);
         }
@@ -1332,6 +1576,18 @@ impl JitRuntimeState {
     ) -> Result<(), String> {
         let start = std::time::Instant::now();
         let signature = TypeSig::from_args(args);
+        // Another VM may have compiled it since this one last looked.
+        self.read_published();
+        if self.has_shared_candidates(function_id) {
+            self.adopt_shared(function_id, names);
+            if self
+                .compiled_functions
+                .get(function_id as usize)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.matches_args(args)))
+            {
+                return Ok(());
+            }
+        }
         tracing::trace!(
             "[JIT-BC] '{}' (id={}) sig={:?} body:\n{}",
             function_info.name,
@@ -1364,8 +1620,12 @@ impl JitRuntimeState {
             }
         };
 
+        let compiled = Arc::new(compiled);
+        if let Some(shared) = &self.shared {
+            shared.publish_function(function_id, &compiled);
+        }
         if let Some(entries) = self.compiled_functions.get_mut(function_id as usize) {
-            entries.push(Rc::new(compiled));
+            entries.push(compiled);
         }
         GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -1423,11 +1683,11 @@ impl JitRuntimeState {
         let signature = TypeSig::from_args(&effective_args);
         let key = LambdaJitKey::new(lambda, args, captures);
 
-        // Clone the Rc out so no borrow into `compiled_lambdas` is held while
+        // Clone the Arc out so no borrow into `compiled_lambdas` is held while
         // the compiled code runs: the JIT'd lambda can re-enter the VM, which
         // may compile and insert new lambdas, rehashing the map and moving its
         // entries out from under a held reference.
-        if let Some(compiled) = self.compiled_lambdas.get(&key).map(Rc::clone) {
+        if let Some(compiled) = self.compiled_lambdas.get(&key).map(Arc::clone) {
             if compiled.matches_args(&effective_args) {
                 self.note_lambda_outcome(lambda, true);
                 return Ok(Some((compiled, effective_args)));
@@ -1436,6 +1696,16 @@ impl JitRuntimeState {
             if let Some(profile) = self.lambda_profiles.get_mut(&key) {
                 profile.guard_failures = profile.guard_failures.saturating_add(1);
             }
+        }
+
+        // Code another VM running this program compiled for the lambda,
+        // looked for when this VM first meets it.
+        let names = names.fusing(self.config.hof_fusion_enabled());
+        if !self.lambda_profiles.contains_key(&key)
+            && let Some(compiled) = self.take_shared_lambda(&key, &names, &effective_args)
+        {
+            self.note_lambda_outcome(lambda, true);
+            return Ok(Some((compiled, effective_args)));
         }
 
         let profile = self.lambda_profiles.entry(key.clone()).or_default();
@@ -1456,6 +1726,12 @@ impl JitRuntimeState {
             return Ok(None);
         }
 
+        // Or compiled it while this VM was counting its calls.
+        if let Some(compiled) = self.take_shared_lambda(&key, &names, &effective_args) {
+            self.note_lambda_outcome(lambda, true);
+            return Ok(Some((compiled, effective_args)));
+        }
+
         let (function_info, synthetic_program) =
             synthetic_function_info_from_lambda(program, lambda, captures, effective_args.len())?;
         let start = std::time::Instant::now();
@@ -1464,7 +1740,7 @@ impl JitRuntimeState {
             u32::MAX,
             &function_info,
             &signature,
-            names.fusing(self.config.hof_fusion_enabled()),
+            names,
         ) {
             Ok(compiled) => {
                 GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1473,11 +1749,14 @@ impl JitRuntimeState {
                         .cumulative_compile_time_ms
                         .saturating_add(start.elapsed().as_millis() as u64);
                 }
-                // Keep our own Rc for the call; the map's clone can move
+                // Keep our own Arc for the call; the map's clone can move
                 // freely if reentrant compilation rehashes the map.
-                let compiled = Rc::new(compiled);
+                let compiled = Arc::new(compiled);
+                if let Some(shared) = &self.shared {
+                    shared.publish_lambda(&key, &compiled);
+                }
                 self.compiled_lambdas
-                    .insert(key.clone(), Rc::clone(&compiled));
+                    .insert(key.clone(), Arc::clone(&compiled));
                 self.note_lambda_outcome(lambda, true);
                 Ok(Some((compiled, effective_args)))
             }
@@ -1500,6 +1779,25 @@ impl JitRuntimeState {
         }
     }
 
+    /// The shared code for the lambda `key` that takes `effective_args`,
+    /// now this VM's too.
+    fn take_shared_lambda(
+        &mut self,
+        key: &LambdaJitKey,
+        names: &CallNames<'_>,
+        effective_args: &[Val],
+    ) -> Option<Arc<JitCompiledFunction>> {
+        let compiled = self.shared_lambda(key, names)?;
+        if !compiled.matches_args(effective_args) {
+            return None;
+        }
+        self.compiled_lambdas
+            .insert(key.clone(), Arc::clone(&compiled));
+        self.shared_taken += 1;
+        GLOBAL_JIT_SHARED_COUNT.fetch_add(1, Ordering::Relaxed);
+        Some(compiled)
+    }
+
     /// After a compile failed with `err`: code that couldn't be finalized
     /// means none can be, so this VM compiles nothing more.
     fn note_compile_failure(&mut self, err: &str) {
@@ -1517,7 +1815,7 @@ impl JitRuntimeState {
 }
 
 /// A compiled lambda and the arguments it takes: its captures, then the call's.
-pub type CompiledLambdaCall = (Rc<JitCompiledFunction>, Vec<Val>);
+pub type CompiledLambdaCall = (Arc<JitCompiledFunction>, Vec<Val>);
 
 /// Run a compiled lambda, counting the call in the JIT stats.
 pub fn call_compiled_lambda(
@@ -1761,6 +2059,8 @@ fn unsupported_jit_bailout(reason: &'static str, message: impl Into<String>) -> 
 
 pub struct JitStats {
     pub compilations: usize,
+    /// Compiled code taken from another VM running the same program.
+    pub shared: usize,
     pub bailouts: usize,
     pub lambda_interpreter_calls: usize,
     pub lambda_jit_calls: usize,
@@ -1770,6 +2070,7 @@ pub struct JitStats {
 pub fn global_jit_stats() -> JitStats {
     JitStats {
         compilations: GLOBAL_JIT_COMPILE_COUNT.load(Ordering::Relaxed),
+        shared: GLOBAL_JIT_SHARED_COUNT.load(Ordering::Relaxed),
         bailouts: GLOBAL_JIT_BAILOUT_COUNT.load(Ordering::Relaxed),
         lambda_interpreter_calls: GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT.load(Ordering::Relaxed),
         lambda_jit_calls: GLOBAL_LAMBDA_JIT_CALL_COUNT.load(Ordering::Relaxed),
@@ -1786,8 +2087,9 @@ pub fn log_jit_stats_summary() {
         || stats.lambda_jit_fallbacks > 0
     {
         tracing::debug!(
-            "[JIT] stats: {} compiled, {} bailed out, lambda: {} jitted, {} interpreted, {} fallback probes",
+            "[JIT] stats: {} compiled, {} shared, {} bailed out, lambda: {} jitted, {} interpreted, {} fallback probes",
             stats.compilations,
+            stats.shared,
             stats.bailouts,
             stats.lambda_jit_calls,
             stats.lambda_interpreter_calls,
@@ -1996,6 +2298,7 @@ fn compile_supported_function(
     signature: &TypeSig,
     names: CallNames<'_>,
 ) -> Result<JitCompiledFunction, String> {
+    COMPILE_UNBOUND_NAMES.with(|unbound| unbound.borrow_mut().clear());
     let scope = names.scope_of(program, function_id, function_info);
     if function_info.instructions.len() > MAX_JIT_FUNCTION_INSTRUCTIONS {
         return Err(format!(
@@ -2344,17 +2647,30 @@ fn compile_with_return_kind(
     let flow_traces = COMPILE_FLOW_TRACES.with(|traces| mem::take(&mut *traces.borrow_mut()));
     let fused_plans = COMPILE_FUSED_PLANS.with(|plans| mem::take(&mut *plans.borrow_mut()));
     let baked_vals = COMPILE_BAKED_VALS.with(|vals| mem::take(&mut *vals.borrow_mut()));
+    // Copied, not taken: a compile can come through here more than once,
+    // and the names found before the first attempt count for each.
+    let unbound = COMPILE_UNBOUND_NAMES.with(|unbound| unbound.borrow().clone());
+    let entry = module.get_finalized_function(func_id) as usize;
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
         needs_vm_scope,
-        module,
+        _module: module,
+        entry,
+        share: ShareFacts {
+            traced: scope.names.traced,
+            fusing: scope.names.fusing,
+            param_arrows: scope.names.param_arrows.into(),
+            unbound: unbound
+                .into_iter()
+                .map(|(namespace, name)| (namespace.into(), name.into()))
+                .collect(),
+        },
         _dec_constants: dec_constants,
         traces_flows: !flow_traces.is_empty(),
         _flow_traces: flow_traces,
         _fused_plans: fused_plans,
         _baked_vals: baked_vals,
-        func_id,
         arg_layout,
         result_word_len,
     })
@@ -3414,6 +3730,15 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
     }
 
     let error_capture = vm.error_capture_active;
+    // A core function, by the interpreter's direct path for these
+    // arguments when it has one.
+    if let Some(result) = vm.core_call_from_compiled(function_id as u32, &args) {
+        vm.pending_proven = None;
+        return match result {
+            Ok(result) => new_owned_val(result),
+            Err(err) => vm_error_to_owned_val(err, error_capture),
+        };
+    }
     // Same runtime overload dispatch and implicit coercion as the
     // interpreter's CallUserFunction, with the arguments prepared for the
     // overload called.
@@ -12608,7 +12933,8 @@ impl CallScope<'_> {
     /// variables now, or as the program declares them (aliases and imports
     /// included).
     fn namespace_binds(&self, program: &BytecodeProgram, name: &str) -> bool {
-        self.names
+        let binds = self
+            .names
             .namespace_variables
             .and_then(|namespaces| namespaces.get(self.namespace))
             .is_some_and(|variables| variables.contains_key(name))
@@ -12616,7 +12942,21 @@ impl CallScope<'_> {
                 .namespaces
                 .namespaces
                 .get(self.namespace)
-                .is_some_and(|namespace| namespace.variables.contains_key(name))
+                .is_some_and(|namespace| namespace.variables.contains_key(name));
+        // The code being compiled is good for another VM running the
+        // program only if the name is unbound there too.
+        if !binds {
+            COMPILE_UNBOUND_NAMES.with(|unbound| {
+                let mut unbound = unbound.borrow_mut();
+                if !unbound
+                    .iter()
+                    .any(|(namespace, other)| namespace == self.namespace && other == name)
+                {
+                    unbound.push((self.namespace.to_string(), name.to_string()));
+                }
+            });
+        }
+        binds
     }
 }
 

@@ -154,6 +154,7 @@ pub(crate) async fn run_build(
         jit_mode: None,
         jit_threshold: None,
         jit_hof_fusion: None,
+        jit_share: None,
         db_uri: None,
         db_migration_uri: None,
         profile: None,

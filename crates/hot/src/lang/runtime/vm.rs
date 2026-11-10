@@ -920,6 +920,9 @@ pub struct VirtualMachine {
     sorted_key_indices: Option<Vec<usize>>,
     /// JIT configuration, code-memory status, and per-function profiling state.
     jit: JitRuntimeState,
+    /// For each function compiled code has called: its short name when it
+    /// is a core function with a direct path (see `core_fast_name`).
+    core_fast_names: AHashMap<FunctionId, Option<&'static str>>,
     /// Per-function cache of detected HOF fusion pipelines. The plans depend
     /// only on the function's (immutable) instruction list and the program, so
     /// they are computed once on first invocation instead of rescanning the
@@ -1124,7 +1127,8 @@ impl VirtualMachine {
         tracing::debug!("VM: Initializing with thread_count = {}", thread_count);
         tracing::debug!("VM: Isolation mode enabled = {}", isolation_enabled);
 
-        let jit = JitRuntimeState::new(program.functions.len(), &conf);
+        let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
+        jit.attach_shared(&program);
         let function_count = program.functions.len();
 
         let mut vm = Self {
@@ -1184,6 +1188,7 @@ impl VirtualMachine {
             overload_choice_cache: AHashMap::new(),
             sorted_key_indices: None,
             jit,
+            core_fast_names: AHashMap::new(),
             hof_plan_cache: AHashMap::new(),
             native_core_shadows: std::cell::OnceCell::new(),
             meta_calls_read: Arc::new(AtomicBool::new(false)),
@@ -7121,248 +7126,19 @@ impl VirtualMachine {
             return result;
         }
 
-        // Fast paths — bypass unified_function_lookup overhead.
-        // Tier 1: #[inline(always)] type-specialized helpers (zero call overhead)
-        // Tier 2: Full library functions for remaining type combos (single source of truth)
-        // Each library file owns both its fast-path specializations and general impls.
-        // Only where the name reaches hot-std's function: a binding in this
-        // namespace or a project core function of the same name is called
-        // through the lookup, as compiled code calls it.
-        'native: {
-            if self
-                .native_core_shadows_ref()
-                .shadows(&self.current_namespace, function_name)
-            {
-                break 'native;
+        // The direct paths for core functions. Only where the name reaches
+        // hot-std's function: a binding in this namespace or a project core
+        // function of the same name is called through the lookup, as
+        // compiled code calls it.
+        if !self
+            .native_core_shadows_ref()
+            .shadows(&self.current_namespace, function_name)
+            && let Some(result) = self.core_fast_path(function_name, args, true)
+        {
+            if !is_dispatch_function {
+                self.decrement_function_call_depth(function_name);
             }
-            use crate::lang::hot::r#type::HotResult as HR;
-            use crate::lang::hot::{bool, cmp, coll, math};
-
-            // Helper: return a fast-path result, handling call depth
-            macro_rules! fast_return {
-                ($val:expr) => {{
-                    if !is_dispatch_function {
-                        self.decrement_function_call_depth(function_name);
-                    }
-                    return Ok($val);
-                }};
-            }
-            // A VM built without hot-std (as some tests build one) has
-            // only the natives.
-            let has_std = !self.core_functions.is_empty();
-            // These paths take the argument types they name. Any other
-            // (`break 'native`) goes on to hot-std's function, whose
-            // parameter check answers for what it doesn't accept
-            // (`ConstraintError.Violation`), as compiled code reports it.
-            // So does a native that fails: it only read its arguments, so
-            // asking again changes nothing.
-            macro_rules! fast_return_hr {
-                ($hr:expr) => {
-                    match $hr {
-                        HR::Ok(val) => fast_return!(val),
-                        HR::Err(_) if has_std => break 'native,
-                        HR::Err(err_val) => {
-                            if !is_dispatch_function {
-                                self.decrement_function_call_depth(function_name);
-                            }
-                            return self.dispatch_hotlib_err(err_val);
-                        }
-                    }
-                };
-            }
-            // For a native that runs user code: its failure is an Err
-            // value, as through `call-lib`, and it isn't run again.
-            macro_rules! fast_return_once {
-                ($hr:expr) => {
-                    match $hr {
-                        HR::Ok(val) => fast_return!(val),
-                        HR::Err(err_val) => {
-                            if !is_dispatch_function {
-                                self.decrement_function_call_depth(function_name);
-                            }
-                            return self.dispatch_hotlib_err(err_val);
-                        }
-                    }
-                };
-            }
-
-            if args.len() >= 3
-                && let Some(hr) = native_numeric_call(function_name, args)
-            {
-                fast_return_hr!(hr);
-            }
-
-            match args.len() {
-                // ── 1-arg fast paths ──────────────────────────────────────
-                1 => match function_name {
-                    "not" => match &args[0] {
-                        Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
-                        _ => fast_return_once!(bool::not(self, args)),
-                    },
-                    "is-zero" => match &args[0] {
-                        Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
-                        _ if has_std => break 'native,
-                        _ => fast_return_once!(math::is_zero(args)),
-                    },
-                    "is-empty" => match crate::val::as_fields(&args[0]) {
-                        Val::Vec(v) => fast_return!(coll::fast_is_empty_vec(v)),
-                        Val::Str(s) => fast_return!(coll::fast_is_empty_str(s)),
-                        Val::Map(m) => fast_return!(coll::fast_is_empty_map(m)),
-                        Val::Null => fast_return!(Val::Bool(true)),
-                        _ if has_std => break 'native,
-                        _ => fast_return_once!(coll::is_empty(args)),
-                    },
-                    "length" => match crate::val::as_fields(&args[0]) {
-                        Val::Vec(v) => fast_return!(coll::fast_length_vec(v)),
-                        Val::Str(s) => fast_return!(coll::fast_length_str(s)),
-                        Val::Map(m) => fast_return!(coll::fast_length_map(m)),
-                        _ if has_std => break 'native,
-                        _ => fast_return_once!(coll::length(args)),
-                    },
-                    "first" => match &args[0] {
-                        Val::Vec(v) => fast_return!(coll::fast_first_vec(v)),
-                        _ if has_std => break 'native,
-                        _ => fast_return_once!(coll::first(args)),
-                    },
-                    "rest" => match &args[0] {
-                        Val::Vec(v) => fast_return!(coll::fast_rest_vec(v)),
-                        _ if has_std => break 'native,
-                        _ => fast_return_once!(coll::rest(args)),
-                    },
-                    "range" => match &args[0] {
-                        Val::Int(end) => {
-                            // Gate the fast path on the configured collection
-                            // size so user code can't allocate a multi-GB Vec
-                            // by calling `range(1_000_000_000)`.
-                            if let Some(n) =
-                                crate::lang::runtime::limits::range_element_count(0, *end, 1)
-                                && let Err(e) =
-                                    crate::lang::runtime::limits::check_collection_size("range", n)
-                            {
-                                fast_return_hr!(HR::Err(e));
-                            }
-                            match coll::fast_range_1_int(*end) {
-                                Some(val) => fast_return!(val),
-                                None => fast_return_hr!(coll::range(args)),
-                            }
-                        }
-                        _ => fast_return_hr!(coll::range(args)),
-                    },
-                    _ => {}
-                },
-
-                // ── 2-arg fast paths ──────────────────────────────────────
-                2 => {
-                    // Tier 1: Int+Int arithmetic and comparison
-                    if let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1]) {
-                        let result = match function_name {
-                            "add" => Some(math::fast_add_int(*a, *b)),
-                            "sub" => Some(math::fast_sub_int(*a, *b)),
-                            "mul" => Some(math::fast_mul_int(*a, *b)),
-                            "mod" => math::fast_mod_int(*a, *b),
-                            "div" => math::fast_div_int(*a, *b),
-                            "pow" => math::fast_pow_int(*a, *b),
-                            "min" => Some(Val::Int(*a.min(b))),
-                            "max" => Some(Val::Int(*a.max(b))),
-                            "lt" => Some(cmp::fast_lt_int(*a, *b)),
-                            "gt" => Some(cmp::fast_gt_int(*a, *b)),
-                            "lte" => Some(cmp::fast_lte_int(*a, *b)),
-                            "gte" => Some(cmp::fast_gte_int(*a, *b)),
-                            "eq" => Some(cmp::fast_eq_int(*a, *b)),
-                            "ne" => Some(cmp::fast_ne_int(*a, *b)),
-                            _ => None,
-                        };
-                        if let Some(result) = result {
-                            fast_return!(result);
-                        }
-                    }
-
-                    // Tier 1: collection operations with common type combos
-                    match function_name {
-                        "get" => match (crate::val::as_fields(&args[0]), &args[1]) {
-                            (Val::Vec(v), Val::Int(i)) => {
-                                fast_return!(coll::fast_get_vec_int(v, *i))
-                            }
-                            (Val::Map(m), key) => fast_return!(coll::fast_get_map(m, key)),
-                            _ if has_std => break 'native,
-                            _ => fast_return_once!(coll::get(args)),
-                        },
-                        "concat" => match (&args[0], &args[1]) {
-                            (Val::Str(a), Val::Str(b)) => fast_return!(coll::fast_concat_str(a, b)),
-                            (Val::Vec(a), Val::Vec(b)) => fast_return!(coll::fast_concat_vec(a, b)),
-                            _ if has_std => break 'native,
-                            _ => fast_return_once!(coll::concat(args)),
-                        },
-                        "range" => match (&args[0], &args[1]) {
-                            (Val::Int(start), Val::Int(end)) => {
-                                if let Some(n) = crate::lang::runtime::limits::range_element_count(
-                                    *start, *end, 1,
-                                ) && let Err(e) =
-                                    crate::lang::runtime::limits::check_collection_size("range", n)
-                                {
-                                    fast_return_hr!(HR::Err(e));
-                                }
-                                match coll::fast_range_2_int(*start, *end) {
-                                    Some(val) => fast_return!(val),
-                                    None => fast_return_hr!(coll::range(args)),
-                                }
-                            }
-                            _ => fast_return_hr!(coll::range(args)),
-                        },
-                        _ => {}
-                    }
-
-                    // Tier 2: math/cmp for non-Int type combos (Dec, mixed, etc.)
-                    let tier2 = match function_name {
-                        "add" => Some(math::add(args)),
-                        "sub" => Some(math::sub(args)),
-                        "mul" => Some(math::mul(args)),
-                        "div" => Some(math::div(args)),
-                        "mod" => Some(math::modulo(args)),
-                        "pow" => Some(math::pow(args)),
-                        // Their overloads check what isn't a number.
-                        "min" | "max" => native_numeric_call(function_name, args),
-                        "call" | "apply" => self.direct_call(function_name, args),
-                        "eq" => Some(cmp::eq(args)),
-                        "ne" => Some(cmp::ne(args)),
-                        "lt" => Some(cmp::lt(args)),
-                        "gt" => Some(cmp::gt(args)),
-                        "lte" => Some(cmp::lte(args)),
-                        "gte" => Some(cmp::gte(args)),
-                        _ => None,
-                    };
-                    if let Some(hr) = tier2 {
-                        if matches!(function_name, "call" | "apply") {
-                            fast_return_once!(hr);
-                        }
-                        fast_return_hr!(hr);
-                    }
-                }
-
-                // ── 3-arg fast paths ──────────────────────────────────────
-                3 => match function_name {
-                    "range" => match (&args[0], &args[1], &args[2]) {
-                        (Val::Int(start), Val::Int(end), Val::Int(step)) => {
-                            if let Some(n) = crate::lang::runtime::limits::range_element_count(
-                                *start, *end, *step,
-                            ) && let Err(e) =
-                                crate::lang::runtime::limits::check_collection_size("range", n)
-                            {
-                                fast_return_hr!(HR::Err(e));
-                            }
-                            match coll::fast_range_3_int(*start, *end, *step) {
-                                Some(val) => fast_return!(val),
-                                None => fast_return_hr!(coll::range(args)),
-                            }
-                        }
-                        _ => fast_return_hr!(coll::range(args)),
-                    },
-                    "get" => fast_return_hr!(coll::get(args)),
-                    _ => {}
-                },
-
-                _ => {}
-            }
+            return result;
         }
 
         // Use unified function lookup for all other functions
@@ -7371,6 +7147,283 @@ impl VirtualMachine {
             self.decrement_function_call_depth(function_name);
         }
         result
+    }
+
+    /// The direct paths for hot-std's core functions, on the argument types
+    /// each names: no lookup, no frame. `None` when there is none for this
+    /// call, which then goes through hot-std's function.
+    ///
+    /// The caller has established that `function_name` reaches hot-std's
+    /// function, not a binding or a project function of the same name.
+    /// `calls` is whether `call` and `apply` are among the paths: compiled
+    /// code lowers those itself.
+    ///
+    /// Tier 1: type-specialized helpers. Tier 2: the library function for
+    /// the remaining number combinations. Each library file owns both.
+    pub(crate) fn core_fast_path(
+        &mut self,
+        function_name: &str,
+        args: &[Val],
+        calls: bool,
+    ) -> Option<VmResult<Val>> {
+        use crate::lang::hot::r#type::HotResult as HR;
+        use crate::lang::hot::{bool, cmp, coll, math};
+
+        macro_rules! fast_return {
+            ($val:expr) => {{
+                return Some(Ok($val));
+            }};
+        }
+        // A VM built without hot-std (as some tests build one) has
+        // only the natives.
+        let has_std = !self.core_functions.is_empty();
+        // These paths take the argument types they name. Any other
+        // (`return None`) goes on to hot-std's function, whose
+        // parameter check answers for what it doesn't accept
+        // (`ConstraintError.Violation`). So does a native that fails:
+        // it only read its arguments, so asking again changes nothing.
+        macro_rules! fast_return_hr {
+            ($hr:expr) => {
+                match $hr {
+                    HR::Ok(val) => fast_return!(val),
+                    HR::Err(_) if has_std => return None,
+                    HR::Err(err_val) => return Some(self.dispatch_hotlib_err(err_val)),
+                }
+            };
+        }
+        // For a native that runs user code: its failure is an Err
+        // value, as through `call-lib`, and it isn't run again.
+        macro_rules! fast_return_once {
+            ($hr:expr) => {
+                match $hr {
+                    HR::Ok(val) => fast_return!(val),
+                    HR::Err(err_val) => return Some(self.dispatch_hotlib_err(err_val)),
+                }
+            };
+        }
+
+        if args.len() >= 3
+            && let Some(hr) = native_numeric_call(function_name, args)
+        {
+            fast_return_hr!(hr);
+        }
+
+        match args.len() {
+            // ── 1-arg fast paths ──────────────────────────────────────
+            1 => match function_name {
+                "not" => match &args[0] {
+                    Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
+                    _ => fast_return_once!(bool::not(self, args)),
+                },
+                "is-zero" => match &args[0] {
+                    Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
+                    _ if has_std => return None,
+                    _ => fast_return_once!(math::is_zero(args)),
+                },
+                "is-empty" => match crate::val::as_fields(&args[0]) {
+                    Val::Vec(v) => fast_return!(coll::fast_is_empty_vec(v)),
+                    Val::Str(s) => fast_return!(coll::fast_is_empty_str(s)),
+                    Val::Map(m) => fast_return!(coll::fast_is_empty_map(m)),
+                    Val::Null => fast_return!(Val::Bool(true)),
+                    _ if has_std => return None,
+                    _ => fast_return_once!(coll::is_empty(args)),
+                },
+                "length" => match crate::val::as_fields(&args[0]) {
+                    Val::Vec(v) => fast_return!(coll::fast_length_vec(v)),
+                    Val::Str(s) => fast_return!(coll::fast_length_str(s)),
+                    Val::Map(m) => fast_return!(coll::fast_length_map(m)),
+                    _ if has_std => return None,
+                    _ => fast_return_once!(coll::length(args)),
+                },
+                "first" => match &args[0] {
+                    Val::Vec(v) => fast_return!(coll::fast_first_vec(v)),
+                    _ if has_std => return None,
+                    _ => fast_return_once!(coll::first(args)),
+                },
+                "rest" => match &args[0] {
+                    Val::Vec(v) => fast_return!(coll::fast_rest_vec(v)),
+                    _ if has_std => return None,
+                    _ => fast_return_once!(coll::rest(args)),
+                },
+                "range" => match &args[0] {
+                    Val::Int(end) => {
+                        // Gate the fast path on the configured collection
+                        // size so user code can't allocate a multi-GB Vec
+                        // by calling `range(1_000_000_000)`.
+                        if let Some(n) =
+                            crate::lang::runtime::limits::range_element_count(0, *end, 1)
+                            && let Err(e) =
+                                crate::lang::runtime::limits::check_collection_size("range", n)
+                        {
+                            fast_return_hr!(HR::Err(e));
+                        }
+                        match coll::fast_range_1_int(*end) {
+                            Some(val) => fast_return!(val),
+                            None => fast_return_hr!(coll::range(args)),
+                        }
+                    }
+                    _ => fast_return_hr!(coll::range(args)),
+                },
+                _ => {}
+            },
+
+            // ── 2-arg fast paths ──────────────────────────────────────
+            2 => {
+                // Tier 1: Int+Int arithmetic and comparison
+                if let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1]) {
+                    let result = match function_name {
+                        "add" => Some(math::fast_add_int(*a, *b)),
+                        "sub" => Some(math::fast_sub_int(*a, *b)),
+                        "mul" => Some(math::fast_mul_int(*a, *b)),
+                        "mod" => math::fast_mod_int(*a, *b),
+                        "div" => math::fast_div_int(*a, *b),
+                        "pow" => math::fast_pow_int(*a, *b),
+                        "min" => Some(Val::Int(*a.min(b))),
+                        "max" => Some(Val::Int(*a.max(b))),
+                        "lt" => Some(cmp::fast_lt_int(*a, *b)),
+                        "gt" => Some(cmp::fast_gt_int(*a, *b)),
+                        "lte" => Some(cmp::fast_lte_int(*a, *b)),
+                        "gte" => Some(cmp::fast_gte_int(*a, *b)),
+                        "eq" => Some(cmp::fast_eq_int(*a, *b)),
+                        "ne" => Some(cmp::fast_ne_int(*a, *b)),
+                        _ => None,
+                    };
+                    if let Some(result) = result {
+                        fast_return!(result);
+                    }
+                }
+
+                // Tier 1: collection operations with common type combos
+                match function_name {
+                    "get" => match (crate::val::as_fields(&args[0]), &args[1]) {
+                        (Val::Vec(v), Val::Int(i)) => {
+                            fast_return!(coll::fast_get_vec_int(v, *i))
+                        }
+                        (Val::Map(m), key) => fast_return!(coll::fast_get_map(m, key)),
+                        _ if has_std => return None,
+                        _ => fast_return_once!(coll::get(args)),
+                    },
+                    "concat" => match (&args[0], &args[1]) {
+                        (Val::Str(a), Val::Str(b)) => fast_return!(coll::fast_concat_str(a, b)),
+                        (Val::Vec(a), Val::Vec(b)) => fast_return!(coll::fast_concat_vec(a, b)),
+                        _ if has_std => return None,
+                        _ => fast_return_once!(coll::concat(args)),
+                    },
+                    "range" => match (&args[0], &args[1]) {
+                        (Val::Int(start), Val::Int(end)) => {
+                            if let Some(n) =
+                                crate::lang::runtime::limits::range_element_count(*start, *end, 1)
+                                && let Err(e) =
+                                    crate::lang::runtime::limits::check_collection_size("range", n)
+                            {
+                                fast_return_hr!(HR::Err(e));
+                            }
+                            match coll::fast_range_2_int(*start, *end) {
+                                Some(val) => fast_return!(val),
+                                None => fast_return_hr!(coll::range(args)),
+                            }
+                        }
+                        _ => fast_return_hr!(coll::range(args)),
+                    },
+                    _ => {}
+                }
+
+                // Tier 2: math/cmp for non-Int type combos (Dec, mixed, etc.)
+                let tier2 = match function_name {
+                    "add" => Some(math::add(args)),
+                    "sub" => Some(math::sub(args)),
+                    "mul" => Some(math::mul(args)),
+                    "div" => Some(math::div(args)),
+                    "mod" => Some(math::modulo(args)),
+                    "pow" => Some(math::pow(args)),
+                    // Their overloads check what isn't a number.
+                    "min" | "max" => native_numeric_call(function_name, args),
+                    "call" | "apply" if calls => self.direct_call(function_name, args),
+                    "eq" => Some(cmp::eq(args)),
+                    "ne" => Some(cmp::ne(args)),
+                    "lt" => Some(cmp::lt(args)),
+                    "gt" => Some(cmp::gt(args)),
+                    "lte" => Some(cmp::lte(args)),
+                    "gte" => Some(cmp::gte(args)),
+                    _ => None,
+                };
+                if let Some(hr) = tier2 {
+                    if matches!(function_name, "call" | "apply") {
+                        fast_return_once!(hr);
+                    }
+                    fast_return_hr!(hr);
+                }
+            }
+
+            // ── 3-arg fast paths ──────────────────────────────────────
+            3 => match function_name {
+                "range" => match (&args[0], &args[1], &args[2]) {
+                    (Val::Int(start), Val::Int(end), Val::Int(step)) => {
+                        if let Some(n) =
+                            crate::lang::runtime::limits::range_element_count(*start, *end, *step)
+                            && let Err(e) =
+                                crate::lang::runtime::limits::check_collection_size("range", n)
+                        {
+                            fast_return_hr!(HR::Err(e));
+                        }
+                        match coll::fast_range_3_int(*start, *end, *step) {
+                            Some(val) => fast_return!(val),
+                            None => fast_return_hr!(coll::range(args)),
+                        }
+                    }
+                    _ => fast_return_hr!(coll::range(args)),
+                },
+                "get" => fast_return_hr!(coll::get(args)),
+                _ => {}
+            },
+
+            _ => {}
+        }
+        None
+    }
+
+    /// The short name of `function_id` when it is hot-std's core function
+    /// and has a direct path (see [`Self::core_fast_path`]).
+    fn core_fast_name(&mut self, function_id: FunctionId) -> Option<&'static str> {
+        const FAST: [&str; 23] = [
+            "not", "is-zero", "is-empty", "length", "first", "rest", "range", "get", "concat",
+            "add", "sub", "mul", "div", "mod", "pow", "min", "max", "eq", "ne", "lt", "gt", "lte",
+            "gte",
+        ];
+        if let Some(known) = self.core_fast_names.get(&function_id) {
+            return *known;
+        }
+        let name = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|function| function.name.as_str());
+        let fast = name.and_then(|name| {
+            let short = name.strip_prefix("::hot::")?.rsplit('/').next()?;
+            let short = FAST.iter().copied().find(|fast| *fast == short)?;
+            // A project's core function of the same name is not hot-std's.
+            (core_function_name(&self.core_functions, short) == Some(name)).then_some(short)
+        });
+        self.core_fast_names.insert(function_id, fast);
+        fast
+    }
+
+    /// A call of `function_id` from compiled code, by a direct path when it
+    /// is a core function with one for these arguments. Without this the
+    /// call ran hot-std's function, whose body calls the native by name:
+    /// several allocations and lookups where the interpreter had none, so
+    /// that `get` on a Map was slower compiled than interpreted.
+    pub(crate) fn core_call_from_compiled(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> Option<VmResult<Val>> {
+        let short = self.core_fast_name(function_id)?;
+        // A Result argument is unwrapped, or halts, on the way in.
+        if args.iter().any(Self::is_result_shaped) {
+            return None;
+        }
+        self.core_fast_path(short, args, false)
     }
 
     /// Execute a function call by name (helper for variable function calls)
@@ -9680,6 +9733,9 @@ impl VirtualMachine {
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
         self.poll_execution_cancelled()
             .map_err(|error| error.to_string())?;
+        if self.jit.has_shared_candidates(function_id) {
+            self.adopt_shared_code(function_id);
+        }
         let Some(compiled) = self.jit.compiled_function(function_id, args) else {
             return Ok(None);
         };
@@ -9704,6 +9760,20 @@ impl VirtualMachine {
             self.end_traced_call(call_id, value);
         }
         result.map(Some)
+    }
+
+    /// Take the code other VMs running this program compiled for
+    /// `function_id`, where it suits this VM (see `JitRuntimeState::adopt_shared`).
+    #[cold]
+    fn adopt_shared_code(&mut self, function_id: u32) {
+        let shadows = self.native_core_shadows();
+        let param_arrows = self.param_arrows(function_id);
+        self.jit.adopt_shared(
+            function_id,
+            CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
+                .traced(self.traces_calls())
+                .param_arrows(&param_arrows),
+        );
     }
 
     /// Run `compiled`, the code for calling `function_id` with `args`.

@@ -928,6 +928,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 jit_mode: None,
                 jit_threshold: None,
                 jit_hof_fusion: None,
+                jit_share: None,
                 db_uri: None,
                 db_migration_uri: None,
                 log_level: None,
@@ -1001,6 +1002,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 jit_mode: None,
                 jit_threshold: None,
                 jit_hof_fusion: None,
+                jit_share: None,
                 db_uri: None,
                 db_migration_uri: None,
                 log_level: None,
@@ -1048,6 +1050,9 @@ pub(crate) fn apply_configuration_options(
     }
     if let Some(hof_fusion) = global.jit_hof_fusion {
         conf = conf.set_bool("jit.hof.fusion", Some(hof_fusion), true);
+    }
+    if let Some(share) = global.jit_share {
+        conf = conf.set_bool("jit.share", Some(share), true);
     }
     if let Some(ref db_uri) = global.db_uri {
         conf = conf.set_str("db.uri", Some(db_uri.clone()), "");
