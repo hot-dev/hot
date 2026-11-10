@@ -248,11 +248,28 @@ impl Index {
     pub fn is_import(&self, def: &Def<'_>) -> bool {
         self.import_target(def).is_some()
     }
+
+    /// What the hidden type an inline `where` declares (`$Where-…`, which
+    /// `get` doesn't find) is a refinement of.
+    pub fn refined_type(&self, ns: &str, name: &str) -> Option<String> {
+        let namespace = self.namespace(ns)?;
+        namespace
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::TypeDef(type_def) if var.sym.name() == name => {
+                    type_def.type_alias.as_ref().map(ToString::to_string)
+                }
+                _ => None,
+            })
+    }
 }
 
 /// The name-resolution facts of one document text, computed once.
 pub struct DocContext {
     pub syntax: Syntax,
+    pub text: String,
     decls: Vec<(usize, String)>,
     aliases: Vec<(String, String, String)>,
     imports: Vec<(String, String, RefPath)>,
@@ -268,6 +285,7 @@ impl DocContext {
         let locals = syntax.locals(text);
         Self {
             syntax,
+            text: text.to_string(),
             decls,
             aliases,
             imports,
@@ -316,13 +334,19 @@ impl<'a> Scope<'a> {
             .filter(|(import_ns, _, _)| *import_ns == ns)
             .map(|(_, name, target)| (name.clone(), target.clone()))
             .collect();
+        // A `where` predicate runs at namespace scope: of the locals around
+        // it, it sees only its own (a lambda predicate's parameter).
+        let clause = doc.syntax.where_clause_at(offset);
         let locals = doc
             .locals
             .iter()
             .filter(|l| {
                 // On its own declaration, or where it is in scope.
                 (l.start <= offset && offset <= l.end)
-                    || (l.scope.0 <= offset && offset <= l.scope.1 && l.visible_from <= offset)
+                    || (l.scope.0 <= offset
+                        && offset <= l.scope.1
+                        && l.visible_from <= offset
+                        && clause.is_none_or(|(start, _)| l.start >= start))
             })
             .cloned()
             .collect();

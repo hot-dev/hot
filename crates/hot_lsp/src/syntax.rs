@@ -84,10 +84,45 @@ pub struct Local {
 pub enum LocalKind {
     /// A function or lambda parameter, with its type annotation.
     Param(Option<String>),
-    /// A `name value` binding in a body, with the token index of its value.
-    Binding(usize),
-    /// A match-arm payload binding (`Ok(v) => ...`).
+    /// A `name value` binding in a body, with the token index of its value,
+    /// and its annotation when it has one (`name: Int value where p(%)`).
+    Binding(usize, Option<String>),
+    /// A match-arm payload binding (`Result.Ok (v) => ...`).
     ArmBinding,
+}
+
+/// What a key belongs to (see [`Key`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyOwner {
+    /// A constructor call: `Point(x: 1)`, `Point({x: 1})`, `Shape.Circle(r: 1)`.
+    Call(RefPath),
+    /// A field declared in `Name type { key: T }`.
+    TypeDecl(String),
+    /// A key of a record literal that no type is named for.
+    Record,
+}
+
+/// A name written as a key, not as a reference: a named argument's label, a
+/// record key, a field declaration. (A parameter and a typed binding are
+/// also written `name:`. Those declare locals.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Key {
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
+    pub owner: KeyOwner,
+}
+
+/// What `%` stands for in a `where` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhereSubject {
+    /// A value of the type as annotated: `x: Int where p(%)`.
+    Type(String),
+    /// A value of the type being declared: `Range type { ... } where p(%)`.
+    Decl(String),
+    /// The arguments of a precondition, by parameter name, with each one's
+    /// annotation: `fn (a: Int, b: Int) where lte(%.a, %.b)`.
+    Args(Vec<(String, Option<String>)>),
 }
 
 /// The call the cursor is in, for signature help.
@@ -96,6 +131,10 @@ pub struct CallSite {
     pub callee: RefPath,
     /// 0-based index of the argument the cursor is in.
     pub active_parameter: u32,
+    /// The labels of the named arguments before the cursor's.
+    pub labels: Vec<String>,
+    /// The label of the argument the cursor is in, when it has one.
+    pub active_label: Option<String>,
 }
 
 /// What the cursor is completing.
@@ -114,6 +153,15 @@ pub enum CompletionContext {
         present: Vec<String>,
         partial: String,
     },
+    /// Where an argument starts in `callee(`: a field label when the callee
+    /// is a record type (`Point(x: 1, |`), and any name otherwise.
+    CallArgs {
+        callee: RefPath,
+        present: Vec<String>,
+        partial: String,
+    },
+    /// `%.partial` in a `where` clause: a field of the value being checked.
+    PlaceholderDot { partial: String },
     /// A bare name.
     Bare { partial: String },
 }
@@ -141,10 +189,10 @@ pub struct Syntax {
 
 impl Syntax {
     pub fn new(text: &str) -> Self {
-        Self::lex(text, 0, true)
+        Self::lex(text, 0)
     }
 
-    fn lex(text: &str, base: usize, nested: bool) -> Self {
+    fn lex(text: &str, base: usize) -> Self {
         let mut lexer = Lexer::new(text);
         let toks: Vec<Tok> = lexer
             .tokenize()
@@ -162,18 +210,15 @@ impl Syntax {
             parent,
             interpolations: Vec::new(),
         };
-        if nested {
-            let chars: Vec<char> = text.chars().collect();
-            for tok in &syntax.toks {
-                if matches!(tok.kind, TokenType::TemplateString(_)) {
-                    for (start, end) in
-                        interpolation_spans(&chars, tok.start - base, tok.end - base)
-                    {
-                        let code: String = chars[start..end].iter().collect();
-                        syntax
-                            .interpolations
-                            .push(Self::lex(&code, base + start, false));
-                    }
+        // An interpolation is lexed the same way, so a template inside one
+        // has its own interpolations.
+        let mut chars: Option<Vec<char>> = None;
+        for tok in &syntax.toks {
+            if matches!(tok.kind, TokenType::TemplateString(_)) {
+                let chars = chars.get_or_insert_with(|| text.chars().collect());
+                for (start, end) in interpolation_spans(chars, tok.start - base, tok.end - base) {
+                    let code: String = chars[start..end].iter().collect();
+                    syntax.interpolations.push(Self::lex(&code, base + start));
                 }
             }
         }
@@ -202,9 +247,17 @@ impl Syntax {
     }
 
     /// Every token sequence to search for references: this one and each
-    /// template interpolation.
+    /// template interpolation, at any depth.
     pub fn all_scopes(&self) -> impl Iterator<Item = &Syntax> {
-        std::iter::once(self).chain(self.interpolations.iter())
+        fn collect<'a>(syntax: &'a Syntax, out: &mut Vec<&'a Syntax>) {
+            out.push(syntax);
+            for inner in &syntax.interpolations {
+                collect(inner, out);
+            }
+        }
+        let mut scopes = Vec::new();
+        collect(self, &mut scopes);
+        scopes.into_iter()
     }
 
     /// Whether `offset` is inside a string literal or the text of a
@@ -345,7 +398,7 @@ impl Syntax {
             return None;
         }
         let i = self.index_at(offset)?;
-        if !self.is_path_tok(i) {
+        if !self.is_path_tok(i) || self.is_key(i) || self.is_where(i) {
             return None;
         }
         let (first, last) = self.chain_around(i);
@@ -375,7 +428,9 @@ impl Syntax {
         let mut out = Vec::new();
         let mut i = 0;
         while i < self.toks.len() {
-            if self.is_path_tok(i) {
+            if self.is_key(i) || self.is_where(i) {
+                i += 1;
+            } else if self.is_path_tok(i) {
                 let (first, last) = self.chain_around(i);
                 if let Some(path) = self.parse_path(first, last, None)
                     && path.name.is_some()
@@ -539,6 +594,7 @@ impl Syntax {
         for i in self.top_level_statements() {
             if let Some(name) = self.toks[i].ident()
                 && name != "meta"
+                && name != "where"
                 && i + 1 < self.toks.len()
                 && !self.toks[i + 1].is(&TokenType::Dot)
                 && !(self.toks[i + 1].is(&TokenType::LeftParen) && self.adjacent(i, i + 1))
@@ -592,16 +648,449 @@ impl Syntax {
                     && !self.toks[i + 1].is_newline()
             })
             .last()
-            .map(|i| i + 1)
+            .map(|i| match self.typed_binding(i) {
+                Some((_, value)) => value,
+                None => i + 1,
+            })
+    }
+
+    /// Whether token `i` is the contextual keyword `where`.
+    fn is_where(&self, i: usize) -> bool {
+        self.toks.get(i).and_then(Tok::ident) == Some("where")
+    }
+
+    /// The first token at or after `i` that isn't a newline.
+    fn after_newlines(&self, mut i: usize) -> usize {
+        while i < self.toks.len() && matches!(self.toks[i].kind, TokenType::Newline) {
+            i += 1;
+        }
+        i
+    }
+
+    /// The last token before `i` that isn't a newline.
+    fn before_newlines(&self, i: usize) -> Option<usize> {
+        (0..i)
+            .rev()
+            .find(|&j| !matches!(self.toks[j].kind, TokenType::Newline))
+    }
+
+    /// The token after the type expression that starts at `i`: `Int`,
+    /// `Vec<Int>?`, `::model/User`, `"a" | "b"`. `None` when no type starts
+    /// there, or what starts there is a call or an index.
+    fn type_end(&self, mut i: usize) -> Option<usize> {
+        loop {
+            match self.toks.get(i)?.kind {
+                TokenType::Identifier(_) | TokenType::DoubleColon => {
+                    let mut last = i;
+                    while last + 1 < self.toks.len()
+                        && self.is_path_tok(last + 1)
+                        && self.adjacent(last, last + 1)
+                    {
+                        last += 1;
+                    }
+                    i = last + 1;
+                }
+                TokenType::String(_)
+                | TokenType::Int(_)
+                | TokenType::Dec(_)
+                | TokenType::Bool(_)
+                | TokenType::Null => i += 1,
+                _ => return None,
+            }
+            let next = self.toks.get(i)?;
+            if matches!(next.kind, TokenType::LeftParen | TokenType::LeftBracket)
+                && self.adjacent(i - 1, i)
+            {
+                return None;
+            }
+            if next.is(&TokenType::AngleBracketOpen) && self.adjacent(i - 1, i) {
+                let mut depth = 0usize;
+                loop {
+                    match self.toks.get(i)?.kind {
+                        TokenType::AngleBracketOpen => depth += 1,
+                        TokenType::AngleBracketClose => depth -= 1,
+                        TokenType::Newline | TokenType::Eof => return None,
+                        _ => {}
+                    }
+                    i += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            if self.toks.get(i)?.is(&TokenType::QuestionMark) {
+                i += 1;
+            }
+            if self.toks.get(i)?.is(&TokenType::Pipe) {
+                i += 1;
+            } else {
+                return Some(i);
+            }
+        }
+    }
+
+    /// For `name: Type value` with the name at token `i`: where the type
+    /// starts, and where the value does. A record entry and a field
+    /// declaration are also `name: something`, with nothing after it on the
+    /// line.
+    fn typed_binding(&self, i: usize) -> Option<(usize, usize)> {
+        if !self.toks.get(i + 1)?.is(&TokenType::Colon) {
+            return None;
+        }
+        let value = self.type_end(i + 2)?;
+        let starts_value = match self.toks.get(value)?.kind {
+            TokenType::Identifier(_) => !self.is_where(value),
+            TokenType::DoubleColon
+            | TokenType::String(_)
+            | TokenType::TemplateString(_)
+            | TokenType::Int(_)
+            | TokenType::Dec(_)
+            | TokenType::Bool(_)
+            | TokenType::Null
+            | TokenType::Keyword(_)
+            | TokenType::Percent(_)
+            | TokenType::LeftBrace
+            | TokenType::LeftBracket
+            | TokenType::LeftParen => true,
+            _ => false,
+        };
+        starts_value.then_some((i + 2, value))
+    }
+
+    /// Where the statement that token `i` is in ends: the newline at its
+    /// own nesting that no `where` line continues.
+    fn statement_end(&self, i: usize) -> usize {
+        let level = self.parent[i];
+        let mut j = i;
+        while j < self.toks.len() {
+            let tok = &self.toks[j];
+            // The end of the text, or the bracket that closes this nesting.
+            if tok.is(&TokenType::Eof) || (level.is_some() && self.partner[j] == level) {
+                return j;
+            }
+            if self.parent[j] == level
+                && tok.is(&TokenType::Newline)
+                && !self.is_where(self.after_newlines(j))
+            {
+                return j;
+            }
+            j += 1;
+        }
+        self.toks.len()
+    }
+
+    /// The token after the `where` clause that starts at token `w`: the end
+    /// of its line, or the `,`, `:`, `{` or closing bracket that follows the
+    /// predicate. A lambda predicate keeps its body.
+    fn where_end(&self, w: usize) -> usize {
+        let level = self.parent[w];
+        let mut j = w + 1;
+        // `where (x) { p(x) }`
+        if self
+            .toks
+            .get(j)
+            .is_some_and(|t| t.is(&TokenType::LeftParen))
+            && let Some(close) = self.partner[j]
+            && self
+                .toks
+                .get(close + 1)
+                .is_some_and(|t| t.is(&TokenType::LeftBrace))
+            && let Some(body_close) = self.partner[close + 1]
+        {
+            return body_close + 1;
+        }
+        while j < self.toks.len() {
+            let tok = &self.toks[j];
+            // The end of the text, or the bracket that closes this nesting.
+            if tok.is(&TokenType::Eof) || (level.is_some() && self.partner[j] == level) {
+                return j;
+            }
+            if self.parent[j] == level
+                && matches!(
+                    tok.kind,
+                    TokenType::Newline | TokenType::Comma | TokenType::Colon | TokenType::LeftBrace
+                )
+            {
+                return j;
+            }
+            j += 1;
+        }
+        self.toks.len()
+    }
+
+    /// The `where` clause that contains `offset`: its `where` token.
+    fn where_token_at(&self, offset: usize) -> Option<usize> {
+        (0..self.toks.len()).rev().find(|&w| {
+            self.is_where(w) && self.toks[w].start <= offset && {
+                let end = self.where_end(w);
+                end > 0 && offset <= self.toks[end - 1].end
+            }
+        })
+    }
+
+    /// The char span of the `where` clause that contains `offset`. Its
+    /// predicate runs at namespace scope: the locals around it aren't its.
+    pub fn where_clause_at(&self, offset: usize) -> Option<(usize, usize)> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.where_clause_at(offset);
+        }
+        let w = self.where_token_at(offset)?;
+        Some((self.toks[w].start, self.toks[self.where_end(w) - 1].end))
+    }
+
+    /// The `%` at `offset`, if there is one: its char span.
+    pub fn placeholder_at(&self, offset: usize) -> Option<(usize, usize)> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.placeholder_at(offset);
+        }
+        let tok = &self.toks[self.index_at(offset)?];
+        matches!(tok.kind, TokenType::Percent(_)).then_some((tok.start, tok.end))
+    }
+
+    /// What `%` stands for in the `where` clause that contains `offset`.
+    pub fn where_subject(&self, text: &str, offset: usize) -> Option<WhereSubject> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.where_subject(text, offset);
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let w = self.where_token_at(offset)?;
+        let prev = self.before_newlines(w)?;
+        let level = self.parent[w];
+        match self.toks[prev].kind {
+            // `Name type { ... } where`
+            TokenType::RightBrace => {
+                let open = self.partner[prev]?;
+                let name = self.toks.get(open.checked_sub(2)?)?.ident()?;
+                return matches!(
+                    self.toks[open - 1].kind,
+                    TokenType::Keyword(KeywordKind::Type)
+                )
+                .then(|| WhereSubject::Decl(name.to_string()));
+            }
+            // `fn (a: Int, b: Int) where`: the precondition.
+            TokenType::RightParen => {
+                let open = self.partner[prev]?;
+                if self.declares_parameters(open) {
+                    return Some(WhereSubject::Args(self.parameters(&chars, open, prev)));
+                }
+            }
+            _ => {}
+        }
+        // Back through the statement or entry for what is annotated.
+        let mut j = prev + 1;
+        while j > 0 {
+            j -= 1;
+            let tok = &self.toks[j];
+            if self.parent[j] != level {
+                match self.partner[j] {
+                    // A closing bracket at this level: over what it closes.
+                    Some(open) if self.parent[open] == level && open < j => {
+                        j = open;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            match tok.kind {
+                TokenType::Colon => {
+                    let end = self.type_end(j + 1).unwrap_or(w).min(w);
+                    return Some(WhereSubject::Type(self.tokens_text(&chars, j + 1, end)));
+                }
+                // `Port type Int where`
+                TokenType::Keyword(KeywordKind::Type) => {
+                    return Some(WhereSubject::Type(self.tokens_text(&chars, j + 1, w)));
+                }
+                TokenType::Comma => break,
+                TokenType::Newline if !self.is_where(self.after_newlines(j)) => break,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Whether the `(` at `open` starts a parameter list: after `fn`, or
+    /// after `fn` and a flow keyword.
+    fn declares_parameters(&self, open: usize) -> bool {
+        let prev = open.checked_sub(1).map(|p| &self.toks[p].kind);
+        matches!(prev, Some(TokenType::Keyword(KeywordKind::Fn)))
+            || (prev.is_some_and(Self::is_flow_keyword)
+                && open >= 2
+                && matches!(
+                    self.toks[open - 2].kind,
+                    TokenType::Keyword(KeywordKind::Fn)
+                ))
+    }
+
+    /// The parameters between `open` and `close`: the name at the start of
+    /// each comma-separated entry (its token), with the annotation after its
+    /// `:`.
+    fn parameter_tokens(
+        &self,
+        chars: &[char],
+        open: usize,
+        close: usize,
+    ) -> Vec<(usize, Option<String>)> {
+        let mut parameters = Vec::new();
+        let mut entry_start = open + 1;
+        let mut i = open + 1;
+        while i <= close {
+            let at_entry_end =
+                i == close || (self.parent[i] == Some(open) && self.toks[i].is(&TokenType::Comma));
+            if at_entry_end {
+                let mut first = entry_start;
+                while first < i
+                    && matches!(
+                        self.toks[first].kind,
+                        TokenType::Keyword(KeywordKind::Lazy)
+                            | TokenType::DotDotDot
+                            | TokenType::Newline
+                    )
+                {
+                    first += 1;
+                }
+                if first < i && self.toks[first].ident().is_some() {
+                    let annotation = (first + 1 < i && self.toks[first + 1].is(&TokenType::Colon))
+                        .then(|| self.tokens_text(chars, first + 2, i))
+                        .filter(|t| !t.is_empty());
+                    parameters.push((first, annotation));
+                }
+                entry_start = i + 1;
+            }
+            i += 1;
+        }
+        parameters
+    }
+
+    fn parameters(
+        &self,
+        chars: &[char],
+        open: usize,
+        close: usize,
+    ) -> Vec<(String, Option<String>)> {
+        self.parameter_tokens(chars, open, close)
+            .into_iter()
+            .filter_map(|(i, annotation)| Some((self.toks[i].ident()?.to_string(), annotation)))
+            .collect()
+    }
+
+    /// The flow keyword of the block opened at `brace`: `match x {`,
+    /// `fn cond (a): Int {`.
+    fn flow_of_block(&self, brace: usize) -> Option<&KeywordKind> {
+        let level = self.parent[brace];
+        let mut j = brace;
+        while j > 0 {
+            j -= 1;
+            if self.parent[j] != level {
+                return None;
+            }
+            match &self.toks[j].kind {
+                TokenType::Newline => return None,
+                TokenType::RightParen | TokenType::RightBracket | TokenType::RightBrace => {
+                    j = self.partner[j]?;
+                }
+                kind if Self::is_flow_keyword(kind) => match kind {
+                    TokenType::Keyword(keyword) => return Some(keyword),
+                    _ => return None,
+                },
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Whether the identifier at `i` is written as a key (see [`Key`]).
+    fn is_key(&self, i: usize) -> bool {
+        self.key_owner_bracket(i).is_some()
+    }
+
+    /// The bracket whose entry the key at `i` starts, when `i` is a key.
+    fn key_owner_bracket(&self, i: usize) -> Option<usize> {
+        self.toks.get(i)?.ident()?;
+        if !self.toks.get(i + 1)?.is(&TokenType::Colon) {
+            return None;
+        }
+        let bracket = self.parent[i]?;
+        let before = self.before_newlines(i)?;
+        let starts_entry = before == bracket
+            || (self.parent[before] == Some(bracket) && self.toks[before].is(&TokenType::Comma))
+            || (self.toks[i - 1].is_newline() && self.toks[bracket].is(&TokenType::LeftBrace));
+        if !starts_entry {
+            return None;
+        }
+        let is_key = match self.toks[bracket].kind {
+            TokenType::LeftParen => self.is_call_paren(bracket),
+            TokenType::LeftBrace => self.typed_binding(i).is_none(),
+            _ => false,
+        };
+        is_key.then_some(bracket)
+    }
+
+    /// The key at `offset`, with what it is a key of.
+    pub fn key_at(&self, offset: usize) -> Option<Key> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.key_at(offset);
+        }
+        if self.in_string(offset) {
+            return None;
+        }
+        let i = self.index_at(offset)?;
+        let bracket = self.key_owner_bracket(i)?;
+        let owner = match self.toks[bracket].kind {
+            TokenType::LeftParen => KeyOwner::Call(self.path_ending_at(bracket - 1)?),
+            // `Type({key: ...})`
+            _ if bracket > 1
+                && self.toks[bracket - 1].is(&TokenType::LeftParen)
+                && self.is_call_paren(bracket - 1) =>
+            {
+                KeyOwner::Call(self.path_ending_at(bracket - 2)?)
+            }
+            // `Name type { key: T }`
+            _ if bracket > 1
+                && matches!(
+                    self.toks[bracket - 1].kind,
+                    TokenType::Keyword(KeywordKind::Type)
+                ) =>
+            {
+                match self.toks[bracket - 2].ident() {
+                    Some(name) => KeyOwner::TypeDecl(name.to_string()),
+                    None => KeyOwner::Record,
+                }
+            }
+            _ => KeyOwner::Record,
+        };
+        let tok = &self.toks[i];
+        Some(Key {
+            name: tok.ident()?.to_string(),
+            start: tok.start,
+            end: tok.end,
+            owner,
+        })
     }
 
     /// The `{` that opens the body after a parameter list closed at `close`:
-    /// `(a) {`, `(a): Int {`, `(a) where p(%) {`, all on one line.
-    fn body_after(&self, close: usize) -> Option<usize> {
+    /// `(a) {`, `(a): Int {`, `(a) where p(%) {`. A lambda's is on the line
+    /// of its `)`. A declaration's precondition, return type and `{` can
+    /// each start a later line.
+    fn body_after(&self, close: usize, declaration: bool) -> Option<usize> {
         let mut j = close + 1;
         while j < self.toks.len() {
             match &self.toks[j].kind {
                 TokenType::LeftBrace => return Some(j),
+                TokenType::Newline if declaration => {
+                    let next = self.after_newlines(j);
+                    let continues = self.is_where(next)
+                        || self.toks.get(next).is_some_and(|t| {
+                            matches!(t.kind, TokenType::Colon | TokenType::LeftBrace)
+                        });
+                    if !continues {
+                        return None;
+                    }
+                    j = next;
+                }
                 TokenType::Newline
                 | TokenType::Eof
                 | TokenType::RightParen
@@ -681,10 +1170,21 @@ impl Syntax {
             };
             let prev = open.checked_sub(1).map(|p| &self.toks[p].kind);
 
-            // `Variant(binding) => ...`: a match-arm payload binding.
-            if self.is_call_paren(open)
-                && close + 1 < n
+            // A match arm's payload binding: `Result.Ok (v) => ...`, or
+            // with no space. In a `cond` the same shape is a call.
+            if close + 1 < n
                 && self.toks[close + 1].is(&TokenType::Arrow)
+                && open > 0
+                && matches!(
+                    self.toks[open - 1].kind,
+                    TokenType::Identifier(_) | TokenType::QuestionMark
+                )
+                && self.parent[open].is_some_and(|block| {
+                    matches!(
+                        self.flow_of_block(block),
+                        Some(KeywordKind::Match | KeywordKind::MatchAll)
+                    )
+                })
             {
                 let arm_end = self.arm_end(close + 1);
                 for i in open + 1..close {
@@ -704,18 +1204,12 @@ impl Syntax {
                 continue;
             }
 
-            let after_fn = matches!(prev, Some(TokenType::Keyword(KeywordKind::Fn)))
-                || (prev.is_some_and(Self::is_flow_keyword)
-                    && open >= 2
-                    && matches!(
-                        self.toks[open - 2].kind,
-                        TokenType::Keyword(KeywordKind::Fn)
-                    ));
+            let after_fn = self.declares_parameters(open);
             let flow_lambda = prev.is_some_and(Self::is_flow_keyword);
             if !after_fn && !flow_lambda && self.is_call_paren(open) {
                 continue;
             }
-            let Some(body) = self.body_after(close) else {
+            let Some(body) = self.body_after(close, after_fn) else {
                 continue;
             };
             let Some(body_close) = self.partner[body] else {
@@ -723,44 +1217,18 @@ impl Syntax {
             };
             let scope = (self.toks[body].start, self.toks[body_close].end);
 
-            // Parameters: the name at the start of each comma-separated
-            // entry, with the annotation after its `:`.
-            let mut entry_start = open + 1;
-            let mut i = open + 1;
-            while i <= close {
-                let at_entry_end = i == close
-                    || (self.parent[i] == Some(open) && self.toks[i].is(&TokenType::Comma));
-                if at_entry_end {
-                    let mut first = entry_start;
-                    while first < i
-                        && matches!(
-                            self.toks[first].kind,
-                            TokenType::Keyword(KeywordKind::Lazy)
-                                | TokenType::DotDotDot
-                                | TokenType::Newline
-                        )
-                    {
-                        first += 1;
-                    }
-                    if first < i
-                        && let Some(name) = self.toks[first].ident()
-                    {
-                        let annotation = (first + 1 < i
-                            && self.toks[first + 1].is(&TokenType::Colon))
-                        .then(|| self.tokens_text(chars, first + 2, i))
-                        .filter(|t| !t.is_empty());
-                        locals.push(Local {
-                            name: name.to_string(),
-                            start: self.toks[first].start,
-                            end: self.toks[first].end,
-                            scope,
-                            visible_from: scope.0,
-                            kind: LocalKind::Param(annotation),
-                        });
-                    }
-                    entry_start = i + 1;
-                }
-                i += 1;
+            for (i, annotation) in self.parameter_tokens(chars, open, close) {
+                let Some(name) = self.toks[i].ident() else {
+                    continue;
+                };
+                locals.push(Local {
+                    name: name.to_string(),
+                    start: self.toks[i].start,
+                    end: self.toks[i].end,
+                    scope,
+                    visible_from: scope.0,
+                    kind: LocalKind::Param(annotation),
+                });
             }
         }
 
@@ -776,12 +1244,14 @@ impl Syntax {
                 continue;
             }
             let statement_start = self.toks[i - 1].is_newline() || i - 1 == block;
-            if !statement_start || i + 1 >= n {
+            if !statement_start || i + 1 >= n || name == "where" {
                 continue;
             }
-            let next = &self.toks[i + 1];
-            let value_starts =
-                !matches!(
+            // `name: Type value`, with any `where` clause after the value.
+            let typed = self.typed_binding(i);
+            let next = &self.toks[typed.map_or(i + 1, |(_, value)| value)];
+            let value_starts = typed.is_some()
+                || !matches!(
                     next.kind,
                     TokenType::Newline
                         | TokenType::Eof
@@ -804,17 +1274,27 @@ impl Syntax {
             let block_end = self.partner[block]
                 .map(|close| self.toks[close].end)
                 .unwrap_or(usize::MAX);
-            let line_end = (i + 1..n)
-                .find(|&j| self.toks[j].is_newline())
-                .map(|j| self.toks[j].start)
-                .unwrap_or(block_end);
+            // Visible after its statement: not in its own value, however
+            // many lines that takes.
+            let end = self.statement_end(i);
+            let line_end = self.toks.get(end).map_or(block_end, |tok| tok.start);
+            let annotation = typed.map(|(from, value)| {
+                let mut annotation = self.tokens_text(chars, from, value);
+                if let Some(w) =
+                    (value..end).find(|&w| self.parent[w] == Some(block) && self.is_where(w))
+                {
+                    annotation.push(' ');
+                    annotation.push_str(&self.tokens_text(chars, w, self.where_end(w)));
+                }
+                annotation
+            });
             locals.push(Local {
                 name: name.to_string(),
                 start: self.toks[i].start,
                 end: self.toks[i].end,
                 scope: (self.toks[i].start, block_end),
                 visible_from: line_end,
-                kind: LocalKind::Binding(i + 1),
+                kind: LocalKind::Binding(typed.map_or(i + 1, |(_, value)| value), annotation),
             });
         }
     }
@@ -882,9 +1362,29 @@ impl Syntax {
                             self.parent[i] == Some(open) && self.toks[i].is(&TokenType::Comma)
                         })
                         .count() as u32;
+                    // Named arguments: the labels before the cursor's
+                    // argument, and that argument's own.
+                    let keys: Vec<usize> = (open + 1..self.toks.len())
+                        .take_while(|&i| self.toks[i].start < offset)
+                        .filter(|&i| self.key_owner_bracket(i) == Some(open))
+                        .collect();
+                    let entry_start = (open + 1..self.toks.len())
+                        .take_while(|&i| self.toks[i].start < offset)
+                        .filter(|&i| {
+                            self.parent[i] == Some(open) && self.toks[i].is(&TokenType::Comma)
+                        })
+                        .last()
+                        .unwrap_or(open);
+                    let label = |i: &usize| self.toks[*i].ident().map(str::to_string);
                     return Some(CallSite {
                         callee,
                         active_parameter,
+                        labels: keys
+                            .iter()
+                            .filter(|&&i| i < entry_start)
+                            .filter_map(label)
+                            .collect(),
+                        active_label: keys.iter().find(|&&i| i > entry_start).and_then(label),
                     });
                 }
                 // A literal argument: keep looking for the call outside it.
@@ -980,6 +1480,14 @@ impl Syntax {
                 base.name.as_ref()?;
                 Some(CompletionContext::Dot { base, partial })
             }
+            // `%.partial`
+            TokenType::Dot
+                if before > 0
+                    && matches!(self.toks[before - 1].kind, TokenType::Percent(_))
+                    && self.adjacent(before - 1, before) =>
+            {
+                Some(CompletionContext::PlaceholderDot { partial })
+            }
             _ => None,
         }
     }
@@ -995,15 +1503,36 @@ impl Syntax {
     ) -> Option<CompletionContext> {
         let stack = self.open_brackets(offset);
         let &brace = stack.last()?;
-        if !self.toks[brace].is(&TokenType::LeftBrace) || brace < 2 {
-            return None;
-        }
-        // At a key position: right after `{` or `,`.
-        let before = next.checked_sub(1)?;
+        // At a key position: right after the bracket or a `,` in it.
+        let before = self.before_newlines(next)?;
         if before != brace
             && !(self.parent.get(before) == Some(&Some(brace))
                 && self.toks[before].is(&TokenType::Comma))
         {
+            return None;
+        }
+        let present = |bracket: usize| -> Vec<String> {
+            (bracket + 1..self.toks.len())
+                .take_while(|&i| self.toks[i].start < offset)
+                .filter(|&i| {
+                    self.parent[i] == Some(bracket)
+                        && i + 1 < self.toks.len()
+                        && self.toks[i + 1].is(&TokenType::Colon)
+                })
+                .filter_map(|i| self.toks[i].ident().map(str::to_string))
+                .collect()
+        };
+        // `Type(key: v, par|`: an argument of a call.
+        if self.toks[brace].is(&TokenType::LeftParen) && self.is_call_paren(brace) {
+            let callee = self.path_ending_at(brace - 1)?;
+            callee.name.as_ref()?;
+            return Some(CompletionContext::CallArgs {
+                callee,
+                present: present(brace),
+                partial,
+            });
+        }
+        if !self.toks[brace].is(&TokenType::LeftBrace) || brace < 2 {
             return None;
         }
         let paren = brace - 1;
@@ -1011,18 +1540,9 @@ impl Syntax {
             return None;
         }
         let type_path = self.path_ending_at(paren - 1)?;
-        let present = (brace + 1..self.toks.len())
-            .take_while(|&i| self.toks[i].start < offset)
-            .filter(|&i| {
-                self.parent[i] == Some(brace)
-                    && i + 1 < self.toks.len()
-                    && self.toks[i + 1].is(&TokenType::Colon)
-            })
-            .filter_map(|i| self.toks[i].ident().map(str::to_string))
-            .collect();
         Some(CompletionContext::TypeFields {
             type_path,
-            present,
+            present: present(brace),
             partial,
         })
     }
@@ -1062,46 +1582,26 @@ fn brackets(toks: &[Tok]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
 }
 
 /// The char spans of the code inside each `${...}` of a template string
-/// whose token spans `start..end` of `chars`.
+/// whose token spans `start..end` of `chars`. An expression ends where the
+/// lexer ends it: a brace or backtick inside one of its strings or templates
+/// doesn't. A block template has no escapes.
 fn interpolation_spans(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> {
     let end = end.min(chars.len());
+    let block = chars[start..end].starts_with(&['`', '`', '`']);
     let mut spans = Vec::new();
     let mut i = start;
     while i + 1 < end {
-        if chars[i] == '\\' {
+        if chars[i] == '\\' && !block {
             i += 2;
             continue;
         }
         if chars[i] == '$' && chars[i + 1] == '{' {
             let code_start = i + 2;
-            let mut depth = 1;
-            let mut j = code_start;
-            let mut quote: Option<char> = None;
-            while j < end {
-                let c = chars[j];
-                if let Some(q) = quote {
-                    if c == '\\' {
-                        j += 1;
-                    } else if c == q {
-                        quote = None;
-                    }
-                } else {
-                    match c {
-                        '"' | '\'' => quote = Some(c),
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                j += 1;
-            }
-            spans.push((code_start, j.min(end)));
-            i = j + 1;
+            // Unclosed while it is being typed: the rest is its code.
+            let close = hot::lang::lexer::template_expression_end(&chars[..end], code_start)
+                .map_or(end, |after| after - 1);
+            spans.push((code_start, close));
+            i = close + 1;
             continue;
         }
         i += 1;
@@ -1289,5 +1789,296 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(at("  x \"str"), None);
+    }
+
+    fn names_at(text: &str, needle: &str, delta: usize) -> Vec<String> {
+        let offset = offset_of(text, needle) + delta;
+        let mut names: Vec<String> = Syntax::new(text)
+            .locals(text)
+            .iter()
+            .filter(|l| l.scope.0 <= offset && offset <= l.scope.1 && l.visible_from <= offset)
+            .map(|l| l.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_signature_over_several_lines_keeps_its_parameters() {
+        let text = "::a ns\n\nwithdraw fn (amount: Int, balance: Int)\n    where lte(%.amount, %.balance)\n    : Int where gte(%, 0)\n{\n    sub(balance, amount)\n}\n\nplain fn (x: Int): Int\n{\n    x\n}\n";
+        assert_eq!(names_at(text, "sub(balance", 4), ["amount", "balance"]);
+        assert_eq!(names_at(text, "    x\n", 4), ["x"]);
+        // A lambda's `{` is on the line of its `)`: this is not one.
+        let text = "::a ns\n\nf fn () {\n  g(1, (a))\n  { a }\n}\n";
+        assert!(names_at(text, "{ a }", 2).is_empty());
+    }
+
+    #[test]
+    fn typed_bindings_are_locals_and_where_lines_are_not() {
+        let text = "::a ns\n\nf fn () {\n    limit: Int 3 where gt(%, 0)\n    count: Int 5\n        where between(%, 1, 500)\n    vals: All<Vec> parallel {\n        a 1\n    }\n    m {limit: 1, other: 2}\n    add(limit, count)\n}\n";
+        assert_eq!(
+            names_at(text, "add(limit", 4),
+            ["count", "limit", "m", "vals"]
+        );
+        let syntax = Syntax::new(text);
+        let locals = syntax.locals(text);
+        let annotation = |name: &str| match &locals.iter().find(|l| l.name == name).unwrap().kind {
+            LocalKind::Binding(_, annotation) => annotation.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(annotation("limit").as_deref(), Some("Int where gt(%, 0)"));
+        assert_eq!(
+            annotation("count").as_deref(),
+            Some("Int where between(%, 1, 500)")
+        );
+        assert_eq!(annotation("vals").as_deref(), Some("All<Vec>"));
+        assert_eq!(annotation("m"), None);
+        assert!(
+            locals
+                .iter()
+                .all(|l| l.name != "where" && l.name != "other")
+        );
+        // The value of a typed binding is what follows its type.
+        let limit = locals.iter().find(|l| l.name == "limit").unwrap();
+        let LocalKind::Binding(value, _) = limit.kind else {
+            panic!()
+        };
+        assert_eq!(syntax.toks[value].start, offset_of(text, "3 where"));
+
+        let text =
+            "::a ns\n\nPort type Int\n    where between(%, 1, 65535)\n\nmax-retries: Int 3\n";
+        let syntax = Syntax::new(text);
+        let names: Vec<String> = syntax.top_level_names().into_iter().map(|n| n.0).collect();
+        assert_eq!(names, ["Port", "max-retries"]);
+        let value = syntax.top_level_value("max-retries").unwrap();
+        assert_eq!(syntax.toks[value].start, offset_of(text, "3\n"));
+    }
+
+    #[test]
+    fn match_arms_bind_and_cond_arms_call() {
+        let text = "::a ns\n\nf fn (r: Result, x: Int): Any {\n  a match r {\n    Result.Ok (v) => { v }\n    Err(e) => { e }\n    Any (w) => { w }\n  }\n  cond {\n    gt(x, 1) => { x }\n    => { 0 }\n  }\n}\n\ng fn match (r: Result): Any {\n  Result.Ok (inner) => { inner }\n}\n";
+        assert_eq!(names_at(text, "{ v }", 2), ["r", "v", "x"]);
+        assert_eq!(names_at(text, "{ e }", 2), ["e", "r", "x"]);
+        assert_eq!(names_at(text, "{ w }", 2), ["r", "w", "x"]);
+        assert_eq!(names_at(text, "{ inner }", 2), ["inner", "r"]);
+        // In the `cond`, `x` is still the parameter.
+        let syntax = Syntax::new(text);
+        let offset = offset_of(text, "{ x }") + 2;
+        let x: Vec<_> = syntax
+            .locals(text)
+            .into_iter()
+            .filter(|l| l.name == "x" && l.scope.0 <= offset && offset <= l.scope.1)
+            .collect();
+        assert_eq!(x.len(), 1);
+        assert!(matches!(x[0].kind, LocalKind::Param(_)));
+    }
+
+    #[test]
+    fn keys_are_not_references() {
+        let text = "::a ns\n\nPoint type { x: Int, y: Int }\nx 1\np Point(x: x, y: 2)\nq Point({x: x})\nc Shape.Circle(radius: 5.0)\nm {x: 1}\nf fn (x: Int) { limit: Int x }\n";
+        let syntax = Syntax::new(text);
+        let label = offset_of(text, "x: x, y: 2");
+        assert!(syntax.path_at(label).is_none());
+        assert_eq!(
+            syntax.path_at(label + 3).unwrap().name.as_deref(),
+            Some("x")
+        );
+        let owner = |needle: &str| syntax.key_at(offset_of(text, needle)).map(|key| key.owner);
+        match owner("x: x, y: 2") {
+            Some(KeyOwner::Call(callee)) => assert_eq!(callee.name.as_deref(), Some("Point")),
+            other => panic!("{other:?}"),
+        }
+        match owner("x: x})") {
+            Some(KeyOwner::Call(callee)) => assert_eq!(callee.name.as_deref(), Some("Point")),
+            other => panic!("{other:?}"),
+        }
+        match owner("radius: 5.0") {
+            Some(KeyOwner::Call(callee)) => {
+                assert_eq!(callee.name.as_deref(), Some("Shape"));
+                assert_eq!(callee.members, ["Circle"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            owner("x: Int, y: Int"),
+            Some(KeyOwner::TypeDecl("Point".to_string()))
+        );
+        assert_eq!(owner("x: 1}"), Some(KeyOwner::Record));
+        // A parameter and a typed binding are declarations, not keys.
+        assert_eq!(owner("x: Int) {"), None);
+        assert_eq!(owner("limit: Int x"), None);
+        assert!(syntax.path_at(offset_of(text, "x: Int) {")).is_some());
+
+        // Find-references sees the two values named `x`, the parameter and
+        // its use, and no key.
+        let refs = syntax.references();
+        let xs: Vec<usize> = refs
+            .iter()
+            .filter(|r| r.name.as_deref() == Some("x"))
+            .map(|r| r.name_start)
+            .collect();
+        assert_eq!(
+            xs,
+            [
+                offset_of(text, "x 1"),
+                offset_of(text, "x: x, y: 2") + 3,
+                offset_of(text, "x: x})") + 3,
+                offset_of(text, "x: Int) {"),
+                offset_of(text, "x }"),
+            ]
+        );
+    }
+
+    #[test]
+    fn named_arguments_of_the_open_call() {
+        let call = |text: &str| Syntax::new(text).call_at(text.chars().count()).unwrap();
+        let site = call("  p Point(y: 2, ");
+        assert_eq!(site.callee.name.as_deref(), Some("Point"));
+        assert_eq!(site.active_parameter, 1);
+        assert_eq!(site.labels, ["y"]);
+        assert_eq!(site.active_label, None);
+        let site = call("  p Point(y: 2, x: ");
+        assert_eq!(site.labels, ["y"]);
+        assert_eq!(site.active_label.as_deref(), Some("x"));
+        let site = call("  add(1, ");
+        assert!(site.labels.is_empty());
+        assert_eq!(site.active_label, None);
+    }
+
+    #[test]
+    fn completion_in_constructor_calls_and_predicates() {
+        let at = |text: &str| Syntax::new(text).completion_at(text.chars().count());
+        match at("  p Point(") {
+            Some(CompletionContext::CallArgs {
+                callee,
+                present,
+                partial,
+            }) => {
+                assert_eq!(callee.name.as_deref(), Some("Point"));
+                assert!(present.is_empty());
+                assert_eq!(partial, "");
+            }
+            other => panic!("{other:?}"),
+        }
+        match at("  p Point(x: 1, ") {
+            Some(CompletionContext::CallArgs { present, .. }) => assert_eq!(present, ["x"]),
+            other => panic!("{other:?}"),
+        }
+        match at("  p Point(x: 1,\n    y") {
+            Some(CompletionContext::CallArgs {
+                present, partial, ..
+            }) => {
+                assert_eq!(present, ["x"]);
+                assert_eq!(partial, "y");
+            }
+            other => panic!("{other:?}"),
+        }
+        match at("  c ::geo/Shape.Circle(") {
+            Some(CompletionContext::CallArgs { callee, .. }) => {
+                assert_eq!(callee.ns.as_deref(), Some("::geo"));
+                assert_eq!(callee.members, ["Circle"]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Inside an argument's value, a bare name.
+        assert_eq!(
+            at("  p Point(x: to"),
+            Some(CompletionContext::Bare {
+                partial: "to".to_string()
+            })
+        );
+        assert_eq!(
+            at("Range type { low: Int, high: Int } where lte(%.lo"),
+            Some(CompletionContext::PlaceholderDot {
+                partial: "lo".to_string()
+            })
+        );
+        assert_eq!(
+            at("f fn (a: Int) where gt(%."),
+            Some(CompletionContext::PlaceholderDot {
+                partial: String::new()
+            })
+        );
+    }
+
+    #[test]
+    fn what_a_predicate_checks() {
+        let text = "::a ns\n\nPort type Int where between(%, 1, 65535)\nRange type { low: Int, high: Int } where lte(%.low, %.high)\nSpan type { a: Int }\n    where gt(%.a, 0)\nwithdraw fn (amount: Int where gt(%, 1), balance: Dec)\n    where lte(%.amount, %.balance)\n    : Int where gte(%, 2)\n{\n    limit: Str \"a\" where ne(%, \"\")\n    amount\n}\nlam fn (n: Int where (v) { gt(v, 3) }): Int { n }\n";
+        let syntax = Syntax::new(text);
+        let subject = |needle: &str| syntax.where_subject(text, offset_of(text, needle));
+        let of_type = |t: &str| Some(WhereSubject::Type(t.to_string()));
+        assert_eq!(subject("between(%, 1, 65535)"), of_type("Int"));
+        assert_eq!(
+            subject("lte(%.low"),
+            Some(WhereSubject::Decl("Range".to_string()))
+        );
+        assert_eq!(
+            subject("gt(%.a, 0)"),
+            Some(WhereSubject::Decl("Span".to_string()))
+        );
+        assert_eq!(subject("gt(%, 1)"), of_type("Int"));
+        assert_eq!(
+            subject("lte(%.amount"),
+            Some(WhereSubject::Args(vec![
+                ("amount".to_string(), Some("Int where gt(%, 1)".to_string())),
+                ("balance".to_string(), Some("Dec".to_string())),
+            ]))
+        );
+        assert_eq!(subject("gte(%, 2)"), of_type("Int"));
+        assert_eq!(subject("ne(%, "), of_type("Str"));
+        assert_eq!(subject("amount\n}"), None);
+
+        // A clause is its `where` and its predicate, a lambda's body too.
+        let clause = |needle: &str| {
+            let (start, end) = syntax.where_clause_at(offset_of(text, needle)).unwrap();
+            text.chars()
+                .skip(start)
+                .take(end - start)
+                .collect::<String>()
+        };
+        assert_eq!(clause("gt(%, 1)"), "where gt(%, 1)");
+        assert_eq!(clause("lte(%.amount"), "where lte(%.amount, %.balance)");
+        assert_eq!(clause("gt(v, 3)"), "where (v) { gt(v, 3) }");
+        assert!(
+            syntax
+                .where_clause_at(offset_of(text, "amount\n}"))
+                .is_none()
+        );
+        assert!(
+            syntax
+                .placeholder_at(offset_of(text, "%, 1, 65535"))
+                .is_some()
+        );
+        assert!(syntax.path_at(offset_of(text, "where between")).is_none());
+    }
+
+    #[test]
+    fn interpolations_end_where_the_lexer_ends_them() {
+        let name_in = |text: &str, needle: &str| {
+            Syntax::new(text)
+                .path_at(offset_of(text, needle) + 1)
+                .and_then(|path| path.name)
+        };
+        // A template in an interpolation has its own.
+        let text = "msg `a ${`b ${inner} c`} d ${outer}`\n";
+        assert_eq!(name_in(text, "inner").as_deref(), Some("inner"));
+        assert_eq!(name_in(text, "outer").as_deref(), Some("outer"));
+        // A brace in a string doesn't end the expression.
+        let text = "msg `a ${concat(\"}\", who)} b`\n";
+        assert_eq!(name_in(text, "who").as_deref(), Some("who"));
+        // A block template has no escapes: `\\$` doesn't hide the `${`.
+        let text = "raw ```C:\\Users\\${user}\\docs```\n";
+        assert_eq!(name_in(text, "user").as_deref(), Some("user"));
+        // In a plain template it does.
+        let text = "msg `cost \\${price}`\n";
+        assert_eq!(name_in(text, "price"), None);
+        // Every interpolation is searched for references.
+        let text = "msg `a ${`b ${inner}`} ${outer}`\n";
+        let names: Vec<String> = Syntax::new(text)
+            .all_scopes()
+            .flat_map(|scope| scope.references())
+            .filter_map(|path| path.name)
+            .collect();
+        assert!(names.contains(&"inner".to_string()) && names.contains(&"outer".to_string()));
     }
 }
