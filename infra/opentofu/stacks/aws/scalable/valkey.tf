@@ -44,6 +44,14 @@ resource "aws_elasticache_parameter_group" "valkey" {
     value = "noeviction"
   }
 }
+# A raised data.valkey.auth_token_version rotates the token: ElastiCache takes
+# the new one beside the one before it and drops any older one (ROTATE, its
+# strategy when none is named), so hosts stay connected until they have the new
+# token, and a leaked token stops working at the second raise. The provider
+# sends a token change at once, whatever apply_immediately says. No
+# auth_token_update_strategy is set: SET takes only the token the cache already
+# has, which no later apply can supply, and naming a strategy on a cache that
+# exists sends ElastiCache a change with no token in it.
 resource "aws_elasticache_replication_group" "valkey" {
   count                       = local.managed_valkey ? 1 : 0
   replication_group_id        = "hot-${local.config.name}"
