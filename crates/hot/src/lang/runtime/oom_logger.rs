@@ -36,7 +36,14 @@
 //! * Inside the OOM logger we can't call any function that allocates. Stick
 //!   to `core::fmt::Write` into stack-allocated buffers and direct syscalls.
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
+
+/// The allocator under the logger.
+#[cfg(not(feature = "mimalloc"))]
+use std::alloc::System;
+#[cfg(feature = "mimalloc")]
+#[allow(non_upper_case_globals)]
+static System: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Re-entrancy guard so a panic / log inside the logger doesn't recurse.
