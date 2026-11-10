@@ -191,6 +191,11 @@ Choose where to wait based on who needs the result:
   official SDK task waiter. This lets the originating run finish while the task
   continues asynchronously.
 
+A retry runs as a new task with a new ID. `::hot::task/await` follows a failed
+task to its retry and returns the last attempt's outcome, under the ID you
+awaited. An await that reaches its own timeout first returns the timeout. `::hot::task/cancel` and `::hot::task/send` act on the newest
+retry when given an earlier attempt's ID.
+
 All SDK waiters subscribe to `/v1/tasks/{task_id}/subscribe`. The first
 `task:update` is always the latest persisted state, so the client cannot miss a
 task that completed before it subscribed. The waiter reconnects when needed,

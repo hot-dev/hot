@@ -874,6 +874,78 @@ pub async fn recover_event_outbox(
     Ok(recovered)
 }
 
+/// Emails one recovery pass enqueues at most, how long it waits on one
+/// enqueue, and how long it keeps starting new ones.
+const EMAIL_RECOVERY_BATCH: usize = 50;
+const EMAIL_RECOVERY_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const EMAIL_RECOVERY_PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Enqueue again the app emails that are still pending with no queue message
+/// to send them: their enqueue failed after the `email_queue` row was written,
+/// their sender died between the two, their message was dead-lettered by
+/// deliveries that never held the send claim (which fails no pending email),
+/// or their worker died mid-send (see `EmailQueueEntry::settle_stale`, which
+/// the caller runs beside this and which fails the emails too old to recover).
+///
+/// Emails are claimed and enqueued one at a time, and the pass stops at the
+/// first enqueue that fails, giving that claim back: a queue outage costs no
+/// email a recovery attempt. Claims are atomic, so several schedulers can
+/// sweep (see `EmailQueueEntry::claim_overdue`). A message enqueued here can
+/// be an email's second or third; the worker's send claim sends it once.
+pub async fn recover_pending_emails(
+    db: &DatabasePool,
+    queue: &dyn Queue<Message>,
+) -> Result<usize, String> {
+    use crate::db::email_queue::EmailQueueEntry;
+    let started = std::time::Instant::now();
+    let mut recovered = 0;
+    while recovered < EMAIL_RECOVERY_BATCH && started.elapsed() < EMAIL_RECOVERY_PASS_BUDGET {
+        let Some(entry) = EmailQueueEntry::claim_overdue(db, chrono::Utc::now(), 1)
+            .await
+            .map_err(|error| error.to_string())?
+            .pop()
+        else {
+            break;
+        };
+        let email_queue_id = entry.email_queue_id;
+        let message: Message = EmailMessage {
+            id: Uuid::now_v7(),
+            head: AHashMap::new(),
+            body: EmailMessageBody {
+                email_queue_id,
+                to_address: entry.to_address,
+                subject: entry.subject,
+                html_body: entry.html_body,
+                text_body: entry.text_body,
+                from_address: entry.from_address,
+            },
+        }
+        .into();
+        // One attempt: the sweep is the retry. A message that did get through
+        // after its enqueue was given up is one more duplicate for the send
+        // claim to drop.
+        let failure = match tokio::time::timeout(
+            EMAIL_RECOVERY_ENQUEUE_TIMEOUT,
+            queue.enqueue(message),
+        )
+        .await
+        {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some("the enqueue timed out".to_string()),
+        };
+        if let Some(failure) = failure {
+            if let Err(error) = EmailQueueEntry::unclaim_overdue(db, &email_queue_id).await {
+                tracing::warn!(%email_queue_id, %error, "Could not give back a pending app email's recovery claim");
+            }
+            return Err(format!("Recovering email {email_queue_id}: {failure}"));
+        }
+        tracing::info!(%email_queue_id, "Enqueued a pending app email again");
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 impl QueueEventPublisher {
     async fn enqueue_message(&self, message: Message) -> Result<(), String> {
         crate::queue::enqueue_with_retries(
@@ -1046,11 +1118,25 @@ impl EventPublisher for QueueAndDatabaseEventPublisher {
         // Step 2: Now that database write is complete, enqueue to queue
         // Worker can now safely process this event knowing the event record exists
         crate::lang::hot::native_io::block_on_result("send enqueue", async {
-            let packet = self.database_publisher.pending_message(ctx, event.event_id).await.map_err(Val::from)?;
             // The event row and its packet are committed: the outbox now owes
-            // the delivery, so a failed enqueue is recovered, not reported. An
-            // error here would tell `send` the event was lost while recovery
-            // still delivers it, and a retried send would deliver it twice.
+            // the delivery, so a packet that can't be read back or a failed
+            // enqueue is recovered, not reported. An error here would tell
+            // `send` the event was lost while recovery still delivers it, and
+            // a retried send would deliver it twice. Only a packet nothing can
+            // deliver is an error.
+            let packet = match self.database_publisher.pending_message(ctx, event.event_id).await {
+                Ok(packet) => packet,
+                Err(super::database::PendingMessageError::Unread(error)) => {
+                    tracing::warn!(event_id = %event.event_id, %error, "Event enqueue packet could not be read; outbox recovery will enqueue it");
+                    if let Err(error) = self.database_publisher.release_enqueue(ctx, event.event_id).await {
+                        tracing::warn!(event_id = %event.event_id, %error, "Event outbox lease not released; recovery waits for it to expire");
+                    }
+                    return Ok(());
+                }
+                Err(super::database::PendingMessageError::Unusable(error)) => {
+                    return Err(Val::from(error));
+                }
+            };
             if let Err(error) = self.queue_publisher.enqueue_message(packet).await {
                 tracing::warn!(event_id = %event.event_id, %error, "Event enqueue failed; outbox recovery will enqueue it");
                 if let Err(error) = self.database_publisher.release_enqueue(ctx, event.event_id).await {
@@ -1387,6 +1473,136 @@ mod tests {
         assert_eq!(queue.dequeue().await.unwrap().unwrap().id, id);
         assert!(queue.dequeue().await.unwrap().is_none());
         combined.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pending_email_whose_enqueue_was_lost_is_enqueued_again_once() {
+        use crate::db::email_queue::EmailQueueEntry;
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let queue = test_queue_publisher().queue;
+        let enqueue = async |to: &'static str| {
+            EmailQueueEntry::enqueue(&db, to, "Subject", None, Some("Hello"), "from@example.com")
+                .await
+                .unwrap()
+        };
+        // Written, and then never enqueued.
+        let lost = enqueue("lost@example.com").await;
+        sqlx::query(
+            "UPDATE email_queue SET created_at = datetime('now', '-15 minutes'), updated_at = datetime('now', '-15 minutes')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        // Just written: its own queue message is still on its way.
+        enqueue("fresh@example.com").await;
+
+        let (one, two) = tokio::join!(
+            recover_pending_emails(&db, &*queue),
+            recover_pending_emails(&db, &*queue)
+        );
+        assert_eq!(one.unwrap() + two.unwrap(), 1);
+        let message = EmailMessage::try_from(queue.dequeue().await.unwrap().unwrap()).unwrap();
+        assert_eq!(message.body.email_queue_id, lost);
+        assert_eq!(message.body.to_address, "lost@example.com");
+        assert_eq!(message.body.text_body.as_deref(), Some("Hello"));
+        assert!(queue.dequeue().await.unwrap().is_none());
+    }
+
+    /// A queue whose first enqueues fail, as through an outage.
+    struct FailingQueue {
+        failures_left: std::sync::atomic::AtomicUsize,
+        enqueued: std::sync::Mutex<Vec<Message>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Queue<Message> for FailingQueue {
+        async fn enqueue(
+            &self,
+            item: Message,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self
+                .failures_left
+                .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                .is_ok()
+            {
+                return Err("queue unavailable".into());
+            }
+            self.enqueued.lock().unwrap().push(item);
+            Ok(())
+        }
+
+        async fn dequeue(
+            &self,
+        ) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(None)
+        }
+
+        async fn len(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.enqueued.lock().unwrap().len())
+        }
+
+        async fn move_to_dead_letter_queue(
+            &self,
+            _item: Message,
+            _reason: String,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_re_enqueue_leaves_every_pending_email_due_at_once() {
+        use crate::db::email_queue::EmailQueueEntry;
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        for to in ["a@example.com", "b@example.com", "c@example.com"] {
+            EmailQueueEntry::enqueue(&db, to, "Subject", None, Some("Hello"), "from@example.com")
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "UPDATE email_queue SET created_at = datetime('now', '-15 minutes'), updated_at = datetime('now', '-15 minutes')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // Two passes through a queue outage: each stops at its first email,
+        // and no email is left waiting out a backoff for a message it never got.
+        let queue = FailingQueue {
+            failures_left: 2.into(),
+            enqueued: Default::default(),
+        };
+        for _ in 0..2 {
+            let error = recover_pending_emails(&db, &queue).await.unwrap_err();
+            assert!(error.contains("queue unavailable"), "{error}");
+            let untouched: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM email_queue WHERE status_id = 1 AND updated_at = created_at",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(untouched, 3);
+        }
+
+        // The queue is back: the next pass enqueues all three, once each.
+        assert_eq!(recover_pending_emails(&db, &queue).await.unwrap(), 3);
+        assert_eq!(recover_pending_emails(&db, &queue).await.unwrap(), 0);
+        let mut recipients: Vec<String> = std::mem::take(&mut *queue.enqueued.lock().unwrap())
+            .into_iter()
+            .map(|message| EmailMessage::try_from(message).unwrap().body.to_address)
+            .collect();
+        recipients.sort();
+        assert_eq!(
+            recipients,
+            ["a@example.com", "b@example.com", "c@example.com"]
+        );
     }
 
     #[test]

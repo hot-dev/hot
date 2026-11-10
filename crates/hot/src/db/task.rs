@@ -172,6 +172,74 @@ pub enum InfraRetryFinalizeOutcome {
     AlreadyTerminal,
 }
 
+/// The next attempt of a task's `retry` policy, inserted in the transaction
+/// that failed the attempt before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedRetry {
+    pub retry_task_id: Uuid,
+    pub retry_attempt: i16,
+    pub next_retry_at: DateTime<Utc>,
+}
+
+/// What [`Task::complete_with_retry`] or
+/// [`Task::fail_stale_running_with_retry`] did. Both of its parts commit
+/// together or not at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureWrite {
+    /// The terminal write applied: the row was still this writer's to finish.
+    pub applied: bool,
+    /// The retry this transaction inserted. `None` when the write did not
+    /// apply, the policy owes no retry, or the retry row already existed.
+    pub retry: Option<CommittedRetry>,
+}
+
+impl FailureWrite {
+    const NOT_APPLIED: Self = Self {
+        applied: false,
+        retry: None,
+    };
+}
+
+/// The attempt number and start time of the retry a failing attempt's `retry`
+/// policy still owes, read from the row's own `options`. `None` without a
+/// policy or once its attempts are spent.
+fn policy_retry_due(
+    options: Option<&serde_json::Value>,
+    retry_attempt: i16,
+) -> Option<(i16, DateTime<Utc>)> {
+    let policy = crate::env::retry::RetryConfig::from_meta(Some(options?));
+    if !policy.is_enabled() || retry_attempt >= policy.max_retries {
+        return None;
+    }
+    let next_attempt = retry_attempt + 1;
+    let delay_ms = policy.delay_for_attempt(next_attempt);
+    Some((
+        next_attempt,
+        Utc::now() + chrono::Duration::milliseconds(delay_ms),
+    ))
+}
+
+// A policy retry copies the failing row, `info` (its latest checkpoint)
+// included, under a new id. The unique index on `(parent_task_id,
+// retry_attempt)` makes a second insert for the same attempt a no-op.
+const POLICY_RETRY_INSERT_PG: &str = "\
+    INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, \
+        task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, \
+        infra_retry_count, next_retry_at, by_user_id, info) \
+    SELECT $1, env_id, stream_id, build_id, origin_run_id, task_id, $2, function_name, args, \
+        options, task_type, timeout_ms, $3, 0, $4, by_user_id, info \
+    FROM task WHERE task_id = $5 \
+    ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING";
+
+const POLICY_RETRY_INSERT_SQLITE: &str = "\
+    INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, \
+        task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, \
+        infra_retry_count, next_retry_at, by_user_id, created_at, info) \
+    SELECT ?, env_id, stream_id, build_id, origin_run_id, task_id, ?, function_name, args, \
+        options, task_type, timeout_ms, ?, 0, ?, by_user_id, ?, info \
+    FROM task WHERE task_id = ? \
+    ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING";
+
 const TASK_ORIGIN_FN_PG: &str = "\
     COALESCE(\
         origin_e.event_data->>'fn', \
@@ -203,6 +271,96 @@ const TASK_ORIGIN_FN_EXPR_SQLITE: &str = "\
         (SELECT function_name FROM call WHERE run_id = origin_r.run_id AND parent_call_id IS NULL LIMIT 1), \
         (SELECT function_name FROM task t2 WHERE t2.run_id = origin_r.run_id LIMIT 1)\
     )";
+
+/// The conditional terminal UPDATE of [`Task::complete`], runnable on a pool
+/// or inside a transaction.
+struct TerminalWrite<'a> {
+    task_id: &'a Uuid,
+    status: &'a TaskStatus,
+    result: Option<&'a serde_json::Value>,
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&'a str>,
+}
+
+impl TerminalWrite<'_> {
+    /// Cancellation requests are terminal to callers, but keep their quota
+    /// reservation until the owning worker confirms termination and usage.
+    fn settles_cancelled(&self) -> bool {
+        *self.status == TaskStatus::Cancelled
+            && self.fence_worker.is_some()
+            && self
+                .duration_ms_override
+                .is_some_and(|duration| duration >= 0)
+            && self
+                .result
+                .and_then(|value| value.get("compute-units"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|units| units >= 0)
+    }
+
+    async fn execute_pg<'e, E>(&self, executor: E) -> Result<u64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        Ok(sqlx::query(
+            r#"UPDATE task SET
+                        task_status_id = $1,
+                        stop_time = $2,
+                        duration_ms = COALESCE($8::bigint, EXTRACT(EPOCH FROM ($2 - start_time)) * 1000),
+                        result = $3,
+                        reserved_compute_units = CASE WHEN $9 THEN 0 ELSE reserved_compute_units END,
+                        reserved_duration_ms = CASE WHEN $9 THEN 0 ELSE reserved_duration_ms END
+                    WHERE task_id = $4
+                      AND (task_status_id IN ($5, $6) OR ($9 AND task_status_id=5 AND reserved_duration_ms>0))
+                      AND ($7::text IS NULL OR worker_id = $7)"#,
+        )
+        .bind(self.status.as_id())
+        .bind(Utc::now())
+        .bind(self.result)
+        .bind(self.task_id)
+        .bind(TaskStatus::Queued.as_id())
+        .bind(TaskStatus::Running.as_id())
+        .bind(self.fence_worker)
+        .bind(self.duration_ms_override)
+        .bind(self.settles_cancelled())
+        .execute(executor)
+        .await?
+        .rows_affected())
+    }
+
+    async fn execute_sqlite<'e, E>(&self, executor: E) -> Result<u64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let result_str = self
+            .result
+            .map(|r| serde_json::to_string(r).unwrap_or_default());
+        Ok(sqlx::query(
+            r#"UPDATE task SET
+                        task_status_id = ?1,
+                        stop_time = ?2,
+                        duration_ms = COALESCE(?8, CAST((julianday(?2) - julianday(start_time)) * 86400000 AS INTEGER)),
+                        result = ?3,
+                        reserved_compute_units = CASE WHEN ?9 THEN 0 ELSE reserved_compute_units END,
+                        reserved_duration_ms = CASE WHEN ?9 THEN 0 ELSE reserved_duration_ms END
+                    WHERE task_id = ?4
+                      AND (task_status_id IN (?5, ?6) OR (?9 AND task_status_id=5 AND reserved_duration_ms>0))
+                      AND (?7 IS NULL OR worker_id = ?7)"#,
+        )
+        .bind(self.status.as_id())
+        .bind(Utc::now())
+        .bind(result_str)
+        .bind(self.task_id)
+        .bind(TaskStatus::Queued.as_id())
+        .bind(TaskStatus::Running.as_id())
+        .bind(self.fence_worker)
+        .bind(self.duration_ms_override)
+        .bind(self.settles_cancelled())
+        .execute(executor)
+        .await?
+        .rows_affected())
+    }
+}
 
 impl Task {
     pub fn status(&self) -> Option<TaskStatus> {
@@ -327,6 +485,9 @@ impl Task {
         .await
     }
 
+    /// The child starts with its parent's latest checkpoint: `info` is read
+    /// from the parent row inside the insert itself, not from `original`,
+    /// which may predate the last `set_checkpoint`.
     async fn insert_retry_with_infra_count(
         db: &crate::db::DatabasePool,
         new_task_id: &Uuid,
@@ -338,7 +499,7 @@ impl Task {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id, info) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, (SELECT info FROM task WHERE task_id = $6)) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
@@ -371,7 +532,7 @@ impl Task {
                     .as_ref()
                     .map(|o| serde_json::to_string(o).unwrap_or_default());
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id, created_at, info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT info FROM task WHERE task_id = ?)) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
@@ -390,6 +551,7 @@ impl Task {
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .bind(created_at)
+                .bind(original.task_id)
                 .execute(sqlite_pool)
                 .await?
                 .rows_affected()
@@ -464,11 +626,11 @@ impl Task {
                            task_id, env_id, stream_id, build_id, origin_run_id,
                            parent_task_id, task_status_id, function_name, args,
                            options, task_type, timeout_ms, retry_attempt,
-                           infra_retry_count, next_retry_at, by_user_id
+                           infra_retry_count, next_retry_at, by_user_id, info
                        )
                        SELECT $1, env_id, stream_id, build_id, origin_run_id,
                               task_id, $2, function_name, args, options,
-                              task_type, timeout_ms, retry_attempt, $3, $4, by_user_id
+                              task_type, timeout_ms, retry_attempt, $3, $4, by_user_id, info
                        FROM task WHERE task_id = $5
                        ON CONFLICT (parent_task_id, retry_attempt)
                            WHERE parent_task_id IS NOT NULL DO NOTHING
@@ -569,11 +731,11 @@ impl Task {
                            task_id, env_id, stream_id, build_id, origin_run_id,
                            parent_task_id, task_status_id, function_name, args,
                            options, task_type, timeout_ms, retry_attempt,
-                           infra_retry_count, next_retry_at, by_user_id, created_at
+                           infra_retry_count, next_retry_at, by_user_id, created_at, info
                        )
                        SELECT ?, env_id, stream_id, build_id, origin_run_id,
                               task_id, ?, function_name, args, options,
-                              task_type, timeout_ms, retry_attempt, ?, ?, by_user_id, ?
+                              task_type, timeout_ms, retry_attempt, ?, ?, by_user_id, ?, info
                        FROM task WHERE task_id = ?
                        ON CONFLICT (parent_task_id, retry_attempt)
                            WHERE parent_task_id IS NOT NULL DO NOTHING"#,
@@ -679,7 +841,8 @@ impl Task {
         let now = Utc::now();
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query(
-                "UPDATE task SET task_status_id = $1, start_time = $2, worker_id = $3, last_heartbeat_at = $2 WHERE task_id = $4 AND task_status_id = $5",
+                // Heartbeat from the database clock (see `heartbeat`).
+                "UPDATE task SET task_status_id = $1, start_time = $2, worker_id = $3, last_heartbeat_at = NOW() WHERE task_id = $4 AND task_status_id = $5",
             )
             .bind(TaskStatus::Running.as_id())
             .bind(now)
@@ -778,72 +941,176 @@ impl Task {
         duration_ms_override: Option<i64>,
         fence_worker: Option<&str>,
     ) -> Result<bool, TaskError> {
-        // Cancellation requests are terminal to callers, but keep their quota
-        // reservation until the owning worker confirms termination and usage.
-        let settles_cancelled = *status == TaskStatus::Cancelled
-            && fence_worker.is_some()
-            && duration_ms_override.is_some_and(|duration| duration >= 0)
-            && result
-                .and_then(|value| value.get("compute-units"))
-                .and_then(serde_json::Value::as_i64)
-                .is_some_and(|units| units >= 0);
-        let now = Utc::now();
-        let queued_id = TaskStatus::Queued.as_id();
-        let running_id = TaskStatus::Running.as_id();
+        let write = TerminalWrite {
+            task_id,
+            status,
+            result,
+            duration_ms_override,
+            fence_worker,
+        };
         let rows_affected = match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query(
-                r#"UPDATE task SET
-                        task_status_id = $1,
-                        stop_time = $2,
-                        duration_ms = COALESCE($8::bigint, EXTRACT(EPOCH FROM ($2 - start_time)) * 1000),
-                        result = $3,
-                        reserved_compute_units = CASE WHEN $9 THEN 0 ELSE reserved_compute_units END,
-                        reserved_duration_ms = CASE WHEN $9 THEN 0 ELSE reserved_duration_ms END
-                    WHERE task_id = $4
-                      AND (task_status_id IN ($5, $6) OR ($9 AND task_status_id=5 AND reserved_duration_ms>0))
-                      AND ($7::text IS NULL OR worker_id = $7)"#,
-            )
-            .bind(status.as_id())
-            .bind(now)
-            .bind(result)
-            .bind(task_id)
-            .bind(queued_id)
-            .bind(running_id)
-            .bind(fence_worker)
-            .bind(duration_ms_override)
-            .bind(settles_cancelled)
-            .execute(pg_pool)
-            .await?
-            .rows_affected(),
+            crate::db::DatabasePool::Postgres(pg_pool) => write.execute_pg(pg_pool).await?,
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let result_str = result.map(|r| serde_json::to_string(r).unwrap_or_default());
-                sqlx::query(
-                    r#"UPDATE task SET
-                        task_status_id = ?1,
-                        stop_time = ?2,
-                        duration_ms = COALESCE(?8, CAST((julianday(?2) - julianday(start_time)) * 86400000 AS INTEGER)),
-                        result = ?3,
-                        reserved_compute_units = CASE WHEN ?9 THEN 0 ELSE reserved_compute_units END,
-                        reserved_duration_ms = CASE WHEN ?9 THEN 0 ELSE reserved_duration_ms END
-                    WHERE task_id = ?4
-                      AND (task_status_id IN (?5, ?6) OR (?9 AND task_status_id=5 AND reserved_duration_ms>0))
-                      AND (?7 IS NULL OR worker_id = ?7)"#,
-                )
-                .bind(status.as_id())
-                .bind(now)
-                .bind(result_str)
-                .bind(task_id)
-                .bind(queued_id)
-                .bind(running_id)
-                .bind(fence_worker)
-                .bind(duration_ms_override)
-                .bind(settles_cancelled)
-                .execute(sqlite_pool)
-                .await?
-                .rows_affected()
+                write.execute_sqlite(sqlite_pool).await?
             }
         };
         Ok(rows_affected == 1)
+    }
+
+    /// [`Task::complete`] for a failure whose `retry` policy may owe another
+    /// attempt: the terminal write and the retry row commit in one
+    /// transaction, so nobody can see the failure without its retry.
+    ///
+    /// The retry is decided from the locked row before the write (see
+    /// [`policy_retry_due`]) and only for `failed` and `timed_out`. It is
+    /// inserted only if the terminal write applied: a row that was cancelled,
+    /// finished by someone else or fenced away from `fence_worker` gets no
+    /// retry, and a replay of a write that already committed inserts nothing.
+    /// An insert that fails rolls the terminal write back. Enqueueing the
+    /// retry is the caller's job, after the commit; the queued-row reconciler
+    /// covers a caller that stops before it.
+    pub async fn complete_with_retry(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        status: &TaskStatus,
+        result: Option<&serde_json::Value>,
+        duration_ms_override: Option<i64>,
+        fence_worker: Option<&str>,
+        retry_task_id: &Uuid,
+    ) -> Result<FailureWrite, TaskError> {
+        let retryable = matches!(status, TaskStatus::Failed | TaskStatus::TimedOut);
+        let write = TerminalWrite {
+            task_id,
+            status,
+            result,
+            duration_ms_override,
+            fence_worker,
+        };
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let Some(due) = Self::lock_for_policy_retry_pg(&mut tx, task_id).await? else {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                };
+                if write.execute_pg(&mut *tx).await? != 1 {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                }
+                let retry = match due.filter(|_| retryable) {
+                    Some(due) => {
+                        Self::insert_policy_retry_pg(&mut tx, task_id, retry_task_id, due).await?
+                    }
+                    None => None,
+                };
+                tx.commit().await?;
+                Ok(FailureWrite {
+                    applied: true,
+                    retry,
+                })
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                // Reads before writing, so take the writer lock up front.
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(due) = Self::read_for_policy_retry_sqlite(&mut tx, task_id).await? else {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                };
+                if write.execute_sqlite(&mut *tx).await? != 1 {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                }
+                let retry = match due.filter(|_| retryable) {
+                    Some(due) => {
+                        Self::insert_policy_retry_sqlite(&mut tx, task_id, retry_task_id, due)
+                            .await?
+                    }
+                    None => None,
+                };
+                tx.commit().await?;
+                Ok(FailureWrite {
+                    applied: true,
+                    retry,
+                })
+            }
+        }
+    }
+
+    /// Lock `task_id`'s row and decide its policy retry. The outer `None`
+    /// means the row does not exist.
+    async fn lock_for_policy_retry_pg(
+        conn: &mut sqlx::PgConnection,
+        task_id: &Uuid,
+    ) -> Result<Option<Option<(i16, DateTime<Utc>)>>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (i16, Option<serde_json::Value>)>(
+            "SELECT retry_attempt, options FROM task WHERE task_id = $1 FOR UPDATE",
+        )
+        .bind(task_id)
+        .fetch_optional(conn)
+        .await?;
+        Ok(row.map(|(retry_attempt, options)| policy_retry_due(options.as_ref(), retry_attempt)))
+    }
+
+    /// [`Self::lock_for_policy_retry_pg`] on SQLite, where the transaction
+    /// already holds the writer lock.
+    async fn read_for_policy_retry_sqlite(
+        conn: &mut sqlx::SqliteConnection,
+        task_id: &Uuid,
+    ) -> Result<Option<Option<(i16, DateTime<Utc>)>>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (i16, Option<serde_json::Value>)>(
+            "SELECT retry_attempt, options FROM task WHERE task_id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(conn)
+        .await?;
+        Ok(row.map(|(retry_attempt, options)| policy_retry_due(options.as_ref(), retry_attempt)))
+    }
+
+    async fn insert_policy_retry_pg(
+        conn: &mut sqlx::PgConnection,
+        parent_task_id: &Uuid,
+        retry_task_id: &Uuid,
+        (retry_attempt, next_retry_at): (i16, DateTime<Utc>),
+    ) -> Result<Option<CommittedRetry>, sqlx::Error> {
+        let inserted = sqlx::query(POLICY_RETRY_INSERT_PG)
+            .bind(retry_task_id)
+            .bind(TaskStatus::Queued.as_id())
+            .bind(retry_attempt)
+            .bind(next_retry_at)
+            .bind(parent_task_id)
+            .execute(conn)
+            .await?
+            .rows_affected()
+            == 1;
+        Ok(inserted.then_some(CommittedRetry {
+            retry_task_id: *retry_task_id,
+            retry_attempt,
+            next_retry_at,
+        }))
+    }
+
+    async fn insert_policy_retry_sqlite(
+        conn: &mut sqlx::SqliteConnection,
+        parent_task_id: &Uuid,
+        retry_task_id: &Uuid,
+        (retry_attempt, next_retry_at): (i16, DateTime<Utc>),
+    ) -> Result<Option<CommittedRetry>, sqlx::Error> {
+        let inserted = sqlx::query(POLICY_RETRY_INSERT_SQLITE)
+            .bind(retry_task_id)
+            .bind(TaskStatus::Queued.as_id())
+            .bind(retry_attempt)
+            .bind(next_retry_at)
+            .bind(Utc::now())
+            .bind(parent_task_id)
+            .execute(conn)
+            .await?
+            .rows_affected()
+            == 1;
+        Ok(inserted.then_some(CommittedRetry {
+            retry_task_id: *retry_task_id,
+            retry_attempt,
+            next_retry_at,
+        }))
     }
 
     /// Terminally fail a task only while it is still `queued`.
@@ -1269,11 +1536,11 @@ impl Task {
                        AND t.task_type = 'container'
                        AND (
                            (t.last_heartbeat_at IS NOT NULL
-                            AND t.last_heartbeat_at >= datetime('now', '-' || ? || ' seconds'))
+                            AND julianday(t.last_heartbeat_at) >= julianday('now', '-' || ? || ' seconds'))
                         OR (t.start_time IS NOT NULL
-                            AND t.start_time >= datetime('now', '-' || ? || ' seconds'))
+                            AND julianday(t.start_time) >= julianday('now', '-' || ? || ' seconds'))
                         OR (t.start_time IS NULL
-                            AND t.created_at >= datetime('now', '-' || ? || ' seconds'))
+                            AND julianday(t.created_at) >= julianday('now', '-' || ? || ' seconds'))
                        )",
                 )
                 .bind(org_id)
@@ -1965,10 +2232,10 @@ impl Task {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET worker_id = $1, last_heartbeat_at = $2 WHERE task_id = $3 AND task_status_id = $4",
+                    // Heartbeat from the database clock (see `heartbeat`).
+                    "UPDATE task SET worker_id = $1, last_heartbeat_at = NOW() WHERE task_id = $2 AND task_status_id = $3",
                 )
                 .bind(worker_id)
-                .bind(now)
                 .bind(task_id)
                 .bind(TaskStatus::Running.as_id())
                 .execute(pg_pool)
@@ -2037,18 +2304,20 @@ impl Task {
     }
 
     /// Batch-update heartbeats for all tasks owned by this worker that are still running.
+    ///
+    /// The heartbeat is stamped with the database clock, the same clock
+    /// `find_zombie_tasks` and `fail_stale_running` compare it against, so a
+    /// worker whose own clock runs behind cannot age its rows into zombies.
     pub async fn heartbeat(
         db: &crate::db::DatabasePool,
         worker_id: &str,
     ) -> Result<u64, TaskError> {
-        let now = Utc::now();
         let running_id = TaskStatus::Running.as_id();
         let rows = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET last_heartbeat_at = $1 WHERE worker_id = $2 AND task_status_id = $3",
+                    "UPDATE task SET last_heartbeat_at = NOW() WHERE worker_id = $1 AND task_status_id = $2",
                 )
-                .bind(now)
                 .bind(worker_id)
                 .bind(running_id)
                 .execute(pg_pool)
@@ -2056,10 +2325,10 @@ impl Task {
                 .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                // RFC 3339, the text form sqlx writes for a bound `DateTime<Utc>`.
                 sqlx::query(
-                    "UPDATE task SET last_heartbeat_at = ? WHERE worker_id = ? AND task_status_id = ?",
+                    "UPDATE task SET last_heartbeat_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE worker_id = ? AND task_status_id = ?",
                 )
-                .bind(now)
                 .bind(worker_id)
                 .bind(running_id)
                 .execute(sqlite_pool)
@@ -2128,7 +2397,7 @@ impl Task {
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = ?
                          AND t.last_heartbeat_at IS NOT NULL
-                         AND t.last_heartbeat_at < datetime('now', '-' || ? || ' seconds')"#,
+                         AND julianday(t.last_heartbeat_at) < julianday('now', '-' || ? || ' seconds')"#,
                     )
                     .bind(running_id)
                     .bind(stale_threshold_secs.to_string())
@@ -2138,6 +2407,200 @@ impl Task {
                 Ok(tasks)
             }
         }
+    }
+
+    /// Fail a `running` task only while it is still the zombie a reaper pass
+    /// observed: still owned by `observed_worker` and still stale by the
+    /// database clock at write time (the predicates of `find_zombie_tasks`
+    /// and `find_running_without_heartbeat`, repeated in the UPDATE).
+    ///
+    /// The reaper lists candidates and then awaits per-task work, and a
+    /// candidate's worker may only have been cut off from the database for a
+    /// while. A heartbeat, an adoption (`set_worker`) or a terminal write that
+    /// lands in between makes this affect zero rows, so a live task is never
+    /// failed out from under its worker. Returns true when the row was failed.
+    pub async fn fail_stale_running(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        observed_worker: Option<&str>,
+        stale_threshold_secs: i64,
+        error: Option<&serde_json::Value>,
+    ) -> Result<bool, TaskError> {
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                Self::fail_stale_running_pg(
+                    pg_pool,
+                    task_id,
+                    observed_worker,
+                    stale_threshold_secs,
+                    error,
+                )
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                Self::fail_stale_running_sqlite(
+                    sqlite_pool,
+                    task_id,
+                    observed_worker,
+                    stale_threshold_secs,
+                    error,
+                )
+                .await?
+            }
+        };
+        Ok(rows_affected == 1)
+    }
+
+    /// [`Task::fail_stale_running`] plus the retry the zombie's `retry` policy
+    /// still owes, in one transaction: the retry row is inserted only if the
+    /// fenced update applied, and both commit together. A candidate that is
+    /// no longer the observed zombie gets neither. See
+    /// [`Task::complete_with_retry`] for the rest of the contract.
+    pub async fn fail_stale_running_with_retry(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        observed_worker: Option<&str>,
+        stale_threshold_secs: i64,
+        error: Option<&serde_json::Value>,
+        retry_task_id: &Uuid,
+    ) -> Result<FailureWrite, TaskError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let Some(due) = Self::lock_for_policy_retry_pg(&mut tx, task_id).await? else {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                };
+                let rows_affected = Self::fail_stale_running_pg(
+                    &mut *tx,
+                    task_id,
+                    observed_worker,
+                    stale_threshold_secs,
+                    error,
+                )
+                .await?;
+                if rows_affected != 1 {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                }
+                let retry = match due {
+                    Some(due) => {
+                        Self::insert_policy_retry_pg(&mut tx, task_id, retry_task_id, due).await?
+                    }
+                    None => None,
+                };
+                tx.commit().await?;
+                Ok(FailureWrite {
+                    applied: true,
+                    retry,
+                })
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                // Reads before writing, so take the writer lock up front.
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                let Some(due) = Self::read_for_policy_retry_sqlite(&mut tx, task_id).await? else {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                };
+                let rows_affected = Self::fail_stale_running_sqlite(
+                    &mut *tx,
+                    task_id,
+                    observed_worker,
+                    stale_threshold_secs,
+                    error,
+                )
+                .await?;
+                if rows_affected != 1 {
+                    tx.rollback().await?;
+                    return Ok(FailureWrite::NOT_APPLIED);
+                }
+                let retry = match due {
+                    Some(due) => {
+                        Self::insert_policy_retry_sqlite(&mut tx, task_id, retry_task_id, due)
+                            .await?
+                    }
+                    None => None,
+                };
+                tx.commit().await?;
+                Ok(FailureWrite {
+                    applied: true,
+                    retry,
+                })
+            }
+        }
+    }
+
+    async fn fail_stale_running_pg<'e, E>(
+        executor: E,
+        task_id: &Uuid,
+        observed_worker: Option<&str>,
+        stale_threshold_secs: i64,
+        error: Option<&serde_json::Value>,
+    ) -> Result<u64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        Ok(sqlx::query(
+            r#"UPDATE task SET
+                        task_status_id = $1,
+                        stop_time = $2,
+                        duration_ms = EXTRACT(EPOCH FROM ($2 - start_time)) * 1000,
+                        result = $3
+                    WHERE task_id = $4
+                      AND task_status_id = $5
+                      AND worker_id IS NOT DISTINCT FROM $6::text
+                      AND ((last_heartbeat_at IS NOT NULL
+                            AND last_heartbeat_at < NOW() - ($7 || ' seconds')::interval)
+                        OR (last_heartbeat_at IS NULL
+                            AND start_time < NOW() - interval '5 minutes'))"#,
+        )
+        .bind(TaskStatus::Failed.as_id())
+        .bind(Utc::now())
+        .bind(error)
+        .bind(task_id)
+        .bind(TaskStatus::Running.as_id())
+        .bind(observed_worker)
+        .bind(stale_threshold_secs.to_string())
+        .execute(executor)
+        .await?
+        .rows_affected())
+    }
+
+    async fn fail_stale_running_sqlite<'e, E>(
+        executor: E,
+        task_id: &Uuid,
+        observed_worker: Option<&str>,
+        stale_threshold_secs: i64,
+        error: Option<&serde_json::Value>,
+    ) -> Result<u64, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let error_str = error.map(|e| serde_json::to_string(e).unwrap_or_default());
+        Ok(sqlx::query(
+            r#"UPDATE task SET
+                        task_status_id = ?1,
+                        stop_time = ?2,
+                        duration_ms = CAST((julianday(?2) - julianday(start_time)) * 86400000 AS INTEGER),
+                        result = ?3
+                    WHERE task_id = ?4
+                      AND task_status_id = ?5
+                      AND worker_id IS ?6
+                      AND ((last_heartbeat_at IS NOT NULL
+                            AND julianday(last_heartbeat_at) < julianday('now', '-' || ?7 || ' seconds'))
+                        OR (last_heartbeat_at IS NULL
+                            AND julianday(start_time) < julianday('now', '-5 minutes')))"#,
+        )
+        .bind(TaskStatus::Failed.as_id())
+        .bind(Utc::now())
+        .bind(error_str)
+        .bind(task_id)
+        .bind(TaskStatus::Running.as_id())
+        .bind(observed_worker)
+        .bind(stale_threshold_secs.to_string())
+        .execute(executor)
+        .await?
+        .rows_affected())
     }
 
     /// Save checkpoint data for a task (application-level state persistence).
@@ -2175,6 +2638,45 @@ impl Task {
     ) -> Result<Option<serde_json::Value>, TaskError> {
         let task = Self::get_in_env(db, task_id, env_id).await?;
         Ok(task.info)
+    }
+
+    /// The newest retry of `parent_task_id` in `env_id`, if one exists.
+    ///
+    /// A retry is a new row with a new id, so callers holding the parent's id
+    /// (`::hot::task/await`, `cancel`, `send`) use this to follow the lineage.
+    pub async fn get_retry_child(
+        db: &crate::db::DatabasePool,
+        parent_task_id: &Uuid,
+        env_id: &Uuid,
+    ) -> Result<Option<Task>, TaskError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} WHERE t.parent_task_id = $1 AND t.env_id = $2 \
+                     ORDER BY t.created_at DESC, t.task_id DESC LIMIT 1"
+                );
+                Ok(sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(parent_task_id)
+                    .bind(env_id)
+                    .fetch_optional(pg_pool)
+                    .await?)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} WHERE t.parent_task_id = ? AND t.env_id = ? \
+                     ORDER BY t.created_at DESC, t.task_id DESC LIMIT 1"
+                );
+                Ok(sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(parent_task_id)
+                    .bind(env_id)
+                    .fetch_optional(sqlite_pool)
+                    .await?)
+            }
+        }
     }
 
     /// Replace task observability timing without touching application
@@ -2298,7 +2800,7 @@ impl Task {
                        JOIN task_status ts ON t.task_status_id = ts.task_status_id
                        WHERE t.task_status_id = ?
                          AND t.last_heartbeat_at IS NULL
-                         AND t.start_time < datetime('now', '-5 minutes')"#,
+                         AND julianday(t.start_time) < julianday('now', '-5 minutes')"#,
                     )
                     .bind(running_id)
                     .fetch(sqlite_pool),
@@ -3552,6 +4054,115 @@ mod tests {
         );
     }
 
+    /// A claimed (`running`, owned, heartbeating) code task.
+    async fn insert_claimed(db: &crate::db::DatabasePool, worker: &str) -> Uuid {
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::claim_for_worker(db, &task_id, worker).await.unwrap());
+        task_id
+    }
+
+    /// Move a task's heartbeat and start `seconds` into the past, in the
+    /// RFC 3339 text form the worker's own writes store on SQLite.
+    async fn backdate(db: &crate::db::DatabasePool, task_id: &Uuid, seconds: i64, heartbeat: bool) {
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("expected sqlite test pool")
+        };
+        let at = Utc::now() - chrono::Duration::seconds(seconds);
+        sqlx::query("UPDATE task SET last_heartbeat_at = ?, start_time = ? WHERE task_id = ?")
+            .bind(heartbeat.then_some(at))
+            .bind(at)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_zombie_queries_find_same_day_stale_rows() {
+        let db = crate::db::test_db().await;
+        // Two minutes stale, so on the same UTC date as now except right
+        // after midnight. As text, the stored 'T' form sorts after
+        // `datetime('now')`'s space form for the whole day.
+        let stale = insert_claimed(&db, "worker-same-day").await;
+        backdate(&db, &stale, 120, true).await;
+        let is_zombie = |tasks: Vec<Task>| tasks.iter().any(|t| t.task_id == stale);
+        assert!(is_zombie(Task::find_zombie_tasks(&db, 60).await.unwrap()));
+        assert!(!is_zombie(Task::find_zombie_tasks(&db, 600).await.unwrap()));
+
+        // A row written by a heartbeat is fresh again.
+        assert_eq!(Task::heartbeat(&db, "worker-same-day").await.unwrap(), 1);
+        assert!(!is_zombie(Task::find_zombie_tasks(&db, 60).await.unwrap()));
+
+        // The legacy path: no heartbeat, started ten minutes ago.
+        let legacy = insert_claimed(&db, "worker-legacy").await;
+        backdate(&db, &legacy, 600, false).await;
+        assert!(
+            Task::find_running_without_heartbeat(&db)
+                .await
+                .unwrap()
+                .iter()
+                .any(|t| t.task_id == legacy)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_stale_running_requires_the_observed_zombie() {
+        let db = crate::db::test_db().await;
+        let error = serde_json::json!({"msg": "zombie"});
+        let fail = |task_id: Uuid, worker: Option<&'static str>| {
+            let (db, error) = (db.clone(), error.clone());
+            async move {
+                Task::fail_stale_running(&db, &task_id, worker, 60, Some(&error))
+                    .await
+                    .unwrap()
+            }
+        };
+        let status = |task_id: Uuid| {
+            let db = db.clone();
+            async move { Task::get(&db, &task_id).await.unwrap().status() }
+        };
+
+        // Fresh heartbeat: not a zombie.
+        let task_id = insert_claimed(&db, "worker-a").await;
+        assert!(!fail(task_id, Some("worker-a")).await);
+
+        // Stale, but owned by someone other than the worker the reaper saw.
+        backdate(&db, &task_id, 120, true).await;
+        assert!(!fail(task_id, Some("worker-b")).await);
+        assert!(!fail(task_id, None).await);
+
+        // Stale when listed, but its heartbeat landed before the write.
+        assert_eq!(Task::heartbeat(&db, "worker-a").await.unwrap(), 1);
+        assert!(!fail(task_id, Some("worker-a")).await);
+        assert_eq!(status(task_id).await, Some(TaskStatus::Running));
+
+        // Still the zombie that was listed: failed exactly once.
+        backdate(&db, &task_id, 120, true).await;
+        assert!(fail(task_id, Some("worker-a")).await);
+        assert_eq!(status(task_id).await, Some(TaskStatus::Failed));
+        assert!(!fail(task_id, Some("worker-a")).await);
+
+        // A released row has no owner and an aged heartbeat.
+        let released = insert_claimed(&db, "worker-a").await;
+        assert!(
+            Task::release_worker(&db, &released, "worker-a")
+                .await
+                .unwrap()
+        );
+        assert!(fail(released, None).await);
+
+        // The legacy path: no heartbeat, started ten minutes ago.
+        let legacy = insert_claimed(&db, "worker-a").await;
+        backdate(&db, &legacy, 600, false).await;
+        assert!(fail(legacy, Some("worker-a")).await);
+    }
+
     #[tokio::test]
     async fn test_find_running_without_heartbeat() {
         let db = crate::db::test_db().await;
@@ -3998,5 +4609,448 @@ mod tests {
         let p2 = insert_parent_task(&db).await;
         assert_eq!((p1.parent_task_id, p1.retry_attempt), (None, 0));
         assert_eq!((p2.parent_task_id, p2.retry_attempt), (None, 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Retries start from the parent's checkpoint, and are found by parent id
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn retry_children_inherit_the_parents_latest_checkpoint() {
+        let db = crate::db::test_db().await;
+        // `stale` is read before the checkpoint is written, as a worker's
+        // copy of the row is: the child must still get the stored checkpoint.
+        let stale = insert_parent_task(&db).await;
+        let checkpoint = serde_json::json!({"offset": 200});
+        Task::set_checkpoint(&db, &stale.task_id, &checkpoint)
+            .await
+            .unwrap();
+        Task::set_timing(&db, &stale.task_id, &serde_json::json!({"queue_ms": 7}))
+            .await
+            .unwrap();
+
+        let budget_child = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(&db, &budget_child, &stale, 1, Utc::now())
+                .await
+                .unwrap()
+        );
+        let child = Task::get(&db, &budget_child).await.unwrap();
+        assert_eq!(child.info, Some(checkpoint.clone()));
+        assert!(child.timing.is_none(), "only the checkpoint carries over");
+        assert_eq!(
+            Task::get_checkpoint(&db, &budget_child, &stale.env_id)
+                .await
+                .unwrap(),
+            Some(checkpoint.clone())
+        );
+
+        let infra_child = Uuid::now_v7();
+        assert!(
+            Task::insert_infra_retry(&db, &infra_child, &stale, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Task::get(&db, &infra_child).await.unwrap().info,
+            Some(checkpoint)
+        );
+
+        // A parent that never checkpointed hands on nothing.
+        let plain = insert_parent_task(&db).await;
+        let plain_child = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(&db, &plain_child, &plain, 1, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(Task::get(&db, &plain_child).await.unwrap().info.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalize_with_infra_retry_child_inherits_checkpoint() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(Task::mark_running(&db, &parent.task_id).await.unwrap());
+        let checkpoint = serde_json::json!({"step": 3});
+        Task::set_checkpoint(&db, &parent.task_id, &checkpoint)
+            .await
+            .unwrap();
+
+        let child_id = Uuid::now_v7();
+        let error = serde_json::json!({"msg": "interrupted"});
+        Task::finalize_with_infra_retry(
+            &db,
+            &parent.task_id,
+            &child_id,
+            3,
+            &error,
+            &error,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            Task::get_checkpoint(&db, &child_id, &parent.env_id)
+                .await
+                .unwrap(),
+            Some(checkpoint)
+        );
+    }
+
+    #[tokio::test]
+    async fn get_retry_child_finds_the_retry_in_its_own_env_only() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(
+            Task::get_retry_child(&db, &parent.task_id, &parent.env_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let child_id = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(&db, &child_id, &parent, 1, Utc::now())
+                .await
+                .unwrap()
+        );
+        let child = Task::get_retry_child(&db, &parent.task_id, &parent.env_id)
+            .await
+            .unwrap()
+            .expect("the retry is found by its parent's id");
+        assert_eq!(child.task_id, child_id);
+        assert_eq!(child.status, "queued");
+        assert!(
+            Task::get_retry_child(&db, &parent.task_id, &Uuid::now_v7())
+                .await
+                .unwrap()
+                .is_none(),
+            "another environment must not see the retry"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A `retry` policy's retry commits with the failure it follows
+    // -----------------------------------------------------------------------
+
+    /// A running task owned by `worker` with two `retry` attempts.
+    async fn insert_claimed_with_retry(db: &crate::db::DatabasePool, worker: &str) -> Task {
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        let options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+        Task::insert(
+            db,
+            &task_id,
+            &env_id,
+            &stream_id,
+            &build_id,
+            None,
+            "::app/retried",
+            Some(&serde_json::json!({"n": 1})),
+            Some(&options),
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::claim_for_worker(db, &task_id, worker).await.unwrap());
+        Task::get(db, &task_id).await.unwrap()
+    }
+
+    async fn fail_with_retry(
+        db: &crate::db::DatabasePool,
+        task: &Task,
+        fence_worker: Option<&str>,
+        retry_task_id: &Uuid,
+    ) -> Result<FailureWrite, TaskError> {
+        Task::complete_with_retry(
+            db,
+            &task.task_id,
+            &TaskStatus::Failed,
+            Some(&serde_json::json!({"msg": "boom"})),
+            None,
+            fence_worker,
+            retry_task_id,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn complete_with_retry_commits_the_failure_and_its_retry_together() {
+        let db = crate::db::test_db().await;
+        let parent = insert_claimed_with_retry(&db, "worker-a").await;
+        let checkpoint = serde_json::json!({"step": 3});
+        Task::set_checkpoint(&db, &parent.task_id, &checkpoint)
+            .await
+            .unwrap();
+
+        // One transaction: a retry insert that fails (here on the task
+        // primary key) takes the terminal write back with it.
+        assert!(
+            fail_with_retry(&db, &parent, Some("worker-a"), &parent.task_id)
+                .await
+                .is_err()
+        );
+        let unchanged = Task::get(&db, &parent.task_id).await.unwrap();
+        assert_eq!(unchanged.task_status_id, TaskStatus::Running.as_id());
+        assert!(unchanged.result.is_none());
+
+        let retry_id = Uuid::now_v7();
+        let write = fail_with_retry(&db, &parent, Some("worker-a"), &retry_id)
+            .await
+            .unwrap();
+        assert!(write.applied);
+        let committed = write.retry.expect("the policy owes a first retry");
+        assert_eq!(
+            (committed.retry_task_id, committed.retry_attempt),
+            (retry_id, 1)
+        );
+
+        // No step between seeing `failed` and seeing the retry.
+        let failed = Task::get(&db, &parent.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        let retry = Task::get_retry_child(&db, &parent.task_id, &parent.env_id)
+            .await
+            .unwrap()
+            .expect("the retry is visible as soon as the failure is");
+        assert_eq!(retry.task_id, retry_id);
+        assert_eq!(retry.task_status_id, TaskStatus::Queued.as_id());
+        assert_eq!((retry.retry_attempt, retry.infra_retry_count), (1, 0));
+        assert_eq!(retry.parent_task_id, Some(parent.task_id));
+        assert_eq!(retry.function_name, parent.function_name);
+        assert_eq!(
+            (&retry.args, &retry.options),
+            (&parent.args, &parent.options)
+        );
+        assert_eq!(retry.timeout_ms, parent.timeout_ms);
+        assert_eq!(
+            retry.info,
+            Some(checkpoint),
+            "the retry starts from the checkpoint"
+        );
+        assert!(retry.next_retry_at.is_some());
+        assert!(retry.worker_id.is_none() && retry.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_with_retry_replays_create_no_second_retry() {
+        let db = crate::db::test_db().await;
+        let parent = insert_claimed_with_retry(&db, "worker-a").await;
+        let first = fail_with_retry(&db, &parent, Some("worker-a"), &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert!(first.applied && first.retry.is_some());
+
+        // The same write again, as after a lost answer, and the reaper
+        // arriving late: neither applies, neither inserts.
+        for _ in 0..2 {
+            let replay = fail_with_retry(&db, &parent, Some("worker-a"), &Uuid::now_v7())
+                .await
+                .unwrap();
+            assert_eq!(replay, FailureWrite::NOT_APPLIED);
+        }
+        let late_reap = Task::fail_stale_running_with_retry(
+            &db,
+            &parent.task_id,
+            Some("worker-a"),
+            0,
+            None,
+            &Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(late_reap, FailureWrite::NOT_APPLIED);
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            2
+        );
+
+        // A retry row somebody already made for the attempt (an older
+        // worker's) is left as the one retry: the failure still applies.
+        let other = insert_claimed_with_retry(&db, "worker-a").await;
+        let existing = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(&db, &existing, &other, 1, Utc::now())
+                .await
+                .unwrap()
+        );
+        let write = fail_with_retry(&db, &other, None, &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert!(write.applied);
+        assert_eq!(write.retry, None);
+        assert_eq!(Task::get_count_by_env(&db, &other.env_id).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn complete_with_retry_inserts_only_for_an_applied_retryable_failure() {
+        let db = crate::db::test_db().await;
+        let children = |task: &Task| {
+            let (db, parent, env) = (db.clone(), task.task_id, task.env_id);
+            async move { Task::get_retry_child(&db, &parent, &env).await.unwrap() }
+        };
+
+        // Fenced out: the row belongs to another worker now.
+        let stolen = insert_claimed_with_retry(&db, "worker-a").await;
+        let write = fail_with_retry(&db, &stolen, Some("worker-b"), &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(write, FailureWrite::NOT_APPLIED);
+        assert!(children(&stolen).await.is_none());
+        assert_eq!(
+            Task::get(&db, &stolen.task_id)
+                .await
+                .unwrap()
+                .task_status_id,
+            TaskStatus::Running.as_id()
+        );
+
+        // Cancelled first: cancellation is final.
+        let cancelled = insert_claimed_with_retry(&db, "worker-a").await;
+        assert!(
+            Task::cancel(&db, &cancelled.task_id, &cancelled.env_id)
+                .await
+                .unwrap()
+        );
+        let write = fail_with_retry(&db, &cancelled, Some("worker-a"), &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(write, FailureWrite::NOT_APPLIED);
+        assert!(children(&cancelled).await.is_none());
+
+        // A success is never retried, whatever the policy.
+        let done = insert_claimed_with_retry(&db, "worker-a").await;
+        let write = Task::complete_with_retry(
+            &db,
+            &done.task_id,
+            &TaskStatus::Completed,
+            None,
+            None,
+            Some("worker-a"),
+            &Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        assert!(write.applied);
+        assert_eq!(write.retry, None);
+        assert!(children(&done).await.is_none());
+
+        // A timeout is retried like a failure, and the last attempt is not.
+        let timed_out = insert_claimed_with_retry(&db, "worker-a").await;
+        let first_retry = Uuid::now_v7();
+        let write = Task::complete_with_retry(
+            &db,
+            &timed_out.task_id,
+            &TaskStatus::TimedOut,
+            None,
+            None,
+            Some("worker-a"),
+            &first_retry,
+        )
+        .await
+        .unwrap();
+        assert_eq!(write.retry.map(|retry| retry.retry_attempt), Some(1));
+        let mut attempt = Task::get(&db, &first_retry).await.unwrap();
+        for expected in [Some(2), None] {
+            assert!(Task::mark_running(&db, &attempt.task_id).await.unwrap());
+            let next = Uuid::now_v7();
+            let write = fail_with_retry(&db, &attempt, None, &next).await.unwrap();
+            assert!(write.applied);
+            assert_eq!(write.retry.map(|retry| retry.retry_attempt), expected);
+            if expected.is_some() {
+                attempt = Task::get(&db, &next).await.unwrap();
+            }
+        }
+        assert!(children(&attempt).await.is_none(), "attempts are spent");
+
+        // No policy, no retry.
+        let plain = insert_parent_task(&db).await;
+        let write = fail_with_retry(&db, &plain, None, &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert!(write.applied);
+        assert_eq!(write.retry, None);
+
+        // No row, nothing written.
+        let mut missing = insert_parent_task(&db).await;
+        missing.task_id = Uuid::now_v7();
+        let write = fail_with_retry(&db, &missing, None, &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(write, FailureWrite::NOT_APPLIED);
+    }
+
+    #[tokio::test]
+    async fn fail_stale_running_with_retry_inserts_only_when_the_fenced_update_applies() {
+        let db = crate::db::test_db().await;
+        let error = serde_json::json!({"msg": "zombie"});
+        let reap = |task_id: Uuid, worker: Option<&'static str>| {
+            let (db, error) = (db.clone(), error.clone());
+            async move {
+                Task::fail_stale_running_with_retry(
+                    &db,
+                    &task_id,
+                    worker,
+                    60,
+                    Some(&error),
+                    &Uuid::now_v7(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let task = insert_claimed_with_retry(&db, "worker-a").await;
+        let task_id = task.task_id;
+
+        // Fresh heartbeat, then stale but owned by someone else, then a
+        // heartbeat that lands before the write: the fenced update applies
+        // to none of them, so none gets a retry.
+        assert_eq!(
+            reap(task_id, Some("worker-a")).await,
+            FailureWrite::NOT_APPLIED
+        );
+        backdate(&db, &task_id, 120, true).await;
+        assert_eq!(
+            reap(task_id, Some("worker-b")).await,
+            FailureWrite::NOT_APPLIED
+        );
+        assert_eq!(Task::heartbeat(&db, "worker-a").await.unwrap(), 1);
+        assert_eq!(
+            reap(task_id, Some("worker-a")).await,
+            FailureWrite::NOT_APPLIED
+        );
+        let row = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(Task::get_count_by_env(&db, &task.env_id).await.unwrap(), 1);
+
+        // Still the zombie that was listed: failed and retried, once.
+        backdate(&db, &task_id, 120, true).await;
+        let write = reap(task_id, Some("worker-a")).await;
+        assert!(write.applied);
+        let committed = write.retry.expect("the zombie's policy owes a retry");
+        let failed = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        assert_eq!(failed.result, Some(error.clone()));
+        let retry = Task::get_retry_child(&db, &task_id, &task.env_id)
+            .await
+            .unwrap()
+            .expect("the retry is visible as soon as the failure is");
+        assert_eq!(
+            (retry.task_id, retry.retry_attempt, retry.task_status_id),
+            (committed.retry_task_id, 1, TaskStatus::Queued.as_id())
+        );
+        assert_eq!(
+            reap(task_id, Some("worker-a")).await,
+            FailureWrite::NOT_APPLIED
+        );
+        assert_eq!(Task::get_count_by_env(&db, &task.env_id).await.unwrap(), 2);
+
+        // A zombie without a policy is failed and left at that.
+        let plain = insert_claimed(&db, "worker-a").await;
+        backdate(&db, &plain, 120, true).await;
+        let write = reap(plain, Some("worker-a")).await;
+        assert!(write.applied);
+        assert_eq!(write.retry, None);
     }
 }
