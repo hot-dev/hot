@@ -691,3 +691,78 @@ async fn errors_without_a_location_go_to_the_configuration() {
     assert!(file_diagnostics.is_empty(), "{file_diagnostics:?}");
     client.shutdown().await;
 }
+
+const SHOP: &str = r#"::app::shop ns
+
+Port type Int where between(%, 1, 65535)
+Point type { x: Int, y: Int }
+Range type { low: Int, high: Int }
+    where lte(%.low, %.high)
+
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)
+    : Int where gte(%, 0)
+{
+    limit: Int 3 where gt(%, 0)
+    sub(balance, min(amount, limit))
+}
+
+origin fn (x: Int): Point { Point(x: x, y: 0) }
+
+describe fn match (r: Result): Any {
+    Result.Ok (value) => { value }
+    _ => { null }
+}
+"#;
+
+/// Constraints, named arguments and spaced match arms, through the
+/// protocol: what the server answers for the language as it is written now.
+#[tokio::test(flavor = "multi_thread")]
+async fn constraints_and_named_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    write(&root, "hot.hot", HOT_HOT);
+    let shop = write(&root, "hot/src/app/shop.hot", SHOP);
+
+    let mut client = Client::start(&root).await;
+    let since = client.mark();
+    client.open(&shop, SHOP).await;
+    let diagnostics = client.diagnostics(&shop, since, |_| true).await;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // A signature over several lines keeps its parameters.
+    let hover = client.hover_text(&shop, pos(SHOP, "sub(balance", 4)).await;
+    assert!(hover.contains("balance: Int"), "{hover}");
+    // A typed binding is a local, with its constraint.
+    let hover = client.hover_text(&shop, pos(SHOP, "limit))", 0)).await;
+    assert!(hover.contains("limit: Int where gt(%, 0)"), "{hover}");
+    // A named refinement and a precondition are shown.
+    let hover = client.hover_text(&shop, pos(SHOP, "Port type", 0)).await;
+    assert!(hover.contains("where between(%, 1, 65535)"), "{hover}");
+    let hover = client.hover_text(&shop, pos(SHOP, "withdraw fn", 0)).await;
+    assert!(hover.contains("where lte(%.amount, %.balance)"), "{hover}");
+    // A `where` line is not a variable.
+    let hover = client
+        .at("textDocument/hover", &shop, pos(SHOP, "where lte(%.low", 1))
+        .await;
+    assert!(hover.is_null(), "{hover}");
+    // A named argument's label is the field, and a match arm binds.
+    let hover = client.hover_text(&shop, pos(SHOP, "x: x, y: 0", 0)).await;
+    assert!(hover.contains("field of `::app::shop/Point`"), "{hover}");
+    let hover = client.hover_text(&shop, pos(SHOP, "{ value }", 2)).await;
+    assert!(hover.contains("match arm binding"), "{hover}");
+
+    // While typing a constructor call: its fields, by name.
+    let typing = format!("{SHOP}\nnext fn (): Point {{\n    Point(x: 1, \n}}\n");
+    client.change(&shop, 2, &typing).await;
+    let at_argument = pos(&typing, "Point(x: 1, ", 12);
+    let labels = client.completion_labels(&shop, at_argument.clone()).await;
+    assert_eq!(labels, ["y"]);
+    let help = client
+        .at("textDocument/signatureHelp", &shop, at_argument)
+        .await;
+    assert_eq!(help["signatures"][0]["label"], "Point(x: Int, y: Int)");
+    assert_eq!(help["activeParameter"], 1);
+
+    client.shutdown().await;
+}

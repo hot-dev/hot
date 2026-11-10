@@ -2,7 +2,9 @@
 
 use crate::index::{Def, DocContext, Index, Resolved, Scope};
 use crate::render;
-use crate::syntax::{CompletionContext, LocalKind, RefPath, ValueShape};
+use crate::syntax::{
+    CompletionContext, Key, KeyOwner, LocalKind, RefPath, ValueShape, WhereSubject,
+};
 use crate::text::{Document, LineIndex};
 use ahash::{AHashMap, AHashSet};
 use hot::lang::ast::{Source, Value};
@@ -87,7 +89,114 @@ fn head(path: &RefPath) -> RefPath {
     }
 }
 
+/// The record type a constructor call builds: `Point(`, or the payload of
+/// `Shape.Circle(`.
+fn record_of_callee<'a>(scope: &Scope<'a>, callee: &RefPath) -> Option<Def<'a>> {
+    let def = scope.resolve_def(&head(callee))?;
+    let Value::TypeDef(type_def) = def.value else {
+        return None;
+    };
+    match callee.members.first() {
+        None => render::resolve_type(scope, &callee_name(callee)?).or(Some(def)),
+        Some(variant) => {
+            let variant = type_def
+                .variants
+                .as_ref()?
+                .iter()
+                .find(|v| v.name.name() == variant)?;
+            render::resolve_type(
+                &Scope::in_namespace(scope.index, def.ns),
+                variant.type_ref.as_deref()?,
+            )
+        }
+    }
+}
+
+/// A callee as a type annotation would name it: `Point`, `::model/Point`.
+fn callee_name(callee: &RefPath) -> Option<String> {
+    let name = callee.name.as_deref()?;
+    Some(match &callee.ns {
+        Some(ns) => format!("{ns}/{name}"),
+        None => name.to_string(),
+    })
+}
+
+/// The record type a key names a field of, and the field's annotation.
+fn key_field<'a>(scope: &Scope<'a>, key: &Key) -> Option<(Def<'a>, String)> {
+    let def = match &key.owner {
+        KeyOwner::Call(callee) => record_of_callee(scope, callee)?,
+        KeyOwner::TypeDecl(name) => scope
+            .global(name)
+            .filter(|def| matches!(def.value, Value::TypeDef(_)))?,
+        KeyOwner::Record => return None,
+    };
+    let annotation = render::type_fields(&def)
+        .into_iter()
+        .find(|(name, _)| *name == key.name)?
+        .1;
+    Some((def, annotation))
+}
+
+/// The fields `%.` reaches in the `where` clause at `offset`: the parameters
+/// of a precondition, or the fields of the record being checked.
+fn placeholder_fields(
+    scope: &Scope<'_>,
+    ctx: &DocContext,
+    offset: usize,
+) -> Option<Vec<(String, Option<String>)>> {
+    let def = match ctx.syntax.where_subject(&ctx.text, offset)? {
+        WhereSubject::Args(parameters) => return Some(parameters),
+        WhereSubject::Type(annotation) => render::resolve_type(scope, &annotation)?,
+        WhereSubject::Decl(name) => render::resolve_type(scope, &name)?,
+    };
+    Some(
+        render::type_fields(&def)
+            .into_iter()
+            .map(|(name, annotation)| (name, Some(annotation)))
+            .collect(),
+    )
+}
+
 pub fn hover(index: &Index, doc: &Document, ctx: &DocContext, offset: usize) -> Option<Hover> {
+    // `%`: what it stands for where it is written.
+    if let Some((start, end)) = ctx.syntax.placeholder_at(offset) {
+        let value = match ctx.syntax.where_subject(&ctx.text, offset) {
+            Some(WhereSubject::Type(t)) => {
+                format!("```hot\n%: {t}\n```\n\nthe value this constraint checks")
+            }
+            Some(WhereSubject::Decl(name)) => {
+                format!("```hot\n%: {name}\n```\n\nthe value this constraint checks")
+            }
+            Some(WhereSubject::Args(parameters)) => format!(
+                "```hot\n%: {{ {} }}\n```\n\nthe arguments this precondition checks, by parameter name",
+                parameters
+                    .iter()
+                    .map(|(name, annotation)| match annotation {
+                        Some(t) => format!("{name}: {t}"),
+                        None => name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => "```hot\n%\n```\n\nthe parameter of an implicit lambda".to_string(),
+        };
+        let mut hover = markdown(value);
+        hover.range = Some(doc.char_range(start, end - start));
+        return Some(hover);
+    }
+    // A key: the field it names, when a type is named for it.
+    if let Some(key) = ctx.syntax.key_at(offset) {
+        let scope = Scope::new(index, ctx, offset);
+        let (def, annotation) = key_field(&scope, &key)?;
+        let mut hover = markdown(format!(
+            "```hot\n{}: {}\n```\n\nfield of `{}`",
+            key.name,
+            index.display_type(&annotation),
+            def.qualified()
+        ));
+        hover.range = Some(doc.char_range(key.start, key.end - key.start));
+        return Some(hover);
+    }
     let path = ctx.syntax.path_at(offset)?;
     let scope = Scope::new(index, ctx, offset);
     let range = Some(doc.char_range(path.name_start, path.name_end - path.name_start));
@@ -117,6 +226,12 @@ pub fn definition(
     offset: usize,
     files: &mut Files<'_>,
 ) -> Option<Location> {
+    // A key: the type that declares the field.
+    if let Some(key) = ctx.syntax.key_at(offset) {
+        let scope = Scope::new(index, ctx, offset);
+        let (def, _) = key_field(&scope, &key)?;
+        return files.location(def.var.src.as_ref()?);
+    }
     let path = ctx.syntax.path_at(offset)?;
     let scope = Scope::new(index, ctx, offset);
     if path.name.is_none() {
@@ -157,13 +272,31 @@ pub fn signature_help(index: &Index, ctx: &DocContext, offset: usize) -> Option<
             .iter()
             .find(|v| v.name.name() == variant)?;
         let payload = v.type_ref.clone()?;
+        // A record payload is built by naming its fields.
+        let fields: Vec<String> =
+            render::resolve_type(&Scope::in_namespace(index, def.ns), &payload)
+                .map(|record| render::type_fields(&record))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, t)| format!("{}: {}", name, index.display_type(&t)))
+                .collect();
+        let parameters = if fields.is_empty() {
+            vec![payload]
+        } else {
+            fields
+        };
         vec![tower_lsp_server::ls_types::SignatureInformation {
-            label: format!("{}.{}({})", def.name, variant, payload),
+            label: format!("{}.{}({})", def.name, variant, parameters.join(", ")),
             documentation: None,
-            parameters: Some(vec![tower_lsp_server::ls_types::ParameterInformation {
-                label: tower_lsp_server::ls_types::ParameterLabel::Simple(payload),
-                documentation: None,
-            }]),
+            parameters: Some(
+                parameters
+                    .into_iter()
+                    .map(|p| tower_lsp_server::ls_types::ParameterInformation {
+                        label: tower_lsp_server::ls_types::ParameterLabel::Simple(p),
+                        documentation: None,
+                    })
+                    .collect(),
+            ),
             active_parameter: None,
         }]
     } else {
@@ -172,17 +305,44 @@ pub fn signature_help(index: &Index, ctx: &DocContext, offset: usize) -> Option<
     if signatures.is_empty() {
         return None;
     }
-    let active = call.active_parameter;
+    let mut active = call.active_parameter;
     let active_signature = signatures
         .iter()
         .position(|s| {
             let count = s.parameters.as_ref().map_or(0, Vec::len) as u32;
             count > active || s.label.contains("...")
         })
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
+    // A named argument is the parameter of its name, wherever it is
+    // written. One with no label yet is the first not yet named.
+    let names: Vec<String> = signatures[active_signature]
+        .parameters
+        .iter()
+        .flatten()
+        .map(|p| match &p.label {
+            tower_lsp_server::ls_types::ParameterLabel::Simple(label) => label
+                .split(':')
+                .next()
+                .unwrap_or(label)
+                .trim()
+                .trim_start_matches("lazy ")
+                .to_string(),
+            _ => String::new(),
+        })
+        .collect();
+    let named = match &call.active_label {
+        Some(label) => names.iter().position(|name| name == label),
+        None if !call.labels.is_empty() => {
+            names.iter().position(|name| !call.labels.contains(name))
+        }
+        None => None,
+    };
+    if let Some(named) = named {
+        active = named as u32;
+    }
     Some(SignatureHelp {
         signatures,
-        active_signature: Some(active_signature),
+        active_signature: Some(active_signature as u32),
         active_parameter: Some(active),
     })
 }
@@ -222,8 +382,10 @@ fn fields_of_value(
     };
     match scope.resolve(&head(base))? {
         Resolved::Local(local) => match &local.kind {
-            LocalKind::Param(Some(annotation)) => current = render::resolve_type(scope, annotation),
-            LocalKind::Binding(value) => {
+            LocalKind::Param(Some(annotation)) | LocalKind::Binding(_, Some(annotation)) => {
+                current = render::resolve_type(scope, annotation)
+            }
+            LocalKind::Binding(value, None) => {
                 (current, literal_keys) = shape_type(ctx.syntax.value_shape(*value));
             }
             _ => {}
@@ -412,13 +574,43 @@ pub fn completion(index: &Index, ctx: &DocContext, offset: usize) -> Option<Vec<
                 if present.contains(&name) || !name.starts_with(&partial) {
                     continue;
                 }
+                push(field_item(index, &name, &annotation), &mut items);
+            }
+        }
+        CompletionContext::CallArgs {
+            callee,
+            present,
+            partial,
+        } => {
+            // A record type's fields, to name: `Point(x: 1, |`.
+            if let Some(def) = record_of_callee(&scope, &callee) {
+                for (name, annotation) in render::type_fields(&def) {
+                    if present.contains(&name) || !name.starts_with(&partial) {
+                        continue;
+                    }
+                    push(field_item(index, &name, &annotation), &mut items);
+                }
+            }
+            // And any name, once one is being typed.
+            if !partial.is_empty() {
+                for item in bare_items(index, ctx, &scope, offset, &partial) {
+                    push(item, &mut items);
+                }
+            }
+            if items.is_empty() {
+                return None;
+            }
+        }
+        CompletionContext::PlaceholderDot { partial } => {
+            for (name, annotation) in placeholder_fields(&scope, ctx, offset)? {
+                if !name.starts_with(&partial) {
+                    continue;
+                }
                 push(
                     CompletionItem {
                         label: name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(format!("{}: {}", name, index.display_type(&annotation))),
-                        insert_text: Some(format!("{}: ", name)),
-                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                        detail: annotation.map(|t| format!("{}: {}", name, index.display_type(&t))),
                         ..Default::default()
                     },
                     &mut items,
@@ -426,56 +618,82 @@ pub fn completion(index: &Index, ctx: &DocContext, offset: usize) -> Option<Vec<
             }
         }
         CompletionContext::Bare { partial } => {
-            let mut locals: Vec<_> = scope.locals().to_vec();
-            locals.sort_by_key(|l| std::cmp::Reverse(l.start));
-            for local in locals {
-                // Not the word being typed.
-                let typing = local.start <= offset && offset <= local.end;
-                if local.name.starts_with(&partial) && !typing {
-                    push(
-                        CompletionItem {
-                            label: local.name.clone(),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            detail: match &local.kind {
-                                LocalKind::Param(Some(t)) => Some(format!("{}: {}", local.name, t)),
-                                LocalKind::Param(None) => Some("parameter".to_string()),
-                                _ => Some("local".to_string()),
-                            },
-                            ..Default::default()
-                        },
-                        &mut items,
-                    );
-                }
-            }
-            // This document's own top-level names, fresher than the index.
-            let ns = scope.ns.clone();
-            for (name, start, end) in ctx.syntax.top_level_names() {
-                let typing = start <= offset && offset <= end;
-                if ctx.namespace_at(start) == ns && name.starts_with(&partial) && !typing {
-                    let item = match index.get(&ns, &name) {
-                        Some(def) => def_item(index, &def),
-                        None => CompletionItem {
-                            label: name.clone(),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            ..Default::default()
-                        },
-                    };
-                    push(item, &mut items);
-                }
-            }
-            for def in index.defs_in(&ns) {
-                if def.name.starts_with(&partial) {
-                    push(def_item(index, &def), &mut items);
-                }
-            }
-            for def in index.core_defs() {
-                if def.name.starts_with(&partial) {
-                    push(def_item(index, &def), &mut items);
-                }
+            for item in bare_items(index, ctx, &scope, offset, &partial) {
+                push(item, &mut items);
             }
         }
     }
     Some(items)
+}
+
+/// A record field to name in a constructor call: `name: `.
+fn field_item(index: &Index, name: &str, annotation: &str) -> CompletionItem {
+    CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::FIELD),
+        detail: Some(format!("{}: {}", name, index.display_type(annotation))),
+        insert_text: Some(format!("{}: ", name)),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        ..Default::default()
+    }
+}
+
+/// The names a bare word can complete to, nearest first: locals, this
+/// document's top-level names, the namespace's, then core names.
+fn bare_items(
+    index: &Index,
+    ctx: &DocContext,
+    scope: &Scope<'_>,
+    offset: usize,
+    partial: &str,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let mut locals: Vec<_> = scope.locals().to_vec();
+    locals.sort_by_key(|l| std::cmp::Reverse(l.start));
+    for local in locals {
+        // Not the word being typed.
+        let typing = local.start <= offset && offset <= local.end;
+        if local.name.starts_with(partial) && !typing {
+            items.push(CompletionItem {
+                label: local.name.clone(),
+                kind: Some(CompletionItemKind::VARIABLE),
+                detail: match &local.kind {
+                    LocalKind::Param(Some(t)) | LocalKind::Binding(_, Some(t)) => {
+                        Some(format!("{}: {}", local.name, t))
+                    }
+                    LocalKind::Param(None) => Some("parameter".to_string()),
+                    _ => Some("local".to_string()),
+                },
+                ..Default::default()
+            });
+        }
+    }
+    // This document's own top-level names, fresher than the index.
+    let ns = scope.ns.clone();
+    for (name, start, end) in ctx.syntax.top_level_names() {
+        let typing = start <= offset && offset <= end;
+        if ctx.namespace_at(start) == ns && name.starts_with(partial) && !typing {
+            items.push(match index.get(&ns, &name) {
+                Some(def) => def_item(index, &def),
+                None => CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    ..Default::default()
+                },
+            });
+        }
+    }
+    for def in index.defs_in(&ns) {
+        if def.name.starts_with(partial) {
+            items.push(def_item(index, &def));
+        }
+    }
+    for def in index.core_defs() {
+        if def.name.starts_with(partial) {
+            items.push(def_item(index, &def));
+        }
+    }
+    items
 }
 
 /// What find-references looks for.
@@ -613,4 +831,250 @@ pub fn workspace_symbols(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::lang::ast::Program;
+
+    const APP: &str = r#"::app ns
+
+Port type Int where between(%, 1, 65535)
+Range type { low: Int, high: Int } where lte(%.low, %.high)
+Point type { x: Int, y: Int }
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+LineItem type { sku: Str, qty: Int }
+Bulk type LineItem where gt(%.qty, 100)
+plain 4
+max-retries: Int 3
+
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)
+    : Int where gte(%, 0)
+{
+    sub(balance, amount)
+}
+
+make fn (qty: Int): LineItem where gt(%.qty, 0) { LineItem(sku: "a", qty: qty) }
+
+total fn (item: LineItem where gt(%.qty, 0), bulk: Bulk): Int {
+    plain 9
+    limit: Int 3 where gt(%, plain)
+    made make(1)
+    add(item.qty, made.qty, bulk.qty, limit)
+}
+
+build fn (x: Int): Point {
+    p Point(x: x, y: 2)
+    c Shape.Circle(radius: 1.0)
+    p
+}
+
+pick fn match (r: Result): Any {
+    Result.Ok (value) => { value }
+    _ => { null }
+}
+"#;
+
+    fn index() -> Index {
+        let mut namespaces = Default::default();
+        let parsed = hot::lang::parser::parse_hot_file(APP, "/app.hot").unwrap();
+        hot::lang::engine::discover::merge_program_namespaces_strict(
+            &mut namespaces,
+            parsed.namespaces,
+        )
+        .unwrap();
+        Index::new(Program {
+            namespaces,
+            current_namespace: hot::lang::ast::NsPath::hot_main(),
+        })
+    }
+
+    fn offset_of(text: &str, needle: &str) -> usize {
+        text[..text.find(needle).expect(needle)].chars().count()
+    }
+
+    /// Hover text at `delta` chars into the first `needle` of `text`.
+    fn hover_at(index: &Index, text: &str, needle: &str, delta: usize) -> Option<String> {
+        let doc = Document::new(text.to_string(), 0);
+        let ctx = DocContext::new(text);
+        let hover = hover(index, &doc, &ctx, offset_of(text, needle) + delta)?;
+        match hover.contents {
+            HoverContents::Markup(content) => Some(content.value),
+            _ => None,
+        }
+    }
+
+    /// Completion labels with the cursor at the end of `text`.
+    fn complete(index: &Index, text: &str) -> Vec<String> {
+        let ctx = DocContext::new(text);
+        let mut labels: Vec<String> = completion(index, &ctx, text.chars().count())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        labels.sort();
+        labels
+    }
+
+    /// The active signature's label and active parameter, with the cursor
+    /// at the end of `text`.
+    fn signature(index: &Index, text: &str) -> (String, String) {
+        let ctx = DocContext::new(text);
+        let help = signature_help(index, &ctx, text.chars().count()).expect("signature help");
+        let active = &help.signatures[help.active_signature.unwrap_or(0) as usize];
+        let parameter = active
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.get(help.active_parameter? as usize))
+            .map(|parameter| match &parameter.label {
+                tower_lsp_server::ls_types::ParameterLabel::Simple(label) => label.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        (active.label.clone(), parameter)
+    }
+
+    #[test]
+    fn hover_shows_constraints() {
+        let index = index();
+        let port = hover_at(&index, APP, "Port type", 0).unwrap();
+        assert!(
+            port.contains("type Int where between(%, 1, 65535)"),
+            "{port}"
+        );
+        assert!(port.contains("#### Constraint"), "{port}");
+        let range = hover_at(&index, APP, "Range type", 0).unwrap();
+        assert!(
+            range.contains("type { ... } where lte(%.low, %.high)"),
+            "{range}"
+        );
+        let withdraw = hover_at(&index, APP, "withdraw fn", 0).unwrap();
+        assert!(
+            withdraw.contains(
+                "fn(amount: Int, balance: Int) where lte(%.amount, %.balance): Int where gte(%, 0)"
+            ),
+            "{withdraw}"
+        );
+        let retries = hover_at(&index, APP, "max-retries: Int", 0).unwrap();
+        assert!(retries.contains("max-retries: Int"), "{retries}");
+    }
+
+    #[test]
+    fn hover_on_locals_of_constrained_code() {
+        let index = index();
+        // A parameter of a signature written over several lines.
+        let balance = hover_at(&index, APP, "sub(balance", 4).unwrap();
+        assert!(
+            balance.contains("balance: Int") && balance.contains("parameter"),
+            "{balance}"
+        );
+        // A typed binding, with its constraint.
+        let limit = hover_at(&index, APP, "limit)\n", 0).unwrap();
+        assert!(limit.contains("limit: Int where gt(%, plain)"), "{limit}");
+        assert!(limit.contains("local binding"), "{limit}");
+        // No variable is named `where`.
+        assert_eq!(hover_at(&index, APP, "where lte(%.amount", 1), None);
+        // A match arm's binding, written with a space.
+        let value = hover_at(&index, APP, "{ value }", 2).unwrap();
+        assert!(value.contains("match arm binding"), "{value}");
+    }
+
+    #[test]
+    fn a_predicate_resolves_names_at_namespace_scope() {
+        let index = index();
+        // `plain` in the predicate is the namespace's, not the local `plain 9`.
+        let in_predicate = hover_at(&index, APP, "gt(%, plain)", 6).unwrap();
+        assert!(in_predicate.contains("### ::app/plain"), "{in_predicate}");
+        let percent = hover_at(&index, APP, "%, plain)", 0).unwrap();
+        assert!(percent.contains("%: Int"), "{percent}");
+        let record = hover_at(&index, APP, "%.low", 0).unwrap();
+        assert!(record.contains("%: Range"), "{record}");
+        let arguments = hover_at(&index, APP, "%.amount", 0).unwrap();
+        assert!(
+            arguments.contains("amount: Int, balance: Int"),
+            "{arguments}"
+        );
+    }
+
+    #[test]
+    fn a_named_argument_is_a_field_not_a_variable() {
+        let index = index();
+        let label = hover_at(&index, APP, "x: x, y: 2", 0).unwrap();
+        assert!(
+            label.contains("x: Int") && label.contains("field of `::app/Point`"),
+            "{label}"
+        );
+        // The value after it is the parameter.
+        let value = hover_at(&index, APP, "x: x, y: 2", 3).unwrap();
+        assert!(value.contains("parameter"), "{value}");
+        let radius = hover_at(&index, APP, "radius: 1.0", 0).unwrap();
+        assert!(
+            radius.contains("radius: Dec") && radius.contains("::app/Circle"),
+            "{radius}"
+        );
+        // A field where it is declared.
+        let declared = hover_at(&index, APP, "low: Int", 0).unwrap();
+        assert!(declared.contains("field of `::app/Range`"), "{declared}");
+    }
+
+    #[test]
+    fn constructor_calls_complete_and_explain_their_fields() {
+        let index = index();
+        assert_eq!(complete(&index, "::app ns\n\nq Point("), ["x", "y"]);
+        assert_eq!(complete(&index, "::app ns\n\nq Point(x: 1, "), ["y"]);
+        assert_eq!(complete(&index, "::app ns\n\nq Shape.Circle("), ["radius"]);
+        // A function call's arguments are any names, once one is typed.
+        assert!(complete(&index, "::app ns\n\nq make(").is_empty());
+        assert!(complete(&index, "::app ns\n\nq make(pl").contains(&"plain".to_string()));
+
+        let (label, parameter) = signature(&index, "::app ns\n\nq Point(");
+        assert_eq!(label, "Point(x: Int, y: Int)");
+        assert_eq!(parameter, "x: Int");
+        // By name, not by position.
+        let (_, parameter) = signature(&index, "::app ns\n\nq Point(y: ");
+        assert_eq!(parameter, "y: Int");
+        let (_, parameter) = signature(&index, "::app ns\n\nq Point(y: 2, ");
+        assert_eq!(parameter, "x: Int");
+        let (label, _) = signature(&index, "::app ns\n\nq Shape.Circle(");
+        assert_eq!(label, "Shape.Circle(radius: Dec)");
+        let (label, _) = signature(&index, "::app ns\n\nq Port(");
+        assert_eq!(label, "Port(value: Int where between(%, 1, 65535))");
+        let (label, _) = signature(&index, "::app ns\n\nq Range(");
+        assert_eq!(label, "Range(low: Int, high: Int) where lte(%.low, %.high)");
+        let (label, parameter) = signature(&index, "::app ns\n\nq withdraw(1, ");
+        assert_eq!(
+            label,
+            "withdraw(amount: Int, balance: Int) where lte(%.amount, %.balance): Int where gte(%, 0)"
+        );
+        assert_eq!(parameter, "balance: Int");
+    }
+
+    #[test]
+    fn fields_complete_through_refined_types_and_placeholders() {
+        let index = index();
+        // With the cursor `extra` chars into `needle`, in the whole text.
+        let ctx = DocContext::new(APP);
+        let at = |needle: &str, extra: usize| -> Vec<String> {
+            let mut labels: Vec<String> = completion(&index, &ctx, offset_of(APP, needle) + extra)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.label)
+                .collect();
+            labels.sort();
+            labels
+        };
+        let fields = ["qty", "sku"];
+        // A parameter refined inline, a function that returns a refined
+        // type, and a named refinement of a record.
+        assert_eq!(at("item.qty, made", 5), fields);
+        assert_eq!(at("made.qty, bulk", 5), fields);
+        assert_eq!(at("bulk.qty, limit", 5), fields);
+        // `%.` in a record's invariant, and in a precondition.
+        assert_eq!(at("%.low, %.high", 2), ["high", "low"]);
+        assert_eq!(at("%.amount, %.balance", 2), ["amount", "balance"]);
+        assert_eq!(at("%.qty, 0), bulk", 2), fields);
+    }
 }
