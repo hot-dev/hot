@@ -205,8 +205,71 @@ fn test_name_and_reference_alone_on_a_line_is_a_binding() {
         panic!("expected a serial body")
     };
     assert_eq!(flow.expressions.len(), 3);
-    assert!(matches!(&flow.expressions[1], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "x"));
+    // `x` has a statement after it, so it sits in a block of its own: left
+    // bare before `y`, the compiler would read the pair as the binding `x y`.
+    assert!(lone_reference(&flow.expressions[1]).is_some_and(|name| name == "x"));
     assert!(matches!(&flow.expressions[2], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "y"));
+}
+
+/// The name a statement refers to when it is a reference in a block of its
+/// own, which is how a body keeps one that more statements follow.
+fn lone_reference(statement: &Value) -> Option<&str> {
+    match statement {
+        Value::Flow(flow) => match flow.expressions.as_slice() {
+            [Value::Ref(Ref::Var(reference))] => Some(reference.var.sym.name()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[test]
+fn test_reference_alone_on_a_line_never_takes_the_next_statement() {
+    // `m.xs[0]` then `println(..)` was read as the deep assignment
+    // `m.xs[0] println(..)`, in a function body and in a lambda's.
+    for source in [
+        "g fn (m) {\n    m.xs[0]\n    println(\"after\")\n    m\n}",
+        "g fn (m) {\n    m.a.b\n    println(\"after\")\n    m\n}",
+        "g fn (m) {\n    m\n    println(\"after\")\n    m\n}",
+        "g fn (m) {\n    f (m) {\n        m.a.b\n        println(\"after\")\n        m\n    }\n    f\n}",
+    ] {
+        let program = parse_hot(source).expect("parses");
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let Some(Value::Fn(defs)) = default_ns.scope.vars.values().next() else {
+            panic!("g is a function")
+        };
+        let Value::Flow(mut flow) = defs[0].body.clone() else {
+            panic!("expected a serial body in {source}")
+        };
+        // The fourth source nests the statements in a lambda bound to `f`.
+        if let Some(Value::MultipleValues(values)) = flow.expressions.first()
+            && let Some(Value::Lambda(lambda)) = values.get(1)
+            && let Value::Flow(inner) = lambda.body.as_ref()
+        {
+            flow = inner.clone();
+        }
+        assert_eq!(flow.expressions.len(), 3, "{source}");
+        assert_eq!(lone_reference(&flow.expressions[0]), Some("m"), "{source}");
+        assert!(matches!(&flow.expressions[1], Value::FnCall(_)), "{source}");
+        // The last statement is the body's value and stays as written.
+        assert!(
+            matches!(&flow.expressions[2], Value::Ref(Ref::Var(_))),
+            "{source}"
+        );
+    }
+
+    // A pipe continued on the next line still pipes the reference, and a
+    // value on the same line still binds it.
+    let program = parse_hot("g fn (u) {\n    u.name\n        |> uppercase()\n}").expect("parses");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let Some(Value::Fn(defs)) = default_ns.scope.vars.values().next() else {
+        panic!("g is a function")
+    };
+    assert!(
+        format!("{:?}", defs[0].body).contains("Pipe"),
+        "expected a pipe, got {:?}",
+        defs[0].body
+    );
 }
 
 #[test]

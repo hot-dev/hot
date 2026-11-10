@@ -42,19 +42,18 @@ impl Compiler {
     #[allow(clippy::only_used_in_recursion)]
     fn extract_dependencies_recursive(&self, value: &Value, deps: &mut IndexSet<String>) {
         match value {
-            Value::Val(val, _) => {
-                // Check if Val contains boxed expressions that might have dependencies
-                if let Val::Box(boxed) = val
-                    && let Some(fn_call) = boxed.as_any().downcast_ref::<FnCall>()
-                {
-                    self.extract_dependencies_recursive(&Value::FnCall(fn_call.clone()), deps);
-                }
-            }
+            Value::Val(val, _) => self.extract_dependencies_in_val(val, deps),
             Value::Ref(reference) => match reference {
                 Ref::Var(var_ref) => {
                     // All Ref::Var are local variable references
                     // (namespaced references use Ref::Ns)
                     deps.insert(var_ref.var.sym.to_string());
+                    // A dynamic index, as in `items[i]`, reads `i` too.
+                    if let Some(deep_path) = &var_ref.var.deep_path {
+                        let mut index_vars = Vec::new();
+                        super::collect_dynamic_index_vars(deep_path, &mut index_vars);
+                        deps.extend(index_vars.into_iter().map(str::to_string));
+                    }
                 }
                 Ref::Ns(_) => {
                     // Namespaced references are not local dependencies
@@ -125,12 +124,47 @@ impl Compiler {
                 // Extract dependencies from match arm body
                 self.extract_dependencies_recursive(&arm.body, deps);
             }
-            Value::MapWithSpread { spread_entries, .. } => {
+            Value::MapWithSpread {
+                base_entries,
+                spread_entries,
+            } => {
+                for entry in base_entries.values() {
+                    self.extract_dependencies_in_val(entry, deps);
+                }
                 for (_, spread_val) in spread_entries {
                     self.extract_dependencies_recursive(spread_val, deps);
                 }
             }
             Value::Placeholder(_) => {}
+        }
+    }
+
+    /// Dependencies of a literal. A Map or Vec literal holds each entry that
+    /// isn't itself a literal as a boxed expression, at any depth: `{x: a}`
+    /// and `[a, a]` read `a`. Missing them scheduled such a binding beside
+    /// the one it reads, so it failed, or read an outer binding of the name.
+    fn extract_dependencies_in_val(&self, val: &Val, deps: &mut IndexSet<String>) {
+        match val {
+            Val::Box(boxed) => {
+                if let Some(fn_call) = boxed.as_any().downcast_ref::<FnCall>() {
+                    self.extract_dependencies_recursive(&Value::FnCall(fn_call.clone()), deps);
+                } else if let Some(node) =
+                    boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>()
+                {
+                    self.extract_dependencies_recursive(&node.0, deps);
+                }
+            }
+            Val::Map(map) => {
+                for entry in map.values() {
+                    self.extract_dependencies_in_val(entry, deps);
+                }
+            }
+            Val::Vec(elements) => {
+                for element in elements.iter() {
+                    self.extract_dependencies_in_val(element, deps);
+                }
+            }
+            _ => {}
         }
     }
 

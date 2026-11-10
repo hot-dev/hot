@@ -4,7 +4,7 @@
 // and VM use to ensure consistent variable/function lookup behavior. This allows
 // resolution errors to be caught at compile time rather than runtime.
 
-use crate::lang::bytecode::{NamespaceRegistry, VariableInfo, VariableType};
+use crate::lang::bytecode::{NamespaceRegistry, VariableInfo};
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::hot::libmap::get_hotlib_functions;
 use crate::val::Val;
@@ -125,10 +125,9 @@ impl UnifiedResolver {
         }
 
         // 2b. CURRENT NAMESPACE - Check namespace variables
-        if let Some(variables) = self
+        if self
             .namespace_registry
-            .get_variables(&self.current_namespace)
-            && variables.iter().any(|v| v.name == var_name)
+            .has_variable_named(&self.current_namespace, var_name)
         {
             return true;
         }
@@ -215,9 +214,9 @@ impl UnifiedResolver {
             let namespace = &qualified_name[..last_slash];
             let var_name = &qualified_name[last_slash + 1..];
 
-            if let Some(variables) = self.namespace_registry.get_variables(namespace) {
-                return variables.iter().any(|v| v.name == var_name);
-            }
+            return self
+                .namespace_registry
+                .has_variable_named(namespace, var_name);
         }
         false
     }
@@ -228,21 +227,12 @@ impl UnifiedResolver {
             let namespace = &qualified_name[..last_slash];
             let func_name = &qualified_name[last_slash + 1..];
 
-            if let Some(variables) = self.namespace_registry.get_variables(namespace) {
-                // Check if there's a function variable with this name
-                for var in variables {
-                    if var.name == func_name {
-                        match var.var_type {
-                            VariableType::Function | VariableType::CoreFunction => return true,
-                            VariableType::TypeConstructor => return true, // Type constructors are callable
-                            VariableType::Value => {
-                                // Any value can potentially be called as a function in Hot
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+            // Functions and type constructors are callable, and any value
+            // can potentially be called as a function in Hot: a variable of
+            // any kind with this name resolves.
+            return self
+                .namespace_registry
+                .has_variable_named(namespace, func_name);
         }
         false
     }
@@ -291,10 +281,9 @@ impl UnifiedResolver {
         }
 
         // Check current namespace
-        if let Some(variables) = self
+        if self
             .namespace_registry
-            .get_variables(&self.current_namespace)
-            && variables.iter().any(|v| v.name == name)
+            .has_variable_named(&self.current_namespace, name)
         {
             info.found_in_current_namespace = true;
         }

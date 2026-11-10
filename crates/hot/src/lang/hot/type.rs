@@ -229,21 +229,27 @@ pub fn str_constructor(
                     format!("{}/{}", type_namespace, impl_fn_name)
                 };
 
+                // Each distinct name is tried once. A qualified implementation
+                // name makes all three the same: retrying it would run a
+                // failing conversion, side effects included, three times.
+                let mut candidates: Vec<&str> = vec![&qualified];
+                for name in [type_qualified.as_str(), impl_fn_name.as_str()] {
+                    if !candidates.contains(&name) {
+                        candidates.push(name);
+                    }
+                }
                 STR_DISPATCH_DEPTH.set(depth + 1);
-                let call_res = vm
-                    .execute_function_call_by_name(&qualified, std::slice::from_ref(&dispatch_arg))
-                    .or_else(|_| {
-                        vm.execute_function_call_by_name(
-                            &type_qualified,
-                            std::slice::from_ref(&dispatch_arg),
-                        )
-                    })
-                    .or_else(|_| {
-                        vm.execute_function_call_by_name(
-                            &impl_fn_name,
-                            std::slice::from_ref(&dispatch_arg),
-                        )
-                    });
+                let mut call_res = vm.execute_function_call_by_name(
+                    candidates[0],
+                    std::slice::from_ref(&dispatch_arg),
+                );
+                for name in &candidates[1..] {
+                    if call_res.is_ok() {
+                        break;
+                    }
+                    call_res =
+                        vm.execute_function_call_by_name(name, std::slice::from_ref(&dispatch_arg));
+                }
                 STR_DISPATCH_DEPTH.set(depth);
 
                 match call_res {

@@ -11,6 +11,7 @@ pub type LexerResult<T> = std::result::Result<T, Box<LexerError>>;
 pub enum LexerErrorKind {
     InvalidCharacter(char),
     UnterminatedString,
+    UnterminatedComment,
     InvalidNumber(String),
     InvalidIdentifier(String),
     UnexpectedEndOfInput,
@@ -22,6 +23,7 @@ impl fmt::Display for LexerErrorKind {
         match self {
             LexerErrorKind::InvalidCharacter(ch) => write!(f, "Invalid character '{}'", ch),
             LexerErrorKind::UnterminatedString => write!(f, "Unterminated string"),
+            LexerErrorKind::UnterminatedComment => write!(f, "Unterminated block comment"),
             LexerErrorKind::InvalidNumber(num) => write!(f, "Invalid number '{}'", num),
             LexerErrorKind::InvalidIdentifier(id) => write!(f, "Invalid identifier '{}'", id),
             LexerErrorKind::UnexpectedEndOfInput => write!(f, "Unexpected end of input"),
@@ -61,6 +63,13 @@ impl fmt::Display for LexerError {
                 write!(
                     f,
                     "{}Unterminated string at line {}, column {}",
+                    file_prefix, self.line, self.column
+                )
+            }
+            LexerErrorKind::UnterminatedComment => {
+                write!(
+                    f,
+                    "{}Unterminated block comment at line {}, column {}",
                     file_prefix, self.line, self.column
                 )
             }
@@ -381,7 +390,7 @@ impl Lexer {
                 } else if self.peek() == '*' {
                     // Handle block comment: /* comment text */
                     self.advance(); // consume '*'
-                    let comment = self.read_block_comment();
+                    let comment = self.read_block_comment()?;
                     TokenType::BlockComment(comment)
                 } else {
                     TokenType::Slash
@@ -536,7 +545,10 @@ impl Lexer {
     }
 
     fn skip_whitespace(&mut self) {
-        while matches!(self.peek(), ' ' | '\t' | '\r') {
+        // A UTF-8 byte order mark may open a file.
+        while matches!(self.peek(), ' ' | '\t' | '\r')
+            || (self.position == 0 && self.peek() == '\u{feff}')
+        {
             self.advance();
         }
     }
@@ -863,6 +875,18 @@ impl Lexer {
             self.advance();
         }
 
+        // A number ends at a boundary. Without this check `1e10`, `0xFF` and
+        // `1_000` lexed as a number followed by a name (`1` then `e10`),
+        // which the parser then bound as a variable.
+        if !self.is_at_end() && Self::continues_word(self.peek()) {
+            while !self.is_at_end()
+                && (Self::continues_word(self.peek()) || self.peek().is_ascii_digit())
+            {
+                number.push(self.advance());
+            }
+            return Err(Box::new(self.error(LexerErrorKind::InvalidNumber(number))));
+        }
+
         if has_decimal {
             match D256::from_str(&number, Context::default()) {
                 Ok(d) => Ok(TokenType::Dec(d)),
@@ -874,6 +898,11 @@ impl Lexer {
                 Err(_) => Err(Box::new(self.error(LexerErrorKind::InvalidNumber(number)))),
             }
         }
+    }
+
+    /// Whether `ch` would extend a number into a word: `e` in `1e10`.
+    fn continues_word(ch: char) -> bool {
+        ch.is_alphabetic() || ch == '_' || ch == '$'
     }
 
     fn read_identifier(&mut self) -> LexerResult<String> {
@@ -964,18 +993,21 @@ impl Lexer {
     }
 
     /// Read block comment content (/* comment text */)
-    fn read_block_comment(&mut self) -> String {
+    ///
+    /// A comment with no closing `*/` is an error: accepting it would
+    /// silently comment out the rest of the file.
+    fn read_block_comment(&mut self) -> LexerResult<String> {
         let mut comment = String::with_capacity(self.remaining_len().min(256));
         while !self.is_at_end() {
             if self.peek() == '*' && self.peek_next() == '/' {
                 self.advance(); // consume '*'
                 self.advance(); // consume '/'
-                break;
+                return Ok(comment);
             }
             comment.push(self.peek());
             self.advance();
         }
-        comment
+        Err(Box::new(self.error(LexerErrorKind::UnterminatedComment)))
     }
 }
 
@@ -1396,6 +1428,58 @@ mod tests {
         } else {
             panic!("Expected string token, got {:?}", tokens[0].token_type);
         }
+    }
+
+    #[test]
+    fn a_number_followed_by_a_word_is_one_invalid_number() {
+        // `1e10` lexed as `1` then the name `e10`, which the parser bound to
+        // the next value.
+        for (source, text) in [
+            ("x 1e10", "1e10"),
+            ("y 2.5e3", "2.5e3"),
+            ("z 0xFF", "0xFF"),
+            ("w 1_000", "1_000"),
+        ] {
+            let mut lexer = Lexer::new(source);
+            let _tokens = lexer.tokenize();
+            assert_eq!(
+                lexer.errors().first().map(|error| &error.kind),
+                Some(&LexerErrorKind::InvalidNumber(text.to_string())),
+                "{source}"
+            );
+            assert_eq!(
+                lexer.errors().len(),
+                1,
+                "{source}: one error for the whole word"
+            );
+        }
+
+        // A number still ends at punctuation or space.
+        let mut lexer = Lexer::new("add(1,x) [2] {a:3} 4.5 -6");
+        let _tokens = lexer.tokenize();
+        assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
+    }
+
+    #[test]
+    fn an_unterminated_block_comment_is_an_error() {
+        let mut lexer = Lexer::new("a 1\n/* TODO\nb 2\n");
+        let _tokens = lexer.tokenize_with_comments();
+        assert_eq!(
+            lexer.errors().first().map(|error| &error.kind),
+            Some(&LexerErrorKind::UnterminatedComment)
+        );
+
+        let mut lexer = Lexer::new("a 1 /* closed */ b 2");
+        let _tokens = lexer.tokenize_with_comments();
+        assert!(lexer.errors().is_empty());
+    }
+
+    #[test]
+    fn a_byte_order_mark_may_open_a_file() {
+        let mut lexer = Lexer::new("\u{feff}::app ns\n");
+        let tokens = lexer.tokenize();
+        assert!(lexer.errors().is_empty(), "{:?}", lexer.errors());
+        assert!(matches!(tokens[0].token_type, TokenType::DoubleColon));
     }
 
     #[test]

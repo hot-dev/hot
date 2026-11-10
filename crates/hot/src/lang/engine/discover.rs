@@ -284,33 +284,54 @@ pub(crate) fn merge_namespace(
     }
 
     // Bindings: compare by symbol name (Var identity includes source spans,
-    // so map-key equality can't detect same-name redeclarations).
+    // so map-key equality can't detect same-name redeclarations). The index
+    // maps a name to the positions of its bindings, oldest first, so each
+    // incoming binding looks its name up instead of scanning (and cloning)
+    // every existing one: `hot run file.hot` merges the target file into the
+    // unit that already holds it, where every binding has a namesake.
+    let mut positions_by_name: AHashMap<String, Vec<usize>> = AHashMap::new();
+    for (position, (var, _)) in existing.scope.vars.iter().enumerate() {
+        positions_by_name
+            .entry(var.sym.name().to_string())
+            .or_default()
+            .push(position);
+    }
+
+    let mut same_file_answers: AHashMap<(String, String), bool> = AHashMap::new();
+
     for (var, value) in incoming.scope.vars {
         let name = var.sym.name();
-        let existing_same_name: Vec<_> = existing
-            .scope
-            .vars
-            .iter()
-            .rev()
-            .filter(|(v, _)| v.sym.name() == name)
-            .map(|(var, value)| (var.clone(), value.clone()))
-            .collect();
+        let positions = positions_by_name
+            .get(name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
 
         // Every file's `::path ns` declaration parses to a `ns` binding, so a
         // namespace assembled from several files legitimately sees one per
         // file — keep the first and skip the rest.
-        if name == "ns" && !existing_same_name.is_empty() {
+        if name == "ns" && !positions.is_empty() {
             continue;
         }
 
-        if existing_same_name.is_empty() {
-            existing.scope.vars.insert(var, value);
-        } else {
-            let same_file = existing_same_name.iter().any(|(prior, _)| {
+        if !positions.is_empty() {
+            // Newest first, as a redeclaration reports its latest namesake.
+            let namesakes = || {
+                positions
+                    .iter()
+                    .rev()
+                    .filter_map(|&position| existing.scope.vars.get_index(position))
+            };
+            let incoming_file = binding_file(&var, &incoming_source_file);
+            let same_file = namesakes().any(|(prior, _)| {
                 let prior_file = binding_file(prior, &existing.source_file);
-                let incoming_file = binding_file(&var, &incoming_source_file);
-                match (prior_file, incoming_file) {
-                    (Some(prior), Some(incoming)) => same_source_file(&prior, &incoming),
+                match (prior_file, &incoming_file) {
+                    (Some(prior), Some(incoming)) => {
+                        // Comparing two spellings of a path asks the file
+                        // system; a file's bindings all ask the same question.
+                        *same_file_answers
+                            .entry((prior.clone(), incoming.clone()))
+                            .or_insert_with(|| same_source_file(&prior, incoming))
+                    }
                     _ => false,
                 }
             });
@@ -319,22 +340,14 @@ pub(crate) fn merge_namespace(
                 continue;
             }
 
-            match policy {
-                NsMergePolicy::Strict => {
-                    let legal_open_extension = existing_same_name
-                        .iter()
-                        .all(|(_, prior_value)| is_open_literal_union_pair(prior_value, &value));
-                    let legal_deep_set = existing_same_name
-                        .iter()
-                        .all(|(prior, _)| disjoint_deep_sets(prior, &var));
-                    if legal_open_extension || legal_deep_set {
-                        existing.scope.vars.insert(var, value);
-                        continue;
-                    }
-
-                    let (prior, _) = &existing_same_name[0];
-                    let prior_file = binding_file(prior, &existing.source_file);
-                    let incoming_file = binding_file(&var, &incoming_source_file);
+            if policy == NsMergePolicy::Strict {
+                let legal_open_extension = namesakes()
+                    .all(|(_, prior_value)| is_open_literal_union_pair(prior_value, &value));
+                let legal_deep_set = namesakes().all(|(prior, _)| disjoint_deep_sets(prior, &var));
+                if !legal_open_extension && !legal_deep_set {
+                    let prior_file = namesakes()
+                        .next()
+                        .and_then(|(prior, _)| binding_file(prior, &existing.source_file));
                     return Err(format!(
                         "Duplicate definition of '{}' in namespace '{}': defined in {} and {}",
                         name,
@@ -343,10 +356,16 @@ pub(crate) fn merge_namespace(
                         file_label(&incoming_file),
                     ));
                 }
-                NsMergePolicy::Shadow => {
-                    existing.scope.vars.insert(var, value);
-                }
             }
+            // A legal extension under `Strict`, or any redeclaration under
+            // `Shadow` (newest wins): the binding is added below.
+        }
+
+        let name = name.to_string();
+        let (position, _) = existing.scope.vars.insert_full(var, value);
+        let positions = positions_by_name.entry(name).or_default();
+        if !positions.contains(&position) {
+            positions.push(position);
         }
     }
 

@@ -777,6 +777,22 @@ pub struct TypeChecker {
     /// Where each variant type (`::ns/Enum.Variant`) was last read by name.
     /// A use found later, such as in the type a body returns, reports there.
     variant_reads: AHashMap<String, Source>,
+    /// Counts changes to the registries an annotation resolves against
+    /// (`qualified_types`, `custom_constructors`, `core_types`,
+    /// `known_types`). Every write to one of them bumps it, which retires
+    /// `annotation_scratch`.
+    registry_generation: u64,
+    /// Annotations already parsed by [`Self::parse_type_annotation_pure`],
+    /// with the checker that parses them.
+    annotation_scratch: std::cell::RefCell<Option<AnnotationScratch>>,
+}
+
+/// A checker holding a copy of the type registries, and the annotations it
+/// has parsed. Valid for one `registry_generation`.
+struct AnnotationScratch {
+    generation: u64,
+    checker: Box<TypeChecker>,
+    parsed: AHashMap<String, TypeExpr>,
 }
 
 impl Default for TypeChecker {
@@ -816,6 +832,8 @@ impl TypeChecker {
             current_def_src: None,
             piped_type: None,
             variant_reads: AHashMap::new(),
+            registry_generation: 0,
+            annotation_scratch: std::cell::RefCell::new(None),
         }
     }
 
@@ -1296,6 +1314,7 @@ impl TypeChecker {
         }
         for name in local {
             let short = Self::short_type_name(&name);
+            self.registry_generation += 1;
             self.qualified_types.insert(name, TypeExpr::Named(short));
         }
     }
@@ -1315,6 +1334,7 @@ impl TypeChecker {
             self.resolve_alias_base(&qualified);
         }
         let resolved = self.ast_type_to_type_expr_in_namespace(&alias.base, &alias.namespace);
+        self.registry_generation += 1;
         self.qualified_types.insert(name.to_string(), resolved);
     }
 
@@ -1658,16 +1678,45 @@ impl TypeChecker {
     /// the regular parser; we only call it for declared annotations, which
     /// are the simple cases the parser already handles deterministically.
     fn parse_type_annotation_pure(&self, annotation: &str) -> TypeExpr {
+        // Most annotations are a built-in name, which needs no registry.
+        if let Some(builtin) = self.try_resolve_builtin_type(annotation.trim()) {
+            return builtin;
+        }
+
         // The mutating path is only "mutating" because it might emit errors;
-        // for the pre-pass we discard those by routing through a temporary
-        // checker. In practice the existing `parse_type_annotation` is
-        // side-effect-free for valid annotations.
-        let mut tmp = TypeChecker::new();
-        tmp.qualified_types = self.qualified_types.clone();
-        tmp.custom_constructors = self.custom_constructors.clone();
-        tmp.core_types = self.core_types.clone();
-        tmp.known_types = self.known_types.clone();
-        tmp.parse_type_annotation(annotation, None)
+        // for the pre-pass we discard those by routing through a scratch
+        // checker. Its answer depends only on the annotation and the four
+        // registries copied here, so one scratch serves every annotation
+        // until a registry changes. (Building a checker and cloning the
+        // registries per annotation made the pre-pass cost annotations x
+        // types: most of the type check on a large project.)
+        let mut slot = self.annotation_scratch.borrow_mut();
+        if slot
+            .as_ref()
+            .is_none_or(|scratch| scratch.generation != self.registry_generation)
+        {
+            let mut checker = Box::new(TypeChecker::new());
+            checker.qualified_types = self.qualified_types.clone();
+            checker.custom_constructors = self.custom_constructors.clone();
+            checker.core_types = self.core_types.clone();
+            checker.known_types = self.known_types.clone();
+            *slot = Some(AnnotationScratch {
+                generation: self.registry_generation,
+                checker,
+                parsed: AHashMap::new(),
+            });
+        }
+        let scratch = slot.as_mut().expect("scratch was just ensured");
+        if let Some(parsed) = scratch.parsed.get(annotation) {
+            return parsed.clone();
+        }
+        let parsed = scratch.checker.parse_type_annotation(annotation, None);
+        // Only the type is wanted; drop whatever the parse reported.
+        scratch.checker.errors = CompilerErrors::new();
+        scratch
+            .parsed
+            .insert(annotation.to_string(), parsed.clone());
+        parsed
     }
 
     /// Register a top-level `(var, value)` pair, picking up `TypeDef`s,
@@ -1684,6 +1733,7 @@ impl TypeChecker {
                 let short = var.sym.name().to_string();
                 let qualified = format!("{}/{}", ns_str, short);
 
+                self.registry_generation += 1;
                 self.known_types.insert(short.clone());
 
                 // Pre-register enum/literal-union metadata first so the
@@ -1725,12 +1775,15 @@ impl TypeChecker {
                     TypeExpr::Named(qualified.clone())
                 };
 
+                self.registry_generation += 1;
                 self.qualified_types.insert(qualified.clone(), resolved);
                 if type_def.constructor_functions.is_some() {
+                    self.registry_generation += 1;
                     self.custom_constructors.insert(qualified.clone());
                 }
 
                 if CoreVariableRegistry::has_core_metadata(var) {
+                    self.registry_generation += 1;
                     self.core_types.insert(short, qualified);
                 }
 
@@ -2759,6 +2812,7 @@ impl TypeChecker {
             Value::TypeDef(type_def) => {
                 let short = type_def.name.name().to_string();
                 let qualified = format!("{}/{}", ns_str, short);
+                self.registry_generation += 1;
                 self.known_types.insert(short.clone());
 
                 if !self.qualified_types.contains_key(&qualified) {

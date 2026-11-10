@@ -984,6 +984,33 @@ impl NamespaceRegistry {
         }
     }
 
+    /// Whether `namespace_path` declares a variable named `name`.
+    ///
+    /// A variable is filed under its name, so this is one lookup. An import
+    /// is filed under its short name with its qualified target as the name
+    /// (`add_variable_with_key`), so it is never found by its short name:
+    /// the same answer as scanning every variable's `name`, which is what
+    /// resolving each reference did before (linear in the namespace's size,
+    /// so quadratic over a large namespace).
+    pub fn has_variable_named(&self, namespace_path: &str, name: &str) -> bool {
+        let Some(namespace) = self.namespaces.get(namespace_path) else {
+            return false;
+        };
+        let found = namespace
+            .variables
+            .get(name)
+            .is_some_and(|variable| variable.name == name);
+        debug_assert_eq!(
+            found,
+            namespace
+                .variables
+                .values()
+                .any(|variable| variable.name == name),
+            "variable '{name}' of '{namespace_path}' is filed under another key"
+        );
+        found
+    }
+
     /// Get all variables in a namespace
     pub fn get_variables(&self, namespace_path: &str) -> Option<Vec<&VariableInfo>> {
         self.namespaces
@@ -1657,11 +1684,38 @@ impl BytecodeProgram {
         }
         let hash = Self::constant_hash(constant);
         self.constant_index.get(&hash).and_then(|candidates| {
-            candidates
-                .iter()
-                .copied()
-                .find(|&id| self.constants.get(id as usize) == Some(constant))
+            candidates.iter().copied().find(|&id| {
+                self.constants
+                    .get(id as usize)
+                    .is_some_and(|existing| Self::same_constant(existing, constant))
+            })
         })
+    }
+
+    /// Whether two constants can share a pool slot: equal, and written the
+    /// same way. Equality alone is numeric for a Dec and ignores a Map's key
+    /// order, so `2.5` took the slot of an earlier `2.50` and printed as it.
+    fn same_constant(a: &Constant, b: &Constant) -> bool {
+        fn same_val(a: &crate::val::Val, b: &crate::val::Val) -> bool {
+            use crate::val::Val;
+            match (a, b) {
+                (Val::Dec(x), Val::Dec(y)) => x == y && x.to_string() == y.to_string(),
+                (Val::Vec(x), Val::Vec(y)) => {
+                    x.len() == y.len() && x.iter().zip(y.iter()).all(|(x, y)| same_val(x, y))
+                }
+                (Val::Map(x), Val::Map(y)) => {
+                    x.len() == y.len()
+                        && x.iter()
+                            .zip(y.iter())
+                            .all(|((xk, xv), (yk, yv))| same_val(xk, yk) && same_val(xv, yv))
+                }
+                _ => a == b,
+            }
+        }
+        match (a, b) {
+            (Constant::Val(a), Constant::Val(b)) => a == b && same_val(a, b),
+            _ => a == b,
+        }
     }
 
     /// Add a constant to the pool, return its index

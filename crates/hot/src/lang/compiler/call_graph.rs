@@ -69,8 +69,16 @@ impl CallGraph {
                 }
 
                 // Extract function-level ctx requirements from var.meta
+                // A function whose arities are separate declarations appears
+                // here once per declaration. Their requirements and callees
+                // add up: replacing them kept only the last declaration's,
+                // so a context key needed through an earlier arity was lost.
                 if let Some(ctx_keys) = extract_fn_ctx_from_meta(&var.meta) {
-                    graph.fn_ctx_requirements.insert(fqn.clone(), ctx_keys);
+                    graph
+                        .fn_ctx_requirements
+                        .entry(fqn.clone())
+                        .or_default()
+                        .extend(ctx_keys);
                 }
 
                 // Extract function-level box requirements from var.meta
@@ -84,15 +92,13 @@ impl CallGraph {
                     for fn_def in fn_defs {
                         collect_callees_from_value(&fn_def.body, &ns_str, aliases, &mut callees);
                     }
-                    graph.edges.insert(fqn, callees);
+                    graph.edges.entry(fqn).or_default().extend(callees);
                 } else if let Value::Ref(r) = value {
                     // Var imports like `api-request ::slack::api/request` are Value::Ref,
                     // not Value::Fn. Create an edge so the BFS can follow through the
                     // indirection and reach the target function's ctx requirements.
                     if let Some(target_fqn) = resolve_ref_fqn(r, &ns_str, aliases) {
-                        let mut callees = AHashSet::new();
-                        callees.insert(target_fqn);
-                        graph.edges.insert(fqn, callees);
+                        graph.edges.entry(fqn).or_default().insert(target_fqn);
                     }
                 }
             }
@@ -723,6 +729,24 @@ mod tests {
         let graph = CallGraph::build(&program);
         let callees = graph.edges.get("::app/my-fn").unwrap();
         assert!(callees.contains("::app/local-helper"));
+    }
+
+    #[test]
+    fn arities_declared_separately_add_their_callees_and_requirements() {
+        // Each declaration replaced the one before it, so a context key
+        // needed through an earlier arity was never required.
+        let source = r#"::lib ns
+needs-key meta {ctx: {"MY_KEY": {required: true}}} fn (): Str { "k" }
+plain fn (): Str { "p" }
+entry fn (a: Int): Str { needs-key() }
+entry fn (a: Int, b: Int): Str { plain() }
+"#;
+        let mut program = crate::lang::parser::parse_hot(source).expect("parses");
+        crate::lang::compiler::resolver::resolve_all_variable_references(&mut program);
+        let graph = CallGraph::build(&program);
+        let callees = graph.edges.get("::lib/entry").expect("entry has callees");
+        assert!(callees.contains("::lib/needs-key"), "{callees:?}");
+        assert!(callees.contains("::lib/plain"), "{callees:?}");
     }
 
     #[test]

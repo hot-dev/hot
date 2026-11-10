@@ -769,6 +769,11 @@ struct ActiveFlowState {
     /// this is set, every branch result is promoted to `OwnedVal` so the merged
     /// register has one uniform, memory-safe kind. Computed once at `BeginFlow`.
     force_owned_result: bool,
+    /// A `cond` or `match` with no default arm: when no arm is taken its
+    /// result is Null, which the result register holds as the raw `0` it was
+    /// loaded with. `EndFlow` gives that path a real Null once the result is
+    /// an owned value.
+    unmatched_is_null: bool,
 }
 
 /// A compiled function's module, which frees the function's code memory when
@@ -5738,25 +5743,33 @@ fn prescan_return_kind(
         Some(RawKind::Bool) => Some(JitValueKind::Bool),
         _ => None,
     };
-    // Each open flow: whether it accumulates (Map/Vec), and the kinds its
-    // branches produce.
-    let mut flows: Vec<(bool, Vec<Option<RawKind>>)> = Vec::new();
+    // Each open flow: whether it accumulates (Map/Vec), the kinds its
+    // branches produce, and whether it can end with no branch taken (a
+    // `cond` or `match` with no default arm), which makes its result Null.
+    let mut flows: Vec<(bool, Vec<Option<RawKind>>, bool)> = Vec::new();
 
     for (inst_ip, inst) in instructions.iter().enumerate() {
         match inst {
             Instruction::BeginFlow {
-                result_modifier, ..
+                flow_type,
+                result_modifier,
+                ..
             } => {
+                let can_end_unmatched = matches!(flow_type, FlowType::Cond | FlowType::Match)
+                    && find_matching_end_flow(instructions, inst_ip).is_ok_and(|end_ip| {
+                        flow_can_end_unmatched(instructions, program, inst_ip, end_ip)
+                    });
                 flows.push((
                     matches!(
                         result_modifier,
                         FlowResultModifier::Map | FlowResultModifier::Vec
                     ),
                     Vec::new(),
+                    can_end_unmatched,
                 ));
             }
             Instruction::CondBranchEnd { result, .. } => {
-                if let Some((_, kinds)) = flows.last_mut() {
+                if let Some((_, kinds, _)) = flows.last_mut() {
                     kinds.push(reg_kinds.get(result).copied());
                 }
             }
@@ -6041,11 +6054,19 @@ fn prescan_return_kind(
             // self-call's result `Null`.
             Instruction::EndFlow { dest } => {
                 let kind = match flows.pop() {
-                    Some((true, _)) => Some(RawKind::OwnedVal),
-                    Some((false, kinds)) if !kinds.is_empty() => Some(match kinds[0] {
-                        Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
-                        _ => RawKind::OwnedVal,
-                    }),
+                    Some((true, _, _)) => Some(RawKind::OwnedVal),
+                    Some((false, kinds, can_end_unmatched)) if !kinds.is_empty() => {
+                        Some(match kinds[0] {
+                            // The unmatched path's Null is a kind of its own
+                            // beside the branches' (see
+                            // `flow_branches_have_mixed_kinds`).
+                            Some(first) if can_end_unmatched && first != RawKind::Null => {
+                                RawKind::OwnedVal
+                            }
+                            Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
+                            _ => RawKind::OwnedVal,
+                        })
+                    }
                     _ => None,
                 };
                 match kind {
@@ -7292,13 +7313,24 @@ impl<'a> EmitCtx<'a> {
             }
         }
         dropped.extend_from_slice(&self.open_accumulators);
-        if dropped.is_empty() {
-            return Ok(());
-        }
         let null = builder.ins().iconst(types::I64, 0);
         for var in dropped {
             drop_owned_var(builder, &self.helper_refs, var);
             builder.def_var(var, null);
+        }
+        // Every other register starts the next iteration null too, as it
+        // starts a call. One may still hold a pointer it no longer owns: a
+        // branch result handed on to its flow's result register, or a baked
+        // constant. Code on another path drops a register before writing it
+        // wherever a first pass finds it null or owned, so on a later pass it
+        // would free that value a second time.
+        for (idx, &var) in self.registers.iter().enumerate() {
+            let owned_here = self.register_kinds[idx] == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx)
+                && !open_results.contains(&idx);
+            if !owned_here {
+                builder.def_var(var, null);
+            }
         }
         Ok(())
     }
@@ -9185,6 +9217,9 @@ fn build_supported_body(
                     last_pipe_reg: None,
                     pipe_steps: 0,
                     force_owned_result,
+                    unmatched_is_null: accumulator_var.is_none()
+                        && matches!(flow_type, FlowType::Cond | FlowType::Match)
+                        && flow_can_end_unmatched(instructions, program, ip, end_ip),
                 });
                 // A traced inline flow is a call record of its own, and the
                 // flow of the calls made in it, as in the interpreter.
@@ -9410,6 +9445,34 @@ fn build_supported_body(
                     let kind = flow
                         .merged_result_kind
                         .unwrap_or(ctx.register_kind(result_reg)?);
+                    if flow.unmatched_is_null && kind == RawKind::OwnedVal {
+                        // No owned value is 0, so a 0 here is the register's
+                        // initial Null: no arm stored a result.
+                        let result_idx = ctx.remap_reg(result_reg)?;
+                        let slot = ctx.registers[result_idx];
+                        let current = builder.use_var(slot);
+                        let unmatched_block = builder.create_block();
+                        let matched_block = builder.create_block();
+                        let is_unmatched = builder.ins().icmp_imm_s(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal,
+                            current,
+                            0,
+                        );
+                        builder
+                            .ins()
+                            .brif(is_unmatched, unmatched_block, &[], matched_block, &[]);
+                        builder.switch_to_block(unmatched_block);
+                        builder.seal_block(unmatched_block);
+                        let null = builder.ins().iconst(types::I64, 0);
+                        let boxed_null =
+                            promote_to_owned(builder, &ctx.helper_refs, RawKind::Null, null)?;
+                        builder.def_var(slot, boxed_null);
+                        builder.ins().jump(matched_block, &[]);
+                        builder.switch_to_block(matched_block);
+                        builder.seal_block(matched_block);
+                        ctx.compile_time_owned.remove(&result_idx);
+                        ctx.register_kinds[result_idx] = Some(RawKind::OwnedVal);
+                    }
                     if *dest != result_reg {
                         let raw = ctx.reg_value(builder, result_reg)?;
                         ctx.define_register(builder, *dest, kind, raw)?;
@@ -9466,12 +9529,21 @@ fn build_supported_body(
                     if actual_kind == param_kind {
                         continue;
                     }
+                    // A `Result` parameter takes its argument as it is, an
+                    // Err included: preparing it here would consume the
+                    // Result and halt on an Err the function means to
+                    // inspect. The call through the VM passes it intact.
+                    let takes_result = program
+                        .result_params
+                        .get(&function_id)
+                        .is_some_and(|flags| flags.get(idx).copied().unwrap_or(false));
                     if actual_kind == RawKind::OwnedVal
                         && matches!(
                             param_kind,
                             RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null
                         )
                         && !ctx.error_capture_active
+                        && !takes_result
                     {
                         owned_raws.push(idx);
                         continue;
@@ -10008,6 +10080,7 @@ fn flow_branches_have_mixed_kinds(
 
     let mut merged: Option<RawKind> = None;
     let mut depth = 0usize;
+    let mut has_default = false;
 
     for (ip, inst) in instructions
         .iter()
@@ -10015,6 +10088,9 @@ fn flow_branches_have_mixed_kinds(
         .take(end_ip)
         .skip(begin_ip + 1)
     {
+        if depth == 0 && is_default_branch(instructions, program, ip) {
+            has_default = true;
+        }
         // Track nested flows so only this flow's own branch ends are inspected.
         match inst {
             Instruction::BeginFlow { .. } => {
@@ -10129,7 +10205,63 @@ fn flow_branches_have_mixed_kinds(
         }
     }
 
-    false
+    // With no default arm the flow can end with none taken, and its result is
+    // then Null: one more kind beside the arms'. (Tagging that path with the
+    // arms' kind read the untouched result register as an Int `0`, a Bool
+    // `false`, or a pointer.)
+    !has_default && merged.is_some_and(|kind| kind != RawKind::Null)
+}
+
+/// Whether the branch `ip` starts always runs. The compiler writes a default
+/// arm (`=>`, an `if`'s else) as a branch on a `true` loaded just before it.
+fn is_default_branch(instructions: &[Instruction], program: &BytecodeProgram, ip: usize) -> bool {
+    let Some(Instruction::CondBranchStart { condition, .. }) = instructions.get(ip) else {
+        return false;
+    };
+    ip.checked_sub(1)
+        .and_then(|previous| instructions.get(previous))
+        .is_some_and(|previous| {
+            matches!(
+                previous,
+                Instruction::LoadConst { dest, constant }
+                    if dest == condition
+                        && matches!(
+                            program.constants.get(*constant as usize),
+                            Some(Constant::Val(Val::Bool(true)))
+                        )
+            )
+        })
+}
+
+/// Whether the flow from `begin_ip` to `end_ip` has arms and can end with
+/// none of them taken: it has no default arm.
+fn flow_can_end_unmatched(
+    instructions: &[Instruction],
+    program: &BytecodeProgram,
+    begin_ip: usize,
+    end_ip: usize,
+) -> bool {
+    let mut depth = 0usize;
+    let mut has_arm = false;
+    for (ip, inst) in instructions
+        .iter()
+        .enumerate()
+        .take(end_ip)
+        .skip(begin_ip + 1)
+    {
+        match inst {
+            Instruction::BeginFlow { .. } => depth += 1,
+            Instruction::EndFlow { .. } => depth = depth.saturating_sub(1),
+            Instruction::CondBranchStart { .. } if depth == 0 => {
+                if is_default_branch(instructions, program, ip) {
+                    return false;
+                }
+                has_arm = true;
+            }
+            _ => {}
+        }
+    }
+    has_arm
 }
 
 /// The raw kind of a call the emitter lowers to an intrinsic (see

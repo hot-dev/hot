@@ -328,19 +328,31 @@ pub fn pow(args: &[Val]) -> HotResult<Val> {
                 HotResult::Ok(int_pow(*a, *b))
             }
         }
-        (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(a.pow(*b))),
-        (Val::Int(a), Val::Dec(b)) => {
-            use fastnum::decimal::Decimal;
-            let a_dec = Decimal::from(*a);
-            HotResult::Ok(Val::Dec(a_dec.pow(*b)))
-        }
-        (Val::Dec(a), Val::Int(b)) => {
-            use fastnum::decimal::Decimal;
-            let b_dec = Decimal::from(*b);
-            HotResult::Ok(Val::Dec(a.pow(b_dec)))
-        }
+        (Val::Dec(a), Val::Dec(b)) => dec_pow(*a, *b),
+        (Val::Int(a), Val::Dec(b)) => dec_pow(fastnum::D256::from(*a), *b),
+        (Val::Dec(a), Val::Int(b)) => dec_pow(*a, fastnum::D256::from(*b)),
         _ => HotResult::Err(Val::from("pow requires numbers")),
     }
+}
+
+/// `base` to the power `exponent`, where either is a Dec.
+fn dec_pow(base: fastnum::D256, exponent: fastnum::D256) -> HotResult<Val> {
+    if !exponent.is_integral() && !exponent.is_nan() {
+        // No real number is a fractional power of a negative one. The
+        // general power below would answer with the power of `|base|`.
+        if base.is_negative() && !base.is_zero() {
+            return HotResult::Ok(Val::err(Val::from(
+                "pow of a negative number requires a whole exponent",
+            )));
+        }
+        // A square root has its own algorithm. The general fractional power
+        // is `exp(exponent * ln(base))` at full Dec precision, hundreds of
+        // times slower, and can miss an exact root in its last digits.
+        if exponent == fastnum::D256::HALF {
+            return HotResult::Ok(Val::Dec(base.sqrt()));
+        }
+    }
+    HotResult::Ok(Val::Dec(base.pow(exponent)))
 }
 
 /// Ceiling function

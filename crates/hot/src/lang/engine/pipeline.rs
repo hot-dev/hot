@@ -1302,7 +1302,10 @@ impl Engine {
 
         // Phase 1: Discover compilation units (packages and source paths)
         tracing::debug!(" Unified Pipeline: Phase 1 - Discovering compilation units...");
-        let units = discover_compilation_units(conf, project_name, src_paths, test_paths)?;
+        let units = {
+            let _phase = crate::lang::phase_timing::phase("discover-units");
+            discover_compilation_units(conf, project_name, src_paths, test_paths)?
+        };
 
         tracing::debug!(
             " Discovered {} compilation units: {}",
@@ -1329,7 +1332,10 @@ impl Engine {
 
         // Phase 2: Parse units with per-package caching
         tracing::debug!(" Unified Pipeline: Phase 2 - Parsing with per-package cache...");
-        let (namespaces, parsed_files) = parse_units_with_cache(&units, color)?;
+        let (namespaces, parsed_files) = {
+            let _phase = crate::lang::phase_timing::phase("load-units");
+            parse_units_with_cache(&units, color)?
+        };
 
         tracing::debug!(
             " Loaded {} namespaces from {} units",
@@ -1470,7 +1476,10 @@ impl Engine {
 
         // Phase 1.5: Resolve variable references to namespace functions
         tracing::debug!(" Unified Pipeline: Phase 1.5 - Resolving variable references...");
-        crate::lang::compiler::resolver::resolve_all_variable_references(&mut combined_program);
+        {
+            let _phase = crate::lang::phase_timing::phase("resolve-var-refs");
+            crate::lang::compiler::resolver::resolve_all_variable_references(&mut combined_program);
+        }
 
         // Phase 2: Compile the combined program with two-pass approach
         tracing::debug!(" Unified Pipeline: Phase 2 - Compiling combined program...");
@@ -1505,7 +1514,11 @@ impl Engine {
         compiler.set_run_namespaces(run_namespaces);
 
         // Try comprehensive compilation with validation first
-        match compiler.compile_program(&mut combined_program) {
+        let compile_result = {
+            let _phase = crate::lang::phase_timing::phase("compile-program (total)");
+            compiler.compile_program(&mut combined_program)
+        };
+        match compile_result {
             Ok(()) => {
                 // Compilation with validation succeeded. Capture non-fatal
                 // deprecation warnings for the caller (scoped to project files)
@@ -1553,12 +1566,20 @@ impl Engine {
 
         // Registry authority is the complete program, never the additive
         // process-global tooling registry shared with other builds.
-        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
-            compiler.build_tool_specs(&combined_program),
-        ));
-        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
-            Arc::new(compiler.build_skill_specs(&combined_program)),
-        );
+        // Only running code reads them, so a check doesn't build them: the
+        // registries hold a schema for every function in the program.
+        let runs_code = matches!(mode, PipelineMode::Execute | PipelineMode::Test { .. });
+        let _registry_scopes = runs_code.then(|| {
+            let _phase = crate::lang::phase_timing::phase("tool-skill-registries");
+            (
+                crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+                    compiler.build_tool_specs(&combined_program),
+                )),
+                crate::lang::hot::internal_skill::ThreadRegistryGuard::install(Arc::new(
+                    compiler.build_skill_specs(&combined_program),
+                )),
+            )
+        });
 
         tracing::debug!(" Unified Pipeline: Phase 3 - Executing program...");
 
@@ -1624,26 +1645,30 @@ impl Engine {
                 // (e.g. missing required ctx keys) for run/eval without a
                 // separate check pipeline pass. The returned ctx
                 // requirements are reused below for defaults/secret keys.
-                let ctx_requirements = Self::validate_compiled_program(
-                    &mut compiler,
-                    &combined_program,
-                    conf,
-                    Self::runtime_context_validation_policy(context_storage.as_ref()),
-                    color,
-                )?;
+                let ctx_requirements = {
+                    let _phase = crate::lang::phase_timing::phase("validate-compiled");
+                    Self::validate_compiled_program(
+                        &mut compiler,
+                        &combined_program,
+                        conf,
+                        Self::runtime_context_validation_policy(context_storage.as_ref()),
+                        color,
+                    )?
+                };
 
                 // Execute and return final result using Arc for efficient sharing
-                let program = compiler.get_program_arc();
-                let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(
-                    combined_program.clone(),
-                ));
+                // Compilation is over: the compiler's output and the AST move
+                // into the VM rather than being copied for it.
+                let _vm_phase = crate::lang::phase_timing::phase("vm-setup");
+                let parts = compiler.into_runtime_parts();
+                let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(combined_program));
                 let mut vm = crate::lang::VirtualMachine::new(
-                    program,
+                    parts.program,
                     Some(hot_ast),
-                    compiler.get_function_mapping_arc(),
-                    compiler.get_core_functions_arc(),
-                    compiler.get_type_implementations_arc(),
-                    compiler.get_core_variables_arc(),
+                    parts.function_mapping,
+                    parts.core_functions,
+                    parts.type_implementations,
+                    parts.core_variables,
                     conf.cloned(),
                 );
 
@@ -1683,8 +1708,13 @@ impl Engine {
                 if let Some(ep) = embedding_provider {
                     vm.set_embedding_provider(ep);
                 }
+                drop(_vm_phase);
 
-                match vm.execute() {
+                let executed = {
+                    let _phase = crate::lang::phase_timing::phase("vm-execute");
+                    vm.execute()
+                };
+                match executed {
                     Ok(result) => {
                         tracing::debug!(" Unified Pipeline execution completed successfully");
 
@@ -1719,17 +1749,22 @@ impl Engine {
                 ));
 
                 // Create VM for test execution using Arc for efficient sharing
-                let program = compiler.get_program_arc();
-                let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(
-                    combined_program.clone(),
-                ));
+                let _vm_phase = crate::lang::phase_timing::phase("vm-setup");
+                // Read the ctx requirements off the AST before it moves into
+                // the VM; they are applied once the VM exists.
+                let ctx_requirements =
+                    crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
+                        &combined_program,
+                    );
+                let parts = compiler.into_runtime_parts();
+                let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(combined_program));
                 let mut vm = crate::lang::VirtualMachine::new(
-                    program,
-                    Some(hot_ast.clone()),
-                    compiler.get_function_mapping_arc(),
-                    compiler.get_core_functions_arc(),
-                    compiler.get_type_implementations_arc(),
-                    compiler.get_core_variables_arc(),
+                    parts.program,
+                    Some(hot_ast),
+                    parts.function_mapping,
+                    parts.core_functions,
+                    parts.type_implementations,
+                    parts.core_variables,
                     conf.cloned(),
                 );
 
@@ -1748,11 +1783,7 @@ impl Engine {
                     vm.context_storage = context_storage;
                 }
 
-                // Extract ctx requirements via call graph and apply defaults + secret keys
-                let ctx_requirements =
-                    crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                        &combined_program,
-                    );
+                // Apply defaults + secret keys from the ctx requirements
                 vm.apply_ctx_defaults(ctx_requirements.all_defaults());
                 vm.secret_keys = ctx_requirements.all_secret_keys();
                 vm.sync_secret_keys_to_execution_context();
@@ -1776,9 +1807,15 @@ impl Engine {
                 if let Some(sp) = stream_publisher {
                     vm.set_stream_publisher(sp);
                 }
+                drop(_vm_phase);
 
-                match vm.execute() {
+                let initialized = {
+                    let _phase = crate::lang::phase_timing::phase("vm-execute (module init)");
+                    vm.execute()
+                };
+                match initialized {
                     Ok(_) => {
+                        let _phase = crate::lang::phase_timing::phase("run-tests");
                         // Call the Hot test runner once using the initialized VM
                         let test_result = if let Some(pattern) = pattern {
                             tracing::debug!(" Running tests matching pattern: {}", pattern);

@@ -165,6 +165,30 @@ pub fn max_recursion_depth() -> usize {
     })
 }
 
+/// How many `parallel` flows may be open inside one another before the next
+/// is refused. Each branch of a `parallel` flow runs on a thread of its own,
+/// so a function that reaches itself through one opens a level of threads
+/// per call: far costlier than a frame, and outside the recursion limit,
+/// which each branch's VM counted from zero. Real nesting (a divide-and-
+/// conquer over a tree) is logarithmic in its input.
+///
+/// Override at runtime with `HOT_MAX_PARALLEL_DEPTH=<n>`.
+pub const DEFAULT_MAX_PARALLEL_DEPTH: usize = 64;
+
+/// Resolve the active cap on nested `parallel` flows, honoring
+/// `HOT_MAX_PARALLEL_DEPTH`. Cached after first read.
+pub fn max_parallel_depth() -> usize {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HOT_MAX_PARALLEL_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_PARALLEL_DEPTH)
+    })
+}
+
 /// The error for a call refused at `depth` because it would pass `max`
 /// (see [`max_recursion_depth`]).
 pub(crate) fn recursion_limit_message(depth: usize, max: usize) -> String {
@@ -840,6 +864,9 @@ pub struct VirtualMachine {
     /// (`CallUserFunction`, thunks, JIT re-entry), so runaway recursion always
     /// hits the limit instead of overflowing the native stack.
     user_function_depth: usize,
+    /// How many `parallel` flows this VM runs inside: a branch's VM is one
+    /// deeper than the VM whose flow started it (see [`max_parallel_depth`]).
+    parallel_depth: usize,
     /// Specific recursion depth tracking for the call function to prevent infinite recursion
     call_function_depth: usize,
     /// If true, convert runtime errors into Result-style maps instead of aborting
@@ -1125,6 +1152,7 @@ impl VirtualMachine {
             skip_remaining_cond_flow: None,
             function_call_depth: 0,
             user_function_depth: 0,
+            parallel_depth: 0,
             call_function_depth: 0,
             error_capture_active: false,
             constraint: None,
@@ -5886,11 +5914,13 @@ impl VirtualMachine {
     pub(crate) fn interpolate_template(&mut self, parts: &[Val]) -> VmResult<Val> {
         // Check for template literal recursion
         if self.template_recursion_depth > 15 {
-            tracing::warn!(
-                "Template recursion limit hit at depth {}",
+            // An error, not placeholder text: a truncated rendering looks
+            // like a successful one.
+            return Err(VmError::runtime(format!(
+                "Template literals are nested too deeply (more than {} levels). \
+                 A `-> Str` conversion that renders its own type recurses once per level.",
                 self.template_recursion_depth
-            );
-            return Ok(Val::from("<template-recursion>"));
+            )));
         }
         self.template_recursion_depth += 1;
         let result = self.interpolate_template_parts(parts);
@@ -5911,13 +5941,36 @@ impl VirtualMachine {
             // Automatically unwrap Results in template literals
             let unwrapped_val = self.unwrap_result_if_ok(part_val)?;
 
-            // Convert value to string using Str constructor (supports type implementations)
-            let string_repr: String =
-                match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val]) {
-                    crate::lang::hot::r#type::HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
-                    crate::lang::hot::r#type::HotResult::Ok(other) => other.to_string(),
-                    crate::lang::hot::r#type::HotResult::Err(e) => e.to_string(),
-                };
+            // Convert value to string using Str constructor (supports type implementations).
+            // A conversion that fails, or returns an Err, halts as `Str(value)`
+            // does outside a template: rendering the error into the text would
+            // hand back a successful string.
+            let converted = match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val])
+            {
+                crate::lang::hot::r#type::HotResult::Ok(value) => {
+                    self.unwrap_result_if_ok(&value)?
+                }
+                crate::lang::hot::r#type::HotResult::Err(error) => {
+                    if self.has_failed() || self.has_cancelled() {
+                        // The conversion's own halt, reported once: its
+                        // text arrives already carrying the prefix.
+                        let message = match &error {
+                            Val::Str(text) => text.to_string(),
+                            other => other.to_string(),
+                        };
+                        let message = message
+                            .strip_prefix("Runtime error: ")
+                            .unwrap_or(&message)
+                            .to_string();
+                        return Err(VmError::runtime(message));
+                    }
+                    self.unwrap_result_if_ok(&Val::err(error))?
+                }
+            };
+            let string_repr: String = match converted {
+                Val::Str(s) => (*s).to_owned(),
+                other => other.to_string(),
+            };
             // Bound the produced template length up-front using checked
             // arithmetic so a single template can't drive an unbounded
             // String allocation (which would call the allocator and
@@ -11052,10 +11105,11 @@ impl VirtualMachine {
                 );
                 self.scope_stack.push(temp_scope);
 
-                let result = self.execute_thunk(thunk)?;
+                let result = self.execute_thunk(thunk);
 
-                // Pop the temporary scope
+                // Pop the temporary scope, whether or not the thunk failed
                 self.scope_stack.pop();
+                let result = result?;
 
                 self.store_variable(var_name, result.clone())?;
 
@@ -11080,6 +11134,23 @@ impl VirtualMachine {
                     (name, thunk)
                 })
                 .collect();
+
+            // A branch's VM counts as one flow deeper, and goes on counting
+            // calls from this VM's depth, so recursion through a parallel
+            // flow meets a limit instead of opening threads until the
+            // system refuses one.
+            let max_parallel = max_parallel_depth();
+            if self.parallel_depth >= max_parallel {
+                return Err(VmError::runtime(format!(
+                    "Parallel flows are nested too deeply ({} levels, max {}). \
+                     This usually indicates a function that calls itself from inside a \
+                     parallel flow without reaching its base case. \
+                     Raise HOT_MAX_PARALLEL_DEPTH if your workload genuinely nests deeper.",
+                    self.parallel_depth, max_parallel
+                )));
+            }
+            let branch_parallel_depth = self.parallel_depth + 1;
+            let branch_call_depth = self.user_function_depth;
 
             // Get the current namespace so task VMs use the same one
             let main_namespace = self.current_namespace.clone();
@@ -11228,6 +11299,8 @@ impl VirtualMachine {
                                 );
                                 task_vm.inherit_host_context(&host_context_tmpl);
                                 task_vm.inherit_namespace_variables(&namespace_snapshot_clone);
+                                task_vm.parallel_depth = branch_parallel_depth;
+                                task_vm.user_function_depth = branch_call_depth;
 
                                 // Share the failure state
                                 task_vm.failure_state = failure_state_clone;

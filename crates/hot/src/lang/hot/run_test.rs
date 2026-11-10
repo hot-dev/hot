@@ -4533,6 +4533,96 @@ check fn (s: Any, radius: Dec): Vec { [is-type(s, ::t/Shape), eq(s.radius, radiu
         );
     }
 
+    /// The text a run ends with: its value, or its failure.
+    fn run_text(src: &str, conf: Option<Val>) -> String {
+        match compile_and_run_with_std_conf(src, conf) {
+            Ok(value) => format!("OK:{value:?}"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn a_failed_str_conversion_halts_a_template() {
+        // The conversion's Err, or its halt, was rendered into the text and
+        // the run went on with a successful string.
+        for body in [r#"err("cannot render")"#, r#"fail("render halts")"#] {
+            let src = format!(
+                r#"::t ns
+Tag type {{ name: Str }}
+Tag -> Str fn (t: Tag): Str {{ {body} }}
+show fn (t: Tag): Str {{
+    text `rendered: ${{t}}`
+    concat(text, " then-continued")
+}}
+show(Tag({{name: "a"}}))"#
+            );
+            for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+                let text = run_text(&src, conf);
+                assert!(
+                    !text.contains("then-continued"),
+                    "the run went on past a failed conversion ({body}): {text}"
+                );
+                assert!(
+                    text.contains("cannot render") || text.contains("render halts"),
+                    "{body}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_template_nested_too_deeply_is_an_error() {
+        // It rendered `<template-recursion>` in place of the rest.
+        let src = r#"::t ns
+Node type { value: Int, next: Any }
+Node -> Str fn (n: Node): Str { if(is-null(n.next), `${n.value}`, `${n.value},${n.next}`) }
+chain fn (n: Int, tail: Any): Any { if(lte(n, 0), tail, chain(sub(n, 1), Node({value: n, next: tail}))) }
+`${chain(40, null)}`"#;
+        let text = run_text(src, None);
+        assert!(text.contains("nested too deeply"), "{text}");
+        assert!(!text.contains("template-recursion"), "{text}");
+    }
+
+    #[test]
+    fn recursion_through_a_parallel_flow_meets_a_limit() {
+        // Each branch's VM counted calls from zero, so this ran until the
+        // system refused another thread.
+        let src = r#"::t ns
+f fn (n: Int): Int {
+    p parallel {
+        a f(add(n, 1))
+        b 1
+    }
+    add(p.a, p.b)
+}
+f(0)"#;
+        let text = run_text(src, None);
+        assert!(text.contains("nested too deeply"), "{text}");
+    }
+
+    #[test]
+    fn counts_too_large_for_an_instruction_are_compile_errors() {
+        // Each count was truncated, silently dropping arguments or elements.
+        let args = (0..300).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let src = format!("::t ns\nbig fn (...r) {{ length(r) }}\nbig({args})");
+        let text = run_text(&src, None);
+        assert!(text.contains("at most 255 arguments"), "{text}");
+
+        let elements = (0..64).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let src = format!("::t ns\nxs [100, 200]\nall [{elements}, ...xs]\nlength(all)");
+        let text = run_text(&src, None);
+        assert!(text.contains("can have at most 64 elements"), "{text}");
+
+        // 63 elements and a spread still fit.
+        let elements = (0..63).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let src = format!("::t ns\nxs [100, 200]\nall [{elements}, ...xs]\nlength(all)");
+        assert_same_with_and_without_jit(&src, &Val::Int(65));
+
+        let src = "::t ns\nxs [1, 2]\n1 |> add(...xs)";
+        let text = run_text(src, None);
+        assert!(text.contains("can't spread"), "{text}");
+    }
+
     #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
         // The halt now propagates out of the JIT frame as a run failure
