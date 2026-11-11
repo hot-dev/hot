@@ -133,3 +133,17 @@ meta ["test"] fn () {
     assert-eq(2, Deferred({value: 2}).value, "Map literal")
     assert-eq("lazy:s", Deferred("s").value, "Str")
 }
+
+// A core type declared outside hot-std has no native function behind its
+// name, so a call reaches its own constructors.
+ProjectCoreId
+meta {core: true}
+type fn (id: Str): ProjectCoreId { id },
+(prefix: Str, n: Int): ProjectCoreId { `${prefix}-${n}` }
+
+test-core-type-custom-constructors
+meta ["test"] fn () {
+  assert-eq("user-456", ProjectCoreId("user-456"), "one-argument constructor")
+  assert-eq("user-7", ProjectCoreId("user", 7), "two-argument constructor")
+  assert-eq(["a", "b"], map(["a", "b"], ProjectCoreId), "constructor as a function value")
+}

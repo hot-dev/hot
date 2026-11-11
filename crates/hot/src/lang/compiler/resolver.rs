@@ -513,6 +513,7 @@ impl Resolver {
                 // Type definitions don't contain variable references that need validation
                 // Type field names are not variables
             }
+            Value::Spread(inner) => self.validate_value_references(inner)?,
             Value::Cond(..)
             | Value::CondDefault(_)
             | Value::Match(_)
@@ -577,7 +578,7 @@ impl Resolver {
                     }
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 self.validate_value_references(inner)?;
             }
             Value::MapWithSpread {
@@ -1058,7 +1059,7 @@ impl Resolver {
             Value::MatchArm(arm) => {
                 self.collect_local_variables(&arm.body)?;
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 self.collect_local_variables(inner)?;
             }
             Value::Val(val, _) => {

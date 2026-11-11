@@ -49,7 +49,7 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 {
   "mcp:weather/get-forecast": ["execute"],
   "stream:*": ["read"],
-  "event:user:*": ["create", "read"]
+  "event:user:*": ["create"]
 }
 ```
 
@@ -65,7 +65,7 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 | `mcp` | `execute` | MCP tool invocation (e.g., `mcp:weather/get-forecast`) |
 | `webhook` | `execute` | Webhook endpoint access (e.g., `webhook:payments/*`) |
 | `stream` | `read` | Stream subscription (e.g., `stream:*` or `stream:<id>`) |
-| `event` | `create`, `read` | Event publishing and reading |
+| `event` | `create`, `read` | Event publishing (e.g., `event:user:*`) and reading (`event:*` only) |
 | `run` | `read` | Run inspection |
 | `call` | `delete` | Call trace purges (e.g., `call:<run_id>/*` or `call:*`) |
 | `project` | `create`, `read`, `update`, `delete` | Project management |
@@ -74,8 +74,17 @@ API keys, service keys, and sessions share a granular permission system. Permiss
 | `key` | `create`, `read`, `update`, `delete` | Service key management |
 | `session` | `create`, `read`, `delete` | Session management |
 | `env` | `read` | Environment information |
+| `file` | `create`, `read`, `delete` | File listing, download, upload, and deletion (e.g., `file:*`, `file:<file_id>`, or `file:<path>` for a simple upload) |
+| `blob` | `read` | Blob reference download (e.g., `blob:<blob_ref_id>`) |
+| `domain` | `create`, `read`, `update`, `delete` | Custom domain management (`update` covers verify) |
 
 The wildcard action `*` grants all valid actions for that resource type. The universal wildcard `*:*` with `["*"]` grants unrestricted access within the environment.
+
+Publishing checks the event's own type, so `event:user:*` with `create` allows `user:signup`. Reading events checks `event:*`. A narrower `read` grant such as `event:user:*` matches no read route and grants nothing.
+
+Sessions and service keys can call only the event, stream, task, MCP, and webhook routes. Every other route takes API keys only. A session or service key gets `403` `forbidden` there, whatever it is granted. The [API permission matrix](/docs/api/management#environment-api-keys) lists the grant each route checks.
+
+Service keys accept only the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. A service key request that names `call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`, or `*:*` is rejected with `400`.
 
 Org API keys use qualified URNs such as `org:*`, `org:{org}/env:*/api-key:*`, and `org:{org}/env:{env}/project:*`; see [Sub-organizations](/docs/api/management#permissions). Environment credentials reject `org:` URNs.
 
@@ -96,6 +105,7 @@ Permissions are validated when creating or updating API keys, sessions, and serv
 | Actions are lowercase only | `"Read"`, `"CREATE"` | Invalid action |
 | Only valid actions: `create`, `read`, `update`, `delete`, `execute`, `*` | `"destroy"` | Invalid action |
 | Action must be valid for the resource type | `"mcp:*": ["create"]` | Action not valid for resource |
+| Service keys take only `mcp`, `webhook`, `stream`, `event`, `run` | `"project:*"` on a service key | Resource type not allowed |
 
 Sessions and service keys must also be a **subset** of the parent API key's permissions — you cannot escalate permissions beyond what the issuing key allows.
 
@@ -110,6 +120,40 @@ API requests are rate limited per organization. Limits are based on your subscri
 | Scale / Self-Host | Unlimited |
 
 When the limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header indicating how many seconds to wait before retrying.
+
+### Request and Connection Limits
+
+Webhook and MCP routes are public, and an SSE subscription holds a connection open. These limits apply to them on top of the rate limit. The numbers are Hot's defaults.
+
+| Limit | Default | When exceeded |
+|-------|---------|---------------|
+| Request body on webhook and MCP routes | 10 MB | `413` |
+| Webhook handler run time (`webhook.timeout`) | 30 seconds | `504` with the body `{"error": "Webhook function timed out after 30s"}` |
+| Webhook requests and MCP `tools/call` requests in flight, per organization (`api.public-org-inflight-limit`) | 50 | `429` `rate_limit_exceeded` |
+| Open SSE subscriptions per credential (`api.sse-per-credential-connection-limit`) | 128 | `429` `rate_limit_exceeded` |
+| Open SSE subscriptions per organization (`api.sse-per-org-connection-limit`) | 1,024 | `429` `rate_limit_exceeded` |
+| Open SSE subscriptions per API server (`api.sse-global-connection-limit`) | 10,000 | `429` `rate_limit_exceeded` |
+
+An organization shares the per-organization limits with its sub-organizations. Each API server counts its own requests and connections.
+
+The in-flight limit counts requests that have passed authentication and are waiting on a run. It does not apply to an organization whose rate limit is unlimited. Setting it to `0` turns it off.
+
+The SSE limits cover the stream, run, task, and environment subscriptions under `/v1`. They are enforced only when `api.sse-connection-limit-mode` is `enforce`. The default, `observe`, logs a connection over the limit and lets it through. A limit set to `0` is off.
+
+A `429` from these limits uses the standard error envelope with `retry_after` set to `1`:
+
+```json
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "Too many active SSE connections for this credential Retry after 1 seconds.",
+    "request_id": "123e4567-e89b-12d3-a456-426614174000",
+    "retry_after": 1
+  }
+}
+```
+
+The in-flight `429` also sends a `Retry-After: 1` header. The SSE `429` carries the wait only in the body.
 
 ## Response Format
 
@@ -168,7 +212,7 @@ List endpoints support pagination via query parameters:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `limit` | int | 20 | Maximum results to return |
+| `limit` | int | 20 | Maximum results to return, from 1 to 500. A value outside that range is clamped to it |
 | `offset` | int | 0 | Number of results to skip |
 
 ---
@@ -183,7 +227,7 @@ List endpoints support pagination via query parameters:
 GET /status
 ```
 
-Returns API server health information. No authentication required. Note that `/status` is served at the server root — it is the one endpoint **not** under the `/v1` prefix.
+Returns API server health information. No authentication required. `/status` is served at the server root, not under the `/v1` prefix. Three more unauthenticated routes are served there: `GET /` returns the same body as `/status`, `GET /docs/api` serves the interactive API reference (Swagger UI), and `GET /openapi.json` serves the OpenAPI document. [Webhook](/docs/webhooks#webhook-url) and [MCP](/docs/mcp#mcp-endpoint) routes are also outside `/v1`.
 
 **Response:**
 
@@ -642,7 +686,7 @@ Content-Type: application/json
 | Field | Required | Description |
 |-------|----------|-------------|
 | `path` | Yes | Destination file path |
-| `expected_size` | No | Expected total size in bytes (enables quota pre-check and determines part count) |
+| `expected_size` | No | Exact total size in bytes. Sets the part size and part count and reserves storage quota. Needed for any upload over 256 MB (see below) |
 | `content_type` | No | MIME type of the file |
 
 **Example:**
@@ -670,7 +714,11 @@ Content-Type: application/json
 }
 ```
 
-The `part_size` (in bytes) is the recommended size for each part. Use this value when splitting your file.
+`part_size` (in bytes) is the size to split the file into, and the largest part the upload accepts. It is 64 MB unless `expected_size` needs more than 10,000 parts of that size. Every part except the last must be at most `part_size`, and a larger one returns `413` `part_too_large`.
+
+With `expected_size`, the upload must match it exactly. `parts_expected` is the number of parts to send. A part that takes the total past `expected_size` returns `413` `part_too_large`, and completing with a different part count or byte total returns `409` `upload_incomplete`. An `expected_size` over the plan's file size limit returns `413` `payload_too_large`.
+
+Without `expected_size`, `parts_expected` is `null` and the whole upload is limited to 256 MB, or to the plan's file size limit when that is lower. Every part, the last included, must be at most `part_size`. Send `expected_size` for anything larger.
 
 ##### 2. Upload Parts
 
@@ -682,9 +730,12 @@ Content-Type: application/octet-stream
 Upload each part as raw bytes. Part numbers are 1-based.
 
 **Constraints:**
-- Non-final parts must be at least 5 MB
-- Maximum part size is 256 MB
-- Maximum 10,000 parts per upload
+- When the upload has an `expected_size`, non-final parts must be at least 5 MB (`400` `part_too_small`)
+- No part may be larger than `part_size`, apart from the last part of an upload with an `expected_size`, and no part may be larger than 256 MB (`413` `part_too_large`)
+- Part numbers run from 1 to 10,000, and no higher than `parts_expected` when it is set (`400` `bad_request`)
+- The upload must still be pending. A part sent after the upload completed or was aborted returns `409` `upload_not_pending`. An upload past its `expires_at` is aborted
+
+Sending a part again with the same bytes returns the recorded part. Sending different bytes for a part number already uploaded returns `409` `part_already_uploaded`: abort the upload to replace it. A part number that another request is still uploading returns `409` `part_in_progress`.
 
 **Response:**
 
@@ -705,7 +756,7 @@ Upload each part as raw bytes. Part numbers are 1-based.
 POST /v1/files/uploads/{upload_id}/complete
 ```
 
-Assembles all uploaded parts into the final file. Returns the file metadata (same shape as simple upload response).
+Assembles all uploaded parts into the final file. Returns the file metadata (same shape as simple upload response). Completing an upload that is already complete returns the same metadata again.
 
 ##### Abort Upload
 
@@ -875,6 +926,8 @@ POST /v1/projects/{project_id_or_slug}/context
 
 **Response:** `201 Created` (value is not returned).
 
+Creating or updating a variable needs the API server's encryption key. Without a usable key (`HOT_ENCRYPTION_KEY`), the request returns `503` `encryption_not_configured`.
+
 #### Update Context Variable
 
 ```http
@@ -910,8 +963,12 @@ POST /v1/events
 
 Publishes an event that can trigger event handlers.
 
-`event_type` is an arbitrary string chosen by your application (for example `user:created`).
+`event_type` is a string chosen by your application (for example `user:created`).
 Hot does not enforce a specific naming pattern, but `:`-separated names are the recommended convention.
+
+Types that begin with `hot:` are reserved. Publishing one returns `403` `forbidden`, with one exception:
+[`hot:call`](/docs/events#background-jobs), which runs a function. The same rule applies to
+[Subscribe with Event](#subscribe-with-event-atomic).
 
 For comparison:
 - Hot language `send(...)` uses `type` and `data`
@@ -1007,6 +1064,8 @@ GET /v1/events/{event_id}/runs
 
 Returns all runs triggered by this event.
 
+The three read routes need `event:*` with `read`. A grant scoped to some event types, such as `event:user:*`, covers publishing only.
+
 ---
 
 ### Runs
@@ -1033,6 +1092,10 @@ GET /v1/runs
 Filters narrow together, and `pagination.total` counts what they keep. A
 `project_id` or `stream_id` that isn't a UUID is a `400`. `function` compares
 the name of each run in the environment, so add `time_range` on a large one.
+
+The list leaves out the runs of [tasks](#tasks) (`run_type` `task`), so
+`type=task` returns nothing. Read a task's run with `GET /v1/runs/{run_id}`,
+using the task's `run_id`, or follow the task with the task endpoints.
 
 **Response:**
 
@@ -1085,6 +1148,9 @@ data: {"type":"run:update","run":{"run_id":"...","status":"running",...}}
 event: run:update
 data: {"type":"run:update","run":{"run_id":"...","status":"succeeded","result":{...},...}}
 ```
+
+The subscription has no time limit and sends no `stream:complete`. It stays
+open, with a keepalive comment every 15 seconds, until the run is terminal.
 
 Clients should reconnect to this endpoint after an interrupted connection.
 Official SDK run waiters handle that automatically.
@@ -1212,6 +1278,8 @@ event: task:update
 data: {"type":"task:update","task":{"task_id":"...","status":"completed","result":{...},...}}
 ```
 
+Like a run subscription, it has no time limit and sends no `stream:complete`.
+
 Clients should reconnect to the same endpoint after an interrupted connection;
 the persisted first snapshot makes reconnection race-free. The official SDK
 task waiters implement this behavior.
@@ -1325,6 +1393,8 @@ Subscribe to real-time events for the entire environment via Server-Sent Events 
 | `event:created` | A new event was created |
 | `event:handled` | An event was handled |
 | `stream:created` | A new stream was created |
+| `task:started` | A task started running. Carries `task_id`, `stream_id`, `function_name`, and `task_type` |
+| `task:complete` | A task finished. Carries `task_id`, `stream_id`, `function_name`, `status`, `duration_ms`, and `error` |
 
 **Example Events:**
 
@@ -1402,9 +1472,9 @@ for line in response.iter_lines():
 <!-- tabs:end -->
 
 **Notes:**
-- The stream automatically times out after 5 minutes. Reconnect to continue receiving events.
+- The stream closes about 5 minutes after it opens, without a closing event. Reconnect to continue receiving events.
 - Events are scoped to the environment associated with your API key.
-- This endpoint requires pub/sub to be configured on the server.
+- This endpoint requires pub/sub to be configured on the server. Without it the request returns `503`.
 
 ---
 
@@ -1500,15 +1570,18 @@ the full lifecycle of an operation.
 
 ```http
 GET /v1/streams/{stream_id}/subscribe
+POST /v1/streams/{stream_id}/subscribe
 ```
 
-Subscribe to an existing stream to receive real-time updates.
+Subscribe to an existing stream to receive real-time updates. `POST` is the same subscription for clients that open a stream with a request. It takes no body and returns the same events.
+
+A subscription starts at the newest entry: `stream:data` sent before it opened is not replayed. To publish an event and read everything its run sends, use [Subscribe with Event](#subscribe-with-event-atomic).
 
 **Query Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `project` | string | Optional project filter |
+| `project` | string | Optional project ID or name. Only runs of that project are sent |
 
 **Response:** `text/event-stream`
 
@@ -1522,7 +1595,7 @@ Subscribe to an existing stream to receive real-time updates.
 | `run:cancel` | A run was cancelled |
 | `task:update` | Latest persisted state of a task belonging to this stream |
 | `stream:data` | Real-time data from the run (e.g., AI tokens) |
-| `stream:complete` | Stream subscription ended — the stream completed or the subscription timed out (5 minute default) |
+| `stream:complete` | The subscription reached its 5 minute limit. The data is `{"type":"stream:complete","stream_id":"..."}` and the connection closes |
 
 **Example Event:**
 
@@ -1551,6 +1624,12 @@ it in `retry_run_id`:
 event: run:fail
 data: {"type":"run:fail","run":{"run_id":"A","status":"pending_retry","retry_attempt":1,...},"retry_run_id":"B"}
 ```
+
+`stream:complete` does not mean the stream's runs are done. A subscription
+ends 5 minutes after it opens whatever the stream is doing, and it does not end
+earlier when a run finishes. Subscribe again to keep following the stream, or
+close the connection once you have the `run:stop`, `run:fail`, or `run:cancel`
+you are waiting for.
 
 On connection, Hot sends the latest persisted snapshot for tasks already on
 the stream, then sends another `task:update` when a task changes. This makes a
@@ -1586,6 +1665,14 @@ Accept: text/event-stream
 | `event_data` | Yes | Event payload (any JSON) |
 | `stream_id` | No | Continue an existing stream; if omitted, creates a new stream |
 
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `project` | string | Optional project ID or name. Only runs of that project are sent |
+
+The credential needs `event:<event_type>` with `create` and `stream:<stream_id>` with `read`. Without a `stream_id` the stream is new, so the `read` grant must be `stream:*`.
+
 **Response:** `text/event-stream`
 
 The first event is always `event:published` confirming the event was queued:
@@ -1603,6 +1690,8 @@ data: {"type":"stream:data","run_id":"...","data_type":"ai:delta","payload":{"te
 event: run:stop
 data: {"type":"run:stop","run":{...}}
 ```
+
+The connection follows the same rules as [Subscribe to Stream](#subscribe-to-stream): it stays open after the run ends and closes with `stream:complete` 5 minutes after it opened.
 
 **Examples:**
 
@@ -1792,6 +1881,8 @@ Revokes all active sessions for the authenticated API key.
 
 Service keys are long-lived, permission-scoped credentials you issue to your customers or external systems for access to MCP tools, webhooks, and other API resources. Only API keys can create service keys.
 
+Creating a service key requires a **Pro or Scale** subscription plan. On another plan `POST /v1/service-keys` returns `403` `plan_required`. A self-hosted installation without a plan can create them.
+
 #### Create Service Key
 
 ```http
@@ -1819,9 +1910,9 @@ POST /v1/service-keys
 |-------|----------|-------------|
 | `name` | No | Human-readable name |
 | `description` | No | Description of the key's purpose |
-| `permissions` | Yes | Permission map. Must be a subset of the parent API key's permissions. |
+| `permissions` | Yes | Permission map. Must be a subset of the parent API key's permissions, and may use only the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. |
 | `metadata` | No | Arbitrary JSON metadata (encrypted at rest, available at runtime via `req.auth.service-key.meta`) |
-| `expires_in` | No | TTL in seconds (`null` or omitted = never expires) |
+| `expires_in` | No | TTL in seconds, greater than zero (`null` or omitted = never expires) |
 
 **Response:** `201 Created`
 
@@ -1846,8 +1937,10 @@ POST /v1/service-keys
 
 | Code | Status | Cause |
 |------|--------|-------|
+| `plan_required` | 403 | Service keys require a Pro or Scale plan |
 | `forbidden` | 403 | Non-API-key credential attempted to create a service key |
 | `permission_escalation` | 403 | Requested permissions exceed parent API key permissions |
+| `bad_request` | 400 | Invalid permissions, a resource type service keys do not accept, or an `expires_in` of zero or less |
 
 #### List Service Keys
 
@@ -1886,7 +1979,7 @@ PATCH /v1/service-keys/{service_key_id}
 }
 ```
 
-Replaces the key's metadata entirely. The key must belong to the authenticated API key.
+Replaces the key's metadata entirely. The key must belong to the authenticated API key. Updating a revoked key returns `409` `revoked`.
 
 #### Revoke Service Key
 
@@ -1923,6 +2016,10 @@ Revokes all active service keys for the authenticated API key.
 
 Custom domains map your own domain names (e.g., `mcp.example.com`) to your Hot Dev environment. This feature requires a **Pro or Scale** subscription plan.
 
+Domain provisioning is off unless the installation sets `domain.mode` (`HOT_DOMAIN_MODE`) to something other than its default, `none`. While it is off, `POST /v1/domains` returns `503` `custom_domains_disabled`. A self-hosted installation has it off by default. See [Custom Domains](/docs/domains#self-hosted-installations).
+
+These routes take API keys only.
+
 #### Register Domain
 
 ```http
@@ -1946,26 +2043,41 @@ POST /v1/domains
     "env_id": "660e8400-e29b-41d4-a716-446655440000",
     "domain": "mcp.example.com",
     "status": "pending_validation",
-    "validation_cname_name": "_abc123.mcp.example.com",
-    "validation_cname_value": "_xyz789.acm-validations.aws",
-    "routing_domain": null,
+    "dns_records": [
+      {
+        "type": "CNAME",
+        "name": "_abc123.mcp.example.com",
+        "value": "_xyz789.acm-validations.aws",
+        "purpose": "certificate_validation"
+      }
+    ],
     "created_at": "2026-01-15T10:30:00Z"
   },
   "meta": {...}
 }
 ```
 
-After creating a domain, add the **validation CNAME** record (using the `validation_cname_name` and `validation_cname_value` fields) to prove domain ownership. Once validated, the `routing_domain` field will be populated — add a domain CNAME pointing to that routing target to start routing traffic.
+`dns_records` lists the DNS records to create. After creating a domain, add the record whose `purpose` is `certificate_validation` to prove domain ownership. It can be missing from the first response: read the domain again after a few seconds. Once the domain is validated and its routing target exists, the response gains a `routing_domain` field and a second record whose `purpose` is `traffic`: a CNAME from your domain to the routing target. Add it to start routing traffic.
 
-Domain statuses: `pending_validation`, `validated`, `provisioning`, `active`, `deleting`.
+| Field | Description |
+|-------|-------------|
+| `status` | `pending_validation`, `validated`, `provisioning`, `active`, or `pending_deletion` |
+| `dns_records` | Records to create, each with `type`, `name`, `value`, and `purpose` (`certificate_validation` or `traffic`) |
+| `routing_domain` | The routing target. Left out until it exists |
+| `verified_at` | When the certificate was issued. Left out until then |
+| `tls_provisioned_at` | When the domain began serving traffic. Left out until then |
+| `provisioning_error` | The last provisioning error. Left out when there is none |
 
 **Errors:**
 
 | Code | Status | Cause |
 |------|--------|-------|
+| `custom_domains_disabled` | 503 | Domain provisioning is not enabled on this installation |
 | `plan_required` | 403 | Custom domains require Pro or Scale plan |
 | `domain_limit_reached` | 403 | Domain count limit reached for current plan |
 | `domain_exists` | 409 | Domain is already registered |
+| `domain_pending_deletion` | 409 | The domain was removed and is still being cleaned up. Wait a few minutes and try again |
+| `bad_request` | 400 | Invalid domain name |
 
 #### List Domains
 
@@ -1987,7 +2099,7 @@ GET /v1/domains/{domain_id}
 POST /v1/domains/{domain_id}/verify
 ```
 
-Checks the current provisioning status of the domain. If the validation CNAME has propagated and the certificate is issued, the domain moves to `validated` status and routing provisioning begins. If not yet validated, returns the required DNS records.
+Checks the current provisioning status of the domain. If the validation CNAME has propagated and the certificate is issued, the domain moves to `validated` status and routing provisioning begins. If not yet validated, `message` names the validation record to add.
 
 Pending domains are also checked automatically in the background, so you don't need to call this endpoint repeatedly.
 
@@ -1999,7 +2111,7 @@ Pending domains are also checked automatically in the background, so you don't n
     "domain_id": "550e8400-e29b-41d4-a716-446655440000",
     "domain": "mcp.example.com",
     "status": "validated",
-    "message": "Domain validated successfully — routing provisioning in progress"
+    "message": "Certificate validated! Domain routing will be provisioned automatically."
   },
   "meta": {...}
 }
@@ -2013,7 +2125,7 @@ Pending domains are also checked automatically in the background, so you don't n
     "domain_id": "550e8400-e29b-41d4-a716-446655440000",
     "domain": "mcp.example.com",
     "status": "pending_validation",
-    "message": "Add a CNAME record: _abc123.mcp.example.com → _xyz789.acm-validations.aws"
+    "message": "Waiting for DNS validation. Add a CNAME record: _abc123.mcp.example.com -> _xyz789.acm-validations.aws. DNS changes may take a few minutes to propagate."
   },
   "meta": {...}
 }
@@ -2025,7 +2137,7 @@ Pending domains are also checked automatically in the background, so you don't n
 DELETE /v1/domains/{domain_id}
 ```
 
-Removes a custom domain. The domain must belong to the authenticated environment. Deletion is asynchronous — the domain enters a `deleting` state while its routing target and TLS certificate are cleaned up, then the record is removed.
+Removes a custom domain. The domain must belong to the authenticated environment. Deletion is asynchronous: the domain reports the status `pending_deletion` while its routing target and TLS certificate are cleaned up, then the record is removed. Registering the same name again before then returns `409` `domain_pending_deletion`.
 
 **Response:** `204 No Content`
 
@@ -2043,11 +2155,13 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | `org_suspended` | 403 | The sub-organization is suspended or archived |
 | `org_limit_reached` | 403 | The account's sub-organization or environment limit is reached |
 | `permission_escalation` | 403 | Requested permissions exceed parent credential permissions |
-| `plan_required` | 403 | Feature requires a higher subscription plan |
+| `plan_required` | 403 | Feature requires a higher subscription plan: [service keys](#service-keys) and [custom domains](#custom-domains) need Pro or Scale |
 | `not_found` | 404 | Resource not found |
 | `bad_request` | 400 | Invalid request body or parameters |
 | `method_not_allowed` | 405 | The route does not accept this HTTP method |
 | `domain_exists` | 409 | Custom domain is already registered |
+| `domain_pending_deletion` | 409 | The custom domain was removed and is still being cleaned up |
+| `revoked` | 409 | The service key is revoked and cannot be updated |
 | `slug_taken` | 409 | Organization slug is already taken; slugs are unique across all accounts |
 | `external_id_taken` | 409 | Another sub-organization of the account has this `external_id` |
 | `gone` | 410 | The route was removed, such as Hot 3.0.0's `/v1/management` |
@@ -2061,6 +2175,10 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | `storage_quota_exceeded` | 413 | The account's file storage limit is reached |
 | `internal_server_error` | 500 | Server error |
 | `service_unavailable` | 503 | A dependency, such as the database, cannot be reached; retry the request |
+| `custom_domains_disabled` | 503 | Custom domain provisioning is not enabled on this installation |
+| `encryption_not_configured` | 503 | The API server has no usable encryption key for context variables |
+| `redeploy_required` | 503 | The webhook's project was deployed with another major version of Hot. It works again once the project is redeployed |
+| `mcp_disabled` | 503 | MCP is turned off on this installation (`mcp.enabled`). Returned by the HTTP+SSE transport; Streamable HTTP returns a JSON-RPC error instead |
 
 ---
 
@@ -2188,5 +2306,5 @@ System.out.println(event.get("stream_id"));
 ```
 <!-- tabs:end -->
 
-See [SDKs](api/sdks) for installation, streaming, error handling, and the
+See [SDKs](/docs/api/sdks) for installation, streaming, error handling, and the
 full behavior shared across all five libraries.

@@ -144,29 +144,37 @@ a run whose lease lapses.
 
 ### Run Data
 
-Every run captures:
+The API returns a run as:
 
 ```json
 {
-  "run_id": "run_abc123xyz",
-  "function": "::myapp::orders/process-order",
+  "run_id": "019a2f6e-7c1a-7b3e-9d6a-2f4c8e1b5a70",
+  "env_id": "019a2f00-1111-7000-8000-00000000000a",
+  "stream_id": "019a2f6e-7b90-7c11-8a55-6d0e9f3c2b18",
+  "build_id": "019a2e10-4d2c-7f00-b1c3-5a9e7d2f4c66",
+  "run_type": "event",
   "status": "succeeded",
-  "input": {
-    "order_id": "ord_12345"
-  },
+  "start_time": "2026-11-04T10:30:00Z",
+  "stop_time": "2026-11-04T10:30:02Z",
+  "origin_run_id": null,
+  "event_id": "019a2f6e-7b8f-7d42-a0e1-3c5b7f9d1e24",
   "result": {
     "status": "processed",
     "total": 99.99
   },
-  "started_at": "2024-12-04T10:30:00Z",
-  "completed_at": "2024-12-04T10:30:02Z",
-  "duration_ms": 2150,
-  "trigger": {
-    "type": "event",
-    "event_id": "evt_xyz789"
-  }
+  "project_id": "019a2e00-2222-7000-8000-00000000000b",
+  "project_name": "orders",
+  "retry_attempt": 0
 }
 ```
+
+`build_id`, `stop_time`, `origin_run_id` and `event_id` are `null` when they
+don't apply: a running run has no `stop_time`, and `origin_run_id` is set on a
+retry. `result`, `project_id`, `project_name` and `next_retry_at` are left
+out when they have no value. `next_retry_at` appears while a run is
+`pending_retry`. The record doesn't name the function or its arguments. The
+run's event carries the input, and the [execution trace](#execution-trace)
+shows the calls.
 
 ### Execution Trace
 
@@ -254,14 +262,31 @@ Event type {
 }
 ```
 
-The `send` function has two arities:
+A handler receives exactly this as its `event` argument. The type lives in
+`::hot::event` and isn't a core name, so write `::hot::event/Event` or alias it.
+
+The `send` function has three arities:
 
 ```hot
 // Pass event type and data directly
 send("user:created", {id: "usr_12345", email: "alice@example.com"})
 
+// Pass only the event type. The data is an empty map.
+send("cache:refresh")
+
 // Or pass an Event
-send(Event({type: "user:created", data: {id: "usr_12345", email: "alice@example.com"}}))
+send(::hot::event/Event({type: "user:created", data: {id: "usr_12345", email: "alice@example.com"}}))
+```
+
+Each returns an `EventInfo` for the published event:
+
+```hot
+info send("user:created", {id: "usr_12345"})
+info.event.id     // UUID of the published event
+info.event.type   // "user:created"
+info.event.time   // Instant the event was published
+info.stream.id    // UUID of the stream, the same as the sending run's
+info.env.id       // UUID of the environment
 ```
 
 `send` returns an `Err` if the event couldn't be stored, in which case no handler runs. Event data of any size can be sent as long as it fits `blob.rehydrate.max-total-bytes`, 512 MB as JSON by default: data over 1 MB as JSON goes to [blob storage](/docs/configuration/storage). Without blob storage, PostgreSQL refuses a `jsonb` value over 256 MB.
@@ -398,45 +423,45 @@ process-stream fn (iter, accumulated: Str): Str {
 }
 ```
 
-**JavaScript client** — publish an event, then subscribe to the stream:
+**JavaScript client** (subscribe and publish in one request):
 
 ```javascript
-// 1. Publish event to trigger the handler
-const eventRes = await fetch('/v1/events', {
+// POST /v1/streams/subscribe-with-event opens the subscription first and
+// then publishes the event, so no stream:data is missed.
+const response = await fetch('/v1/streams/subscribe-with-event', {
   method: 'POST',
   headers: {
     'Authorization': `Bearer ${API_KEY}`,
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream'
   },
   body: JSON.stringify({
     event_type: 'chat:message',
     event_data: { message: 'Hello!' }
+    // stream_id: existingStreamId   // optional: continue an existing stream
   })
-});
-const { data: { stream_id } } = await eventRes.json();
-
-// 2. Subscribe to stream for real-time updates
-// GET (classic SSE) and POST (streamable HTTP style) are both supported.
-const response = await fetch(`/v1/streams/${stream_id}/subscribe`, {
-  headers: {
-    'Authorization': `Bearer ${API_KEY}`,
-    'Accept': 'text/event-stream'
-  }
 });
 
 const reader = response.body.getReader();
 const decoder = new TextDecoder();
+let buffer = '';
 
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
 
-  const text = decoder.decode(value);
-  // Parse SSE events (data: {...}\n\n format)
-  for (const line of text.split('\n')) {
+  // Parse SSE events (data: {...}\n\n format); a chunk can end mid-line
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split('\n');
+  buffer = lines.pop();
+  for (const line of lines) {
     if (line.startsWith('data: ')) {
       const event = JSON.parse(line.slice(6));
-      if (event.type === 'stream:data') {
+      if (event.type === 'event:published') {
+        // Always the first event: { event_id, stream_id, event_type }
+        console.log('Stream:', event.stream_id);
+      }
+      if (event.type === 'stream:data' && event.data_type === 'ai:delta') {
         // Real-time chunk from ::hot::stream/data
         appendToResponse(event.payload.text);
       }
@@ -448,6 +473,20 @@ while (true) {
   }
 }
 ```
+
+The request body takes `event_type`, `event_data` and an optional `stream_id`.
+The response is the event stream itself. Its first event is `event:published`,
+followed by `run:start`, `stream:data`, `run:stop`, `run:fail`, `run:cancel` and
+`task:update` as they happen. The connection stays open for up to 5 minutes and
+then ends with `stream:complete`. See
+[Subscribe with Event](/docs/api#subscribe-with-event-atomic) in the API
+reference.
+
+Don't publish with `POST /v1/events` and then subscribe to
+`/v1/streams/{stream_id}/subscribe` when you need the stream data. That
+subscription delivers only the `stream:data` emitted after it opens, and data
+is ephemeral, so whatever the handler emitted first is lost. Use the separate
+subscribe endpoint to follow a stream that is already running.
 
 ### Subscription States
 
@@ -513,12 +552,18 @@ the stream ID.
 
 ### Viewing Streams
 
-Active and completed streams are visible in the Hot App:
+The **Streams** page in the Hot App lists the environment's streams, newest
+first, and can be searched by stream ID. Each row shows:
 
-- Connection status and duration
-- Messages sent/received
-- Bandwidth usage
-- Error details
+- **Stream ID**, linked to the stream's page
+- **Context**: the stream's latest event type and latest run function
+- **Start** and **Last Activity** times
+- **Duration**
+- **Runs** and **Events** counts
+- **Project**
+
+A stream's page shows the same details with a graph of the stream and its
+runs, events, and tasks. Live subscriber connections aren't listed.
 
 ## Monitoring
 

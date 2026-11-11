@@ -35,8 +35,8 @@ Runs block until the function completes. See [Runs, Events & Streams](/docs/plat
 ### Tasks
 
 **Tasks** are long-running, asynchronous resources. When you start a task, the
-current run returns immediately with a `TaskInfo` containing the task ID and
-stream ID. The task inherits that stream, records the originating run, and
+current run returns immediately with a [`TaskInfo`](#taskinfo) containing the
+task ID and its stream. The task inherits that stream, records the originating run, and
 executes in the background on a task worker. Its execution is recorded as a
 task-type run.
 
@@ -154,6 +154,12 @@ info ::task/start(::myapp/long-job, {input: data}, {
 })
 ```
 
+`timeout` is in milliseconds. Without one, a code task gets 30 minutes
+(1,800,000). A value below 1 second is raised to 1 second, and one above 7 days
+(604,800,000) is lowered to 7 days. A task that runs past its timeout ends as
+`timed_out`. A container task takes its timeout from its
+[`BoxConf`](/docs/box#boxconf) instead, in seconds.
+
 ### Container Tasks
 
 Use `::hot::box/start` to run Docker/OCI containers:
@@ -161,7 +167,7 @@ Use `::hot::box/start` to run Docker/OCI containers:
 ```hot
 ::box ::hot::box
 
-task ::box/start(BoxConf({
+task ::box/start(::box/BoxConf({
   image: "python:3.13-alpine",
   cmd: ["python", "-c", "print('Hello')"],
   size: "nano"
@@ -172,14 +178,29 @@ See [Containers](/docs/box) for full container documentation.
 
 ## TaskInfo
 
-Both `::hot::task/start` and `::hot::box/start` return a `TaskInfo` with:
+Both `::hot::task/start` and `::hot::box/start` return a `TaskInfo`. Its `id`
+is the task's UUID as a `Str` in both. The other fields differ by task type.
+
+A code task's `TaskInfo`, from `::hot::task/start`:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | `Str` | Unique task identifier (UUID) |
-| `stream-id` | `Str` | Stream this task belongs to |
+| `stream` | `Stream` | Stream this task belongs to. Its ID is `info.stream.id` |
+| `origin-run` | `Run` | The run that started the task. Its ID is `info.origin-run.id` |
+| `data` | `Any?` | `null` from `::hot::task/start` |
 
-For code tasks, `TaskInfo` also includes `stream` (the full stream object) and `origin-run` (the run that spawned the task).
+A container task's `TaskInfo`, from `::hot::box/start`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `Str` | Unique task identifier (UUID) |
+| `stream-id` | `Str` | ID of the stream this task belongs to |
+| `data` | `Any?` | `null` from `::hot::box/start`. Container packages set it, for example to an output URL |
+
+A container task's `TaskInfo` has no `stream` or `origin-run`, and a code
+task's has no `stream-id`. Both tasks run in the stream of the run that started
+them, so `info().stream.id` in that run is the same ID.
 
 ## Waiting for Completion
 

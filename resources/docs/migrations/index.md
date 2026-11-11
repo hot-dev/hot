@@ -147,7 +147,9 @@ Hot 3.0.2 masks more secrets in call and run records. See [Secret Masking](/docs
 
 **Packages** that call `::hot::ctx/mark-secret` need `hot-min-version: "3.0.2"`.
 
-**On PostgreSQL, the upgrade builds an index on `call`.** Migration 025 replaces `call_env_start_time_idx` with an index that also holds each call's size, so hourly usage reconciliation no longer reads the whole table. Trace writes keep running during the build, though they slow down if they share a disk with it. It reads all of `call` and then waits for every older transaction to finish, so give your migration job room: a 2.4 GB table took about 20 s on a 125 MB/s disk. If the job is interrupted, run `hot db migrate` again.
+**Migrations 024 to 028.** Run `hot db migrate` with the 3.0.2 CLI. Migration 024 adds rollover columns to `usage_task`. Migration 025 builds a new index on `call`, and 026 drops the index it replaces. Migration 027 makes autovacuum visit `call` sooner after inserts. Migration 028 makes email addresses case-insensitive. On SQLite, 024 and 027 change nothing.
+
+**On PostgreSQL, the upgrade builds an index on `call`.** Migrations 025 and 026 replace `call_env_start_time_idx` with an index that also holds each call's size, so hourly usage reconciliation no longer reads the whole table. Trace writes keep running during the build, though they slow down if they share a disk with it. It reads all of `call` and then waits for every older transaction to finish, so give your migration job room: a 2.4 GB table took about 20 s on a 125 MB/s disk. If the job is interrupted, run `hot db migrate` again.
 
 **Email addresses now identify one account, whatever their capitals.** `DANA@corp.com` and `dana@corp.com` are the same address for sign-up, sign-in, verification, invitations and OAuth, and a second account can't be created under other capitals. Mail still goes to the address as it was typed. Only the letters A to Z fold: other letters, dots and `+` suffixes still make a different address.
 
@@ -235,7 +237,7 @@ WHERE auth_type = 'email_password' AND auth_identifier = 'local@hot.dev';
 tables, or when the schema is behind the release. You can roll back to 3.0.0
 after the migration, but `hm_` credentials stay revoked.
 
-**Migrations 017–023 run on upgrade.**
+**Migrations 017–023 run on upgrade.** A SQLite database that 3.0.0 migrated also gets 015 and 016, which 3.0.0 shipped for PostgreSQL only.
 - **Lock waits:** migrations wait at most 5 s for a lock
   (`db.migration-lock-timeout-ms`) and retry up to 5 times.
 - **019 checks your data:** it refuses to run over duplicate project names in
@@ -524,8 +526,9 @@ this section before you upgrade.
 - **Back up your database.** For a local project, stop `hot dev` and any
   other Hot process, then copy the `.hot/db/` directory. For PostgreSQL, take
   a snapshot. See [Backups](/docs/configuration/postgres#backups).
-- **Hot 3.0.0 applies migrations 012 to 016 on PostgreSQL, and 3.0.1 applies
-  017 to 023.** Hot 2.6.11 added 010 and 011. Downgrading a migrated database
+- **Hot 3.0.0 applies migrations 012 to 016 on PostgreSQL and 012 to 014 on
+  SQLite. Hot 3.0.1 applies 017 to 023, and on SQLite also 015 and 016.** Hot
+  2.6.11 added 010 and 011. Downgrading a migrated database
   is not supported. To go back, restore your backup.
 - **Ignore the "Hot 1.x database" hint.** A 2.x release that opens a migrated
   database says it is a Hot 1.x database and suggests `hot db port-v1-to-v2`
@@ -820,6 +823,25 @@ of guessing. Don't delete the database: restore the backup you took before
 that build ran, then upgrade with a release. A database a newer Hot release
 migrated says so instead: upgrade Hot to that release.
 
+## Hot 2.x Releases and Migrations {#hot-2x-migrations}
+
+Each Hot 2.x release below added database migrations. A 2.x release that isn't
+listed added none. The numbers are the same for SQLite and PostgreSQL.
+`hot db status` lists the migrations a database still needs.
+
+| Release | Migrations | What they add |
+|---------|------------|---------------|
+| 2.0.0 | 001 | The Hot 2 baseline schema |
+| 2.0.9 | 002 | On SQLite, the `::hot::store` tables. On PostgreSQL, a required environment on every store |
+| 2.1.0 | 003 | The embedding configuration of each store |
+| 2.4.0 | 004 | Build runtime status and deployment order |
+| 2.4.3 | 005 | The engine and `hot-std` version of each build |
+| 2.5.0 | 006 | Blob tables for large values |
+| 2.6.1 | 007 | A unique index for files that have no environment |
+| 2.6.7 | 008 | Task timing |
+| 2.6.8 | 009 | Task retry lineage |
+| 2.6.11 | 010, 011 | Multipart upload completion and retry records |
+
 ## Upgrading to Hot 2.6 {#upgrading-to-hot-26}
 
 Hot 2.6 completes the move to one error idiom and removes the legacy
@@ -835,6 +857,28 @@ flow-result-modifier syntax:
   collect all results (`x: All<Map> cond { ... }`); any other type on a
   collect-all flow takes the single final value (`x: Int parallel { ... }`).
   See [Flows](/docs/language/flows).
+
+## Upgrading to Hot 2.5 {#upgrading-to-hot-25}
+
+Hot 2.5.0 stores large values outside the database. A large string or byte
+value in a persisted call, run, or event is written to blob storage, and the
+database row keeps a small reference to it. Blobs use the same backend as file
+storage. See [Storage](/docs/configuration/storage).
+
+This is on by default inside a project. To keep every value in the database,
+set `hot.blob.mode "disabled"` in `hot.hot`.
+
+## Upgrading to Hot 2.4 {#upgrading-to-hot-24}
+
+From Hot 2.4.7, a project that doesn't set `hot.file.mode` uses `service` mode
+for `::hot::file`. Earlier releases used `direct` mode. In `service` mode,
+files go through Hot's file storage and are recorded in the database. In
+`direct` mode, paths are read and written on the local filesystem as given.
+
+If your local project relies on direct filesystem paths, set
+`hot.file.mode "direct"` in `hot.hot`. Commands run outside a project still
+default to `direct`. When `HOT_ENV` is not `development`, Hot always uses
+`service`.
 
 ## Upgrading to Hot 2.3
 

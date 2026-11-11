@@ -113,7 +113,7 @@ fn walk<'v>(value: &'v Value, visit: &mut dyn FnMut(&'v Value)) {
                 }
             }
         }
-        Value::Raw(inner) | Value::Do(inner) => walk(inner, visit),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => walk(inner, visit),
         Value::Match(m) => {
             walk(&m.value, visit);
             for arm in &m.arms {
@@ -1042,6 +1042,7 @@ impl<'a> Index<'a> {
                 if is_where_predicate(var.sym.name()) {
                     continue;
                 }
+                self.check_top_level_shadow(var, value, out);
                 // A typed binding with a literal initializer.
                 if let (Some(annotation), Some(literal)) =
                     (var.type_annotation.as_deref(), literal(value))
@@ -1483,6 +1484,35 @@ impl<'a> Index<'a> {
         out.warnings.push(diagnostic(
             "binding-shadows-function",
             format!("`{name} (…)` binds a local named `{name}`, which hides the `{name}` function"),
+            Some(&help),
+            true,
+            var.src.as_ref().map(error_location),
+        ));
+    }
+
+    /// `binding-shadows-function` at namespace level: `if (x) { … }` written
+    /// as a statement of its own binds `if` to the lambda `(x) { … }`. A
+    /// definition is written `name fn (x) { … }`, so a bare lambda bound to a
+    /// core function's name is taken for a mistaken call.
+    fn check_top_level_shadow(&self, var: &Var, value: &Value, out: &mut ConstraintDiagnostics) {
+        if var.meta.is_some() || !matches!(value, Value::Lambda(_)) {
+            return;
+        }
+        let name = var.sym.name();
+        let is_core_function = self.core.get(name).is_some_and(|info| {
+            info.variable_type == crate::lang::compiler::core_registry::CoreVariableType::Function
+        });
+        if !is_core_function {
+            return;
+        }
+        let help = format!(
+            "a call has no space before `(`: write `{name}(…)`. To define a function, write `{name} fn (…) {{ … }}`"
+        );
+        out.warnings.push(diagnostic(
+            "binding-shadows-function",
+            format!(
+                "`{name} (…)` binds a variable named `{name}`, which hides the `{name}` function"
+            ),
             Some(&help),
             true,
             var.src.as_ref().map(error_location),

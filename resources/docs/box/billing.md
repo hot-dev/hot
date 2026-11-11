@@ -36,7 +36,7 @@ Billable time measures your workload's execution window, not the platform's over
 - **Platform cleanup** — log collection and container removal after your command exits.
 - **Preparation** — bundle download and extraction for `mounts` entries, and other worker-side setup.
 
-The `duration-ms` field on task results and completion events reflects billable time. The timing breakdown on each result reports every phase separately — `image-pull-ms`, `slot-wait-ms`, `runtime-start-ms`, `execution-ms`, `logs-collect-ms` — so you can see exactly what was excluded.
+The `duration-ms` field on task results and completion events reflects billable time. The `TaskResult` from `::hot::task/await` reports the phases separately as `image-pull-ms`, `slot-wait-ms`, `execution-ms` and `logs-collect-ms`, so you can see what was excluded. The task's stored result also records `runtime-start-ms`, the time the container took to start. `TaskResult` doesn't carry it: read it from the `result` of the task record the API returns.
 
 **Timeouts are separate from billing.** A container task's `timeout` budget is measured from when a worker claims the task, so it covers preparation phases as well as execution: a slow image pull consumes your task's time budget, but never your CUS.
 
@@ -91,17 +91,23 @@ Use `::hot::box/quota()` to check remaining CUS before starting containers:
 ```hot
 q ::hot::box/quota()
 q.compute-units-remaining   // CUS left this period (-1 = unlimited)
-q.compute-units-used       // CUS consumed this period
-q.tasks-remaining          // Tasks left (-1 = unlimited, 0 = exhausted)
-q.overage                  // true if usage exceeds included (paid plans)
+q.compute-units-used        // CUS consumed this period
+q.minutes-remaining         // Container minutes left this period (-1 = unlimited)
+q.concurrent-remaining      // Containers that can start now (-1 = unlimited)
+q.overage                   // true if usage exceeds included (paid plans)
 ```
+
+On the Free plan, `compute-units-remaining` and `minutes-remaining` stop at `0`.
+On a paid plan they go below `0` as overage accrues, and `overage` is `true`.
+`concurrent-remaining` counts the organization's running containers against
+the plan's limit, and never goes below `0`.
 
 Example: check quota before running a container:
 
 ```hot
 q ::hot::box/quota()
-if(eq(q.tasks-remaining, 0), fail("No container tasks remaining"), "OK")
-if(or(eq(q.compute-units-remaining, -1), gt(q.compute-units-remaining, 0)),
-  ::hot::box/start(BoxConf({image: "alpine:3.21", cmd: ["echo", "hello"], size: "nano"})),
-  fail("CUS quota exhausted"))
+// 0 means the Free plan's cap is reached. A paid plan goes negative instead.
+if(eq(q.compute-units-remaining, 0),
+  fail("CUS quota exhausted"),
+  ::hot::box/start(::hot::box/BoxConf({image: "alpine:3.21", cmd: ["echo", "hello"], size: "nano"})))
 ```

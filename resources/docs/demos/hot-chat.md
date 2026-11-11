@@ -19,8 +19,8 @@ Both agents live under `hot/src/` in the same project and boot together with
 one `hot dev`. The Next.js side is a thin transport — the agent is the
 product.
 
-**Expected time:** 15 minutes. **Cost:** none — the demo agents answer from
-local memory by default. Set `ANTHROPIC_API_KEY` for live LLM replies.
+**Expected time:** 15 minutes. **Cost:** none without an LLM key. Set
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in `.env` for live LLM replies.
 
 ## What You'll Get To See
 
@@ -36,15 +36,22 @@ local memory by default. Set `ANTHROPIC_API_KEY` for live LLM replies.
 
 ## Prerequisites
 
-- **Hot CLI** 2.0.3+ — [hot.dev/download](https://hot.dev/download)
+- **Hot CLI** 3.0 or newer — [hot.dev/download](https://hot.dev/download)
 - **Node 20+** for the Next.js app
 - A **Hot API key** for your local dev environment (one-time, see below)
 
-No LLM API keys required — the demo agents answer from local memory.
+No LLM API keys are required to run the demo. Without one, messages are still
+stored in memory and the deterministic commands (`/recall`, `/whoami`,
+`/guide`) work as usual. Every reply that needs a model is replaced by a fixed
+notice: `(LLM disabled: set ANTHROPIC_API_KEY or OPENAI_API_KEY in .env to
+enable AI replies.)`. With a key set, those replies stream from Anthropic or
+OpenAI.
 
-The project's `hot.hot` declares published packages (`hot.dev/hot-ai`
-**1.4.0**, `hot.dev/hot-ai-agent` **1.0.0**, `hot.dev/anthropic` **1.2.1**),
-so dependencies resolve from the Hot package registry automatically.
+The project's `hot.hot` declares published packages (`hot.dev/hot-ai`,
+`hot.dev/hot-ai-agent`, `hot.dev/anthropic`, and `hot.dev/openai`), so
+dependencies resolve from the Hot package registry automatically. The pinned
+versions are in
+[`hot.hot`](https://github.com/hot-dev/hot-demos/blob/main/hot-chat/hot.hot).
 
 ## Step 1: Clone
 
@@ -75,7 +82,7 @@ agents under one project. Leave it running.
 
 While the Hot App is open, generate an API key:
 
-> *Hot App → API Keys → New Key.* Copy the value.
+> *Hot App → API Keys → Create API Key.* Copy the value.
 
 ## Step 4: Start The Chat UI
 
@@ -100,7 +107,9 @@ Memory is keyed by **person** (`person:<user-id>`), so it follows the user
 across sessions and devices.
 
 1. Type `/remember I prefer launch updates that start with blockers` and
-   press Enter. You'll see `remembered` stream into the assistant bubble.
+   press Enter. The note is stored. With an LLM key, a short model reply
+   streams into the assistant bubble. Without one, the bubble shows the
+   offline notice.
 2. Click **Recall preferences** (a quick-prompt chip) — the matching note
    comes back.
 3. Refresh the browser and ask `/recall` again. Same answer — memory is
@@ -112,8 +121,8 @@ Personal Mode commands, grouped by role:
 |-------------|--------------------|-----------------------------------------------------------|
 | Write       | `/remember <text>` | store a personal note (free-chat does the same)           |
 | Read        | `/recall <query>`  | search identity-scoped memory (deterministic, works offline) |
-| Synthesis   | `/brief`           | preferences, open tasks, deadlines, projects              |
-| Synthesis   | `/tasks`           | open tasks only, rendered as a checklist                  |
+| Synthesis   | `/brief`           | preferences, open tasks, deadlines, projects (needs an LLM key) |
+| Synthesis   | `/tasks`           | open tasks only, rendered as a checklist (needs an LLM key) |
 | Identity    | `/whoami`          | show transport, session, and user identity                |
 | Help        | `/guide`           | cheat sheet of the available commands                     |
 
@@ -126,8 +135,9 @@ same channel share one memory.
 1. Switch to Team Mode in the toolbar.
 2. Type *"we decided to ship docs before launch"*, then *"CI is the only
    blocker"*.
-3. Ask `/ask what is blocking launch?` — the reply cites the matching
-   records with attribution.
+3. Ask `/ask what is blocking launch?`. With an LLM key, the reply is
+   grounded on the matching records. Without one, both messages are still
+   recorded, and `/ask` returns the offline notice.
 
 Team Mode commands, grouped by role:
 
@@ -135,17 +145,17 @@ Team Mode commands, grouped by role:
 |------------|---------------|--------------------------------------------------------------------|
 | Write      | (no command)  | record the message into session memory                             |
 | Read       | `/ask <q>`    | LLM-backed answer grounded on channel memory                       |
-| Synthesis  | `/summary`    | distill the recent channel transcript                              |
-| Synthesis  | `/decisions`  | decisions, action items, and open questions from the transcript    |
+| Synthesis  | `/summary`    | distill the recent channel transcript (needs an LLM key)           |
+| Synthesis  | `/decisions`  | decisions, action items, and open questions from the transcript (needs an LLM key) |
 | Identity   | `/whoami`     | show transport, session, and user identity                         |
 | Help       | `/guide`      | cheat sheet of the available commands                              |
 
 ## Step 6: Attach A File
 
 Drag a small file (text, image, PDF — under 4 MB) anywhere onto the chat.
-A chip appears below the composer. Send a message with it; the agent reply
-will include `… with 1 attachment(s)`. The agent stores the file's name and
-type as metadata; this demo doesn't deeply parse contents, but the same
+A chip appears below the composer. Send a message with it. The agent adds
+the file's name, type, and size to the stored message and to the model
+prompt; this demo doesn't deeply parse contents, but the same
 wire shape is how a real product would forward documents to your agent.
 
 ## Step 7: Inspect Identity
@@ -170,8 +180,8 @@ your browser's `localStorage` — clear site data to reset.
 In the Hot App, click into either agent and open the **Graph** tab. Each
 slash command shows up as its own typed event wired to its own handler:
 
-- `personal-agent:remember` → `remember`
-- `personal-agent:recall` → `recall`
+- `personal-agent:remember` → `remember-message`
+- `personal-agent:recall` → `recall-message`
 - `team-agent:ask` → `ask-question`
 - `team-agent:record` → `record-message`
 - …and so on, one node per command.

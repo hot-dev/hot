@@ -116,11 +116,18 @@ HttpResponse type {
 
 Only `status` is required. Omit `headers` and `body` when not needed (e.g., a `204 No Content` response).
 
-On the shared API host, Hot drops any `Set-Cookie` header from a webhook
-response. To set cookies, serve the webhook from a
-[custom domain](#custom-domain-urls).
+On the shared API host, Hot drops any `Set-Cookie`,
+`Content-Security-Policy`, or `X-Content-Type-Options` header that an
+`HttpResponse` sets. It sends `Content-Security-Policy: sandbox` and
+`X-Content-Type-Options: nosniff` on that response instead. A browser that
+opens the response runs no scripts in it, submits no forms from it, and does
+not guess its content type. To set cookies or your own values for these
+headers, serve the webhook from a [custom domain](#custom-domain-urls), which
+passes your headers through unchanged.
 
 If your function returns a plain value (not an `HttpResponse`), Hot wraps it as a `200 OK` JSON response automatically.
+
+A plain map counts as a response when its `status` is an integer from 100 to 599: Hot then sends that status with the map's `body` and `headers`. Any other map is data and is returned whole, so `{status: "ok", count: 3}` arrives as written. To return data that has a numeric `status` field of its own, wrap it: `HttpResponse({status: 200, body: data})`.
 
 ```hot
 // These are equivalent:
@@ -335,6 +342,19 @@ When you redeploy, the endpoint registry updates automatically. If a function's 
 The `retry` metadata does **not** apply to webhook invocations. Webhooks use a synchronous request/response model—the caller sends a request and waits for the result. If the function fails, the error is returned immediately as a 500 response. The calling service can then decide whether to retry.
 
 Use the `send()` pattern shown above to defer work to event handlers that support server-side retries.
+
+## Limits and Errors
+
+| Condition | Response |
+|-----------|----------|
+| Request body over 10 MB | `413` |
+| Handler has not returned after 30 seconds | `504` with the body `{"error": "Webhook function timed out after 30s"}` |
+| Handler fails | `500` with the body `{"error": "Webhook function execution failed"}` |
+| The organization already has 50 webhook and MCP `tools/call` requests in flight on this API server | `429` with the error code `rate_limit_exceeded` and `Retry-After: 1` |
+| The project was deployed with another major version of Hot | `503` with the error code `redeploy_required`, until the project is redeployed |
+| Unknown path, wrong method, or a missing or wrong token | `404` |
+
+The timeout is the installation's `webhook.timeout` setting, in seconds. The in-flight limit does not apply to an organization whose rate limit is unlimited. See [Request and Connection Limits](/docs/api#request-and-connection-limits).
 
 ## Best Practices
 

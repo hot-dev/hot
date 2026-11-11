@@ -30,6 +30,26 @@ Hot provides several built-in channels that are automatically available:
 
 These system channels are read-only and available to all organizations.
 
+### Task and Usage Alerts
+
+Hot also fires these alert events. They have no built-in channel, so create a
+[custom channel](#custom-channels) whose pattern matches the ones you want, such
+as `task:.*`, and subscribe to it.
+
+| Alert Event | Description |
+|-------------|-------------|
+| `task:failed` | A [task](/docs/tasks) failed or timed out. A task with a `retry` fires one for each failed attempt. Payload includes `task_id`, `env_id`, `error`, and `timestamp`. |
+| `task:cancelled` | A task was cancelled. Same payload as `task:failed`. |
+| `usage:cus_warning` | The organization has used 80% of its plan's monthly [Compute Unit Seconds](/docs/box/billing). Payload includes `org_id`, `threshold_pct`, `compute_units_used`, `compute_units_limit`, `usage_pct`, and `timestamp`. |
+| `usage:cus_exceeded` | The organization has used 100% of its plan's monthly Compute Unit Seconds. Same payload as `usage:cus_warning`. |
+
+A task's run never fires `run:failed`. A subscription to `run:failed` alone
+doesn't tell you about failed tasks: add a channel for `task:failed`.
+
+The usage alerts are checked after a container task that used compute units.
+Each fires at most once in 30 days, and only on a plan with a monthly CUS
+limit.
+
 ### Custom Channels
 
 You can create custom channels with regex patterns to match specific alert types. For example:

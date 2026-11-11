@@ -48,7 +48,7 @@ Run the local platform:
 hot dev --open
 ```
 
-This starts the API, scheduler, worker, and Hot App. See
+This starts the API, scheduler, worker, task worker, and Hot App. See
 [Getting Started](/docs/getting-started) for the complete setup path.
 
 ## 2. Define the Boundary

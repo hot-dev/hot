@@ -218,6 +218,108 @@ processes can share one deployment. Where their state lives:
   `HOT_APP_SESSION_SECRET`. Sessions and the one-time API key handoff are
   signed with it, so a request can land on any replica.
 
+## Redis Configuration
+
+Redis is needed only when `hot.queue.type` is `redis`.
+
+| Setting | Environment variable | Description | Default |
+|---------|----------------------|-------------|---------|
+| `hot.redis.uri` | `HOT_REDIS_URI` | Redis connection URI. `rediss://` connects over TLS. Also `--redis.uri` on the service commands | unset |
+| `hot.redis.cluster` | `HOT_REDIS_CLUSTER` | Connect in cluster mode. Set it for a cluster behind one endpoint. A URI that lists several endpoints, separated by commas, is taken as a cluster without it | `false` |
+| `hot.redis.ca-cert` | `HOT_REDIS_CA_CERT` | PEM certificates to trust for a `rediss://` server instead of the system's roots. Standalone servers only | unset |
+| `hot.redis.auth` | `HOT_REDIS_AUTH` | `password` uses the credentials in the URI. `gcp-iam` signs in as the VM's service account, for Memorystore for Valkey. It needs a `rediss://` URI and a standalone server | `password` |
+
+`hot.redis.ca-cert` holds the certificates themselves, not a path. To read them
+from a file, set `HOT_REDIS_CA_CERT_FILE` (see
+[Secrets from Files](#secrets-from-files)). The templates that
+`hot conf generate` prints set `hot.redis.uri` to `redis://localhost:6379`
+unless `HOT_REDIS_URI` is set.
+
+## Service Tuning
+
+`hot conf generate all` prints the full template: the service keys, each with
+its default and the environment variable that sets it. The tables below
+describe the keys an operator is most likely to tune. An environment variable
+is named from its key: `HOT_WORKER_RUN_TIMEOUT` sets `hot.worker.run-timeout`.
+
+### Worker
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.worker.threads` | Worker threads, and the most runs at once | `2` |
+| `hot.worker.run-timeout` | Seconds a run may take when its function sets no `timeout` | `300` |
+| `hot.worker.max-run-timeout` | Cap, in seconds, on a function's own `timeout`. At most 86400 | `3600` |
+| `hot.worker.cancel-on-timeout` | Ask a run to stop when it times out | `true` |
+| `hot.worker.shutdown-timeout` | Seconds to wait for runs at shutdown. `hot dev` uses 1 unless you set it | `60` |
+| `hot.worker.vm-concurrency` | Runs executing at once. It is capped by `worker.threads` and, under a container memory limit, by the memory figures below. `auto` also caps it at the CPU count | `auto` |
+| `hot.worker.vm-memory-mb` | Memory counted for each run in that calculation | `256` |
+| `hot.worker.reserved-memory-mb` | Memory held back from that calculation | `512` |
+| `hot.worker.shared-process` | Count half the CPUs for `auto`, for a worker that shares them with other services | `false` |
+| `hot.worker.max-blocking-executions` | Cap on executions that hold a thread. `-1` is twice the run concurrency | `-1` |
+| `hot.worker.db-max-connections` | Ceiling on the PostgreSQL connection pool. `auto` is 50 | `auto` |
+| `hot.worker.db-reserved-connections` | Connections added to the PostgreSQL pool on top of the run and code-task concurrency | `4` |
+| `hot.worker.local-write-concurrency` | Write headroom added to the SQLite connection pool | `1` |
+| `hot.worker.read-batch-size` | Events read from the queue in one round trip | `8` |
+| `hot.worker.tenant-service-cache-max-entries` | Most entries in the worker's cache of stores and context values. `0` turns it off | `1024` |
+| `hot.worker.event-ordering` | Only `current` is implemented | `current` |
+| `hot.worker.handler-concurrency` | Only `serial` is implemented | `serial` |
+
+### Task Worker
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.task.code-max-concurrent` | Most code tasks at once. The CPU count and the memory budget can lower it | `500` |
+| `hot.task.code-vm-memory-mb` | Memory counted for each code task | `256` |
+| `hot.task.code-memory-percent` | Share of the task worker's usable memory for code tasks. Box tasks get the rest | `50` |
+| `hot.task.container-max-concurrent` | Most box tasks at once. The memory and disk budgets can lower it. `auto` uses `hot.task.max-concurrent` | `auto` |
+| `hot.task.max-concurrent` | Box tasks at once when `container-max-concurrent` is `auto` | `4` |
+| `hot.task.worker-memory-mb` | Memory the task worker may budget. A lower container memory limit wins | `8192` |
+| `hot.task.worker-disk-mb` | Disk the task worker may budget for box tasks | `51200` |
+| `hot.task.recovery-reserved-slots` | Slots held back to adopt containers still running after a restart | `1` |
+| `hot.task.container-reserved-memory-mb` | Memory held back for each of those slots | `512` |
+| `hot.task.container-reserved-disk-mb` | Disk held back for each of those slots | `10240` |
+| `hot.task.shutdown-drain-seconds` | Seconds running tasks get to finish at shutdown before they are cancelled. `hot dev` uses 5 unless you set it | `30` |
+| `hot.task.shutdown-container-timeout-seconds` | Seconds a box task waits for a free container slot | `30` |
+| `hot.task.reconcile-queued-after-seconds` | A task still queued in the database after this long is put on the queue again | `60` |
+| `hot.task.reconcile-interval-seconds` | How often that check runs | `30` |
+| `hot.task.capacity-fairness` | Only `none` is implemented | `none` |
+
+### Scheduler and Retries
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.scheduler.backfill` | On restart, fire the scheduled events missed while the scheduler was down | `false` |
+| `hot.scheduler.sync-interval-seconds` | How often to sync schedules from the database | `30` |
+| `hot.scheduler.retry-interval-seconds` | How often to poll for due retries | `1` |
+| `hot.scheduler.at-interval-seconds` | How often to poll for due one-shot schedules | `1` |
+| `hot.scheduler.singleton` | Allow one scheduler at a time on PostgreSQL (see [hot scheduler](/docs/cli#hot-scheduler)) | `true` |
+| `hot.retry.max-attempts` | Most attempts a function's `retry` may ask for. A higher value is lowered to this | `10` |
+| `hot.retry.max-delay-ms` | Longest retry delay a function may ask for | `3600000` |
+| `hot.retry.default-delay-ms` | Retry delay when a function gives none | `1000` |
+
+### Database, App and Files
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.db.statement-timeout-ms` | PostgreSQL statement timeout | `30000` |
+| `hot.db.lock-timeout-ms` | PostgreSQL lock timeout | `5000` |
+| `hot.db.local.retention.call.days` | In local development, the worker deletes call data older than this many days. `-1` keeps it | `7` |
+| `hot.db.sqlite.cache-size-kb` | SQLite page cache, in KiB | `65536` |
+| `hot.db.sqlite.mmap-size-bytes` | Bytes of the database file to memory-map for reads. `0` turns it off | `268435456` |
+| `hot.db.sqlite.wal-autocheckpoint-pages` | Checkpoint after this many WAL pages | `4000` |
+| `hot.db.sqlite.journal-size-limit-kb` | Soft cap on the WAL file after a checkpoint, in KiB | `65536` |
+| `hot.db.sqlite.synchronous` | `normal`, `full` or `off` | `normal` |
+| `hot.db.sqlite.temp-store` | `memory`, `file` or `default` | `memory` |
+| `hot.db.sqlite.auto-vacuum` | `incremental` or `none`. An existing database may need one full `VACUUM` for a change to apply | `incremental` |
+| `hot.db.sqlite.maintenance.wal-checkpoint` | Truncate the WAL in daily maintenance | `true` |
+| `hot.db.sqlite.maintenance.incremental-vacuum-pages` | Pages to reclaim in each maintenance run. `0` skips it | `1000` |
+| `hot.app.session.timeout` | Hours before an app sign-in expires. The templates that `hot conf generate` prints write `24` | `720` |
+| `hot.file.max-bytes` | Ceiling on the size of a stored file, in bytes. The lower of this and the plan's limit applies. `-1` leaves it to the plan | `-1` |
+
+`hot.db.sqlite.*` and `hot.app.session.timeout` take their environment
+variables only through the `::env/get` lines of the generated template, so keep
+those lines in `hot.hot` to set them from the environment.
+
 ## Trusted Proxy Client IPs
 
 Client IP forwarding stays in compatibility mode by default: the API uses the

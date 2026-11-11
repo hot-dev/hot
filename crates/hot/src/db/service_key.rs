@@ -571,6 +571,29 @@ impl ServiceKey {
         rows.into_iter().map(|r| r.into_service_key()).collect()
     }
 
+    /// How many service keys an API key has issued, whatever their state:
+    /// the total that `list_by_api_key` pages through.
+    pub async fn count_by_api_key(
+        db: &crate::db::DatabasePool,
+        api_key_id: &Uuid,
+    ) -> Result<i64, ServiceKeyError> {
+        let (count,): (i64,) = match db {
+            crate::db::DatabasePool::Sqlite(db) => {
+                sqlx::query_as("SELECT COUNT(*) FROM service_key WHERE api_key_id = ?")
+                    .bind(api_key_id)
+                    .fetch_one(db)
+                    .await?
+            }
+            crate::db::DatabasePool::Postgres(db) => {
+                sqlx::query_as("SELECT COUNT(*) FROM service_key WHERE api_key_id = $1")
+                    .bind(api_key_id)
+                    .fetch_one(db)
+                    .await?
+            }
+        };
+        Ok(count)
+    }
+
     /// List all service keys for an environment (active, revoked, expired).
     /// Used by the dashboard to show full history.
     pub async fn list_by_env(

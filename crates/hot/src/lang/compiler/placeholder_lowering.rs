@@ -606,6 +606,10 @@ fn lower_value_inner(
 
         Value::Do(inner) => Value::Do(Box::new(lower_value(*inner, current_ns, aliases, registry))),
 
+        Value::Spread(inner) => {
+            Value::Spread(Box::new(lower_value(*inner, current_ns, aliases, registry)))
+        }
+
         Value::MultipleValues(vals) => Value::MultipleValues(
             vals.into_iter()
                 .map(|v| lower_value(v, current_ns, aliases, registry))
@@ -766,7 +770,7 @@ fn collect_placeholder_errors(
                 }
             }
         }
-        Value::Raw(inner) | Value::Do(inner) => {
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
             collect_placeholder_errors(inner, binding, near, errors);
         }
         Value::MultipleValues(vals) => {

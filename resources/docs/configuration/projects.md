@@ -67,6 +67,44 @@ hot.project.my-app.deps {
 }
 ```
 
+### resources.paths
+
+Directories of resource files. Their files are bundled with the build and
+read from Hot code with `::hot::resource/load`:
+
+```hot
+hot.project.my-app.resources.paths ["./hot/resources"]
+```
+
+`hot init` writes this setting. A project without it has no resources.
+`-r, --resource.path` adds a directory for one command.
+
+### resources.excludes
+
+Glob patterns for files to leave out of the resources (default: `[]`):
+
+```hot
+hot.project.my-app.resources.excludes ["**/*.tmp"]
+```
+
+### ignore.respect-gitignore
+
+Whether to honor `.gitignore` when collecting the project's resource files
+(default: `true`). `--no-gitignore` turns it off for one command:
+
+```hot
+hot.project.my-app.ignore.respect-gitignore true
+```
+
+### ignore.excludes
+
+Glob patterns to leave out as well, applied with `resources.excludes`
+(default: `[]`):
+
+```hot
+hot.project.my-app.ignore.excludes ["drafts/**"]
+```
+
 ## Multiple Projects
 
 You can define multiple projects in one workspace:
@@ -166,16 +204,17 @@ before a map embeds, or move to a larger size.
 ## Project Naming
 
 Project names:
-- Must be valid Hot identifiers
-- Can contain letters, numbers, and hyphens
-- Cannot start with a number
-- Are case-sensitive
+- Use lowercase letters, digits, and hyphens
+- Start with a letter
+
+`hot init --name` accepts only such a name, and makes one from the directory
+name when you don't pass `--name`: `My App` becomes `my-app`. The name is also
+the root namespace of the starter file, `::my-app::hi`.
 
 Good names:
 - `my-app`
 - `production-api`
 - `dev`
-- `myProject`
 
 ## Directory Structure
 

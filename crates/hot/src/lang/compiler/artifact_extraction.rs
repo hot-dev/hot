@@ -1729,7 +1729,7 @@ impl Compiler {
                     }
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 Self::find_send_calls_recursive(inner, namespace, program, core_variables, results);
             }
             Value::MultipleValues(values) => {

@@ -906,11 +906,19 @@ fn build_webhook_response(
     result: Option<serde_json::Value>,
     on_custom_domain: bool,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    // A value that is not an `HttpResponse` is a 200 JSON response. On the
+    // shared host it carries the same sandbox headers as any other response.
+    let plain = |value: serde_json::Value| {
+        let mut response = (StatusCode::OK, Json(value)).into_response();
+        if !on_custom_domain {
+            shared_host_response_headers(&mut response);
+        }
+        response
+    };
+
     let result = match result {
         Some(r) => r,
-        None => {
-            return Ok((StatusCode::OK, Json(serde_json::json!(null))).into_response());
-        }
+        None => return Ok(plain(serde_json::Value::Null)),
     };
 
     // Unwrap typed values: Hot types serialize as {"$type": "...", "$val": {...}}
@@ -931,9 +939,23 @@ fn build_webhook_response(
         result.clone()
     };
 
-    // Check if the result looks like an HttpResponse (has "status" field)
+    // A typed `HttpResponse` is always a response. An untyped map is one only
+    // when its `status` is an HTTP status code: `{status: "ok"}` and other
+    // data that happens to have a `status` key is returned as JSON.
+    let typed_response = matches!(
+        &result,
+        serde_json::Value::Object(map)
+            if map.contains_key("$val")
+                && map.get("$type").and_then(|t| t.as_str()).is_some_and(|t| {
+                    t == "HttpResponse" || t.ends_with("/HttpResponse")
+                })
+    );
     if let serde_json::Value::Object(ref map) = unwrapped
-        && map.contains_key("status")
+        && (typed_response
+            || map
+                .get("status")
+                .and_then(|status| status.as_u64())
+                .is_some_and(|status| (100..=599).contains(&status)))
     {
         let status_code = map
             .get("status")
@@ -981,13 +1003,9 @@ fn build_webhook_response(
         && map.contains_key("$type")
         && map.contains_key("$val")
     {
-        return Ok((
-            StatusCode::OK,
-            Json(map.get("$val").cloned().unwrap_or(result)),
-        )
-            .into_response());
+        return Ok(plain(map.get("$val").cloned().unwrap_or(result)));
     }
-    Ok((StatusCode::OK, Json(result)).into_response())
+    Ok(plain(result))
 }
 
 #[cfg(test)]
@@ -1042,6 +1060,57 @@ mod tests {
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!({"created": true}));
+    }
+
+    #[tokio::test]
+    async fn test_a_status_key_that_is_not_a_status_code_stays_data() {
+        async fn body_of(response: axum::response::Response) -> serde_json::Value {
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        // Data with a `status` field is returned whole.
+        let data = serde_json::json!({"status": "ok", "count": 3});
+        let response = build_webhook_response(Some(data.clone()), true).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, data);
+
+        // On the shared host a plain value is sandboxed like any response.
+        let response = build_webhook_response(Some(data.clone()), false).unwrap();
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
+            "sandbox"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        let response = build_webhook_response(Some(data.clone()), true).unwrap();
+        assert!(
+            !response
+                .headers()
+                .contains_key(axum::http::header::CONTENT_SECURITY_POLICY)
+        );
+
+        let out_of_range = serde_json::json!({"status": 7, "count": 3});
+        let response = build_webhook_response(Some(out_of_range.clone()), true).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, out_of_range);
+
+        // An untyped map with a status code is still a response.
+        let untyped = serde_json::json!({"status": 201, "body": {"id": 1}});
+        let response = build_webhook_response(Some(untyped), true).unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(body_of(response).await, serde_json::json!({"id": 1}));
+
+        // So is a typed HttpResponse.
+        let typed = serde_json::json!({
+            "$type": "::hot::http/HttpResponse",
+            "$val": {"status": 404, "body": "missing"}
+        });
+        let response = build_webhook_response(Some(typed), true).unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_of(response).await, serde_json::json!("missing"));
     }
 
     #[test]

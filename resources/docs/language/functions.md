@@ -42,7 +42,9 @@ A call never has a space before `(`. With a space, `name (...)` binds a
 variable named `name` to the value in the parentheses, wherever it appears.
 So `assert (x)` and `if (x) { ... }` bind variables named `assert` and `if`
 instead of calling those functions. `hot check` warns with
-`binding-shadows-function` when such a binding shadows a function.
+`binding-shadows-function` when such a binding shadows a function. Inside a
+function body it reports every such binding. At namespace level it reports
+the block form, `if (x) { ... }`, and not a bare `assert (x)`.
 
 A parameter or local binding shadows any function with the same name inside
 its body, so a higher-order function can name its function parameter freely:
@@ -328,7 +330,7 @@ These functions are available everywhere without imports. See [hot-std](/pkg/hot
 
 **[Collections](/pkg/hot.dev/hot-std/hot/coll)** (eager): `map`, `filter`, `reduce`, `first`, `rest`, `last`, `length`, `concat`, `flatten`, `merge`, `keys`, `vals`, `some`, `all`, `range`, `sort`, `reverse`, `distinct`, `slice`
 
-**[Iterators](/pkg/hot.dev/hot-std/hot/iter)** (lazy): `Iter`, `next`, `collect`, `for-each`, `take`, `range`
+**[Iterators](/pkg/hot.dev/hot-std/hot/iter)** (lazy): `Iter`, `next`, `collect`, `for-each`, `take` (returns a `Vec`). The core `range` is the eager one above; the lazy range is `::hot::iter/range`.
 
 **[Strings](/pkg/hot.dev/hot-std/hot/str)**: `uppercase`, `lowercase`, `trim`, `split`, `join`, `starts-with`, `ends-with`, `contains`, `replace`
 

@@ -110,7 +110,6 @@ Instead of setting `HOT_API_KEY` on each step, pass it directly to the action:
 | `ubuntu-latest` | Linux | x86_64 |
 | `ubuntu-24.04-arm` | Linux | arm64 |
 | `macos-latest` | macOS | arm64 |
-| `macos-13` | macOS | x86_64 |
 
 ## Other CI Providers
 

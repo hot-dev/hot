@@ -601,7 +601,7 @@ impl AstVarIndex {
                     Self::index_value_vars(lookup, scopes, scope, v);
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 Self::index_value_vars(lookup, scopes, scope, inner);
             }
             Value::TypeImplementation(type_impl) => {
@@ -962,10 +962,13 @@ pub enum Value {
     Raw(Box<Value>),          // Raw (no-unwrap) value
     Do(Box<Value>),           // Lazy evaluation trigger
     VariadicExpansion(String), // Variadic expansion marker (...identifier)
+    /// A spread of any other expression in a vector literal: `[...f(x)]`,
+    /// `[...m.items]`. `...name` stays `VariadicExpansion`.
+    Spread(Box<Value>),
     MultipleValues(Vec<Value>), // Multiple values for same variable
-    Lambda(Lambda),           // Lambda function: (args) { body }
-    Match(MatchExpr),         // Match expression for variant unions
-    MatchArm(Box<MatchArm>),  // Single match arm (for match flow function bodies)
+    Lambda(Lambda),             // Lambda function: (args) { body }
+    Match(MatchExpr),           // Match expression for variant unions
+    MatchArm(Box<MatchArm>),    // Single match arm (for match flow function bodies)
     MapWithSpread {
         // Map literal with spread entries: {...obj, key: val}
         base_entries: IndexMap<Val, Val>,
@@ -1852,6 +1855,7 @@ impl Display for Value {
             Value::Raw(inner) => write!(f, "!{}", inner),
             Value::Do(inner) => write!(f, "do {}", inner),
             Value::VariadicExpansion(name) => write!(f, "...{}", name),
+            Value::Spread(inner) => write!(f, "...{}", inner),
             Value::MultipleValues(values) => write!(f, "{}", join_display(values, "\n")),
             Value::Lambda(lambda) => write!(f, "{}", lambda),
             Value::Match(match_expr) => write!(f, "{}", match_expr),
