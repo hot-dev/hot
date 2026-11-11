@@ -152,7 +152,11 @@ history is meaningful.
 
 ## Releases
 
-`main` is the stable release branch. A release goes like this:
+`main` is the stable release branch. After you write the notes in step 1,
+`scripts/release.sh X.Y.Z` runs steps 2 and 3. It checks package bumps but
+doesn't make them, and it also moves the example operator workflow pins and
+records new migrations in `resources/db/RELEASED_MIGRATIONS`. A release goes
+like this:
 
 1. **Write the upgrade notes** in `resources/docs/migrations/index.md`, and the
    curated release notes (Breaking, Upgrade, Features, Fixes) in
