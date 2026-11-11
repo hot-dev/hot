@@ -834,7 +834,7 @@ fn value_references_alias(value: &Value, alias_name: &str, current_namespace: &s
                 value_references_alias(expr, alias_name, current_namespace)
             }
         }),
-        Value::Raw(inner) | Value::Do(inner) => {
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
             value_references_alias(inner, alias_name, current_namespace)
         }
         Value::VariadicExpansion(name) => name == alias_name,

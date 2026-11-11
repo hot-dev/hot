@@ -132,8 +132,9 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let timeout_ms: u64 = match options.get("timeout") {
-        Some(Val::Int(n)) => (n as u64).clamp(1000, 604_800_000), // 1s to 7 days
-        _ => 1_800_000,                                           // 30 minutes default
+        // Clamp before the cast: a negative value is the 1s minimum, not 7 days.
+        Some(Val::Int(n)) => n.clamp(1000, 604_800_000) as u64, // 1s to 7 days
+        _ => 1_800_000,                                         // 30 minutes default
     };
 
     let task_type = match options.get("type") {

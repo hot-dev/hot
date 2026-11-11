@@ -32,7 +32,7 @@ impl CacheType {
     pub fn format_version(&self) -> u32 {
         match self {
             CacheType::Bytecode => 18, // Bumped for resolved namespace aliases in union signature keys
-            CacheType::Ast => 6,       // Bumped for named call arguments (FnCallArg.name)
+            CacheType::Ast => 7, // Bumped for expression spreads in vector literals (Value::Spread)
         }
     }
 }

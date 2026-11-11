@@ -275,3 +275,20 @@ meta ["test"] fn () {
   assert-eq(19.99, price-typed, "typed price")
   assert-eq("Alice", name-str, "typed name")
 }
+
+spread-source fn (): Vec { [7, 8] }
+spread-page {items: [1, 2], next: {items: [3]}}
+
+test-vec-spread-of-expressions
+meta ["test"] fn () {
+  xs [9]
+  assert-eq([7, 8], [...spread-source()], "a call")
+  assert-eq([1, 2, 3], [...spread-page.items, ...spread-page.next.items], "paths")
+  assert-eq(
+    [0, 7, 8, 1, 2, 5, 6, 9, 4],
+    [0, ...spread-source(), ...spread-page.items, ...[5, 6], ...xs, 4],
+    "mixed with elements, a literal and a name"
+  )
+  assert-eq([0, 2], [0, ...filter(spread-page.items, (n) { gt(n, 1) })], "a call that takes a function")
+  assert-eq([17, 18], [...map(spread-source(), add(%, 10))], "a placeholder lambda inside the spread")
+}

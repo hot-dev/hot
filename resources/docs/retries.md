@@ -1,5 +1,5 @@
 ---
-description: "Configure retries for Hot handlers, schedules, webhooks, and workflows with attempts, delays, and failure behavior."
+description: "Configure retries for Hot event handlers and scheduled functions with attempts, delays, backoff, and failure behavior."
 ---
 
 # Retries
@@ -19,12 +19,14 @@ The `retry` field supports two forms.
 
 Simple form:
 
+<!-- hot-check: skip -->
 ```hot
 retry: 3
 ```
 
 Full form:
 
+<!-- hot-check: skip -->
 ```hot
 retry: {
   attempts: 5,

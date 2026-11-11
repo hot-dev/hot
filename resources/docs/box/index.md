@@ -12,7 +12,11 @@ Use `::hot::box/start` to run arbitrary container images—Python scripts, Node.
 
 ## BoxConf
 
-Configure a container with `BoxConf`:
+Configure a container with `BoxConf`. `BoxConf`, `BoxMount` and
+`BoxRegistryAuth` live in `::hot::box` and aren't core names, so a bare
+`BoxConf(...)` isn't found at run time. The examples on this page alias the
+namespace with `::box ::hot::box` and write `::box/BoxConf(...)`. `start` also
+takes a plain map with the same fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -173,10 +177,12 @@ set this up, and an installation's `settings` refuses it.
 `mounts` puts files from your project's resources (`hot.project.<name>.resources.paths`) into the container. Each `BoxMount` names a `resource` path, relative to a resource root, and its `dest`, an absolute path in the container:
 
 ```hot
-task ::box/start(BoxConf({
+::box ::hot::box
+
+task ::box/start(::box/BoxConf({
   image: "node:22-alpine",
   cmd: ["node", "/app/index.js"],
-  mounts: [BoxMount({resource: "fetcher/index.js", dest: "/app/index.js"})],
+  mounts: [::box/BoxMount({resource: "fetcher/index.js", dest: "/app/index.js"})],
 }))
 ```
 
@@ -184,16 +190,21 @@ Mounts are read-only. `mounts` also takes a map of container path to resource pa
 
 ## Image Policy
 
-Hot uses an open policy with a denylist. All images are allowed except those matching denied names or prefixes. Images such as `docker:dind` and `docker:*` are blocked.
+Hot uses an open policy with a denylist. All images are allowed except those matching denied names or prefixes. Every `docker:` image, such as `docker:dind`, is blocked.
 
 Check the current policy with `::hot::box/image-policy()`:
 
 ```hot
 policy ::hot::box/image-policy()
 policy.policy           // "open"
-policy.denied            // ["docker:dind", ...]
-policy.denied-prefixes   // ["docker:", "rancher/", ...]
+policy.denied            // ["docker:dind", "docker:latest"]
+policy.denied-prefixes   // ["docker:"]
 ```
+
+A task worker also refuses an image whose compressed manifest and layers come
+to more than 4 GiB, with `Image exceeds the worker's 4 GiB compressed image size
+limit`. A self-hosted installation changes the limit with
+[`HOT_BOX_MAX_IMAGE_BYTES`](/docs/configuration#worker-resource-budgets).
 
 ## Private Images
 
@@ -211,17 +222,20 @@ rather than writing it into the file:
 ::hot::ctx/set-secret("ghcr-pull", {
   registry: "ghcr.io",
   username: "my-bot",
-  token: ::hot::env/get("GHCR_TOKEN"),
+  token: ::hot::env/get("GHCR_TOKEN", ""),
 })
 ```
+
+`::hot::env/get` takes the variable's name and the value to use when it isn't
+set.
 
 Then start the box with the secret's name:
 
 ```hot
-task ::box/start(BoxConf({
+task ::box/start(::box/BoxConf({
   image: "ghcr.io/my-org/my-tool:1",
   network: "none",
-  registry-auth: BoxRegistryAuth({secret: "ghcr-pull"}),
+  registry-auth: ::box/BoxRegistryAuth({secret: "ghcr-pull"}),
 }))
 ```
 
@@ -267,7 +281,7 @@ can open the sealed credential.
 ```hot
 ::box ::hot::box
 
-task ::box/start(BoxConf({
+task ::box/start(::box/BoxConf({
   image: "python:3.13-alpine",
   cmd: ["python", "-c", "print('Hello')"],
   size: "nano"
@@ -277,10 +291,13 @@ task ::box/start(BoxConf({
 // task.stream-id — the stream ID
 ```
 
+The `TaskInfo` from `::hot::box/start` has `id`, `stream-id` and `data`. See
+[TaskInfo](/docs/tasks#taskinfo) for how it differs from a code task's.
+
 Using `script` for multi-line shell commands:
 
 ```hot
-task ::box/start(BoxConf({
+task ::box/start(::box/BoxConf({
   image: "alpine:latest",
   script: """
     echo 'hello from hot box' > /data/test.txt
@@ -293,12 +310,59 @@ task ::box/start(BoxConf({
 With environment variables and custom limits:
 
 ```hot
-task ::box/start(BoxConf({
+task ::box/start(::box/BoxConf({
   image: "node:22-alpine",
   cmd: ["node", "-e", "console.log(process.env.NAME)"],
   env: {NAME: "Hot"},
   size: "medium",
 }))
+```
+
+## Declaring Box Requirements
+
+A function that starts containers can declare what they need with `box`
+metadata:
+
+```hot
+transcribe meta {box: {min-size: "medium", network: true}}
+fn (audio-url: Str) {
+  ::box/start(::box/BoxConf({
+    image: "my-org/whisper:1",
+    env: {AUDIO_URL: audio-url},
+    size: "medium",
+  }))
+}
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `min-size` | `BoxSize` name | Smallest size preset the function's containers need |
+| `network` | `Bool` | `true` when the containers need internet access |
+
+The metadata declares a need and doesn't size the box: still set `size` on the
+`BoxConf`. Hot follows the calls your code makes, so a requirement declared in
+a package counts for every project that calls that function. The build records
+the largest `min-size` reached and whether any function needs the network. A
+`min-size` that isn't a preset name fails the build.
+
+A deploy checks the build's requirements against the organization's limits. If
+the largest container the plan allows is smaller than `min-size`, or the plan
+doesn't allow container network access, the deploy is refused with a
+`Deploy blocked: ...` message naming what is missing.
+
+For a decision that has to be made at run time, read the limits with
+`::hot::box/limits()`:
+
+```hot
+limits ::hot::box/limits()
+limits.memory-mb      // Largest container memory in MB (-1 = no limit)
+limits.cpu-pct        // Largest CPU share, 10 to 100
+limits.tmp-mb         // Largest /tmp in MB (-1 = no limit)
+limits.disk-mb        // Largest /data in MB (-1 = no limit)
+limits.timeout-secs   // Longest timeout in seconds (-1 = no limit)
+limits.network        // true if containers may reach the internet
+
+size if(gte(limits.memory-mb, 1024), "large", "medium")
 ```
 
 ## Local Development
@@ -322,6 +386,8 @@ HOT_BOX_ENABLED=false hot dev
 |----------|-------------|
 | `::hot::box/start(BoxConf)` | Start a container task, returns `TaskInfo` |
 | `::hot::box/sizes()` | Get all size presets with resource profiles |
-| `::hot::box/quota()` | Check remaining CUS and task quota |
+| `::hot::box/limits()` | Get the largest container resources the organization's plan allows (see [Declaring Box Requirements](#declaring-box-requirements)) |
+| `::hot::box/quota()` | Check remaining CUS, minutes, and concurrent container slots (see [Checking Quota](/docs/box/billing#checking-quota)) |
 | `::hot::box/enabled()` | Check if box is enabled in configuration |
+| `::hot::box/stats()` | Get a `BoxStats`, whose one field `enabled` is the same value as `enabled()` |
 | `::hot::box/image-policy()` | Get image denylist and policy |

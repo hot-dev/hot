@@ -89,6 +89,7 @@ process fn (value: Str | Int): Str {
 
 Union types can include literal values:
 
+<!-- hot-check: skip -->
 ```hot
 // String literals
 Fruit type "apple" | "banana" | "orange"
@@ -132,6 +133,36 @@ set-speed("fast", 3, null)   // "Running fast with 3 retries"
 
 Name the type when you reuse it or extend it with `open`.
 
+#### Open Literal Unions
+
+Declare a literal union `open` when more values will be added later. Each
+later `type open` declaration of the same name adds members:
+
+```hot
+// Declare the union as open
+Fruit type open "apple" | "banana" | "orange"
+
+// Extend it. The leading `|` is optional
+Fruit type open | "kiwi"
+Fruit type open "mango" | "pineapple"
+
+kiwi: Fruit "kiwi"   // Valid: added by an extension
+```
+
+Extensions go at namespace top level. Repeating a member is allowed and
+changes nothing. A literal outside the known values, such as `"grape"` here,
+is an `unknown-literal` warning from `hot check` and is accepted at run time.
+
+A union is open or closed from its first declaration. Extending a closed
+union with `open`, or declaring an open union again without it, is an
+`open-literal-union-mismatch` error:
+
+<!-- hot-check: skip -->
+```hot
+Size type "small" | "large"
+Size type open | "medium"   // open-literal-union-mismatch: Size is closed
+```
+
 ## Constraints
 
 Any type can carry a `where` clause, a predicate its values must pass:
@@ -161,6 +192,7 @@ find-user fn (id: Str): User? {
 
 greet fn (name: Str, title: Str?): Str {
   // title can be a Str or null
+  if(is-null(title), name, `${title} ${name}`)
 }
 ```
 
@@ -168,7 +200,7 @@ greet fn (name: Str, title: Str?): Str {
 
 Null isn't converted at a call. Null reaching a parameter declared without `?` through an `Any` value fails at the call (see [Parameter Checks](#parameter-checks)). Only `Str(null)` and template interpolation turn null into `""`. Standard library functions return an `Err` for null unless their parameter is declared `Str?`: `lowercase(null)` fails, and `is-empty(null)` is `true`.
 
-`hot check` warns with `null-check-on-non-nullable` on `is-null(x)` or `is-some(x)` for a parameter declared without `?`, and with `null-for-non-nullable` on a literal `null` argument for one. Declare the parameter `Str?` when null is allowed.
+`hot check` warns with `null-check-on-non-nullable` on `is-null(x)` or `is-some(x)` for a parameter declared without `?`. A literal `null` argument for one is a `type-mismatch` error at namespace top level, and a `null-for-non-nullable` warning inside a function body. Declare the parameter `Str?` when null is allowed.
 
 > **Note:** The `?` syntax indicates the *type* accepts null—it does not make the parameter omittable. You must still pass an argument (either a value or `null`). For truly optional parameters, use function overloading.
 
@@ -437,6 +469,7 @@ Naming a variant an enum doesn't have, as in a misspelled `Direction.Upp`,
 makes `hot check` warn with `unknown-variant`: evaluating it fails at run
 time. An arm such as `Direction.Dwn =>` warns too, since it never matches.
 
+<!-- hot-check: skip -->
 ```hot
 Severity type "low" | "medium" | "high"
 
@@ -606,7 +639,7 @@ treat an `Err` as false, so use `is-err` where a bad value needs its own branch.
 ### Comparing Values of Declared Types
 
 `gt`, `gte`, `lt`, `lte`, `between` and `sort` read a value of a declared type over
-a number or a string as what it holds:
+a number as the number it holds:
 
 ```hot
 Money type Dec
@@ -619,6 +652,10 @@ sort([Money(200), Money(80.5)])   // [Money(80.5), Money(200)]
 They go by the number alone, so `gt(Money(200.0), Weight(80.0))` is true: comparing
 two different types is yours to rule out. An enum variant isn't read this way, as
 `Temp.Celsius(30.0)` is a case of its enum rather than a number.
+
+`gt`, `gte`, `lt`, `lte` and `between` take numbers only, so `gt("b", "a")` is a
+`type-mismatch` error from `hot check`. Strings are ordered by `sort` alone, which
+reads a declared type over a string the same way.
 
 Other operations keep the type. `add(Money(80.0), 1)` gives an `Err`, so convert
 with `Dec(x)` first, and `eq(Money(80.0), 80.0)` is false, because the type is part
@@ -645,7 +682,7 @@ failure err("Not found")
 result safe-divide(10, 2)
 if(is-ok(result),
   `Result: ${result}`,
-  `Error: ${result}`)
+  `Error: ${err-message(result)}`)
 ```
 
 The `Result` type is an enum with `Ok` and `Err` variants:
@@ -786,7 +823,7 @@ plain untype(filing)  // {outcome: "Passed", status: {Owed: 5}}
 Filing(plain)         // the same Filing
 ```
 
-A `Result` isn't data of its own, so `untype(ok(5))` is `5`. To read a payload in code, use [`match`](#matching-a-variants-payload) or field access rather than `untype`.
+A `Result` isn't data of its own, so `untype(ok(5))` is `5`. To read a payload in code, use [`match`](#matching-a-variant-s-payload) or field access rather than `untype`.
 
 ### Typed Values in the Store
 

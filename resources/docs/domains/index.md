@@ -38,6 +38,8 @@ You don't have to keep clicking Check Status - pending domains are also checked 
 | Active | HTTPS is active - domain CNAME is configured and routing traffic |
 | Deleting | Domain removal in progress - provider resources are being cleaned up |
 
+The API reports the same states as `pending_validation`, `validated`, `provisioning`, `active`, and `pending_deletion`.
+
 ## Using Custom Domains
 
 Once a domain is active, use it anywhere you'd use `api.hot.dev`:
@@ -54,10 +56,16 @@ On a self-hosted installation, a name the API already treats as its own is not r
 
 Click **Remove Domain** on the domain detail page to delete a custom domain. This soft-deletes the domain and queues cleanup of the associated provider resources.
 
-While cleanup is in progress, the domain shows a **Deleting** status. You cannot re-add the same domain name until cleanup completes - attempting to do so will show a message asking you to wait.
+While cleanup is in progress, the domain shows a **Deleting** status. You cannot re-add the same domain name until cleanup completes - attempting to do so will show a message asking you to wait. Through the API, the attempt returns `409` with the error code `domain_pending_deletion`.
 
 When removing a domain, remember to also delete the DNS CNAME records you created for it (both the validation CNAME and the domain CNAME).
 
+## Self-Hosted Installations
+
+Custom domain provisioning is off unless an installation sets `domain.mode` (`HOT_DOMAIN_MODE`) to something other than `none`, its default. While it is off, adding a domain through the API returns `503` with the error code `custom_domains_disabled`.
+
+Provisioning certificates and routing also needs a domain provider that the deployment supplies. The open source build does not include one, so setting `domain.mode` alone does not issue a certificate: the domain stays in Pending Validation.
+
 ## API Access
 
-Custom domains can also be managed programmatically via the [Custom Domains API](/docs/api#custom-domains).
+Custom domains can also be managed programmatically via the [Custom Domains API](/docs/api#custom-domains). Each domain's `dns_records` field lists the DNS records to create.

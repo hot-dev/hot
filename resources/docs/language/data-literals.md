@@ -128,6 +128,16 @@ clone [...a]                    // [1, 2, 3] (shallow copy)
 
 Spread elements are flattened inline. Non-spread elements and spread elements can be freely mixed. For simple concatenation without extra elements, you can also use `concat(a, b)`.
 
+A spread takes any expression that gives a Vec, not only a name:
+
+```hot
+recent fn (): Vec { [7, 8] }
+page {items: [1, 2], next: {items: [3]}}
+
+all [...page.items, ...page.next.items, ...recent()]   // [1, 2, 3, 7, 8]
+big [0, ...filter(page.items, (n) { gt(n, 1) })]       // [0, 2]
+```
+
 ## Maps (like Objects)
 
 Key-value collections using curly braces:
@@ -147,6 +157,30 @@ Access properties with dot notation:
 **Map vs Object**: Hot calls these `Map` instead of Object. Map-literal keys use
 identifier or string syntax. Dynamic bracket access can also use a runtime key;
 dot access is always a string-field lookup.
+
+### Field Punning
+
+A bare name in a map literal is short for a field of that name holding that
+value:
+
+```hot
+name "Ada"
+email "ada@example.com"
+
+user {name, email}          // {name: "Ada", email: "ada@example.com"}
+admin {name, role: "admin"} // {name: "Ada", role: "admin"}
+```
+
+One name alone in braces is a block, not a map. `{x}` returns the value of
+`x`. Add a trailing comma, or write the field out, for a one-field map:
+
+```hot
+x 5
+
+{x}      // 5, a block
+{x,}     // {x: 5}
+{x: x}   // {x: 5}
+```
 
 ### Map Spread
 

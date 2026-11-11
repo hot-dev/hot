@@ -105,7 +105,7 @@ impl Compiler {
                     }
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 self.extract_dependencies_recursive(inner, deps);
             }
             Value::VariadicExpansion(identifier) => {

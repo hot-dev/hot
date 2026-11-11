@@ -294,7 +294,14 @@ pub async fn list_service_keys(
         )
     })?;
 
-    let total = service_keys.len() as i64;
+    let total = ServiceKey::count_by_api_key(&db, &api_key.api_key_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
 
     let data: Vec<ServiceKeyResponse> = service_keys
         .into_iter()

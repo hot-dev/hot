@@ -589,6 +589,9 @@ pub enum CacheableValue {
     Placeholder {
         index: usize,
     },
+    Spread {
+        inner: Box<CacheableValue>,
+    },
 }
 
 /// Cacheable version of MatchExpr
@@ -950,6 +953,9 @@ impl From<&crate::lang::ast::Value> for CacheableValue {
             Value::VariadicExpansion(name) => {
                 CacheableValue::VariadicExpansion { name: name.clone() }
             }
+            Value::Spread(inner) => CacheableValue::Spread {
+                inner: Box::new(CacheableValue::from(inner.as_ref())),
+            },
             Value::MultipleValues(values) => CacheableValue::MultipleValues {
                 values: values.iter().map(CacheableValue::from).collect(),
             },
@@ -1420,6 +1426,10 @@ impl TryFrom<CacheableValue> for crate::lang::ast::Value {
                 Ok(Value::Do(Box::new(v)))
             }
             CacheableValue::VariadicExpansion { name } => Ok(Value::VariadicExpansion(name)),
+            CacheableValue::Spread { inner } => {
+                let v = Value::try_from(*inner)?;
+                Ok(Value::Spread(Box::new(v)))
+            }
             CacheableValue::MultipleValues { values } => {
                 let vs: Result<Vec<Value>, String> =
                     values.into_iter().map(Value::try_from).collect();
@@ -1626,7 +1636,7 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 9; // Bumped for named call arguments (FnCallArg.name)
+pub const CACHE_VERSION: u32 = 10; // Bumped for expression spreads in vector literals (Value::Spread)
 
 /// Serialize namespaces to cacheable binary (postcard)
 pub fn serialize_namespaces(
@@ -1945,7 +1955,7 @@ named Greeting(text: greeting)
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
         let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
-        let expected = "d13025210e7351522190d497ef6df0242fc11fc76de3bda7f81295c2017b9dda";
+        let expected = "be0baee19bb214eb2f3e501b18ec349d25dd0d0119ed8e02b2c7e2762f12cece";
         assert_eq!(
             hash, expected,
             "postcard cache wire layout changed (got hash {hash}). If this is \

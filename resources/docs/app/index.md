@@ -44,7 +44,7 @@ Use the filters at the top (project, time range, granularity) to scope the data.
 The **Runs** view shows all executions of your Hot code:
 
 - **Status** - Running, succeeded, failed, cancelled, or pending retry
-- **Type** - How it was triggered (call, event, schedule, run, eval, repl)
+- **Type** - How it was triggered (call, event, schedule, run, eval, repl, task)
 - **Duration** - How long the run took
 - **Timestamp** - When the run started
 
@@ -56,7 +56,7 @@ Click any run to see the full execution trace, including:
 - File attachments (if any)
 - Parent/child run hierarchy
 
-You can **retry** failed runs or **rerun** any completed run directly from the detail view.
+From the detail view you can **retry** a failed run or **re-run** a completed one. Both buttons appear only after the run has finished, and only when the run has an originating event. Retry keeps the run in the same stream. Re-Run starts a new stream.
 
 ### Run states
 
@@ -130,6 +130,7 @@ The **Workflows & Agents** view brings together named workflows, [agents](/docs/
 
 - **All Workflows** — Cards identify each item as a workflow, agent, or unnamed workflow group and show its name, namespace, description, tags, handler count, project, and recent health when applicable. Search by name, namespace, or project, or filter agents by health status.
 - **Graph** — The separate Graph tab shows topology across workflows and agents. Filter by workflow, agent, project, or tag, search for nodes, change the graph direction, and open the inspector.
+- **Workflow details** — Click a named workflow or an unnamed workflow group to open its **Graph** tab, with the same node inspector, and a **Handlers** tab that lists each handler with its type, retry configuration, and source location.
 - **Agent details** — Click an agent to open its default **Graph** tab, an interactive topology visualization of the agent's handlers, triggers, and event sends. Click a node to inspect its namespace, source location, description, retry configuration, and handled or sent events. Additional tabs show **Handlers**, **Runs**, and **Streams**.
 - **Dashboard health widget** — The main Dashboard summarizes healthy, degraded, failing, and idle agents for the selected window and lists up to five degraded or failing agents.
 
@@ -187,7 +188,7 @@ Webhook endpoints are driven by `webhook` metadata in your source code — they'
 
 ## Alerts
 
-The **Alerts** view lets you configure monitoring and notifications for your Hot applications — run failures, deployment issues, and custom alerts from your code. Configure destinations (email, Slack, PagerDuty, webhook), channels, and subscriptions.
+The **Alerts** view lets you configure monitoring and notifications for your Hot applications — run failures, deployment issues, and custom alerts from your code. Configure destinations (email, Slack, PagerDuty, webhook), channels, and subscriptions. The **History** tab lists the alerts that have fired. Open one to see its channel, its data, and each delivery with its destination, status, and attempts.
 
 See [Alerts](/docs/alerts) for the full documentation on channels, destinations, subscriptions, and sending alerts from code.
 
@@ -255,17 +256,23 @@ Each build includes documentation for both your project's source code and the sp
 
 The [hot-std](https://hot.dev/pkg/hot.dev/hot-std) standard library documentation is always available publicly at hot.dev, independent of any specific build.
 
+## Source Browser
+
+Source locations shown on workflow, agent, schedule, event handler, and MCP service pages are links. Click one to open the **source browser** at that file and line. It reads the source of the deployed build. Use it to browse the build's file tree, filter files by name, and search file contents.
+
 ## API Keys
 
 **API Keys** authenticate your requests to the Hot API with configurable permissions and fine-grained resource/action scoping.
+
+Administrators can give a key an expiry when they create it, and rotate, disable, or revoke it later. Rotating issues a new secret and can keep the previous one working for up to 7 days. Disabling can be undone. Revoking is permanent.
+
+Administrators of a parent organization also manage **org API keys** on this page. An org API key lets your own systems create and manage sub-organizations, their environments, and their API keys through [`/v1/orgs`](/docs/api/management). Give it a description, its permissions as `org:` URNs, and an optional expiry. The key is shown once. Revoking it also stops every key it created.
 
 ## Service Keys
 
 **Service Keys** are customer-facing credentials with granular permissions, designed for external integrations and white-label use.
 
-Administrators can give a key an expiry when they create it, and rotate, disable, or revoke it later. Rotating issues a new secret and can keep the previous one working for up to 7 days. Disabling can be undone. Revoking is permanent.
-
-Administrators of a parent organization also manage **org API keys** on this page. An org API key lets your own systems create and manage sub-organizations, their environments, and their API keys through [`/v1/orgs`](/docs/api/management). Give it a description, its permissions as `org:` URNs, and an optional expiry. The key is shown once. Revoking it also stops every key it created.
+Administrators can give a service key an expiry when they create it, and revoke it later. Revoking is permanent. A service key can't be rotated or disabled. On Hot Cloud, service keys need a Pro or Scale plan.
 
 See [Authentication](/docs/authentication) for full documentation on API keys, service keys, sessions, and the permissions model.
 
@@ -321,3 +328,19 @@ Administrators of the parent organization manage sub-organizations from its
 
 The tab also shows an account overview: runs, failures, file bytes, and
 environments for the parent organization and each sub-organization.
+
+### Usage and Billing
+
+Each organization page has **Usage** and **Billing** tabs. A sub-organization has no Billing tab, because its parent holds the plan.
+
+- **Usage** - Current usage against the plan's limits: runs for the billing month, file storage, team members, active schedules, execution trace data, store data, and compute unit seconds. An administrator of a parent organization sees totals for the whole account. In local development, usage is unlimited unless an account limit has been set.
+- **Billing** - The current plan and subscription details. On Hot Cloud, administrators can also choose or change a plan, and cancel or reactivate the subscription. These actions need Hot Cloud billing to be enabled. In local development the tab only says that billing is not available.
+
+## Account Settings
+
+Open **Account** from the user menu to change your own settings:
+
+- **Profile** - Your display name. Your email can't be changed.
+- **Display preferences** - The time zone used for every timestamp in the app, and whether values are shown in Hot or JSON format.
+
+With Hot Cloud billing enabled, the page has two more tabs. **Notifications** sets which emails you receive: the newsletter, product updates, and alert emails. Turning off alert emails opts you out of every alert destination that targets you by organization, team, or user. **Billing** lists the plans of the organizations you administer.

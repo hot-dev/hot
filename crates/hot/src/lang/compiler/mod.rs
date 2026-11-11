@@ -2195,8 +2195,13 @@ impl Compiler {
                         compiled_function_name
                     );
 
-                    // Find the function ID that was created for this type constructor (with __compiled suffix)
-                    if let Some(&function_id) = self.function_mapping.get(&compiled_function_name) {
+                    // Find the function ID that was created for this type constructor: under the
+                    // __compiled suffix for a type with a hotlib function, else under its own name
+                    if let Some(&function_id) = self
+                        .function_mapping
+                        .get(&compiled_function_name)
+                        .or_else(|| self.function_mapping.get(&base_function_name))
+                    {
                         // Register using base names (without suffix) so resolve() can find them
                         // BUT store the compiled function name as the VALUE so VM can find the actual function
                         self.core_functions
@@ -2492,6 +2497,11 @@ impl Compiler {
                     identifier
                 ))
             }
+            Value::Spread(inner) => Err(format!(
+                "Cannot declare variable '{}' with a spread: ...{}",
+                var.sym.name(),
+                inner
+            )),
             Value::MapWithSpread {
                 base_entries,
                 spread_entries,
@@ -3126,7 +3136,7 @@ impl Compiler {
 
                     for (i, element) in values.iter().enumerate() {
                         // Check if this element is a VariadicExpansion
-                        if matches!(element, Value::VariadicExpansion(_)) {
+                        if matches!(element, Value::VariadicExpansion(_) | Value::Spread(_)) {
                             spread_mask |= Self::spread_bit(i)?;
                         }
                         let element_reg = self.compile_value(element)?;
@@ -3459,6 +3469,9 @@ impl Compiler {
                 // MatchArm should only appear inside match flow function bodies
                 Err("Standalone match arm is not valid outside a match flow".to_string())
             }
+            // The vector literal that holds it marks the element as spread;
+            // the value itself compiles as the expression it wraps.
+            Value::Spread(inner) => self.compile_value(inner),
             Value::VariadicExpansion(identifier) => {
                 // Variadic expansion - create a reference to the variadic parameter
                 // This will be resolved at runtime when the function is called
@@ -5502,7 +5515,7 @@ impl Compiler {
                     self.collect_free_variables_from_value(expr, free_vars);
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 self.collect_free_variables_from_value(inner, free_vars);
             }
             Value::Match(match_expr) => {
@@ -5706,6 +5719,17 @@ impl Compiler {
     }
 
     /// Compile a type definition as a callable constructor function
+    /// Whether a hotlib function is registered under a type's qualified name,
+    /// under any arity or signature key.
+    fn has_native_constructor(qualified_name: &str) -> bool {
+        let natives = crate::lang::hot::get_hotlib_map();
+        natives.contains_key(qualified_name)
+            || natives.keys().any(|key| {
+                key.strip_prefix(qualified_name)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+    }
+
     fn compile_type_constructor(
         &mut self,
         type_name: &str,
@@ -5723,12 +5747,17 @@ impl Compiler {
         // Create a unique function name for the type constructor with namespace
         let base_constructor_name = format!("{}/{}", self.current_namespace, type_name);
 
-        // Check if this is a core type - if so, add suffix to differentiate from hotlib function
-        let constructor_name = if is_core_type {
-            format!("{}__compiled", base_constructor_name)
-        } else {
-            base_constructor_name
-        };
+        // A core type backed by a hotlib function of its own name (`Str`,
+        // `Int`, ...) compiles its constructors under a suffix, so the two
+        // don't collide. A core type declared outside hot-std has no such
+        // function: its constructors keep the type's name, or a call to the
+        // type would reach nothing.
+        let constructor_name =
+            if is_core_type && Self::has_native_constructor(&base_constructor_name) {
+                format!("{}__compiled", base_constructor_name)
+            } else {
+                base_constructor_name
+            };
 
         // All types should be compiled normally - core metadata just means auto-import
         // The function body determines whether it calls call-lib to link to hotlib functions
@@ -7128,7 +7157,10 @@ impl Compiler {
                                 b.as_any().downcast_ref::<crate::lang::ast::AstNode>()
                             {
                                 // Check if the AST node is a VariadicExpansion
-                                let is_spread = matches!(&ast_node.0, Value::VariadicExpansion(_));
+                                let is_spread = matches!(
+                                    &ast_node.0,
+                                    Value::VariadicExpansion(_) | Value::Spread(_)
+                                );
                                 // Compile the AST node
                                 (self.compile_value(&ast_node.0)?, is_spread)
                             } else if let Some(fn_call) =
@@ -8031,7 +8063,7 @@ impl Compiler {
                     self.collect_free_variables(spread_val, free_vars, bound_vars);
                 }
             }
-            Value::Raw(inner) | Value::Do(inner) => {
+            Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
                 self.collect_free_variables(inner, free_vars, bound_vars);
             }
             Value::MatchArm(arm) => {

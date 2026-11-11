@@ -308,6 +308,24 @@ impl AuthContext {
         Some(services)
     }
 
+    /// Whether this principal can execute at least one tool of an MCP
+    /// service. `mcp:{service}/*` grants every tool. A narrower grant such as
+    /// `mcp:{service}/get-forecast` grants only the tools it names, and still
+    /// reaches the service. A bare `mcp:{service}` names no tool, so it
+    /// grants nothing.
+    pub fn has_mcp_service_access(&self, service: &str) -> bool {
+        let Some(perms) = self.get_permissions() else {
+            return false;
+        };
+        if perms.has_permission(&format!("mcp:{service}/*"), "execute") {
+            return true;
+        }
+        let tools = format!("mcp:{service}/");
+        perms.inner().keys().any(|resource| {
+            resource.starts_with(&tools) && perms.has_permission(resource, "execute")
+        })
+    }
+
     /// Get MCP service restrictions.
     /// Returns None if unrestricted, Some(vec) of specific service names if restricted.
     pub fn mcp_service_restrictions(&self) -> Option<Vec<String>> {
@@ -950,6 +968,34 @@ mod scope_tests {
             Some(vec!["weather".to_string()])
         );
         assert_eq!(auth.stream_restrictions(), Some(vec!["one".to_string()]));
+    }
+
+    #[test]
+    fn a_tool_grant_reaches_its_mcp_service_and_no_other() {
+        let issuer = json!({"*:*": ["*"]});
+        let one_tool = session_context(
+            json!({"mcp:weather/get-forecast": ["execute"]}),
+            issuer.clone(),
+        );
+        assert!(one_tool.has_mcp_service_access("weather"));
+        assert!(one_tool.has_permission("mcp:weather/get-forecast", "execute"));
+        assert!(!one_tool.has_permission("mcp:weather/get-alerts", "execute"));
+        assert!(!one_tool.has_mcp_service_access("time"));
+
+        let service = session_context(json!({"mcp:weather/*": ["execute"]}), issuer.clone());
+        assert!(service.has_mcp_service_access("weather"));
+        assert!(!service.has_mcp_service_access("weather-admin"));
+
+        // A bare service name names no tool.
+        let bare = session_context(json!({"mcp:weather": ["execute"]}), issuer.clone());
+        assert!(!bare.has_mcp_service_access("weather"));
+
+        // The issuer's grants still bound the session's.
+        let narrowed = session_context(
+            json!({"mcp:weather/get-forecast": ["execute"]}),
+            json!({"mcp:time/*": ["execute"]}),
+        );
+        assert!(!narrowed.has_mcp_service_access("weather"));
     }
 
     #[test]

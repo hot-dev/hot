@@ -102,7 +102,8 @@ Configure the extension in VS Code settings:
 {
   "hot.lsp.enabled": true,
   "hot.lsp.commandPath": "/usr/local/bin/hot",
-  "hot.lsp.extraArgs": []
+  "hot.lsp.extraArgs": [],
+  "hot.checkForUpdates": true
 }
 ```
 
@@ -111,6 +112,7 @@ Configure the extension in VS Code settings:
 | `hot.lsp.enabled` | `true` | Enable the Language Server (requires Hot CLI) |
 | `hot.lsp.commandPath` | `hot` | Path to Hot CLI executable |
 | `hot.lsp.extraArgs` | `[]` | Additional LSP server arguments |
+| `hot.checkForUpdates` | `true` | Check for Hot CLI updates on startup, at most once every 24 hours |
 
 ## Language Server Protocol
 
@@ -195,13 +197,27 @@ Then configure `lsp-mode`:
 
 The VS Code extension provides these commands:
 
-| Command | Description |
-|---------|-------------|
-| `Hot: Start Analyzer` | Start the LSP server |
-| `Hot: Stop Analyzer` | Stop the LSP server |
-| `Hot: Restart Analyzer` | Restart the LSP server |
-| `Hot: Show Logs` | Open the output channel |
-| `Hot: Create AI Hints` | Generate AI assistant hints |
+| Command | Description | Keybinding |
+|---------|-------------|------------|
+| `Hot: Start Analyzer` | Start the LSP server | |
+| `Hot: Stop Analyzer` | Stop the LSP server | |
+| `Hot: Restart Analyzer` | Restart the LSP server | |
+| `Hot: Open Settings` | Open the extension's settings | |
+| `Hot: Show Logs` | Open the output channel | |
+| `Hot: Create AI Coding Hints` | Run `hot ai add` in the workspace folder (`AGENTS.md` and `.skills/`) | |
+| `Hot: Format Document` | Format the active Hot file | |
+| `Hot: Start REPL` | Open a terminal running `hot repl` | |
+| `Hot: Send Selection to REPL` | Send the selection, or the current line, to the REPL terminal | `Alt+Enter` |
+| `Hot: Send File to REPL` | Send the whole file to the REPL terminal | |
+| `Hot: Evaluate Selection` | Evaluate the selection, or the current line, and show the result inline | `Ctrl+Enter` (`Cmd+Enter` on macOS) |
+| `Hot: Evaluate Top-Level Form` | Evaluate the top-level form at the cursor and show the result inline | `Ctrl+Shift+Enter` (`Cmd+Shift+Enter` on macOS) |
+| `Hot: Evaluate to Output Panel` | Evaluate the selection, or the current line, and show the result in the eval output panel | |
+| `Hot: Clear Eval Results` | Clear the inline results | `Escape` |
+| `Hot: Show Eval Output` | Open the eval output panel | |
+| `Hot: Reset REPL Session` | Reset the session the evaluate commands run in | |
+| `Hot: Update Hot CLI` | Run `hot update` in a terminal | |
+
+The keybindings apply while the cursor is in a Hot file.
 
 ## REPL Integration
 
@@ -212,7 +228,9 @@ hot repl
 ```
 
 Features:
-- Tab completion
-- History (up/down arrows)
-- Multi-line input
-- Pretty-printed output
+- History in the session (up/down arrows)
+- A prompt that shows the current namespace
+- Results printed as Hot values, or as JSON with `--value.format json`
+
+The REPL evaluates one line at a time. It has no tab completion and no
+multi-line input.

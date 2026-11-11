@@ -1196,6 +1196,7 @@ Commands:
     deps         Manage project dependencies
     context      Manage project context variables (encrypted key-value storage)
     key          Manage API keys in the local environment database
+    admin        Create the first administrator or reset a password (self-hosted installs)
     conf         Show or generate configuration
 
   Tooling:
@@ -1289,6 +1290,7 @@ mod help_tests {
         assert!(HELP_TEMPLATE.contains("    task-worker  "));
         assert!(HELP_TEMPLATE.contains("    context      "));
         assert!(HELP_TEMPLATE.contains("    key          "));
+        assert!(HELP_TEMPLATE.contains("    admin        "));
         assert!(!HELP_TEMPLATE.contains("    db           "));
         assert!(!HELP_TEMPLATE.contains("    upload       "));
     }

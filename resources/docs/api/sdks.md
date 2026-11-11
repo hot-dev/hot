@@ -292,7 +292,10 @@ customer, err := hot.NewClient(hot.Config{Token: key["token"].(string)})
 if err != nil {
 	log.Fatal(err)
 }
-if _, err := customer.Events.Publish(ctx, map[string]any{"event_type": "support:opened"}); err != nil {
+if _, err := customer.Events.Publish(ctx, map[string]any{
+	"event_type": "support:opened",
+	"event_data": map[string]any{"ticket": "T-1042"},
+}); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -614,9 +617,11 @@ All five SDKs follow the same conventions:
   `key_scope_mismatch`). They reconnect after transport errors, 408, 429 and
   5xx with jittered exponential backoff that honours `retry_after` and never
   sleeps past the caller's timeout. The attempt limit counts consecutive failed
-  connections only. The API closes every subscription 5 minutes after it opens
-  (with `stream:complete`, not an idle timeout), and those rollovers reconnect
-  at once without counting, so a run of any length can be awaited.
+  connections only. The API closes a stream subscription 5 minutes after it
+  opens (with `stream:complete`, not an idle timeout), and those rollovers
+  reconnect at once without counting, so a run of any length can be awaited.
+  Run and task subscriptions have no such limit and send no `stream:complete`:
+  the API keeps them open until the run or task is terminal.
 - **Streaming reconnection.** `subscribeWithEvent` resubscribes across the
   API's 5-minute SSE timeout, dedupes replayed `run:start` and terminal
   events by `run_id`, and ends after the terminal run correlated to the event

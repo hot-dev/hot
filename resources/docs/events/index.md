@@ -30,6 +30,25 @@ fn (event) {
 
 Event handlers can be grouped under an [agent](/docs/agents) by adding `agent: TypeName` to the metadata. This enables per-agent run tracking, health metrics, and observability in the Hot App.
 
+### One Run per Event (`once`)
+
+Every handler for an event type runs for each event, in every project deployed
+to the environment. A handler in a package that several projects depend on
+therefore runs once for each of those projects. Add `once: true` to run it one
+time instead:
+
+```hot
+record-signup meta {on-event: "user:created", once: true}
+fn (event) {
+  write-audit-entry(event.data.id)
+}
+```
+
+Of all the handlers for an event type that set `once: true`, Hot runs one for
+each event. Handlers without it all run as usual. The built-in `hot:schedule:new`
+and `hot:schedule:cancel` handlers use it, so one event creates or cancels one
+schedule however many projects an environment has.
+
 ## Event Schemas
 
 Hot events appear in two related shapes:
@@ -43,7 +62,9 @@ When publishing from Hot code, the event shape is:
 | `type` | `Str` | Event name (for example `"user:created"`) |
 | `data` | `Any` | Event payload |
 
-`send("user:created", {...})` uses this shape.
+`send("user:created", {...})` uses this shape, and a handler receives it as its
+`event` argument: `event.type` and `event.data`, nothing else. For the stream or
+run a handler is part of, call `info()`.
 
 ### 2) HTTP API shape (`POST /v1/events`)
 
@@ -54,6 +75,7 @@ When publishing through the Hot API, the request body is:
 | `event_type` | `string` | Yes | Event name |
 | `event_data` | `json` | Yes | Event payload |
 | `stream_id` | `uuid` | No | Append to an existing stream instead of creating a new one |
+| `event_id` | `uuid` | No | Your own ID for the event, which makes the publish [safe to send again](/docs/api#sending-a-publish-again). Without one, Hot generates an ID and every publish is a new event |
 
 Response payload fields include:
 

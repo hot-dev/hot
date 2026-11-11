@@ -4159,8 +4159,20 @@ impl Parser {
                 if matches!(token.token_type, TokenType::DotDotDot) {
                     self.next(); // consume "..."
 
-                    let identifier = self.expect_identifier()?;
-                    let expansion_value = Value::VariadicExpansion(identifier);
+                    // `...name` reads a variable. Anything else (`...f(x)`,
+                    // `...m.items`, `...[1, 2]`) is an expression to spread.
+                    let bare_name = matches!(
+                        self.peek().map(|t| &t.token_type),
+                        Some(TokenType::Identifier(_))
+                    ) && matches!(
+                        self.peek_n(1).map(|t| &t.token_type),
+                        Some(TokenType::Comma | TokenType::RightBracket | TokenType::Newline)
+                    );
+                    let expansion_value = if bare_name {
+                        Value::VariadicExpansion(self.expect_identifier()?)
+                    } else {
+                        Value::Spread(Box::new(self.parse_value()?))
+                    };
                     // Box the VariadicExpansion as an AstNode so the compiler's
                     // existing detection (`matches!(&ast_node.0,
                     // Value::VariadicExpansion(_))` in compile_literal_value)
@@ -7792,7 +7804,7 @@ pub(crate) fn contains_placeholder(value: &Value) -> bool {
             contains_placeholder(cond) || flow.expressions.iter().any(contains_placeholder)
         }
         Value::CondDefault(flow) => flow.expressions.iter().any(contains_placeholder),
-        Value::Raw(inner) | Value::Do(inner) => contains_placeholder(inner),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => contains_placeholder(inner),
         Value::TemplateLiteral(tl) => tl.parts.iter().any(|p| match p {
             TemplatePart::Expression(e) => contains_placeholder(e),
             _ => false,
@@ -7843,7 +7855,9 @@ pub(crate) fn count_placeholder_lambdas(value: &Value) -> usize {
                     .sum::<usize>()
         }
         Value::CondDefault(flow) => flow.expressions.iter().map(count_placeholder_lambdas).sum(),
-        Value::Raw(inner) | Value::Do(inner) => count_placeholder_lambdas(inner),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
+            count_placeholder_lambdas(inner)
+        }
         Value::TemplateLiteral(tl) => tl
             .parts
             .iter()
@@ -7978,7 +7992,7 @@ pub(crate) fn max_placeholder_index(value: &Value) -> usize {
             .map(max_placeholder_index)
             .max()
             .unwrap_or(0),
-        Value::Raw(inner) | Value::Do(inner) => max_placeholder_index(inner),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => max_placeholder_index(inner),
         Value::TemplateLiteral(tl) => tl
             .parts
             .iter()
@@ -8144,6 +8158,7 @@ pub(crate) fn replace_placeholders(value: Value) -> Value {
         }
         Value::Raw(inner) => Value::Raw(Box::new(replace_placeholders(*inner))),
         Value::Do(inner) => Value::Do(Box::new(replace_placeholders(*inner))),
+        Value::Spread(inner) => Value::Spread(Box::new(replace_placeholders(*inner))),
         Value::TemplateLiteral(mut tl) => {
             tl.parts = tl
                 .parts

@@ -86,9 +86,11 @@ Dependency analysis follows references between Hot bindings. It cannot infer
 conflicts in external state. Independent branches that write the same database
 row, file, or remote resource may race even when no Hot value connects them.
 
-If one branch fails, the flow fails. Sibling work that already started cannot
-be rolled back automatically, so independently scheduled side effects should
-be idempotent or explicitly coordinated.
+A branch that returns an `Err` value keeps it in its own slot, and its siblings
+still run. Only a halt stops the flow: a `fail()`, or an `Err` that other code
+consumes. Sibling work that already started cannot be rolled back
+automatically, so independently scheduled side effects should be idempotent or
+explicitly coordinated.
 
 ## Conditional Flow
 
@@ -336,12 +338,18 @@ message match result {
 Match any variant of a type:
 
 ```hot
-// Matches any Result variant
-is-result match value {
-  Result => true
+Shape enum { Circle(Dec), Square(Dec) }
+
+// Matches any Shape variant
+is-shape match value {
+  Shape => true
   => false
 }
 ```
+
+A `Result` arm is different. It matches the subject as a Result, so it takes a
+plain value as an `Ok`: `match 7 { Result => true  => false }` is `true`. To
+test whether a value is a `Result`, use `is-result(value)`.
 
 ### Match Functions with Extra Arguments
 
@@ -379,6 +387,8 @@ and `match`, use explicit `All<Vec>` or `All<Map>` to make the collection shape
 clear.
 
 ```hot
+Trait enum { Flying, Swimming }
+
 // match defaults to one winning result
 // match-all defaults to All<Map> (keyed by branch)
 
@@ -432,12 +442,16 @@ result 10
 A bare `%` in a pipe stage with no enclosing argument supplied to a parameter
 whose type contains `Fn` is a compile error:
 
+<!-- hot-check: skip -->
 ```hot
-10 |> mul(%, 2)
-// error: Placeholder `%` has no enclosing parameter slot of type `Fn`
-// to bind to. The pipe already passes 10 as the first argument — write
-// `10 |> mul(2)` instead.
+doubled 10 |> mul(%, 2)
+// error: Placeholder `%` in `doubled` (in `::myapp`) has no enclosing
+// parameter slot of type `Fn` to bind to. Wrap the expression with
+// `%(expr)` to construct an explicit lambda value, or move the `%` inside
+// a higher-order function call.
 ```
+
+The pipe already passes `10` as the first argument, so write `10 |> mul(2)`.
 
 When you need a lambda where Hot wouldn't create one automatically, mark the boundary explicitly with `%(expr)` — see [Explicit Lambda Boundary](/docs/language/functions#explicit-lambda-boundary).
 
@@ -472,7 +486,7 @@ classify fn cond (x: Int): Str {
 }
 
 // Inline flow expression inside a function body
-process fn (data: Map): Result {
+process fn (data: Map?): Result {
   result cond {
     is-null(data) => { err("No data") }
     => { ok(data) }

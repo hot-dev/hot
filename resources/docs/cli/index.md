@@ -46,6 +46,12 @@ hot dev -d                        # Daemon mode (background)
 
 Set `hot.dev.open true` in your `hot.hot` to always open the browser on start.
 
+`hot dev`, `hot api`, `hot app`, `hot worker`, `hot task-worker` and
+`hot scheduler` also take `--queue.type` (`memory`, `sqlite`, `redis`),
+`--redis.uri` and `--serialization.type`. The last sets how queue messages are
+serialized: `json`, or `zstdjson` (compressed, the default when
+`hot.serialization.type` is unset).
+
 ### hot api
 
 Run just the API server:
@@ -101,6 +107,17 @@ scheduler by stopping the old one first. Connect the scheduler to PostgreSQL
 directly or through a session-mode pooler; it refuses to start through a
 transaction- or statement-mode pooler that loses its lock.
 
+Scheduler options, which `hot dev` also takes:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--scheduler.backfill <BOOL>` | On restart, fire the scheduled events missed while the scheduler was down | `false` |
+| `--scheduler.sync-interval-seconds <SECONDS>` | How often to sync schedules from the database | `30` |
+| `--scheduler.retry-interval-seconds <SECONDS>` | How often to poll for due retries | `1` |
+| `--scheduler.at-interval-seconds <SECONDS>` | How often to poll for due one-shot (`@at`) schedules | `1` |
+
+Each sets the `hot.scheduler.*` key of the same name.
+
 ## Running Code
 
 ### hot run
@@ -130,13 +147,25 @@ Output format:
 hot eval '::my-app::get-user(1)' --value.format json
 ```
 
+With no command, `hot` evaluates the Hot code piped to it on stdin, in the
+selected project. On a terminal it prints the help instead.
+
+```bash
+echo 'add(1, 2)' | hot
+```
+
 ### hot repl
 
 Start an interactive REPL session:
 
 ```bash
 hot repl
+hot repl --value.format json   # Print results as JSON
 ```
+
+The REPL evaluates one line at a time. The prompt shows the current
+namespace, which an `ns` declaration changes. Ctrl-C clears the line and
+Ctrl-D exits.
 
 ## Testing & Development
 
@@ -165,6 +194,21 @@ fn () {
 `hot test` warns about a test that makes no assertions. A common cause is a
 call written with a space before `(`, as in `assert (x)`, which binds a
 variable named `assert` instead of calling it.
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `--test.capture <BOOL>` | Capture what tests print (default: `true`). Also `hot.test.capture`, or `hot.project.<name>.test.capture` |
+| `--integration` | Start the services the package's `integration.hot` lists, run the tests against them, then stop them |
+
+`hot test --integration` looks for `integration.hot` beside the project's
+source directory, as in `hot/pkg/<name>/integration.hot` for sources in
+`hot/pkg/<name>/src`. That file is configuration laid over `hot.hot`.
+Its `hot.test.integration.services` names the services to start: `api`,
+`app`, `worker`, `task-worker` and `scheduler`. They run in the test process
+on an in-memory queue. Docker must be running when `task-worker` is listed or
+`hot.box.enabled` is `true`, its default.
 
 #### Fixing the clock
 
@@ -235,6 +279,9 @@ sources, dependencies and resources, with the same
 next to the other diagnostics, with code `secret-shape`.
 `--allow-secret-shape` skips the scan.
 
+`--check.raw` (or `hot.check.raw true`) leaves out the "No issues found" line
+of the pretty and simple formats, so a clean check prints nothing.
+
 Exit codes:
 
 | Code | Meaning |
@@ -268,7 +315,12 @@ flag as `hot check`, including `json` / `json-min` for editor / CI integration:
 ```bash
 hot watch                          # Pretty output, re-run on save
 hot watch --check.format json-min  # Stream JSON diagnostics on every change
+hot watch --watch.debounce 500     # Wait 500 ms after a change before checking
 ```
+
+`--watch.debounce` takes milliseconds. The default is `hot.watch.debounce`,
+200, and the least is 50. `hot watch` also takes `--check.raw`,
+`--check.deny-warnings` and `--allow-secret-shape`.
 
 `hot watch` runs until you stop it. Each run prints its report; a run that
 can't start prints the reason on stderr and watching continues.
@@ -353,6 +405,36 @@ hot deploy --local      # Deploy through the local database (local dev or self-h
 `hot build`, `hot compile` and `hot deploy` stop with an error when `-p` names
 a project `hot.hot` doesn't define.
 
+#### Required context variables
+
+A deploy checks the [required context variables](/docs/language/meta#context-requirements)
+your code can reach against the ones set for the project and its environment.
+An unset one is a warning by default, and the deploy goes ahead. To block the
+deploy instead:
+
+```bash
+hot deploy --local --strict
+```
+
+Or set it in `hot.hot`, so a pipeline doesn't need the flag:
+
+```hot
+hot.deploy.ctx.strict true
+```
+
+`--strict` and `hot.deploy.ctx.strict` apply to `hot deploy --local`. A deploy
+through the API is checked by the API server, which blocks only when
+`HOT_DEPLOY_STRICT_CTX` is set to `true` in its environment.
+
+To see the list before you deploy:
+
+```bash
+hot context required --local
+```
+
+It prints each required key with `SET` or `UNSET`, the namespace that requires
+it, and whether a deploy would succeed, warn or block.
+
 ### hot cache
 
 Manage bytecode and package caches:
@@ -377,18 +459,25 @@ hot init path/to/app  # Create nested path if needed, init there
 The project name is taken from the directory name, made into a Hot
 identifier: lowercase letters, digits and `-`, starting with a letter (`My App`
 becomes `my-app`, `2024-app` becomes `app-2024-app`). Pass `--name` to choose
-it. Creates these alongside your existing files:
+it: `--name` takes lowercase letters, digits and `-`, starting with a letter.
+Creates these alongside your existing files:
 - `hot.hot` — Project configuration (project root)
 - `hot/src/<project>/hi.hot` — Starter file with tutorial
 - `.hot/` — Local data: cache, database, logs
 - `.gitignore` entries for `.hot/`, `hot/ctx.hot`, `hot/dev.key` (the key that
   encrypts local context values) and `.env`
 
-In a project, the first command that needs the local SQLite database (`hot run`, `hot eval`, `hot repl`, `hot compile`, `hot build`, `hot test`, or `hot deploy`) prepares it:
+It also writes `.env.example`, a sample `.env` with an empty `HOT_API_KEY`,
+and an empty `hot/test/<project>/` directory. Where `hot.hot` already exists,
+`hot init` leaves it and the `hot/` directories alone.
+
+In a project, the first command that needs the local SQLite database (`hot run`, `hot eval`, `hot repl`, `hot compile`, `hot build`, `hot key create`, or a `hot deploy` that builds from source) prepares it:
 
 - A missing database is created, as `hot init` would.
 - An outdated database is migrated, with a one-line notice.
 - An empty database gets the local identity: user `local@hot.dev`, organization `local`, and environment `development`.
+
+Plain `hot test` runs without the project database, so it prepares nothing. It prepares the database only when you pass `--db.uri`. `hot test --integration` migrates the database its configuration names.
 
 A profile other than the local identity must already exist in the database. See [Profiles](/docs/configuration#profiles). Hot never migrates a PostgreSQL database implicitly; use `hot db migrate`.
 
@@ -396,20 +485,30 @@ A profile other than the local identity must already exist in the database. See 
 
 Manage projects:
 
+> **Note:** This command connects to Hot Cloud by default. To change a project in your local database, pass `--local`. It writes to the database in `hot.db.uri` directly, so no server needs to be running.
+
 ```bash
-hot project activate my-app
+hot project activate my-app            # Activate a project on Hot Cloud
 hot project deactivate my-app
+hot project activate my-app --local    # Activate it in the local database
 ```
 
 To list projects, use `hot projects`.
 
 ### hot projects
 
-List all projects:
+List the projects in the current environment.
+
+> **Note:** This command connects to Hot Cloud by default. To list projects from your local database, pass `--local`. It reads the database in `hot.db.uri` directly, so no server needs to be running.
 
 ```bash
-hot projects
+hot projects                         # List projects on Hot Cloud
+hot projects --local                 # List projects from the local database
+hot projects --limit 50 --offset 50  # The second page of 50
 ```
+
+`--limit` is the number of projects to show (default: 20) and `--offset` the
+number to skip (default: 0).
 
 ### hot deps
 
@@ -420,6 +519,9 @@ hot deps list           # List all dependencies
 hot deps show           # Show detailed dependency info
 hot deps update         # Resolve dependencies again (fetches branch dependencies)
 ```
+
+`hot deps migrate` is left from the move off the old `pkg.paths` setting.
+Projects use `deps` now, so it changes nothing.
 
 `hot deps add` and `hot deps remove` are not implemented yet; they exit with
 an error. Add or remove dependencies in `hot.hot`:
@@ -440,11 +542,16 @@ Manage encrypted context variables (secrets).
 hot context list --local                            # List all variables
 hot context get OPENAI_API_KEY --local              # Get a variable
 hot context set OPENAI_API_KEY '"sk-xxx"' --local   # Set a variable
+hot context set OPENAI_API_KEY '"sk-xxx"' -d "OpenAI key" --local  # Set it with a description
 hot context delete OPENAI_API_KEY --local           # Delete a variable
+hot context required --local                        # List the variables your code requires
 ```
 
 A value is a Hot expression, so a string needs its own quotes inside the
-shell's: `'"sk-xxx"'`.
+shell's: `'"sk-xxx"'`. `-d, --description` stores a description that
+`hot context list` shows beside the key. `hot ctx` is an alias for
+`hot context`. For `hot context required`, see
+[Required context variables](#required-context-variables).
 
 ### hot conf
 
@@ -535,6 +642,29 @@ development, CI against a local `hot dev`, and self-hosted installations. On
 Hot Cloud, create keys in the app instead. See
 [Authentication](/docs/authentication).
 
+### hot admin
+
+Create the first administrator of a self-hosted installation, or reset a
+password:
+
+```bash
+hot admin bootstrap --email admin@example.com --name "Admin" \
+  --password-file /run/secrets/admin-password
+hot admin reset-password --email user@example.com \
+  --password-file /run/secrets/new-password
+```
+
+| Command | Description |
+|---------|-------------|
+| `hot admin bootstrap` | Let an email address sign in with a password, creating the user if needed. Running it again changes nothing, even with another password. `--name` is the display name of a new user |
+| `hot admin reset-password` | Replace the password of a user who signs in with a password |
+
+Both need `--email` and `--password-file`. The file holds the password, and
+one trailing newline is ignored. Both write directly to the database in
+`hot.db.uri`, so run migrations first. See
+[First administrator](/docs/configuration/accounts#first-administrator) and
+[Reset a password](/docs/configuration/accounts#reset-a-password).
+
 ## Tooling
 
 ### hot lsp
@@ -545,6 +675,9 @@ Start the Language Server Protocol server (used by editors):
 hot lsp
 ```
 
+The server speaks over stdin and stdout. `--lsp.transport` (or
+`hot.lsp.transport`) names the transport, and `stdio` is the only one.
+
 ### hot completions
 
 Generate shell completions:
@@ -553,7 +686,12 @@ Generate shell completions:
 hot completions bash > ~/.bash_completions/hot
 hot completions zsh > ~/.zfunc/_hot
 hot completions fish > ~/.config/fish/completions/hot.fish
+hot completions zsh --out-dir ~/.zfunc   # Write the file into a directory
 ```
+
+The shells are `bash`, `zsh`, `fish`, `powershell` and `elvish`. Without
+`--out-dir`, the script goes to stdout. With it, `hot` writes the file into
+that directory, which must exist, under the name the shell expects.
 
 ### hot ai
 
@@ -696,7 +834,18 @@ These options work with most commands:
 | `--deploy.auto <BOOL>` | Auto-deploy on CLI commands (default: true) |
 | `--emitter.type <TYPE>` | Emitter: none, console, db (default: db in project, none otherwise) |
 | `--with-tests <BOOL>` | Include test files in compile/check/watch (default: true for check, false for watch) |
-| `--show-conf` | Show configuration and exit |
+
+`--show-conf` is an option of each command, not a global one. It prints the
+configuration that command uses, then exits:
+
+```bash
+hot worker --show-conf
+hot watch --show-conf
+```
+
+`hot fmt`, `hot cache`, `hot conf`, `hot completions`, `hot ai`, `hot update`
+and `hot uninstall` don't take it. `hot conf` prints the whole resolved
+configuration.
 
 ## Environment Variables
 

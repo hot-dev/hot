@@ -53,6 +53,8 @@ When creating or editing an API key, you choose between two access levels:
 
 Service keys can carry **customer metadata** — arbitrary JSON that is encrypted at rest and automatically available to your Hot functions at runtime. This lets you identify callers and pass customer context (e.g., account ID, plan tier) without requiring extra parameters in every request.
 
+> **Pro plan required.** Creating a service key needs a Pro or Scale plan. On another plan the API returns `403` with the error code `plan_required`. A self-hosted installation without a plan can create them.
+
 ### Creating Service Keys
 
 From the [Hot App](/docs/app), click **New Service Key**. You'll specify:
@@ -63,7 +65,7 @@ From the [Hot App](/docs/app), click **New Service Key**. You'll specify:
 - **Permissions** — A granular permission map using the [permissions model](#permissions-model) below.
 - **Expiration** — Optional. Leave empty for a key that never expires.
 
-> **Resource type restriction:** Because service keys are customer-facing, they can only carry permissions for the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. Administrative resource types (`project`, `build`, `context`, `key`, `session`, `env`) are rejected when creating a service key.
+> **Resource type restriction:** Because service keys are customer-facing, they can only carry permissions for the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. Administrative resource types (`call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`) and the full-access grant `*:*` are rejected when creating a service key.
 
 The generated token is displayed **only once** at creation time. It has no `hot_` prefix, making it suitable for white-label integrations where your customers shouldn't see Hot branding.
 
@@ -110,6 +112,14 @@ API keys, service keys, and sessions all share the same permissions model. Permi
 A service-specific grant names the service's tools or paths with `/*`, as in
 `mcp:weather/*` or `webhook:internal/*`. A bare service name such as
 `mcp:weather` matches no tool or endpoint, so it grants nothing.
+
+An event grant can name a type prefix for publishing, as in
+`{"event:user:*": ["create"]}`. Reading events needs `event:*`: a narrower
+`read` grant matches no route and grants nothing.
+
+Sessions and service keys can call only the event, stream, task, MCP, and
+webhook routes. Every other route takes API keys only, whatever a session or
+service key is granted.
 
 This allows you to create credentials narrowly scoped to just the capabilities needed—useful for giving an AI agent access to specific MCP tools, or restricting a webhook caller to a single service.
 

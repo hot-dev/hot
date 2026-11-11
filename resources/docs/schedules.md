@@ -55,6 +55,9 @@ Scheduled functions can be grouped under an [agent](/docs/agents) by adding `age
 
 Hot accepts common cron forms (5, 6, or 7 fields) plus nickname forms such as `@daily`.
 
+Cron expressions and English schedules are evaluated in UTC. A schedule has no
+time zone setting, so write local times as UTC: `0 9 * * *` runs at 09:00 UTC.
+
 Common patterns:
 
 | Pattern | Description |
@@ -169,10 +172,16 @@ The `hot:schedule:new` event payload uses:
 
 A schedule is one call: a function, a time and its arguments. Two schedules of
 one function at one time both fire, as long as their `args` differ. Sending the
-same call again doesn't add a schedule: it returns the ID of the one it repeats,
-so a redelivered event or a retried run can't arm it twice. A cancelled schedule
-is armed again this way. A one-time schedule that has already fired isn't, so a
-late repeat can't run it a second time.
+same call again doesn't add a schedule: the handler's run returns the ID of the
+one it repeats, so a redelivered event or a retried run can't arm it twice. A
+cancelled schedule is armed again this way. A one-time schedule that has already
+fired isn't, so a late repeat can't run it a second time.
+
+`send` returns an `EventInfo` for the event it published, not a schedule ID. The
+schedule is created later, by the run that handles the event, and its ID is that
+run's result. Read it from `GET /v1/events/{event_id}/runs` (the run's `result`,
+with `event_id` from the `EventInfo`'s `event.id`) or from the schedule's page
+in the Hot App. If the schedule can't be created, that run fails with the reason.
 
 ### Schedule Formats
 
@@ -191,7 +200,7 @@ The `schedule` field supports multiple formats:
 Cancel pending schedules using the `hot:schedule:cancel` event:
 
 ```hot
-// Cancel by schedule ID (returned from hot:schedule:new)
+// Cancel by schedule ID (the result of the run that handled hot:schedule:new)
 send("hot:schedule:cancel", {
   schedule-id: "01916d8a-9c12-7f00-8000-123456789abc"
 })
@@ -209,7 +218,11 @@ The `hot:schedule:cancel` event payload supports either:
 | `schedule-id` | `Str` (UUID) | Conditionally | Cancel one schedule by ID |
 | `fn` | `Str` or function reference | Conditionally | Cancel active schedules for a function |
 
-At least one of `schedule-id` or `fn` must be provided.
+At least one of `schedule-id` or `fn` must be provided. When both are present,
+`schedule-id` is used. A `schedule-id` names a schedule in the sender's
+environment. `fn` cancels every active schedule of that function on the build
+whose run handles the event, metadata schedules included. The handler's run
+returns `true` if it cancelled a schedule. `send` itself returns an `EventInfo`.
 
 Cancelling schedules is useful for:
 - Removing pending one-time schedules that are no longer needed
@@ -249,31 +262,51 @@ fn (event) {
 
 ### Example: Scheduled Reminders
 
+Code that sends `hot:schedule:new` doesn't get the schedule's ID back, so this
+example keeps its own record of each pending reminder in a
+[store](/pkg/hot.dev/hot-std/hot/store). Cancelling deletes the record. The
+schedule still fires, finds no record, and sends nothing. The same record is
+what a [`hot:deploy:activated`](#dynamic-schedules-and-deploys) handler needs to
+arm the reminders again after a deploy.
+
 ```hot
 ::myapp::reminders ns
 
-// Schedule a reminder for later
+::store ::hot::store
+
+// Pending reminders, keyed by reminder ID
+pending ::store/Map({name: "reminders:pending"})
+
+// Schedule a reminder for later. Returns the reminder's ID.
 schedule-reminder fn (user-id: Str, message: Str, delay: Str): Str {
-  // Create a one-time schedule
-  schedule-id send("hot:schedule:new", {
+  reminder-id Uuid()
+  ::store/put(pending, reminder-id, {user-id: user-id, message: message})
+
+  // Create a one-time schedule. send returns an EventInfo, not a schedule ID.
+  send("hot:schedule:new", {
     fn: "::myapp::reminders/send-reminder",
-    args: [{user-id: user-id, message: message}],
+    args: [reminder-id],
     schedule: delay
   })
 
-  // Return the schedule ID so it can be cancelled if needed
-  schedule-id
+  reminder-id
 }
 
-// Cancel a pending reminder
-cancel-reminder fn (schedule-id: Str): Bool {
-  send("hot:schedule:cancel", {schedule-id: schedule-id})
+// Cancel a pending reminder. Returns true if it was still pending.
+cancel-reminder fn (reminder-id: Str): Bool {
+  ::store/delete(pending, reminder-id)
 }
 
-// The actual reminder function (called by scheduler)
-send-reminder fn (data: Map) {
-  user get-user(data.user-id)
-  send-push-notification(user.device-token, data.message)
+// The actual reminder function (called by the scheduler with the schedule's args)
+send-reminder fn (reminder-id: Str) {
+  reminder ::store/get(pending, reminder-id)
+  if(is-some(reminder), deliver-reminder(reminder-id, reminder))
+}
+
+deliver-reminder fn (reminder-id: Str, reminder: Map) {
+  user get-user(reminder.user-id)
+  send-push-notification(user.device-token, reminder.message)
+  ::store/delete(pending, reminder-id)
 }
 ```
 
@@ -316,9 +349,11 @@ schedule that fired:
 ```hot
 nightly-sync meta {schedule: "0 2 * * *"}
 fn (event) {
-  // event.type         → "hot:schedule"
-  // event.schedule_id  → UUID of the schedule that fired
-  // event.scheduled_at → RFC 3339 timestamp of the trigger
+  // event.type          → "hot:schedule"
+  // event.schedule_id   → UUID of the schedule that fired
+  // event.scheduled_at  → RFC 3339 timestamp of the trigger
+  // event.is_backfill   → true when the run makes up for a missed time
+  // event.backfilled_at → RFC 3339 timestamp of the backfill, or null
   sync-data()
 }
 ```
@@ -326,6 +361,42 @@ fn (event) {
 Declare the parameter even if you don't use it — the scheduler always passes it.
 
 Scheduled runs are tracked and visible in the Hot App alongside event-triggered and API-triggered runs.
+
+## Missed Runs and Backfill
+
+A recurring schedule's times that pass while the scheduler is down are skipped
+by default. With `scheduler.backfill` set to `true` (`--scheduler.backfill true`
+on `hot scheduler` or `hot dev`), the scheduler queues the missed times when it
+syncs again:
+
+- It counts from the later of the schedule's last run and the scheduler's last
+  sync, up to now.
+- It queues at most 100 missed times for each schedule. The rest are dropped.
+- A schedule that has never run isn't backfilled in its first 5 minutes.
+- Each backfilled run of a metadata schedule gets `is_backfill: true`, the
+  missed time as `scheduled_at`, and the time it was queued as `backfilled_at`.
+  A dynamic recurring schedule is called with its `args` as usual.
+
+One-time schedules don't depend on this setting. One that came due while the
+scheduler was down runs when the scheduler is back.
+
+Backfilled runs arrive together, so a handler that must not repeat work should
+check `event.is_backfill` or `event.scheduled_at`.
+
+## Schedule Limits
+
+Three settings limit schedules. A plan can make them stricter for an
+organization.
+
+| Setting | Default | Limits |
+|---------|---------|--------|
+| `schedule.min-interval-seconds` | `1` | Shortest gap between two runs of a recurring schedule |
+| `schedule.min-delay-seconds` | `0` | Shortest delay before a one-time schedule runs |
+| `schedule.max-active-per-org` | `-1` (no limit) | Active schedules in one organization |
+
+A build with a metadata schedule that breaks a limit fails to deploy. A
+`hot:schedule:new` that breaks one creates no schedule, and the run that
+handled it fails with the reason.
 
 ## Testing Schedules
 

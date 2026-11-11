@@ -446,7 +446,7 @@ pub(super) fn collect_callees_from_value(
             }
         }
 
-        Value::Raw(inner) | Value::Do(inner) => {
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
             collect_callees_from_value(inner, current_ns, aliases, callees);
         }
 

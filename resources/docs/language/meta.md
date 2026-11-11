@@ -57,6 +57,7 @@ Documentation is displayed in the Hot App dashboard and used by tooling.
 
 The `core: true` metadata marks functions and types as **globally available** without namespace qualification:
 
+<!-- hot-check: skip -->
 ```hot
 // In ::hot::math namespace
 add

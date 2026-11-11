@@ -90,7 +90,7 @@ fn walk_values<'a>(value: &'a Value, visit: &mut impl FnMut(&'a Value)) {
             }
         }
         Value::MatchArm(arm) => walk_values(&arm.body, visit),
-        Value::Raw(inner) | Value::Do(inner) => walk_values(inner, visit),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => walk_values(inner, visit),
         Value::TypeImplementation(ti) => walk_values(&ti.implementation, visit),
         Value::TemplateLiteral(tmpl) => {
             for part in &tmpl.parts {

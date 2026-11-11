@@ -1406,13 +1406,14 @@ async fn resolve_mcp_context(
             ));
         }
 
-        let mcp_resource = format!("mcp:{}/*", service);
-        if !auth_ctx.has_permission(&mcp_resource, actions::EXECUTE) {
+        // A grant on one tool reaches the service too; `tools/call` then
+        // checks the tool being called.
+        if !auth_ctx.has_mcp_service_access(&service) {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiErrorResponse::new(
                     "forbidden",
-                    "Credentials do not have MCP access. Required permission: mcp:<service>/* execute",
+                    "Credentials do not have MCP access. Required permission: execute on mcp:<service>/* or on one of the service's tools",
                 )),
             ));
         }
@@ -1480,13 +1481,14 @@ async fn resolve_mcp_context_from_domain(
             ));
         }
 
-        let mcp_resource = format!("mcp:{}/*", service);
-        if !auth_ctx.has_permission(&mcp_resource, actions::EXECUTE) {
+        // A grant on one tool reaches the service too; `tools/call` then
+        // checks the tool being called.
+        if !auth_ctx.has_mcp_service_access(&service) {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiErrorResponse::new(
                     "forbidden",
-                    "Credentials do not have MCP access. Required permission: mcp:<service>/* execute",
+                    "Credentials do not have MCP access. Required permission: execute on mcp:<service>/* or on one of the service's tools",
                 )),
             ));
         }

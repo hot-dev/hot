@@ -36,6 +36,11 @@ hot dev --open                  # terminal 1 — both agents
 cp .env.example .env && npm install && npm run dev   # terminal 2 — UI
 ```
 
+The UI needs a Hot API key in `.env` before it can reach the agents. Live LLM
+replies also need `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. Without one, the
+agents still store and recall notes, and LLM-backed commands return an offline
+notice. The [Hot Chat](/docs/demos/hot-chat) page has the full steps.
+
 ## Identity Vocabulary
 
 Both modes work with the same two ideas. Holding them apart makes the

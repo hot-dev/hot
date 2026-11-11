@@ -328,6 +328,8 @@ See [Caller Identity](#caller-identity) for the full `hot.request` structure.
 
 Set `auth: "none"` to make a tool publicly accessible — no credentials required.
 
+This applies to Streamable HTTP. The deprecated HTTP+SSE transport always needs a credential, so a client without one must use Streamable HTTP to call a public tool.
+
 ```hot
 hash-text
 meta {mcp: {service: "utils", auth: "none"}}
@@ -403,7 +405,7 @@ codec.
 |--------------|-------------|-------|
 | Stateless Streamable HTTP (2026-07-28) | `POST /mcp/{org}/{env}/{service}` | Begins with `server/discover`; every request carries version, client metadata, capabilities, and routing headers. No MCP session is created. |
 | Legacy Streamable HTTP (2025-03-26 through 2025-11-25) | `POST /mcp/{org}/{env}/{service}` | Uses `initialize` and `notifications/initialized`. Existing clients continue to work on the same URL. |
-| HTTP+SSE (2024-11-05, deprecated) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. |
+| HTTP+SSE (2024-11-05, deprecated) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. Both requests need a credential, even for `auth: "none"` tools, and return `401` without one. |
 
 Supported methods:
 
@@ -440,6 +442,14 @@ hot.mcp.allowed-origins [
 
 - `mcp.timeout` controls Streamable HTTP `tools/call` execution timeout (default: `60` seconds).
 - `mcp.http-sse.session-timeout` controls HTTP+SSE transport session lifetime for `GET /mcp/{org}/{env}/{service}` (default: `300` seconds).
+
+### Limits
+
+- A request body can be at most 10 MB. A larger one returns `413`.
+- An organization can have 50 `tools/call` requests and webhook requests in flight at once on each API server. One more returns `429` with the error code `rate_limit_exceeded` and `Retry-After: 1`. An organization with an unlimited rate limit has no such cap.
+- If MCP is turned off on an installation (`mcp.enabled` set to `false`), Streamable HTTP requests get a JSON-RPC error and the HTTP+SSE `GET` returns `503` with the error code `mcp_disabled`.
+
+See [Request and Connection Limits](/docs/api#request-and-connection-limits).
 
 ### Example: Modern Discovery with curl
 
@@ -569,7 +579,7 @@ Most MCP-compatible AI clients can connect directly to your Hot MCP endpoint. Co
 
 - **URL**: `https://api.hot.dev/mcp/{org}/{env}/{service}` (or `https://your-domain.com/mcp/{service}` with a [custom domain](#custom-domain-urls))
 - **Transport**: Streamable HTTP (preferred) or HTTP+SSE (deprecated compatibility)
-- **Authentication**: Bearer token (API key, service key, or session). Not required for tools with `auth: "none"`.
+- **Authentication**: Bearer token (API key, service key, or session). Over Streamable HTTP it is not required for tools with `auth: "none"`. The deprecated HTTP+SSE transport needs one on every request, whatever the tool's `auth` setting.
 
 ## Caller Identity (`hot.request`) {#caller-identity}
 
@@ -664,19 +674,22 @@ fn (city: Str): Map {
 }
 ```
 
-For `auth: "none"` tools, headers are the mechanism for pass-through auth:
+For `auth: "none"` tools, headers are the mechanism for pass-through auth. Carry the downstream credential in a header of your own, not in `Authorization`. Hot reads an `Authorization: Bearer` token on every MCP request as a Hot credential, and answers `401` when it is not one, before your function runs.
 
 ```hot
 proxy-api
-meta {mcp: {service: "proxy", auth: "none"}}
+meta {
+  mcp: {service: "proxy", auth: "none"},
+  secret-headers: ["x-upstream-token"]
+}
 fn (endpoint: Str): Map {
   req ::hot::ctx/get("hot.request")
-  token get(req.headers, "authorization")
-  if(is-null(token), fail("Authorization header required"))
+  token get(req.headers, "x-upstream-token")
+  if(is-null(token), fail("x-upstream-token header required"))
   ::http/request(::http/HttpRequest({
     method: "GET",
     url: endpoint,
-    headers: {Authorization: token},
+    headers: {Authorization: `Bearer ${token}`},
   })).body
 }
 ```
@@ -723,6 +736,8 @@ API keys can be restricted to only allow MCP access, and further restricted to s
 | MCP (one tool) | `{"mcp:weather/get-forecast": ["execute"]}` | One tool only |
 
 For example, an API key with permission `{"mcp:weather/*": ["execute"]}` can only invoke tools in the `weather` service. It cannot access other services or any non-MCP API endpoints. Name the service's tools with `/*`: a bare `{"mcp:weather": ["execute"]}` matches no tool and grants nothing.
+
+A one-tool grant names the tool as MCP clients see it: the `name` in its `mcp` meta, or the generated name when you set none (`myapp_weather_get_forecast` for `get-forecast` in `::myapp::weather`). A key with a one-tool grant can connect to the service and list its tools. Calling any other tool that requires auth fails.
 
 MCP needs an environment credential. An [org API key](/docs/api/management) gets `403` with the error code `key_scope_mismatch`.
 

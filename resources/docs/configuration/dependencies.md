@@ -143,10 +143,21 @@ When using a specification object, these fields are available:
 | Field | Type | Description |
 |-------|------|-------------|
 | `local` | String | Local filesystem path (relative or absolute) |
+| `pkg` | String | Registry coordinate with its version, `<org>/<package>/<version>`, such as `"hot.dev/anthropic/1.0.0"` |
 | `git` | String | Git repository URL (HTTPS or SSH) |
 | `branch` | String | Git branch name, on any branch of the repository (mutually exclusive with `tag`) |
 | `tag` | String | Git tag or commit SHA, of at least seven characters (mutually exclusive with `branch`) |
 | `path` | String | Path within the Git repository (for monorepos) |
+
+A version string is shorthand for `pkg`: `"hot.dev/anthropic": "1.0.0"` is the
+same as `"hot.dev/anthropic": { "pkg": "hot.dev/anthropic/1.0.0" }`. A `pkg`
+dependency comes from the registry only. It is tried after an existing `local`
+path and before `git`, and a failed download is an error, not a fall back to
+`git`.
+
+A `version` field in a specification object is not supported. A spec such as
+`{ "version": "1.0.0" }` stops with `Registry dependencies not yet supported`.
+Use the version string or `pkg`.
 
 ## Examples
 

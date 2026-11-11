@@ -80,8 +80,8 @@ kb ::store/Map({name: "support:kb", embedding: EmbeddingOptions.Default})
 
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {
-  // Per-stream memory (needs event.stream-id, so created inside the handler)
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
+  // Per-stream memory (needs the run's stream ID, so created inside the handler)
+  memory ::store/Map({name: `support:${info().stream.id}`, embedding: EmbeddingOptions.Default})
   context ::store/search(kb, event.data.message, {limit: 5})
   history ::store/search(memory, event.data.message, {limit: 10})
   response generate-reply(support-agent, context, history, event.data.message)
@@ -91,7 +91,7 @@ fn (event) {
 
 on-feedback meta {agent: SupportAgent, on-event: "support:feedback"}
 fn (event) {
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
+  memory ::store/Map({name: `support:${info().stream.id}`, embedding: EmbeddingOptions.Default})
   ::store/put(memory, Uuid(), {type: "feedback", rating: event.data.rating})
 }
 
@@ -347,6 +347,40 @@ hot.project.support.deps {
 }
 ```
 
+## Agent Harness Package
+
+`hot.dev/hot-ai` provides the low-level building blocks under `::ai::*`:
+sessions, memory, RAG, chat loops, tools, and skills.
+[`hot.dev/hot-ai-agent`](/pkg/hot.dev/hot-ai-agent) adds `::ai::agent::*`, the
+harness code that many agents otherwise write again. It needs Hot 3.0.2 or
+later. Add both to your project's deps, at the versions on their package pages:
+
+```hot
+hot.project.support.deps {
+  "hot.dev/hot-ai": "1.9.2",
+  "hot.dev/hot-ai-agent": "1.5.3",
+}
+```
+
+| Namespace | Provides |
+|-----------|----------|
+| `::ai::agent::chat-turn` | The standard memory-grounded, streaming chat turn (`run-chat-turn`) |
+| `::ai::agent::transport` | Normalized inbound and outbound message shapes, transport tags, and capabilities |
+| `::ai::agent::command` | Slash-style command parsing and command declarations |
+| `::ai::agent::runtime` | Per-agent runtime stores, a session registry, counters, and error logging |
+| `::ai::agent::request` | Request-scoped session, sender, and trusted context for registered tools |
+| `::ai::agent::stream`, `::ai::agent::render` | Agent-level stream event labels, emit helpers, and neutral reply records |
+| `::ai::agent::auth` | Platform, shared-secret, and HMAC request verification |
+| `::ai::agent::attachments`, `::ai::agent::blob` | Bounded attachment handling and durable content-addressed artifacts |
+| `::ai::agent::callbacks` | Validated and optionally signed completion callbacks |
+| `::ai::agent::lifecycle`, `::ai::agent::synthesis` | Session jobs and one-shot synthesis helpers |
+| `::ai::agent::memory`, `::ai::agent::notify` | Common memory commands and durable notification records |
+| `::ai::agent::mcp` | Helpers for agent-scoped MCP tools |
+
+The package has no dependency on a transport vendor such as Slack or Telegram.
+Adapters live in your application and call into these types. The
+[hot-chat demo](/docs/demos/hot-chat) is built on it.
+
 ## Agent Memory
 
 Agents use [`::hot::store`](/pkg/hot.dev/hot-std/hot/store) for persistent memory. Store maps support optional embedding-based semantic search, which is useful for knowledge bases and conversation history.
@@ -358,14 +392,14 @@ mode like `::hot::file` direct access.
 
 ### Per-Stream Memory
 
-Each stream can have its own memory, isolated by stream ID. Since the map name depends on the stream ID, create it inside the handler where `event` is available:
+Each stream can have its own memory, isolated by stream ID. A handler's `event` holds only `type` and `data`, so read the stream ID from `info()`, which describes the current run. Since the map name depends on the stream ID, create the map inside the handler:
 
 ```hot
 EmbeddingOptions ::hot::store/EmbeddingOptions
 
 on-ticket meta {agent: SupportAgent, on-event: "support:ticket"}
 fn (event) {
-  memory ::store/Map({name: `support:${event.stream-id}`, embedding: EmbeddingOptions.Default})
+  memory ::store/Map({name: `support:${info().stream.id}`, embedding: EmbeddingOptions.Default})
 
   history ::store/search(memory, event.data.message, {limit: 10})
   ::store/put(memory, Uuid(), {role: "user", content: event.data.message})
@@ -374,6 +408,10 @@ fn (event) {
   ::store/put(memory, Uuid(), {role: "assistant", content: response})
 }
 ```
+
+`info().stream.id` is the same in every run of one stream. An event that a
+handler sends stays in its stream. An event published through the API starts a
+new stream unless the request passes an existing `stream_id`.
 
 ### Shared Knowledge Base
 

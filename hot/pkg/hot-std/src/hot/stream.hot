@@ -13,7 +13,8 @@ meta {
     doc: """
     Emit typed data to the current run's stream.
 
-    Data is immediately published for real-time delivery and persisted for replay.
+    Data is published at once for real-time delivery. It is not kept for
+    replay: a subscriber receives what is emitted after it connects.
 
     **Arguments**
     - `data-type` - A string identifying the type of data (e.g., `"progress"`, `"update"`)

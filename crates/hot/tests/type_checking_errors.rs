@@ -2016,6 +2016,39 @@ mod integration_tests {
         errors.iter().any(|e| constraint_code(e) == Some(code))
     }
 
+    #[test]
+    fn test_top_level_lambda_bound_to_a_core_function_name_warns() {
+        let warnings = compile_and_get_warnings(
+            r#"
+            ::shadow ns
+
+            ready true
+            if (ready) { println("yes") }
+        "#,
+        );
+        assert!(
+            has_constraint_code(&warnings, "binding-shadows-function"),
+            "`if (ready) {{ … }}` at namespace level binds `if`. Got: {:?}",
+            warnings
+        );
+
+        // A definition, and a lambda under a name of its own, are fine.
+        let warnings = compile_and_get_warnings(
+            r#"
+            ::shadow ns
+
+            double fn (x: Int): Int { mul(x, 2) }
+            triple (x) { mul(x, 3) }
+            total add(double(1), triple(1))
+        "#,
+        );
+        assert!(
+            !has_constraint_code(&warnings, "binding-shadows-function"),
+            "Got: {:?}",
+            warnings
+        );
+    }
+
     /// Every `where` form compiles cleanly when its predicates are pure,
     /// return a Bool, and no literal fails them.
     #[test]

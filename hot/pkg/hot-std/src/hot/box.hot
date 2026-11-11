@@ -85,6 +85,8 @@ meta {
       the image and preparing the container count against it (they are
       never billed).
     - `network` — `"internet"` (default) or `"none"`
+    - `entrypoint` — Replaces the image's entrypoint (optional)
+    - `writable` — `false` makes the root filesystem read-only (default: `true`)
     - `tmp-size` — `/tmp` tmpfs size in MB (overrides size default)
     - `disk-size` — `/data` writable disk in MB (overrides size default)
     - `memory` — Container memory in MB (overrides size default)
@@ -138,7 +140,9 @@ type {
     disk-size: Int?,
     memory: Int?,
     mounts: Vec<BoxMount> | Map<Str, Any>?,
-    registry-auth: BoxRegistryAuth?
+    registry-auth: BoxRegistryAuth?,
+    entrypoint: Vec<Str>?,
+    writable: Bool?
 }
 
 BoxMount
@@ -198,7 +202,7 @@ meta {
     ::hot::ctx/set-secret("ghcr-pull", {
         registry: "ghcr.io",
         username: "my-bot",
-        token: ::hot::env/get("GHCR_TOKEN"),
+        token: ::hot::env/get("GHCR_TOKEN", ""),
     })
 
     // In your code: name the secret, never the token.
@@ -386,8 +390,8 @@ meta {
     ```hot
     policy ::hot::box/image-policy()
     policy.policy     // "open"
-    policy.denied     // ["docker", "docker:dind", ...]
-    policy.denied-prefixes // ["docker:", "rancher/", ...]
+    policy.denied     // ["docker:dind", "docker:latest"]
+    policy.denied-prefixes // ["docker:"]
     ```
     """
 }

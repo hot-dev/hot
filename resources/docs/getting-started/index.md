@@ -123,21 +123,23 @@ hot init my-app
 cd my-app
 ```
 
-The project name comes from the directory name. `hot init` adds three things to the directory:
+The project name comes from the directory name. `hot init` adds four things to the directory:
 
 | What | Where | Purpose |
 |------|-------|---------|
 | `hot.hot` | Project root | Configuration file |
-| `hot/` | `hot/src/`, `hot/test/`, `hot/pkg/` | Your Hot code |
+| `.env.example` | Project root | A sample `.env`, with an empty `HOT_API_KEY` |
+| `hot/` | `hot/src/`, `hot/test/` | Your Hot code |
 | `.hot/` | `.hot/` (gitignored) | Local data — cache, database, logs |
 
-That's it. Your existing files are untouched:
+That's it. It also adds `.hot/`, `hot/ctx.hot`, `hot/dev.key` and `.env` to `.gitignore`. Your other files are untouched:
 
 ```
 my-app/
 ├── src/                 # Your existing code
 ├── package.json         # Your existing config
 ├── hot.hot              # Hot config (project root)
+├── .env.example         # Sample environment file
 ├── hot/                 # Hot code goes here
 │   ├── src/
 │   │   └── my-app/
@@ -201,8 +203,8 @@ When you're ready to go live, deploy to Hot Cloud with a single command.
 
 ### Get a Hot API Key
 
-1. Go to [hot.dev](https://hot.dev) and sign in (or create an account)
-2. Navigate to **Settings → API Keys**
+1. Go to [app.hot.dev](https://app.hot.dev) and sign in (or create an account)
+2. Open **API Keys** in the sidebar ([app.hot.dev/keys](https://app.hot.dev/keys))
 3. Click **Create API Key** and copy the key
 4. Set your API key in your environment:
 

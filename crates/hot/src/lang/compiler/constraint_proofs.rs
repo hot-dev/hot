@@ -218,7 +218,9 @@ fn collect_bound_names(value: &Value, names: &mut AHashSet<String>) {
             }
             collect_bound_names(&arm.body, names);
         }
-        Value::Raw(inner) | Value::Do(inner) => collect_bound_names(inner, names),
+        Value::Raw(inner) | Value::Do(inner) | Value::Spread(inner) => {
+            collect_bound_names(inner, names)
+        }
         Value::TemplateLiteral(template) => {
             for part in &template.parts {
                 if let crate::lang::ast::TemplatePart::Expression(expr) = part {

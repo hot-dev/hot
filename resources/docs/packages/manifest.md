@@ -39,6 +39,19 @@ hot.pkg.<package-name> {
 | `deps` | Map | Package dependencies |
 | `src-paths` | Vec | Directories containing source files, relative to the package folder and inside it |
 
+Write all five in a package you share. Hot itself does not refuse a `pkg.hot`
+that leaves one out:
+
+- Without `src-paths`, the sources are read from `src/`.
+- Without `deps`, the package has no dependencies.
+- `name`, `version` and `description` are not checked when the package is
+  loaded as a dependency. A missing `name` shows as the package's folder in
+  messages.
+
+Publishing to the hot.dev registry reads `version`, in the form `X.Y.Z`, and
+skips a package whose `pkg.hot` has none. Package docs and the package
+directory take `name`, `version`, `description` and `tags` from `pkg.hot`.
+
 ### Optional Fields
 
 | Field | Type | Description |
@@ -50,6 +63,7 @@ hot.pkg.<package-name> {
 | `org` | String | Organization identifier |
 | `tags` | Vec | Broad browse categories for package discovery |
 | `test-paths` | Vec | Directories containing test files |
+| `resource-paths` | Vec | Directories of resource files, relative to the package folder and inside it. A build that depends on the package bundles them. Without it, the package ships no resources |
 | `hot-min-version` | String | Minimum Hot version required (e.g., "1.0.0") |
 
 ## Examples
