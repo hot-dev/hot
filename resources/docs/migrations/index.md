@@ -36,6 +36,25 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.7 to 3.0.8 {#upgrading-from-3-0-7-to-3-0-8}
+
+**Migrations 036 to 039.** Run `hot db migrate` with the 3.0.8 CLI. They add indexes on `event(env_id, event_time)` and `event(stream_id, event_time)` and a partial index on `email_queue` for emails being sent, then drop `idx_event_stream_id`, which the new stream index covers. On Postgres each runs outside a transaction with `CONCURRENTLY`, so event writes don't wait. On a large `event` table the first two can take a while. If one is interrupted, Postgres leaves an invalid index behind: drop it and run `hot db migrate` again.
+
+**What to check in your code:** run `hot check` before you deploy. These now fail to compile or return an Err:
+
+- number literals followed by letters, such as `1e10`, `0xFF` and `1_000`;
+- `!value`, which ran as `value`;
+- a type with `where` declared inside a function;
+- a local's `meta` on the line after its value;
+- a non-finite Dec result, such as `pow(0, -1)` or `Dec("NaN")`;
+- a failed `-> Str` conversion inside a template, which now halts.
+
+`hot check` now also reports type errors in calls inside map and vec literals and in calls into a namespace checked later. Those programs compiled before and failed when run.
+
+**What to check in your deployment:** each `hot` process holds about 40 MB more memory on mimalloc, now the default allocator. If a service no longer fits its limit, set `HOT_ALLOCATOR=system` in its environment. A dead worker's tasks are reaped after 60 to 90 seconds instead of 30. Workers still on 3.0.7 during a rolling upgrade fall back to the usual orphan reclaim.
+
+**What to check in your email:** the first recovery sweep after the upgrade fails pending emails older than 6 hours.
+
 ## Upgrading from Hot 3.0.6 to 3.0.7 {#upgrading-from-3-0-6-to-3-0-7}
 
 **Migration 035.** Run `hot db migrate` with the 3.0.7 CLI. It adds a nullable `revoked_at` column to `api_key`, a check that a revoked key is inactive, and a trigger that refuses any write undoing a revocation. Existing rows keep NULL.

@@ -3394,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "hot"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "aes-gcm",
  "ahash",
@@ -3495,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "hot_api"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "async-stream",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "hot_app"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "askama",
@@ -3566,7 +3566,7 @@ dependencies = [
 
 [[package]]
 name = "hot_cli"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "base64 0.23.1",
@@ -3606,7 +3606,7 @@ dependencies = [
 
 [[package]]
 name = "hot_docs"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "axum",
  "hot",
@@ -3622,7 +3622,7 @@ dependencies = [
 
 [[package]]
 name = "hot_lsp"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "hot_scheduler"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "hot_task_worker"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "hot_worker"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "chrono",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "hotbox"
-version = "3.0.7"
+version = "3.0.8"
 dependencies = [
  "clap",
  "libc",
