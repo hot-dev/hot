@@ -3812,13 +3812,20 @@ impl TypeChecker {
                 self.check_arm_variants(match_expr.arms.iter());
                 // Walk each arm once; a nested match walked again per
                 // level would cost exponential time in the nesting depth.
-                let mut arm_types: Vec<TypeExpr> = match_expr
-                    .arms
+                let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
+                let held = self.arm_subject_types(
+                    subject_name.as_deref(),
+                    &arm_refs,
+                    !match_expr.match_all,
+                );
+                let mut arm_types: Vec<TypeExpr> = arm_refs
                     .iter()
-                    .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
+                    .zip(held)
+                    .map(|(arm, held)| {
+                        self.infer_match_arm_body(arm, subject_name.as_deref(), held)
+                    })
                     .collect();
                 if !match_expr.match_all {
-                    let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
                     let location = match_expr
                         .src
                         .as_ref()
@@ -4273,7 +4280,15 @@ impl TypeChecker {
     /// that using it as the payload is reported (`variant-as-payload`). A
     /// binding whose type the pattern doesn't tell is bound as `Any`, so it
     /// still shadows an outer name or a function of the same name.
-    fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
+    ///
+    /// `held` is what a union-typed subject holds inside this arm, as
+    /// [`Self::arm_subject_types`] works it out.
+    fn infer_match_arm_body(
+        &mut self,
+        arm: &MatchArm,
+        subject: Option<&str>,
+        held: Option<TypeExpr>,
+    ) -> TypeExpr {
         let (payload, matched) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
                 let payload = self.variant_payload_type(type_name, variant);
@@ -4284,11 +4299,9 @@ impl TypeChecker {
                 };
                 (payload, matched)
             }
-            (Some(type_name), None) if arm.alternatives.is_empty() => {
-                let member = self.union_member_named(subject, type_name);
-                (member.clone(), member)
-            }
-            _ => (None, None),
+            // A type arm, or the default arm: the binding of a type arm
+            // holds the same value the matched name does.
+            _ => (held.clone().filter(|_| arm.type_name.is_some()), held),
         };
         let mut bindings: Vec<(&str, TypeExpr)> = Vec::new();
         if let (Some(name), Some(matched)) = (subject, matched) {
@@ -4629,28 +4642,175 @@ impl TypeChecker {
         }
     }
 
-    /// The member of a union-typed `match` subject that a type arm names
-    /// (`HttpError =>` on `Response | HttpError`), which the subject holds
-    /// inside that arm. Members are matched by short name, as exhaustiveness
-    /// matches them, so an imported or qualified arm name finds its type.
-    /// `None` when the subject is not a variable typed as a union, or not
-    /// exactly one member has that name.
-    fn union_member_named(&self, subject: Option<&str>, type_name: &str) -> Option<TypeExpr> {
-        let TypeExpr::Union(members) = self.context.get_variable_type(subject?)? else {
-            return None;
+    /// What a `match` subject typed as a union holds inside each of `arms`.
+    ///
+    /// A type arm holds the members it names: `HttpError =>` on
+    /// `Response | HttpError` the one, `Int | Dec =>` on `Int | Dec | Str`
+    /// the two. In a first-match `match` the default arm holds the members
+    /// no earlier arm takes whole, as a value of any other member never
+    /// reaches it. `None` for an arm that tells no more than the declared
+    /// type does: a variant or value arm, an arm naming no member, and
+    /// every arm when the subject is not a variable typed as a union.
+    fn arm_subject_types(
+        &self,
+        subject: Option<&str>,
+        arms: &[&MatchArm],
+        first_match: bool,
+    ) -> Vec<Option<TypeExpr>> {
+        let Some(members) = self.subject_union_members(subject) else {
+            return vec![None; arms.len()];
         };
+        let select = |chosen: &[bool]| -> Vec<TypeExpr> {
+            members
+                .iter()
+                .zip(chosen)
+                .filter(|(_, chosen)| **chosen)
+                .map(|(member, _)| member.clone())
+                .collect()
+        };
+        // Members no earlier arm has taken whole.
+        let mut left = vec![true; members.len()];
+        let mut held = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let is_default = arm.type_name.is_none()
+                && arm.variant.is_none()
+                && arm.value_literal.is_none()
+                && arm.alternatives.is_empty();
+            if is_default {
+                let rest = select(&left);
+                let tells = first_match && !rest.is_empty() && rest.len() < members.len();
+                held.push(tells.then(|| Self::union_with_null(rest)));
+                continue;
+            }
+            let mut taken = vec![false; members.len()];
+            let mut only_types = true;
+            for (type_name, variant, value_literal) in Self::arm_atoms(arm) {
+                match (type_name, variant, value_literal) {
+                    // A value arm takes the literal member it equals whole.
+                    (_, _, Some(literal)) => {
+                        only_types = false;
+                        let Value::Val(val, _) = literal.as_ref() else {
+                            continue;
+                        };
+                        for (member, taken) in members.iter().zip(&mut taken) {
+                            *taken |= match member {
+                                TypeExpr::Literal(lit) => Self::literal_equals_val(lit, val),
+                                TypeExpr::Null => matches!(val, Val::Null),
+                                _ => false,
+                            };
+                        }
+                    }
+                    (Some(type_name), None, None) => {
+                        if Self::short_type_name(type_name) == "Any" {
+                            only_types = false;
+                            taken.fill(true);
+                            continue;
+                        }
+                        for (member, taken) in members.iter().zip(&mut taken) {
+                            *taken |= Self::type_arm_takes(type_name, member, &members);
+                        }
+                    }
+                    // A variant arm takes part of its enum.
+                    _ => only_types = false,
+                }
+            }
+            let named = select(&taken);
+            held.push((only_types && !named.is_empty()).then(|| Self::union_with_null(named)));
+            for (left, taken) in left.iter_mut().zip(&taken) {
+                *left &= !taken;
+            }
+        }
+        held
+    }
+
+    /// The members of the type a `match` subject is declared or inferred
+    /// as: those of a union, `T?` standing for `T | Null`. `None` when the
+    /// subject is not a variable typed as a union, or a member may be any
+    /// value.
+    fn subject_union_members(&self, subject: Option<&str>) -> Option<Vec<TypeExpr>> {
+        fn collect(ty: &TypeExpr, members: &mut Vec<TypeExpr>) {
+            match ty {
+                TypeExpr::Union(parts) => parts.iter().for_each(|part| collect(part, members)),
+                TypeExpr::Optional(inner) => {
+                    collect(inner, members);
+                    collect(&TypeExpr::Null, members);
+                }
+                other => {
+                    if !members.contains(other) {
+                        members.push(other.clone());
+                    }
+                }
+            }
+        }
+        let declared = self.context.get_variable_type(subject?)?;
+        if !matches!(declared, TypeExpr::Union(_) | TypeExpr::Optional(_)) {
+            return None;
+        }
+        let mut members = Vec::new();
+        collect(declared, &mut members);
+        (members.len() > 1 && !members.contains(&TypeExpr::Any)).then_some(members)
+    }
+
+    /// Whether a type arm naming `type_name` takes every value of `member`,
+    /// one of the `members` of the subject's union, and no value of another
+    /// member. A built-in name takes the built-in member and its literals:
+    /// the runtime matches a type arm on the value's exact type, so `Int`
+    /// never takes a `Dec`, nor `Map` a typed record. Any other name takes
+    /// the declared type of that short name, as exhaustiveness matches
+    /// them, so an imported or qualified arm name finds its type. It takes
+    /// none when two members share the name.
+    fn type_arm_takes(type_name: &str, member: &TypeExpr, members: &[TypeExpr]) -> bool {
+        fn declared_name(member: &TypeExpr) -> Option<String> {
+            match member {
+                TypeExpr::Named(name)
+                | TypeExpr::Record {
+                    type_name: Some(name),
+                    ..
+                } => Some(TypeChecker::short_type_name(name)),
+                _ => None,
+            }
+        }
         let short = Self::short_type_name(type_name);
-        let mut named = members.iter().filter(|member| match member {
-            TypeExpr::Named(name)
+        let built_in = match member {
+            TypeExpr::Int | TypeExpr::Literal(LiteralType::Int(_)) => "Int",
+            TypeExpr::Dec | TypeExpr::Literal(LiteralType::Dec(_)) => "Dec",
+            TypeExpr::Str | TypeExpr::Literal(LiteralType::Str(_)) => "Str",
+            TypeExpr::Bool | TypeExpr::Literal(LiteralType::Bool(_)) => "Bool",
+            TypeExpr::Null | TypeExpr::Literal(LiteralType::Null) => "Null",
+            TypeExpr::Vec(_) => "Vec",
+            TypeExpr::Map(_, _)
             | TypeExpr::Record {
-                type_name: Some(name),
-                ..
-            } => Self::short_type_name(name) == short,
-            _ => false,
-        });
-        match (named.next(), named.next()) {
-            (Some(member), None) => Some(member.clone()),
-            _ => None,
+                type_name: None, ..
+            } => "Map",
+            TypeExpr::Bytes => "Bytes",
+            _ => {
+                return declared_name(member).is_some_and(|name| {
+                    name == short
+                        && members
+                            .iter()
+                            .filter(|other| declared_name(other).as_ref() == Some(&name))
+                            .count()
+                            == 1
+                });
+            }
+        };
+        short == built_in
+    }
+
+    /// One type for a value that may have any of `types`, with a `Null`
+    /// among other members read back as `T?`.
+    fn union_with_null(mut types: Vec<TypeExpr>) -> TypeExpr {
+        let before = types.len();
+        types.retain(|t| *t != TypeExpr::Null);
+        if types.is_empty() {
+            return TypeExpr::Null;
+        }
+        let had_null = types.len() < before;
+        let union = Self::union_of(types);
+        if had_null {
+            TypeExpr::Optional(Box::new(union))
+        } else {
+            union
         }
     }
 
@@ -7043,8 +7203,12 @@ impl TypeChecker {
     /// parameter (the top of `match_subject_stack`) as the matched name.
     fn infer_flow_arm_bodies(&mut self, flow: &Flow) -> Vec<TypeExpr> {
         let subject = self.match_subject_stack.last().and_then(|s| s.name.clone());
-        Self::flow_arms(flow)
-            .map(|arm| self.infer_match_arm_body(arm, subject.as_deref()))
+        let arms: Vec<&MatchArm> = Self::flow_arms(flow).collect();
+        let first_match = matches!(flow.flow_type, FlowType::Match | FlowType::MatchShort);
+        let held = self.arm_subject_types(subject.as_deref(), &arms, first_match);
+        arms.into_iter()
+            .zip(held)
+            .map(|(arm, held)| self.infer_match_arm_body(arm, subject.as_deref(), held))
             .collect()
     }
 }

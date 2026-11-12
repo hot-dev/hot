@@ -948,6 +948,282 @@ mod type_checking_tests {
         );
     }
 
+    // A type arm narrows a built-in member of a union as it does a declared
+    // one. Top-level code reports every mismatch, so each use below was a
+    // false error while the name kept its whole union inside the arm.
+    #[test]
+    fn test_type_arm_narrows_built_in_union_members() {
+        let source = r#"
+            ::test ns
+
+            i: Int | Str 5
+            from-int match i {
+                Int => { add(i, 1) }
+                Str => { uppercase(i) }
+            }
+
+            d: Dec | Str 2.5
+            from-dec match d {
+                Dec => { round(d) }
+                Str => { uppercase(d) }
+            }
+
+            b: Bool | Str true
+            from-bool match b {
+                Bool => { needs-bool(b) }
+                Str => { uppercase(b) }
+            }
+
+            v: Vec<Int> | Str [1, 2]
+            from-vec match v {
+                Vec => { needs-vec(v) }
+                Str => { uppercase(v) }
+            }
+
+            // A Map literal is known as its record, so take a call's Map.
+            m: Map<Str, Int> | Str make-map()
+            from-map match m {
+                Map => { needs-map(m) }
+                Str => { uppercase(m) }
+            }
+
+            y: Bytes | Str "raw"
+            from-bytes match y {
+                Bytes => { needs-bytes(y) }
+                Str => { uppercase(y) }
+            }
+
+            n: Int | Null 4
+            from-null match n {
+                Null => { 0 }
+                Int => { needs-int(n) }
+            }
+
+            o: Int? 4
+            from-optional match o {
+                Int => { needs-int(o) }
+                Null => { 0 }
+            }
+
+            make-map fn (): Map<Str, Int> { {a: 1} }
+            needs-int fn (x: Int): Int { x }
+            needs-bool fn (x: Bool): Bool { x }
+            needs-vec fn (x: Vec<Int>): Vec<Int> { x }
+            needs-map fn (x: Map<Str, Int>): Map<Str, Int> { x }
+            needs-bytes fn (x: Bytes): Bytes { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+    }
+
+    // Each arm holds its own member, and nothing wider or narrower: a use
+    // that only another member allows is still an error.
+    #[test]
+    fn test_type_arm_reports_a_use_its_member_does_not_allow() {
+        let source = r#"
+            ::test ns
+
+            i: Int | Str 5
+            swapped match i {
+                Int => { uppercase(i) }
+                Str => { add(i, 1) }
+            }
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].contains("'uppercase'") && errors[0].contains("got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].contains("'add'") && errors[1].contains("got Str"),
+            "{errors:?}"
+        );
+
+        // An arm naming no member of the union tells nothing, so the name
+        // keeps its declared type there.
+        let unrelated = r#"
+            ::test ns
+
+            i: Int | Str 5
+            never match i {
+                Dec => { add(i, 1) }
+                _ => { 0 }
+            }
+        "#;
+        let errors = call_errors(unrelated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Int | Str"), "{errors:?}");
+    }
+
+    // With more than two members, a union arm holds the members it names
+    // and the default arm the ones no earlier arm took.
+    #[test]
+    fn test_union_and_default_arms_hold_the_remaining_members() {
+        let source = r#"
+            ::test ns
+
+            w: Int | Dec | Str | Bool 2.5
+
+            three-arms match w {
+                Int => { needs-int(w) }
+                Dec => { round(w) }
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+            }
+
+            union-arm match w {
+                Int | Dec => { add(w, 1) }
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+            }
+
+            rest-is-numbers match w {
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+                _ => { add(w, 1) }
+            }
+
+            rest-is-one match w {
+                Int | Dec => { add(w, 1) }
+                Bool => { needs-bool(w) }
+                _ => { uppercase(w) }
+            }
+
+            o: Int? 4
+            rest-after-null match o {
+                null => { 0 }
+                _ => { needs-int(o) }
+            }
+
+            level: "low" | "high" | Int "low"
+            rest-after-values match level {
+                "low" | "high" => { 0 }
+                _ => { needs-int(level) }
+            }
+
+            needs-int fn (x: Int): Int { x }
+            needs-bool fn (x: Bool): Bool { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        // The default arm still holds every member left, so a use only one
+        // of them allows is an error.
+        let too_narrow = r#"
+            ::test ns
+
+            w: Int | Dec | Str 2.5
+            rest match w {
+                Int => { 0 }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(too_narrow);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Dec | Str"), "{errors:?}");
+
+        // A value arm takes one value, not its type: the rest keeps `Int`.
+        let value_arm = r#"
+            ::test ns
+
+            w: Int | Str 5
+            rest match w {
+                0 => { 0 }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(value_arm);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Int | Str"), "{errors:?}");
+
+        // `match-all` runs every arm that matches, so its default arm
+        // tells nothing about the arms before it.
+        let match_all = r#"
+            ::test ns
+
+            w: Int | Str 5
+            every match-all w {
+                Int => { add(w, 1) }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(match_all);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("'uppercase'") && errors[0].contains("got Int | Str"),
+            "{errors:?}"
+        );
+    }
+
+    // A nested match, a match in a function body and a `fn match` narrow
+    // as a top-level match does. A body reports a mismatch only when a
+    // literal proves it, so the wrong uses here pass a literal.
+    #[test]
+    fn test_nested_and_function_level_matches_narrow_alike() {
+        let source = r#"
+            ::test ns
+
+            outer: Int | Str | Bool 5
+            inner: Dec | Str 2.5
+            nested match outer {
+                Int => {
+                    match inner {
+                        Dec => { add(outer, round(inner)) }
+                        Str => { concat(inner, Str(outer)) }
+                    }
+                }
+                _ => {
+                    match outer {
+                        Str => { uppercase(outer) }
+                        Bool => { needs-bool(outer) }
+                    }
+                }
+            }
+
+            in-body fn (x: Int | Str): Any {
+                match x {
+                    Int => { add(x, 1) }
+                    Str => { uppercase(x) }
+                }
+            }
+
+            as-flow fn match (x: Int | Str | Null): Any {
+                Int => { add(x, 1) }
+                Str => { uppercase(x) }
+                _ => { x }
+            }
+
+            bound fn (x: Int | Str): Any {
+                match x {
+                    Int (n) => { add(n, 1) }
+                    Str (s) => { uppercase(s) }
+                }
+            }
+
+            needs-bool fn (x: Bool): Bool { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        // Inside the arms of an outer match the inner one still reports.
+        let wrong = r#"
+            ::test ns
+
+            outer: Int | Str | Bool 5
+            nested match outer {
+                Int => { 0 }
+                _ => {
+                    match outer {
+                        Str => { add(outer, 1) }
+                        Bool => { uppercase(outer) }
+                    }
+                }
+            }
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("got Str"), "{errors:?}");
+        assert!(errors[1].contains("got Bool"), "{errors:?}");
+    }
+
     // A pipe stage takes the piped value as its first argument, so its arity
     // counts one more. A call written inside the stage's arguments is not
     // piped and counts only its own.
