@@ -85,8 +85,8 @@ shadows a function, and `hot test` warns about a test with no assertions.
 - Function return annotations name the successful value. Hot supplies the
   `Result` wrapper, so successful returns usually do not need `ok(...)`.
 - Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
-  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
-  variant and exposes its payload inside the selected arm.
+  propagates `Err`. A parameter declared `Result` receives the Result intact;
+  `match` selects by variant and exposes its payload inside the selected arm.
 - Hot is gradually typed: known records are checked structurally, while
   constructed types and enum variants retain nominal runtime tags.
 - A parameter annotated with a built-in type is checked at the call. Another
