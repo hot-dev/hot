@@ -12669,9 +12669,9 @@ fn emit_self_recursive_call(
         3,
     ));
 
-    for idx in 0..usize::from(args_count) {
+    for (idx, arg) in signature.args.iter().enumerate() {
         let reg = args_start + idx as u32;
-        let expected_kind = signature.args[idx]
+        let expected_kind = arg
             .raw_kind()
             .ok_or_else(|| "Unsupported recursive JIT arg kind".to_string())?;
         let actual_kind = register_kind(remap, register_kinds, reg)?;

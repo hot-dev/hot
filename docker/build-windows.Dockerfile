@@ -1,7 +1,7 @@
 # Multi-stage build for Windows targets using cross-compilation
 # Pin the Debian release (12, bookworm) so the builder's glibc does not
-# change when the bare rust:1.99.1 tag moves to a newer Debian.
-FROM rust:1.99.1-bookworm AS builder
+# change when the bare rust:1.100.0 tag moves to a newer Debian.
+FROM rust:1.100.0-bookworm AS builder
 
 ARG TAILWIND_VERSION=v4.3.3
 

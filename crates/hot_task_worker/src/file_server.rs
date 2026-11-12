@@ -135,13 +135,16 @@ impl FileServerHandle {
     /// Whether this server uses vsock transport (either AF_VSOCK or hybrid UDS).
     pub fn is_vsock(&self) -> bool {
         #[cfg(all(target_os = "linux", feature = "kata"))]
-        if matches!(
-            self.transport,
-            FileServerTransport::VsockAf { .. } | FileServerTransport::VsockUds { .. }
-        ) {
-            return true;
+        {
+            matches!(
+                self.transport,
+                FileServerTransport::VsockAf { .. } | FileServerTransport::VsockUds { .. }
+            )
         }
-        false
+        #[cfg(not(all(target_os = "linux", feature = "kata")))]
+        {
+            false
+        }
     }
 
     /// Whether this server uses TCP transport.

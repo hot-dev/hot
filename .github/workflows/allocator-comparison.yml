@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: 1.99.1
+  RUST_TOOLCHAIN: 1.100.0
   TAILWIND_VERSION: v4.3.3
   CARGO_INCREMENTAL: '0'
   CARGO_NET_RETRY: 2

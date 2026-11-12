@@ -150,11 +150,7 @@ impl ResolutionContext {
         // This method now only handles edge cases and local variable patterns.
 
         // 3. Check if it's a type constructor from user-defined types
-        if self.is_type_constructor(var_name) {
-            return true;
-        }
-
-        false
+        self.is_type_constructor(var_name)
     }
 
     // Removed permissive auto-import list for core functions.

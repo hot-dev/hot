@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
     binutils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust 1.99.1 with a pinned rustup-init, checked against the
+# Install Rust 1.100.0 with a pinned rustup-init, checked against the
 # SHA-256 that static.rust-lang.org publishes for rustup 1.29.2. To move to a
 # new rustup, update the version and both digests from
 # https://static.rust-lang.org/rustup/archive/<version>/<target>/rustup-init.sha256
@@ -32,7 +32,7 @@ RUN set -eux; \
         "https://static.rust-lang.org/rustup/archive/1.29.2/${target}/rustup-init"; \
     echo "${sha256}  /tmp/rustup-init" | sha256sum -c -; \
     chmod +x /tmp/rustup-init; \
-    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.99.1; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.100.0; \
     rm /tmp/rustup-init
 ENV PATH="/root/.cargo/bin:${PATH}"
 

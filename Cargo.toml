@@ -60,7 +60,6 @@ http-body-util = "0.1"
 fastnum = { version = "0.7", features = ["serde", "sqlx", "tokio-postgres"] }
 clap = "4.6"
 hot = { path = "crates/hot" }
-hot_docs = { path = "crates/hot_docs" }
 hot_app = { path = "crates/hot_app" }
 hot_worker = { path = "crates/hot_worker" }
 hot_task_worker = { path = "crates/hot_task_worker" }
@@ -97,7 +96,6 @@ utoipa-swagger-ui = { version = "10.0.1", features = ["axum"] }
 tower-lsp-server = "0.23.0"
 regex = "1.13.1"
 aho-corasick = "1.1"
-num-traits = "0.2"
 walkdir = "2.5.0"
 same-file = "1.0.6"
 ignore = "0.4"
@@ -119,7 +117,6 @@ time = "0.3.55"
 croner = "4.0"
 english-to-cron = "0.1.7"
 humantime = "2.4"
-smallvec = "1.16"
 ahash = { version = "0.8", features = ["serde"] }
 temporal_rs = { version = "0.2.6", features = ["compiled_data", "sys"] }
 anyhow = "1.0"

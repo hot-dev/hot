@@ -175,7 +175,7 @@ jobs:
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
       with:
-        rust-toolchain: 1.99.1
+        rust-toolchain: 1.100.0
         tailwind-version: ${{ env.TAILWIND_VERSION }}
         save-cache: "false"
 
@@ -213,7 +213,7 @@ jobs:
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
       with:
-        rust-toolchain: 1.99.1
+        rust-toolchain: 1.100.0
         tailwind-version: ${{ env.TAILWIND_VERSION }}
         # Restore main's caches, but never save: a release run's caches are
         # scoped to its tag, so no later run could restore them.
@@ -357,7 +357,7 @@ jobs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
-        toolchain: 1.99.1
+        toolchain: 1.100.0
         targets: ${{ matrix.target }}
 
     # Downloads the standalone binary from GitHub releases (no npm or winget)
@@ -483,7 +483,7 @@ jobs:
           -f - \
           --output "type=local,dest=target/hotbox-musl-build" \
           . <<'DOCKERFILE'
-        FROM rust:1.99.1-slim-bookworm AS builder
+        FROM rust:1.100.0-slim-bookworm AS builder
         RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
