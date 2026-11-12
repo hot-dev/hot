@@ -105,6 +105,19 @@ Glob patterns to leave out as well, applied with `resources.excludes`
 hot.project.my-app.ignore.excludes ["drafts/**"]
 ```
 
+### skills.codegen
+
+Hot turns each `*.skill.md` file under the resource paths into a
+`*.skill.hot` file that exports a `::ai::skill/Skill` value. See
+[Agents](/docs/agents). All four settings are optional:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.project.<name>.skills.codegen.enabled` | Generate the files | `true` |
+| `hot.project.<name>.skills.codegen.paths` | Directories to look for `*.skill.md` files in | The project's `resources.paths` |
+| `hot.project.<name>.skills.codegen.out-dir` | Where the generated files go | `hot/src/_skills` |
+| `hot.project.<name>.skills.codegen.namespace` | Root namespace of the generated code | `::skills` |
+
 ## Multiple Projects
 
 You can define multiple projects in one workspace:
