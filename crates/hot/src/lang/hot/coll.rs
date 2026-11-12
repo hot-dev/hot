@@ -1046,32 +1046,51 @@ pub fn get(args: &[Val]) -> HotResult<Val> {
     }
 }
 
+/// A writer that takes its arguments by value. It writes its first argument
+/// in place when nothing else holds that collection's storage, and on a copy
+/// otherwise (`Arc::make_mut`), so a caller that still holds the collection
+/// keeps its contents.
+pub type OwningFn = fn(Vec<Val>) -> HotResult<Val>;
+
+/// The by-value form of the native `name`, for a caller that owns the
+/// argument Vec. Each has a borrowing form of the same name in the hotlib
+/// map, which copies its arguments and calls this one.
+pub fn owning_writer(name: &str) -> Option<OwningFn> {
+    match name {
+        "::hot::coll/assoc" => Some(assoc_owned),
+        "::hot::coll/concat" => Some(concat_owned),
+        "::hot::coll/merge" => Some(merge_owned),
+        "::hot::coll/delete" => Some(delete_owned),
+        _ => None,
+    }
+}
+
 /// Associate a key-value pair with a map, returning a new map
 /// Works only on Map. Creates a new map with the key-value pair added.
 /// A constructed value keeps its type, like deep-path assignment.
 pub fn assoc(args: &[Val]) -> HotResult<Val> {
+    assoc_owned(args.to_vec())
+}
+
+/// [`assoc`] on arguments it owns: the map is written in place when nothing
+/// else holds it.
+pub fn assoc_owned(mut args: Vec<Val>) -> HotResult<Val> {
     if args.len() != 3 {
         return HotResult::Err(Val::from(format!(
             "::hot::coll/assoc expects 3 arguments (map, key, value), got {}",
             args.len()
         )));
     }
+    crate::validate_expansion!("assoc map key", std::slice::from_ref(&args[1]));
 
-    let map = crate::val::as_fields(&args[0]);
-    let key = &args[1];
-    let value = &args[2];
-    crate::validate_expansion!("assoc map key", std::slice::from_ref(key));
-
-    match map {
-        Val::Map(m) => {
-            let mut new_map = (**m).clone(); // Clone the inner IndexMap
-            new_map.insert(key.clone(), value.clone());
-            HotResult::Ok(crate::val::with_type_of(
-                &args[0],
-                Val::Map(std::sync::Arc::new(new_map)),
-            ))
-        }
-        _ => HotResult::Err(Val::from(
+    let (Some(value), Some(key), Some(mut map)) = (args.pop(), args.pop(), args.pop()) else {
+        return HotResult::Err(Val::from("::hot::coll/assoc expects 3 arguments"));
+    };
+    match crate::val::with_fields_mut(&mut map, |fields| {
+        fields.insert(key, value);
+    }) {
+        Some(()) => HotResult::Ok(map),
+        None => HotResult::Err(Val::from(
             "::hot::coll/assoc expects a Map as the first argument".to_string(),
         )),
     }
@@ -1079,6 +1098,12 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
 
 /// Concatenate collections
 pub fn concat(args: &[Val]) -> HotResult<Val> {
+    concat_owned(args.to_vec())
+}
+
+/// [`concat`] on arguments it owns: the first Vec or Bytes is extended in
+/// place when nothing else holds it.
+pub fn concat_owned(args: Vec<Val>) -> HotResult<Val> {
     if args.len() < 2 {
         return HotResult::Err(Val::from(format!(
             "::hot::coll/concat expects at least 2 arguments, got {}",
@@ -1117,41 +1142,38 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
         ));
     }
 
-    // Filter out null arguments and collect
-    let mut valid_args: Vec<&Val> = Vec::new();
-    for (i, arg) in args.iter().enumerate() {
-        match arg {
-            Val::Null => {
-                tracing::debug!("VM: concat ignoring null argument at position {}", i + 1);
-                continue; // Skip null arguments
-            }
-            _ => valid_args.push(arg),
-        }
-    }
+    // Null arguments are ignored.
+    let mut valid_args = args.into_iter().filter(|arg| !matches!(arg, Val::Null));
 
     match mode {
         "Bytes" => {
-            let mut result: Vec<u8> = Vec::new();
+            let Some(Val::Bytes(mut result)) = valid_args.next() else {
+                return HotResult::Ok(Val::bytes(Vec::new()));
+            };
+            let bytes = crate::val::make_mut(&mut result);
             for arg in valid_args {
-                if let Val::Bytes(bytes) = arg {
-                    result.extend(bytes.iter());
+                if let Val::Bytes(more) = arg {
+                    bytes.extend(more.iter());
                 }
             }
-            HotResult::Ok(Val::bytes(result))
+            HotResult::Ok(Val::Bytes(result))
         }
         "Vec" => {
-            let mut result = Vec::new();
+            let Some(Val::Vec(mut result)) = valid_args.next() else {
+                return HotResult::Ok(Val::vec(Vec::new()));
+            };
+            let items = crate::val::make_mut(&mut result);
             for arg in valid_args {
-                if let Val::Vec(vec) = arg {
-                    result.extend(vec.iter().cloned());
+                if let Val::Vec(more) = arg {
+                    items.extend(more.iter().cloned());
                 }
             }
-            HotResult::Ok(Val::vec(result))
+            HotResult::Ok(Val::Vec(result))
         }
         "Str" => {
             let mut result = String::new();
             for arg in valid_args {
-                match arg {
+                match &arg {
                     Val::Str(s) => result.push_str(s),
                     Val::Int(i) => result.push_str(&i.to_string()),
                     Val::Dec(d) => result.push_str(&d.to_string()),
@@ -1180,14 +1202,25 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
 
 /// Merge two maps
 pub fn merge(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::coll/merge", args, 2);
-    crate::validate_expansion!("deep merge", args);
+    merge_owned(args.to_vec())
+}
+
+/// [`merge`] on arguments it owns: the left map is written in place when
+/// nothing else holds it.
+pub fn merge_owned(mut args: Vec<Val>) -> HotResult<Val> {
+    validate_args!("::hot::coll/merge", &args, 2);
+    crate::validate_expansion!("deep merge", &args);
 
     match (
         crate::val::as_fields(&args[0]),
         crate::val::as_fields(&args[1]),
     ) {
-        (Val::Map(_), Val::Map(_)) => HotResult::Ok(merge_fields(&args[0], &args[1])),
+        (Val::Map(_), Val::Map(_)) => {
+            let (Some(right), Some(left)) = (args.pop(), args.pop()) else {
+                return HotResult::Err(Val::from("merge expects two maps"));
+            };
+            HotResult::Ok(merge_fields(left, &right))
+        }
         _ => HotResult::Err(Val::from("merge expects two maps")),
     }
 }
@@ -1195,21 +1228,28 @@ pub fn merge(args: &[Val]) -> HotResult<Val> {
 /// `Val::merge`'s deep merge, seen through constructed values: a typed value
 /// merges its fields and keeps its type (`merge(server, {port: 2})` is still
 /// a `Server`). The left map's key order wins, and a non-map right value
-/// replaces the left one.
-fn merge_fields(a: &Val, b: &Val) -> Val {
-    match (crate::val::as_fields(a), crate::val::as_fields(b)) {
-        (Val::Map(left), Val::Map(right)) => {
-            let mut merged = (**left).clone();
-            for (key, value) in right.iter() {
-                let value = match left.get(key) {
-                    Some(existing) => merge_fields(existing, value),
-                    None => value.clone(),
-                };
-                merged.insert(key.clone(), value);
+/// replaces the left one. The left value is written in place, at every
+/// level, where nothing else holds it.
+fn merge_fields(mut a: Val, b: &Val) -> Val {
+    let Val::Map(right) = crate::val::as_fields(b) else {
+        return b.clone();
+    };
+    let merged = crate::val::with_fields_mut(&mut a, |left| {
+        for (key, value) in right.iter() {
+            match left.get_mut(key) {
+                Some(existing) => {
+                    let taken = std::mem::replace(existing, Val::Null);
+                    *existing = merge_fields(taken, value);
+                }
+                None => {
+                    left.insert(key.clone(), value.clone());
+                }
             }
-            crate::val::with_type_of(a, Val::map(merged.into_inner()))
         }
-        _ => b.clone(),
+    });
+    match merged {
+        Some(()) => a,
+        None => b.clone(),
     }
 }
 
@@ -2317,6 +2357,12 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
 /// Delete a key from a map or index from a vector
 pub fn delete(args: &[Val]) -> HotResult<Val> {
+    delete_owned(args.to_vec())
+}
+
+/// [`delete`] on arguments it owns: the Vec or Map is written in place when
+/// nothing else holds it.
+pub fn delete_owned(mut args: Vec<Val>) -> HotResult<Val> {
     if args.len() != 2 {
         return HotResult::Err(Val::from(format!(
             "::hot::coll/delete expects 2 arguments, got {}",
@@ -2324,10 +2370,13 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    let collection = crate::val::as_fields(&args[0]);
-    let key_or_index = &args[1];
+    let (Some(key_or_index), Some(collection)) = (args.pop(), args.pop()) else {
+        return HotResult::Err(Val::from("::hot::coll/delete expects 2 arguments"));
+    };
+    // A constructed value is its fields here, and the result is a plain map.
+    let collection = crate::val::into_fields(collection);
 
-    match (collection, key_or_index) {
+    match (collection, &key_or_index) {
         (Val::Str(s), Val::Int(target_index)) => {
             let actual_index = if *target_index < 0 {
                 s.chars().count() as i64 + *target_index
@@ -2335,39 +2384,35 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
                 *target_index
             };
             if actual_index < 0 {
-                return HotResult::Ok(Val::from(s.clone()));
+                return HotResult::Ok(Val::Str(s));
             }
-            let from_target = skip_chars(s, actual_index as usize);
+            let from_target = skip_chars(&s, actual_index as usize);
             let mut after_target = from_target.chars();
             if after_target.next().is_none() {
-                return HotResult::Ok(Val::from(s.clone()));
+                return HotResult::Ok(Val::Str(s));
             }
             let before_target = &s[..s.len() - from_target.len()];
             HotResult::Ok(Val::from([before_target, after_target.as_str()].concat()))
         }
-        (Val::Vec(items), Val::Int(target_index)) => {
+        (Val::Vec(mut items), Val::Int(target_index)) => {
             let len = items.len() as i64;
             let actual_index = if *target_index < 0 {
                 len + *target_index
             } else {
                 *target_index
             };
-            if actual_index < 0 || actual_index >= len {
-                HotResult::Ok(Val::Vec(items.clone()))
-            } else {
-                let mut result_items = items.to_vec();
-                result_items.remove(actual_index as usize);
-                HotResult::Ok(Val::vec(result_items))
+            if actual_index >= 0 && actual_index < len {
+                crate::val::make_mut(&mut items).remove(actual_index as usize);
             }
+            HotResult::Ok(Val::Vec(items))
         }
-        (Val::Map(map), Val::Str(target_key)) => {
-            let mut result_map = (**map).clone(); // Clone the inner IndexMap
-            result_map.shift_remove(&Val::from(target_key.clone()));
-            HotResult::Ok(Val::map(result_map.into_inner()))
+        (Val::Map(mut map), Val::Str(_)) => {
+            if map.contains_key(&key_or_index) {
+                crate::val::make_mut(&mut map).shift_remove(&key_or_index);
+            }
+            HotResult::Ok(Val::Map(map))
         }
-        (Val::Map(map), _) => HotResult::Ok(Val::Map(map.clone())), // map is Box, clone returns Box
-        (Val::Str(s), _) => HotResult::Ok(Val::from(s.clone())),
-        (Val::Vec(items), _) => HotResult::Ok(Val::Vec(items.clone())),
+        (collection @ (Val::Map(_) | Val::Str(_) | Val::Vec(_)), _) => HotResult::Ok(collection),
         _ => HotResult::Err(Val::from("delete requires a map or vector")),
     }
 }
@@ -4016,6 +4061,144 @@ pub fn update_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val;
+
+    /// Where a collection's storage lives: equal before and after a write
+    /// means the write was in place.
+    fn storage(value: &Val) -> *const () {
+        match crate::val::as_fields(value) {
+            Val::Vec(items) => std::sync::Arc::as_ptr(items).cast(),
+            Val::Map(entries) => std::sync::Arc::as_ptr(entries).cast(),
+            other => panic!("not a collection: {:?}", other),
+        }
+    }
+
+    fn written(result: HotResult<Val>) -> Val {
+        match result {
+            HotResult::Ok(value) => value,
+            HotResult::Err(error) => panic!("writer failed: {:?}", error),
+        }
+    }
+
+    #[test]
+    fn owning_writers_write_in_place_when_nothing_else_holds_the_collection() {
+        let counted = crate::val::write_stats::counts();
+        let map = val!({"a": 1});
+        let before = storage(&map);
+        let map = written(assoc_owned(vec![map, Val::from("b"), Val::Int(2)]));
+        assert_eq!(storage(&map), before);
+        assert_eq!(map, val!({"a": 1, "b": 2}));
+        // The counts the VM's own tests read say the same.
+        let (in_place, copied) = crate::val::write_stats::counts();
+        assert_eq!((in_place - counted.0, copied - counted.1), (1, 0));
+
+        let map = written(merge_owned(vec![map, val!({"b": 3, "c": 4})]));
+        assert_eq!(storage(&map), before);
+        assert_eq!(map, val!({"a": 1, "b": 3, "c": 4}));
+
+        let map = written(delete_owned(vec![map, Val::from("a")]));
+        assert_eq!(storage(&map), before);
+        assert_eq!(map, val!({"b": 3, "c": 4}));
+
+        let items = val!([1, 2]);
+        let before = storage(&items);
+        let items = written(concat_owned(vec![items, Val::Null, val!([3])]));
+        // A Vec that outgrows its buffer moves its elements, not its storage.
+        assert_eq!(storage(&items), before);
+        assert_eq!(items, val!([1, 2, 3]));
+
+        let items = written(delete_owned(vec![items, Val::Int(0)]));
+        assert_eq!(storage(&items), before);
+        assert_eq!(items, val!([2, 3]));
+    }
+
+    #[test]
+    fn owning_writers_copy_a_collection_something_else_holds() {
+        let counted = crate::val::write_stats::counts();
+        let original = val!({"a": 1, "nested": {"x": 1}});
+        let kept = original.clone();
+        let changed = written(assoc_owned(vec![original, Val::from("a"), Val::Int(2)]));
+        assert_ne!(storage(&changed), storage(&kept));
+        let (in_place, copied) = crate::val::write_stats::counts();
+        assert_eq!((in_place - counted.0, copied - counted.1), (0, 1));
+        assert_eq!(kept, val!({"a": 1, "nested": {"x": 1}}));
+
+        // A nested map is shared with `kept` even though the outer map is
+        // now `changed`'s alone: a deep merge copies it rather than write it.
+        let merged = written(merge_owned(vec![changed, val!({"nested": {"y": 2}})]));
+        assert_eq!(merged, val!({"a": 2, "nested": {"x": 1, "y": 2}}));
+        assert_eq!(kept, val!({"a": 1, "nested": {"x": 1}}));
+
+        let removed = written(delete_owned(vec![kept.clone(), Val::from("a")]));
+        assert_eq!(removed, val!({"nested": {"x": 1}}));
+        assert_eq!(kept, val!({"a": 1, "nested": {"x": 1}}));
+
+        let items = val!([1, 2]);
+        let kept = items.clone();
+        let longer = written(concat_owned(vec![items.clone(), items]));
+        assert_eq!(longer, val!([1, 2, 1, 2]));
+        assert_eq!(kept, val!([1, 2]));
+        let shorter = written(delete_owned(vec![kept.clone(), Val::Int(-1)]));
+        assert_eq!(shorter, val!([1]));
+        assert_eq!(kept, val!([1, 2]));
+    }
+
+    #[test]
+    fn owning_writers_keep_a_constructed_values_type() {
+        let server = val!({
+            "$type": "::test/Server",
+            "$val": {"host": "a.example", "port": 1}
+        });
+        let fields = storage(&server);
+        let moved = written(assoc_owned(vec![server, Val::from("port"), Val::Int(2)]));
+        assert_eq!(storage(&moved), fields, "its fields are written in place");
+        assert_eq!(
+            moved,
+            val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 2}})
+        );
+
+        let kept = moved.clone();
+        let merged = written(merge_owned(vec![moved, val!({"port": 3})]));
+        assert_eq!(
+            merged,
+            val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 3}})
+        );
+        assert_eq!(
+            kept,
+            val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 2}})
+        );
+
+        // `delete` reads a constructed value as its fields: a plain map.
+        let plain = written(delete_owned(vec![kept.clone(), Val::from("port")]));
+        assert_eq!(plain, val!({"host": "a.example"}));
+        assert_eq!(
+            kept,
+            val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 2}})
+        );
+    }
+
+    #[test]
+    fn owning_writers_agree_with_the_borrowing_forms_on_what_they_refuse() {
+        for args in [
+            vec![Val::Int(1), Val::from("k"), Val::Int(1)],
+            vec![val!({"a": 1}), Val::from("k")],
+        ] {
+            assert!(matches!(assoc(&args), HotResult::Err(_)));
+            assert!(matches!(assoc_owned(args), HotResult::Err(_)));
+        }
+        assert!(matches!(
+            merge_owned(vec![val!({"a": 1}), Val::Int(1)]),
+            HotResult::Err(_)
+        ));
+        assert!(matches!(
+            concat_owned(vec![val!([1]), val!({"a": 1})]),
+            HotResult::Err(_)
+        ));
+        assert!(matches!(
+            delete_owned(vec![Val::Int(1), Val::Int(0)]),
+            HotResult::Err(_)
+        ));
+    }
 
     #[test]
     fn test_merge_preserves_left_key_order() {

@@ -158,6 +158,80 @@ pub(crate) fn as_fields(val: &Val) -> &Val {
     typed_fields(val).unwrap_or(val)
 }
 
+/// Where the collection writes of this thread landed, for the tests that
+/// hold the VM to writing a collection in place when nothing else holds it.
+#[cfg(test)]
+pub(crate) mod write_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    }
+
+    /// The writes since the thread started, as (in place, on a copy).
+    pub(crate) fn counts() -> (usize, usize) {
+        COUNTS.with(Cell::get)
+    }
+
+    pub(super) fn note(in_place: bool) {
+        COUNTS.with(|counts| {
+            let (kept, copied) = counts.get();
+            counts.set(if in_place {
+                (kept + 1, copied)
+            } else {
+                (kept, copied + 1)
+            });
+        });
+    }
+}
+
+/// Count a write to `storage` that is about to happen (see `write_stats`):
+/// in place when this is its only holder. Nothing outside tests.
+#[inline(always)]
+pub(crate) fn note_write<T>(storage: &Arc<T>) {
+    #[cfg(test)]
+    write_stats::note(Arc::strong_count(storage) == 1);
+    #[cfg(not(test))]
+    let _ = storage;
+}
+
+/// `Arc::make_mut` for a collection's storage: the write is in place when
+/// nothing else holds it, and on a copy otherwise.
+#[inline(always)]
+pub(crate) fn make_mut<T: Clone>(storage: &mut Arc<T>) -> &mut T {
+    note_write(storage);
+    Arc::make_mut(storage)
+}
+
+/// The fields of `val` by value: a constructed value's `$val` map, and
+/// anything else as it is. When nothing else holds the constructed value,
+/// nothing else holds the fields returned either.
+pub(crate) fn into_fields(val: Val) -> Val {
+    match typed_fields(&val).cloned() {
+        Some(fields) => fields,
+        None => val,
+    }
+}
+
+/// Run `write` on the fields of the map `val`: the map itself, or the `$val`
+/// map of a constructed value, which keeps its type. The fields are written
+/// in place when nothing else holds them and on a copy otherwise
+/// (`Arc::make_mut`), so any other holder of the value keeps its contents.
+/// `None`, with `write` not run, when `val` isn't a map.
+pub(crate) fn with_fields_mut<R>(val: &mut Val, write: impl FnOnce(&mut ValMap) -> R) -> Option<R> {
+    let constructed = typed_fields(val).is_some();
+    let Val::Map(map) = val else {
+        return None;
+    };
+    if !constructed {
+        return Some(write(make_mut(map)));
+    }
+    match Arc::make_mut(map).get_mut(tagged_payload_key()) {
+        Some(Val::Map(fields)) => Some(write(make_mut(fields))),
+        _ => None,
+    }
+}
+
 /// How comparisons see a value: a value of a declared type over a scalar
 /// (`Money(80.0)` from `Money type Dec`) is the scalar it holds, and anything
 /// else is itself. The checker reads such a type as its scalar and it passes a

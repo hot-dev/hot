@@ -83,7 +83,7 @@ pub(crate) fn core_function_name<'a>(
 pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
     match (dest, crate::val::map_spread_entries(source)) {
         (Val::Map(mut dest_map), Some(entries)) => {
-            let dest = Arc::make_mut(&mut dest_map);
+            let dest = crate::val::make_mut(&mut dest_map);
             for (k, v) in entries.iter() {
                 dest.insert(k.clone(), v.clone());
             }
@@ -107,12 +107,34 @@ pub(crate) fn merge_map_spread(dest: Val, source: &Val) -> VmResult<Val> {
     }
 }
 
+/// [`merge_map_spread`] on a `source` the caller owns. A spread into a map
+/// with no entries yet (`{...source, key: value}`) is the source's own
+/// entries, so the result takes the source's storage instead of copying each
+/// entry; a later write to it copies only if something else still holds it.
+pub(crate) fn merge_map_spread_owned(dest: Val, source: Val) -> VmResult<Val> {
+    if matches!(&dest, Val::Map(entries) if entries.is_empty())
+        && crate::val::map_spread_entries(&source).is_some()
+    {
+        return Ok(spread_entries_owned(source));
+    }
+    merge_map_spread(dest, &source)
+}
+
+/// The map of entries `{...source}` contributes, by value: `source` itself,
+/// or a constructed value's fields.
+fn spread_entries_owned(source: Val) -> Val {
+    if source.is_err() {
+        return source;
+    }
+    crate::val::into_fields(source)
+}
+
 /// `target` with `value` appended, as `items[] value` makes it: a Null
 /// target starts a vector. Compiled code appends with it too.
 pub(crate) fn append_to_vec(target: Val, value: Val) -> VmResult<Val> {
     match target {
         Val::Vec(mut elements) => {
-            Arc::make_mut(&mut elements).push(value);
+            crate::val::make_mut(&mut elements).push(value);
             Ok(Val::Vec(elements))
         }
         Val::Null => Ok(Val::vec(vec![value])),
@@ -3656,15 +3678,17 @@ impl VirtualMachine {
                 let property = *property;
                 let value = *value;
                 // Execute dot assignment (property setting)
-                let mut object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
                 let new_value = self.get_register(value)?.clone();
+                // The register gives its value up for the write, which is
+                // then in place unless something else holds the object.
+                let mut object_val = self.take_register(object)?;
 
-                // Set the property on the object
-                self.set_property(&mut object_val, &property_name, new_value)?;
-
-                // Store the modified object back to the register
+                // Set the property on the object, and store it back to the
+                // register whether or not the write succeeded
+                let written = self.set_property(&mut object_val, &property_name, new_value);
                 self.set_register(object, object_val)?;
+                written?;
                 self.instruction_pointer += 1;
             }
 
@@ -3677,14 +3701,13 @@ impl VirtualMachine {
                 let property = *property;
                 let value = *value;
                 // Execute dynamic dot assignment (property setting with runtime key/index)
-                let mut object_val = self.get_register(object)?.clone();
                 let property_val = self.get_register(property)?.clone();
                 let new_value = self.get_register(value)?.clone();
+                let mut object_val = self.take_register(object)?;
 
-                self.set_dynamic_property(&mut object_val, &property_val, new_value)?;
-
-                // Store the modified object back to the register
+                let written = self.set_dynamic_property(&mut object_val, &property_val, new_value);
                 self.set_register(object, object_val)?;
+                written?;
                 self.instruction_pointer += 1;
             }
 
@@ -3822,29 +3845,16 @@ impl VirtualMachine {
                 }
 
                 // Regular hotlib function call (not call-lib)
-                let args_owned = match &args_val {
-                    Val::Vec(vec) => {
-                        tracing::trace!(
-                            "VM: CallLibBuiltin - args is Vec with {} elements: {:?}",
-                            vec.len(),
-                            vec
-                        );
-                        vec.to_vec()
-                    }
-                    _ => {
-                        tracing::trace!(
-                            "VM: CallLibBuiltin - args is single value, wrapping in slice: {:?}",
-                            args_val
-                        );
-                        // Single argument, wrap in slice
-                        vec![args_val.clone()]
-                    }
+                let args_owned = match args_val {
+                    Val::Vec(vec) => Arc::unwrap_or_clone(vec).into_inner(),
+                    // Single argument, wrap in slice
+                    other => vec![other],
                 };
                 // Strict-argument law: same preparation as ordinary calls
                 // (Ok auto-unwraps, Err halts, thunks pass through).
                 let args_prepared = self.prepare_lib_call_args(&function_name, args_owned)?;
 
-                let result = match self.execute_call_lib(&function_name, &args_prepared) {
+                let result = match self.execute_call_lib_owned(&function_name, args_prepared) {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
@@ -3904,7 +3914,7 @@ impl VirtualMachine {
                 let vec_val = self.take_register(vec)?;
 
                 if let Val::Vec(mut elements) = vec_val {
-                    Arc::make_mut(&mut elements).push(value_to_push);
+                    crate::val::make_mut(&mut elements).push(value_to_push);
                     self.set_register(vec, Val::Vec(elements))?;
                 } else {
                     return Err(VmError::runtime(format!(
@@ -3936,8 +3946,17 @@ impl VirtualMachine {
                         // Spread this element - it should be a Vec
                         match element_val {
                             Val::Vec(inner_elements) => {
-                                for inner_elem in Arc::unwrap_or_clone(inner_elements) {
-                                    elements.push(inner_elem);
+                                if elements.is_empty() {
+                                    crate::val::note_write(&inner_elements);
+                                }
+                                let inner = Arc::unwrap_or_clone(inner_elements).into_inner();
+                                if elements.is_empty() {
+                                    // A leading spread (`[...items, x]`)
+                                    // keeps its own storage when nothing
+                                    // else holds it.
+                                    elements = inner;
+                                } else {
+                                    elements.extend(inner);
                                 }
                             }
                             Val::Null => {
@@ -4047,14 +4066,14 @@ impl VirtualMachine {
                 match collection_val {
                     Val::Map(mut map) => {
                         // Set element in map
-                        Arc::make_mut(&mut map).insert(index_val, value_val);
+                        crate::val::make_mut(&mut map).insert(index_val, value_val);
                         self.set_register(collection, Val::Map(map))?;
                     }
                     Val::Vec(mut vec) => {
                         // Set element in vector (if index is an integer)
                         if let Val::Int(idx) = index_val {
                             if idx >= 0 && (idx as usize) < vec.len() {
-                                Arc::make_mut(&mut vec)[idx as usize] = value_val;
+                                crate::val::make_mut(&mut vec)[idx as usize] = value_val;
                                 self.set_register(collection, Val::Vec(vec))?;
                             } else {
                                 return Err(VmError::runtime(format!(
@@ -4084,10 +4103,11 @@ impl VirtualMachine {
             Instruction::MergeMaps { dest, source } => {
                 let dest = *dest;
                 let source = *source;
+                let source_val = self.get_register(source)?.clone();
                 let dest_val = self.take_register(dest)?;
                 // A spread contributes a constructed value's fields, not its
                 // internal `$type`/`$val` wrapper keys.
-                let merged = merge_map_spread(dest_val, self.get_register(source)?)?;
+                let merged = merge_map_spread_owned(dest_val, source_val)?;
                 self.set_register(dest, merged)?;
 
                 self.instruction_pointer += 1;
@@ -9042,7 +9062,31 @@ impl VirtualMachine {
         let args_vec = self.prepare_lib_call_args(&function_name, args_vec)?;
 
         // Call the hotlib function
-        self.execute_call_lib(&function_name, &args_vec)
+        self.execute_call_lib_owned(&function_name, args_vec)
+    }
+
+    /// [`Self::execute_call_lib`] for a caller that owns `args`: a native
+    /// with a by-value form (see `coll::owning_writer`) takes them, and
+    /// writes its collection in place when nothing else holds it.
+    pub(crate) fn execute_call_lib_owned(
+        &mut self,
+        function_name: &str,
+        args: Vec<Val>,
+    ) -> VmResult<Val> {
+        let Some(writer) = crate::lang::hot::coll::owning_writer(function_name) else {
+            return self.execute_call_lib(function_name, &args);
+        };
+        let _native_scope = self.guard_native(function_name, &args)?;
+        // A `where` predicate may only call pure natives.
+        self.check_constraint_native(function_name)?;
+        match writer(args) {
+            // An update keeps a typed value's type, so it must keep the
+            // type's constraints too. None of these reads its arguments.
+            crate::lang::hot::r#type::HotResult::Ok(val) => {
+                self.check_updated_value(function_name, &[], val)
+            }
+            crate::lang::hot::r#type::HotResult::Err(err) => self.dispatch_hotlib_err(err),
+        }
     }
 
     /// Prepare arguments crossing a compiled hotlib call boundary: strict

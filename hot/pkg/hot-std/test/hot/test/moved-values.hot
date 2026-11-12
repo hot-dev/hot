@@ -1,0 +1,443 @@
+::hot::test::moved-values ns
+meta ["test"]
+
+// A value read for the last time is handed on instead of copied, so a writer
+// that receives a collection nothing else holds writes it in place. These
+// tests hold the other half of that: a value that IS read again, by any
+// path, is still what it was. Each one fails with a wrong result, not an
+// error, if a value is moved while something still expects it.
+
+Tally type {
+    counts: Map,
+    seen: Vec
+}
+
+key fn (n: Int): Str { `k${n}` }
+
+put fn (m: Map, k, v): Map { assoc(m, k, v) }
+
+put-last fn (k, v, m: Map): Map { assoc(m, k, v) }
+
+push fn (xs: Vec, x): Vec { [...xs, x] }
+
+// Reads `m` after passing it to a writer.
+write-then-read fn (m: Map): Vec {
+    changed assoc(m, "k", 2)
+    [m, changed]
+}
+
+// The same name passed to two writers in one expression.
+write-twice fn (m: Map): Vec {
+    [assoc(m, "a", 1), assoc(m, "b", 2), m]
+}
+
+// `acc` is read in the branch that returns and written in the one that loops.
+count-up fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, count-up(add(i, 1), n, assoc(acc, key(i), mul(i, i))))
+}
+
+// Not a tail call: the frame goes on to read `acc` after the inner call.
+count-up-inner fn (i: Int, n: Int, acc: Map): Vec {
+    if(gte(i, n), [acc], [acc, ...count-up-inner(add(i, 1), n, assoc(acc, key(i), i))])
+}
+
+vec-up fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, vec-up(add(i, 1), n, [...acc, i]))
+}
+
+both-branches fn cond (m: Map, flag: Bool): Vec {
+    flag => { [assoc(m, "t", 1), m] }
+    => { [m, assoc(m, "f", 1)] }
+}
+
+// The parameter is read once, and the caller reads its argument again.
+grow fn (xs: Vec): Vec { concat(xs, [0]) }
+
+lazy-writer fn (lazy m, k): Map { assoc(do(m), k, 1) }
+
+keeps-result fn (r: Result, m: Map): Map {
+    if(is-err(r), assoc(m, "err", true), assoc(m, "ok", true))
+}
+
+fails-at fn (acc: Map, x: Int): Map {
+    if(eq(x, 3), err("stop at 3"), assoc(acc, key(x), x))
+}
+
+test-a-collection-read-after-a-writer-is-unchanged
+meta ["test"] fn () {
+    m {a: 1}
+    pair write-then-read(m)
+    assert-eq({a: 1}, first(pair))
+    assert-eq({a: 1, k: 2}, last(pair))
+    assert-eq({a: 1}, m)
+
+    three write-twice(m)
+    assert-eq([{a: 1}, {a: 1, b: 2}, {a: 1}], three)
+
+    xs [1, 2]
+    longer grow(xs)
+    assert-eq([1, 2, 0], longer)
+    assert-eq([1, 2], xs)
+    assert-eq([1, 2, 0, 0], grow(longer))
+    assert-eq([1, 2, 0], longer)
+}
+
+test-writers-chained-on-one-value
+meta ["test"] fn () {
+    base {a: 1}
+    a assoc(base, "b", 2)
+    b assoc(a, "c", 3)
+    c merge(b, {d: 4})
+    d delete(c, "a")
+    e update(d, "b", add(%, 10))
+    assert-eq({a: 1}, base)
+    assert-eq({a: 1, b: 2}, a)
+    assert-eq({a: 1, b: 2, c: 3}, b)
+    assert-eq({a: 1, b: 2, c: 3, d: 4}, c)
+    assert-eq({b: 2, c: 3, d: 4}, d)
+    assert-eq({b: 12, c: 3, d: 4}, e)
+
+    nested assoc(assoc(assoc(base, "x", 1), "y", 2), "z", 3)
+    assert-eq({a: 1, x: 1, y: 2, z: 3}, nested)
+    assert-eq({a: 1}, base)
+
+    piped base |> assoc("p", 1) |> assoc("q", 2) |> merge({r: 3})
+    assert-eq({a: 1, p: 1, q: 2, r: 3}, piped)
+    assert-eq({a: 1}, base)
+}
+
+test-a-name-rebound-to-its-own-update
+meta ["test"] fn () {
+    m {n: 0}
+    m assoc(m, "n", 1)
+    m assoc(m, "m", 2)
+    m {...m, o: 3}
+    assert-eq({n: 1, m: 2, o: 3}, m)
+
+    xs []
+    xs [...xs, 1]
+    xs concat(xs, [2])
+    xs [0, ...xs, 3]
+    assert-eq([0, 1, 2, 3], xs)
+}
+
+test-spreads-leave-their-sources
+meta ["test"] fn () {
+    xs [1, 2]
+    ys [...xs, 3]
+    zs [...xs, ...xs]
+    ws [...ys, ...xs, 9]
+    assert-eq([1, 2], xs)
+    assert-eq([1, 2, 3], ys)
+    assert-eq([1, 2, 1, 2], zs)
+    assert-eq([1, 2, 3, 1, 2, 9], ws)
+    assert-eq([1, 2, 1, 2], concat(xs, xs))
+    assert-eq([1, 2], xs)
+
+    m {a: 1}
+    n {...m, b: 2}
+    o {...m, a: 9}
+    p {...n, ...m}
+    assert-eq({a: 1}, m)
+    assert-eq({a: 1, b: 2}, n)
+    assert-eq({a: 9}, o)
+    assert-eq({a: 1, b: 2}, p)
+
+    // A spread alone is the same value under another name: a write to
+    // either must leave the other.
+    q {...m}
+    r assoc(q, "z", 1)
+    assert-eq({a: 1}, q)
+    assert-eq({a: 1}, m)
+    assert-eq({a: 1, z: 1}, r)
+    s [...xs]
+    t [...s, 3]
+    assert-eq([1, 2], s)
+    assert-eq([1, 2], xs)
+    assert-eq([1, 2, 3], t)
+}
+
+test-a-value-a-lambda-captured-stays-as-captured
+meta ["test"] fn () {
+    m {a: 1}
+    reader () { m }
+    writer (k) { assoc(m, k, true) }
+    changed assoc(m, "b", 2)
+    assert-eq({a: 1}, reader())
+    assert-eq({a: 1, x: true}, writer("x"))
+    assert-eq({a: 1, y: true}, writer("y"))
+    assert-eq({a: 1}, reader())
+    assert-eq({a: 1, b: 2}, changed)
+
+    // Created after the last direct read of `xs`.
+    xs [1]
+    ys [...xs, 2]
+    late () { [...xs, 3] }
+    assert-eq([1, 2], ys)
+    assert-eq([1, 3], late())
+    assert-eq([1, 3], late())
+}
+
+test-a-value-read-on-both-branches
+meta ["test"] fn () {
+    m {a: 1}
+    assert-eq([{a: 1, t: 1}, {a: 1}], both-branches(m, true))
+    assert-eq([{a: 1}, {a: 1, f: 1}], both-branches(m, false))
+    assert-eq({a: 1}, m)
+
+    picked if(true, assoc(m, "p", 1), m)
+    other if(false, assoc(m, "p", 1), m)
+    assert-eq({a: 1, p: 1}, picked)
+    assert-eq({a: 1}, other)
+    assert-eq({a: 1}, m)
+
+    sized cond {
+        gt(length(m), 5) => { assoc(m, "big", true) }
+        => { assoc(m, "small", true) }
+    }
+
+    assert-eq({a: 1, small: true}, sized)
+    assert-eq({a: 1}, m)
+}
+
+test-a-value-read-in-a-loop-after-a-write
+meta ["test"] fn () {
+    base {a: 1}
+    each map([1, 2, 3], (n) { assoc(base, "n", n) })
+    assert-eq([{a: 1, n: 1}, {a: 1, n: 2}, {a: 1, n: 3}], each)
+    assert-eq({a: 1}, base)
+
+    // The reducer reads `acc` twice, and the second read is the write.
+    counted reduce(["x", "y", "x"], (acc, k) { assoc(acc, k, add(get(acc, k, 0), 1)) }, {})
+    assert-eq({x: 2, y: 1}, counted)
+
+    // Each step's accumulator is kept by the previous step's result.
+    steps reduce([1, 2, 3], (acc, n) { [...acc, assoc(last(acc), key(n), n)] }, [{}])
+    assert-eq([{}, {k1: 1}, {k1: 1, k2: 2}, {k1: 1, k2: 2, k3: 3}], steps)
+
+    // The initial value is read again after the reduce.
+    init {seed: true}
+    built reduce([1, 2], (acc, n) { assoc(acc, key(n), n) }, init)
+    assert-eq({seed: true, k1: 1, k2: 2}, built)
+    assert-eq({seed: true}, init)
+    again reduce([3], (acc, n) { assoc(acc, key(n), n) }, init)
+    assert-eq({seed: true, k3: 3}, again)
+
+    // The reducer returns its accumulator untouched for some elements, and
+    // an element itself for others.
+    rows [{id: 1}, {id: 2}]
+    kept reduce(rows, (acc, row) { if(eq(row.id, 2), row, acc) }, {id: 0})
+    assert-eq({id: 2}, kept)
+    marked assoc(kept, "seen", true)
+    assert-eq([{id: 1}, {id: 2}], rows)
+    assert-eq({id: 2, seen: true}, marked)
+}
+
+test-a-value-held-in-another-collection
+meta ["test"] fn () {
+    inner {x: 1}
+    holder {inner: inner, list: [inner]}
+    changed assoc(inner, "x", 2)
+    assert-eq(1, holder.inner.x)
+    assert-eq(1, first(holder.list).x)
+    assert-eq(2, changed.x)
+
+    taken assoc(holder.inner, "y", 1)
+    assert-eq({x: 1}, holder.inner)
+    assert-eq({x: 1, y: 1}, taken)
+
+    rows [[1], [2]]
+    grown map(rows, (row) { [...row, 0] })
+    assert-eq([[1], [2]], rows)
+    assert-eq([[1, 0], [2, 0]], grown)
+
+    // An element taken out of a Vec, written, and the Vec read again.
+    head [...first(rows), 9]
+    assert-eq([1, 9], head)
+    assert-eq([[1], [2]], rows)
+}
+
+test-a-collection-carried-through-recursion
+meta ["test"] fn () {
+    assert-eq({k0: 0, k1: 1, k2: 4, k3: 9}, count-up(0, 4, {}))
+    start {s: true}
+    assert-eq({s: true, k0: 0, k1: 1}, count-up(0, 2, start))
+    assert-eq({s: true}, start)
+    assert-eq({s: true, k0: 0}, count-up(0, 1, start))
+
+    // Every level's map is in the result, each as it was at that level.
+    assert-eq([{}, {k0: 0}, {k0: 0, k1: 1}], count-up-inner(0, 2, {}))
+
+    assert-eq([0, 1, 2, 3, 4], vec-up(0, 5, []))
+    seed [9]
+    assert-eq([9, 0, 1], vec-up(0, 2, seed))
+    assert-eq([9], seed)
+}
+
+test-a-collection-built-one-element-at-a-time
+meta ["test"] fn () {
+    n 300
+    by-assoc reduce(range(n), (acc, x) { assoc(acc, x, mul(x, 2)) }, {})
+    assert-eq(n, length(by-assoc))
+    assert-eq(0, get(by-assoc, 0))
+    assert-eq(598, get(by-assoc, 299))
+    assert-eq(range(n), keys(by-assoc))
+
+    by-spread reduce(range(n), (acc, x) { [...acc, x] }, [])
+    assert-eq(range(n), by-spread)
+    by-concat reduce(range(n), (acc, x) { concat(acc, [x]) }, [])
+    assert-eq(range(n), by-concat)
+    by-fn reduce(range(n), push, [])
+    assert-eq(range(n), by-fn)
+    by-put reduce(range(n), (acc, x) { put(acc, x, x) }, {})
+    assert-eq(range(n), vals(by-put))
+    by-put-last reduce(range(n), (acc, x) { put-last(x, x, acc) }, {})
+    assert-eq(by-put, by-put-last)
+    by-map-spread reduce(range(n), (acc, x) { {...assoc(acc, key(x), x), newest: x} }, {})
+    assert-eq(add(n, 1), length(by-map-spread))
+    assert-eq(299, by-map-spread.k299)
+    assert-eq(299, by-map-spread.newest)
+    by-loop count-up(0, n, {})
+    assert-eq(n, length(by-loop))
+    assert-eq(mul(299, 299), by-loop.k299)
+    assert-eq(range(n), vec-up(0, n, []))
+}
+
+test-a-function-called-again-with-a-value-it-wrote
+meta ["test"] fn () {
+    a put({}, "k", 1)
+    b put(a, "k", 2)
+    c put(a, "j", 3)
+    assert-eq({k: 1}, a)
+    assert-eq({k: 2}, b)
+    assert-eq({k: 1, j: 3}, c)
+    d put-last("k", 4, a)
+    assert-eq({k: 4}, d)
+    assert-eq({k: 1}, a)
+
+    // The same call twice, on its own result and on the original.
+    xs push([], 1)
+    ys push(xs, 2)
+    zs push(xs, 3)
+    assert-eq([1], xs)
+    assert-eq([1, 2], ys)
+    assert-eq([1, 3], zs)
+}
+
+test-deep-path-writes-after-a-last-read
+meta ["test"] fn () {
+    m {nested: {b: 2}, list: [1]}
+    copy m
+    m.nested.b 3
+    m.list[] 2
+    assert-eq({nested: {b: 3}, list: [1, 2]}, m)
+    assert-eq({nested: {b: 2}, list: [1]}, copy)
+    copy.nested.c 4
+    assert-eq({nested: {b: 3}, list: [1, 2]}, m)
+    assert-eq({nested: {b: 2, c: 4}, list: [1]}, copy)
+}
+
+test-a-constructed-value-keeps-its-type-and-its-holders
+meta ["test"] fn () {
+    tally Tally({counts: {}, seen: []})
+    next assoc(tally, "counts", assoc(tally.counts, "a", 1))
+    after merge(next, {seen: [...next.seen, "a"]})
+    assert(is-type(after, Tally))
+    assert-eq({}, tally.counts)
+    assert-eq({a: 1}, next.counts)
+    assert-eq([], next.seen)
+    assert-eq(["a"], after.seen)
+
+    folded reduce(["x", "y", "x"], (acc, k) {
+        assoc(acc, "counts", assoc(acc.counts, k, add(get(acc.counts, k, 0), 1)))
+    }, tally)
+    assert(is-type(folded, Tally))
+    assert-eq({x: 2, y: 1}, folded.counts)
+    assert-eq({}, tally.counts)
+}
+
+test-lazy-and-result-parameters
+meta ["test"] fn () {
+    m {a: 1}
+    assert-eq({a: 1, k: 1}, lazy-writer(m, "k"))
+    assert-eq({a: 1, j: 1}, lazy-writer(assoc(m, "x", 0) |> delete("x"), "j"))
+    assert-eq({a: 1}, m)
+
+    assert-eq({a: 1, ok: true}, keeps-result(ok(1), m))
+    assert-eq({a: 1, err: true}, keeps-result(err("no"), m))
+    assert-eq({a: 1}, m)
+
+    wrapped ok(m)
+    assert-eq({a: 1, w: 1}, put(wrapped, "w", 1))
+    assert-eq({a: 1}, m)
+}
+
+test-an-error-partway-through-a-reduce
+meta ["test"] fn () {
+    start {s: 0}
+    // An Err from the reducer halts the reduce; `contain` returns the halt.
+    halted ::hot::internal::exec/contain(() { reduce([1, 2, 3, 4], fails-at, start) })
+    assert(is-err(halted), "the reduce stops at the Err")
+    assert-eq({s: 0}, start)
+    // The accumulator the failing step received is not what a later
+    // reduce starts from.
+    fine reduce([1, 2], fails-at, start)
+    assert-eq({s: 0, k1: 1, k2: 2}, fine)
+    assert-eq({s: 0}, start)
+
+    // A halt inside a writer's argument, with the collection already read.
+    failed ::hot::internal::exec/contain(() { assoc(start, "k", fail("no value")) })
+    assert(is-err(failed), "the call never ran")
+    assert-eq({s: 0}, start)
+    assert-eq({s: 0, k: 1}, assoc(start, "k", 1))
+
+    stopped reduce([1, 2, 3, 4], (acc, x) {
+        if(eq(x, 3), reduced(acc), [...acc, x])
+    }, [])
+    assert-eq([1, 2], stopped)
+}
+
+test-parallel-and-collecting-flows
+meta ["test"] fn () {
+    base {a: 1}
+    both parallel {
+        left assoc(base, "l", 1)
+        right assoc(base, "r", 2)
+        joined merge(left, right)
+    }
+
+    assert-eq({a: 1, l: 1}, both.left)
+    assert-eq({a: 1, r: 2}, both.right)
+    assert-eq({a: 1, l: 1, r: 2}, both.joined)
+    assert-eq({a: 1}, base)
+
+    all: All<Vec> cond-all {
+        true => { assoc(base, "x", 1) }
+        true => { assoc(base, "y", 2) }
+    }
+
+    assert-eq([{a: 1, x: 1}, {a: 1, y: 2}], all)
+    assert-eq({a: 1}, base)
+
+    each pmap([1, 2, 3], (n) { assoc(base, "n", n) })
+    assert-eq([{a: 1, n: 1}, {a: 1, n: 2}, {a: 1, n: 3}], each)
+    assert-eq({a: 1}, base)
+
+    steps: All<Vec> serial {
+        one assoc(base, "s", 1)
+        two assoc(one, "s", 2)
+    }
+
+    assert-eq([{a: 1, s: 1}, {a: 1, s: 2}], steps)
+}
+
+test-a-local-that-shadows-a-function-still-shadows-it
+meta ["test"] fn () {
+    // After its last read as a value, a call through the name still finds
+    // the local, not the core function.
+    count [1, 2]
+    n length(count)
+    called count([1, 2, 3])
+    assert-eq(2, n)
+    assert(is-err(called), "a Vec is not callable")
+}
