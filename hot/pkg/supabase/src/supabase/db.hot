@@ -590,7 +590,7 @@ fn (request: InsertRequest): Str {
 insert-headers
 meta {no-doc: true}
 fn (request: InsertRequest): Map {
-  should-return or(request.return, true)
+  should-return if(is-null(request.return), true, request.return)
   prefer-parts [
     if(should-return, "return=representation", "return=minimal")
   ]
@@ -809,7 +809,7 @@ fn (table: Str, filters: Vec<Str>): Str {
 mutation-headers
 meta {no-doc: true}
 fn (return-rows: Bool?, count: CountMode?, schema: Str?): Map {
-  should-return or(return-rows, true)
+  should-return if(is-null(return-rows), true, return-rows)
   prefer-parts [
     if(should-return, "return=representation", "return=minimal")
   ]
@@ -1178,7 +1178,7 @@ fn (request: UpsertRequest): Map {
       => { "resolution=merge-duplicates" }
   }
 
-  should-return or(request.return, true)
+  should-return if(is-null(request.return), true, request.return)
   prefer-parts []
   prefer-parts concat(prefer-parts, [resolution])
   prefer-parts if(should-return, concat(prefer-parts, ["return=representation"]), concat(prefer-parts, ["return=minimal"]))
