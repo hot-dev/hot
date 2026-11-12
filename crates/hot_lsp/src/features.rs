@@ -1,10 +1,10 @@
 //! Request handlers that answer from the index and one document.
 
-use crate::index::{Def, DocContext, Index, Resolved, Scope};
+use crate::index::{Def, DocContext, Index, Resolved, Resolver, Scope};
 use crate::render;
 use crate::syntax::{
-    CompletionContext, Key, KeyOwner, LocalKind, OutlineItem, OutlineKind, RefPath, ValueShape,
-    WhereSubject,
+    ArgRef, CompletionContext, Key, KeyOwner, Local, LocalKind, OutlineItem, OutlineKind, RefPath,
+    ValueShape, WhereSubject,
 };
 use crate::text::{Document, LineIndex};
 use ahash::{AHashMap, AHashSet};
@@ -159,7 +159,25 @@ fn placeholder_fields(
     )
 }
 
+/// The parameter a precondition's `%.name` names, as a local.
+fn arg_local(arg: &ArgRef) -> Local {
+    Local {
+        name: arg.name.clone(),
+        start: arg.param_start,
+        end: arg.param_end,
+        scope: (arg.param_start, arg.param_end),
+        visible_from: arg.param_start,
+        kind: LocalKind::Param(arg.annotation.clone()),
+    }
+}
+
 pub fn hover(index: &Index, doc: &Document, ctx: &DocContext, offset: usize) -> Option<Hover> {
+    // `%.amount` in a precondition: the parameter.
+    if let Some(arg) = ctx.arg_ref_at(offset) {
+        let mut hover = markdown(render::local_hover(&arg_local(arg)));
+        hover.range = Some(doc.char_range(arg.start, arg.end - arg.start));
+        return Some(hover);
+    }
     // `%`: what it stands for where it is written.
     if let Some((start, end)) = ctx.syntax.placeholder_at(offset) {
         let value = match ctx.syntax.where_subject(&ctx.text, offset) {
@@ -228,6 +246,12 @@ pub fn definition(
     offset: usize,
     files: &mut Files<'_>,
 ) -> Option<Location> {
+    if let Some(arg) = ctx.arg_ref_at(offset) {
+        return Some(Location::new(
+            uri.clone(),
+            doc.char_range(arg.param_start, arg.param_end - arg.param_start),
+        ));
+    }
     // A key: the type that declares the field.
     if let Some(key) = ctx.syntax.key_at(offset) {
         let scope = Scope::new(index, ctx, offset);
@@ -713,6 +737,18 @@ pub fn reference_target(
     offset: usize,
     files: &mut Files<'_>,
 ) -> Option<(Target, Option<Location>)> {
+    if let Some(arg) = ctx.arg_ref_at(offset) {
+        return Some((
+            Target::Local {
+                uri: uri.clone(),
+                start: arg.param_start,
+            },
+            Some(Location::new(
+                uri.clone(),
+                doc.char_range(arg.param_start, arg.param_end - arg.param_start),
+            )),
+        ));
+    }
     let path = ctx.syntax.path_at(offset)?;
     if path.cursor_member.is_some() {
         return None;
@@ -761,6 +797,26 @@ pub fn references_in(
     }
     let ctx = DocContext::new(text);
     let lines = LineIndex::new(text);
+    for site in reference_sites(index, &ctx, target) {
+        out.push(Location::new(
+            uri.clone(),
+            lines.char_range(text, site.start, site.end - site.start),
+        ));
+    }
+}
+
+/// A name in a document that refers to the target of a search.
+pub struct RefSite {
+    /// Char span of the name.
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Each name in a document that refers to `target`, its declaration
+/// included, in source order.
+pub fn reference_sites(index: &Index, ctx: &DocContext, target: &Target) -> Vec<RefSite> {
+    let mut sites = Vec::new();
+    let mut resolver = Resolver::new(index, ctx);
     for syntax in ctx.syntax.all_scopes() {
         for path in syntax.references() {
             let Some(path_name) = path.name.as_deref() else {
@@ -770,25 +826,41 @@ pub fn references_in(
                 Target::Local { start, .. } => {
                     path.ns.is_none()
                         && matches!(
-                            Scope::new(index, &ctx, path.name_start).resolve(&head(&path)),
+                            resolver.resolve(&head(&path), path.name_start),
                             Some(Resolved::Local(local)) if local.start == *start
                         )
                 }
                 Target::Def { qualified, name } => {
                     path_name == name
-                        && Scope::new(index, &ctx, path.name_start)
-                            .resolve_def(&head(&path))
-                            .is_some_and(|def| def.qualified() == *qualified)
+                        && matches!(
+                            resolver.resolve(&head(&path), path.name_start),
+                            Some(Resolved::Def(def)) if def.qualified() == *qualified
+                        )
                 }
             };
             if matches {
-                out.push(Location::new(
-                    uri.clone(),
-                    lines.char_range(text, path.name_start, path.name_end - path.name_start),
-                ));
+                sites.push(RefSite {
+                    start: path.name_start,
+                    end: path.name_end,
+                });
             }
         }
     }
+    // `%.amount` in a precondition names the parameter `amount`.
+    if let Target::Local { start, .. } = target {
+        sites.extend(
+            ctx.arg_refs
+                .iter()
+                .filter(|arg| arg.param_start == *start)
+                .map(|arg| RefSite {
+                    start: arg.start,
+                    end: arg.end,
+                }),
+        );
+    }
+    sites.sort_unstable_by_key(|site| site.start);
+    sites.dedup_by_key(|site| site.start);
+    sites
 }
 
 /// Project definitions whose name contains `query` (case-insensitively).
@@ -1078,6 +1150,77 @@ pick fn match (r: Result): Any {
             arguments.contains("amount: Int, balance: Int"),
             "{arguments}"
         );
+    }
+
+    /// The text of every reference to what is `delta` chars into the
+    /// first `needle`, with the line each is on.
+    fn references_at(index: &Index, text: &str, needle: &str, delta: usize) -> Vec<String> {
+        let uri: Uri = "file:///app.hot".parse().unwrap();
+        let doc = Document::new(text.to_string(), 0);
+        let ctx = DocContext::new(text);
+        let open = AHashMap::new();
+        let mut files = Files::new(Path::new("/"), &open);
+        let offset = offset_of(text, needle) + delta;
+        let Some((target, _)) = reference_target(index, &uri, &doc, &ctx, offset, &mut files)
+        else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        references_in(index, &uri, text, &target, &mut locations);
+        locations
+            .iter()
+            .map(|location| {
+                let line = doc.lines.line(text, location.range.start.line as usize);
+                let (start, end) = (
+                    location.range.start.character as usize,
+                    location.range.end.character as usize,
+                );
+                format!("{}:{}", location.range.start.line + 1, &line[start..end])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_precondition_refers_to_its_parameters() {
+        let index = index();
+        // From the parameter, and from the `%.amount` that names it.
+        let expected = ["13:amount", "14:amount", "17:amount"];
+        assert_eq!(references_at(&index, APP, "amount: Int", 0), expected);
+        assert_eq!(references_at(&index, APP, "%.amount", 2), expected);
+        assert_eq!(
+            references_at(&index, APP, "sub(balance, amount)", 13),
+            expected
+        );
+        let hover = hover_at(&index, APP, "%.amount", 2).unwrap();
+        assert!(
+            hover.contains("amount: Int") && hover.contains("parameter"),
+            "{hover}"
+        );
+        // A record's `%.low` is a field, not a parameter.
+        assert!(references_at(&index, APP, "%.low", 2).is_empty());
+        // `%.qty` on a parameter's own constraint is a field of its type.
+        assert!(references_at(&index, APP, "%.qty, 0), bulk", 2).is_empty());
+
+        let doc = Document::new(APP.to_string(), 0);
+        let ctx = DocContext::new(APP);
+        let uri: Uri = "file:///app.hot".parse().unwrap();
+        let open = AHashMap::new();
+        let mut files = Files::new(Path::new("/"), &open);
+        let offset = offset_of(APP, "%.balance") + 2;
+        let location = definition(&index, &uri, &doc, &ctx, offset, &mut files).unwrap();
+        assert_eq!(location.range.start, Position::new(12, 26));
+    }
+
+    #[test]
+    fn a_variant_is_not_a_reference_to_the_type_of_its_name() {
+        let index = index();
+        // `Circle(Circle)` in `Shape`: the payload is the type, the variant
+        // isn't. `Shape.Circle(` names the variant.
+        assert_eq!(
+            references_at(&index, APP, "Circle type", 0),
+            ["6:Circle", "7:Circle"]
+        );
+        assert_eq!(hover_at(&index, APP, "Circle(Circle)", 0), None);
     }
 
     #[test]
