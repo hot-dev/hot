@@ -60,9 +60,10 @@ apply(3, add(%, 1))   // 4
 A `lazy` parameter is the exception. It holds a deferred argument, so calling
 its name still calls the function.
 
-A function that a namespace declares or imports under a core function's name
-is the one its calls reach. `hot check` checks those calls against it, not
-against the core function:
+A function that a namespace defines under a core function's name takes that
+name for the whole namespace. Every bare call there reaches it: at any
+argument count, with a spread, in a pipe, as a value, above or below its
+definition. `hot check` checks those calls against it:
 
 ```hot
 add fn (a: Str, b: Str): Str { `${a} and ${b}` }
@@ -70,9 +71,11 @@ add fn (a: Str, b: Str): Str { `${a} and ${b}` }
 add("salt", "pepper")   // "salt and pepper"
 ```
 
-Here `add(1, 2)` is a `type-mismatch`, since this `add` takes two `Str`. A
-declared function takes the argument counts it declares: `add(1, 2, 3)` still
-reaches the core `add`. Other namespaces reach the core `add` as before.
+Here `add(1, 2)` is a `type-mismatch`, since this `add` takes two `Str`. And
+`add(1, 2, 3)` is an `arity-mismatch`. It does not reach the core `add`. Call
+the core function by its path, `::hot::math/add(1, 2, 3)`, or give yours
+another name. A function imported under a core name works the same way.
+Other namespaces still reach the core `add`.
 
 ## Qualified Calls
 

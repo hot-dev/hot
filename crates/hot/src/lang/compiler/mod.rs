@@ -191,6 +191,12 @@ pub struct Compiler {
     /// Pre-extracted set of all known function names (populated before bytecode compilation)
     /// Used to distinguish function references from type/variable references at compile time
     known_functions: AHashSet<String>,
+    /// `namespace/name` of each function a namespace defines under the name
+    /// of a core function, hot-std's own core functions aside. A bare
+    /// `name` in that namespace is this function at every argument count
+    /// and wherever in the namespace it is defined (see
+    /// [`Self::shadows_core_function`]).
+    core_named_functions: AHashSet<String>,
     /// The known functions that construct a unit enum variant (`::ns/Type.Variant`
     /// with no payload). A reference to one is the variant's value.
     unit_variants: AHashSet<String>,
@@ -262,6 +268,7 @@ pub struct CompilerSeed {
     /// record: a call by that name reaches the value, not a function.
     namespace_values: AHashSet<String>,
     known_functions: AHashSet<String>,
+    core_named_functions: AHashSet<String>,
     unit_variants: AHashSet<String>,
     plain_payload_variants: AHashSet<String>,
     next_cond_id: u64,
@@ -382,6 +389,7 @@ impl Compiler {
             core_lazy_function_names: IndexMap::new(),
             namespace_values: AHashSet::new(),
             known_functions: AHashSet::new(),
+            core_named_functions: AHashSet::new(),
             unit_variants: AHashSet::new(),
             plain_payload_variants: AHashSet::new(),
             next_cond_id: 0,
@@ -417,6 +425,7 @@ impl Compiler {
             core_lazy_function_names: self.core_lazy_function_names.clone(),
             namespace_values: self.namespace_values.clone(),
             known_functions: self.known_functions.clone(),
+            core_named_functions: self.core_named_functions.clone(),
             unit_variants: self.unit_variants.clone(),
             plain_payload_variants: self.plain_payload_variants.clone(),
             next_cond_id: self.next_cond_id,
@@ -441,6 +450,7 @@ impl Compiler {
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
         compiler.namespace_values = seed.namespace_values;
         compiler.known_functions = seed.known_functions;
+        compiler.core_named_functions = seed.core_named_functions;
         compiler.unit_variants = seed.unit_variants;
         compiler.plain_payload_variants = seed.plain_payload_variants;
         compiler.next_cond_id = seed.next_cond_id;
@@ -968,6 +978,17 @@ impl Compiler {
                         // Add the qualified function name
                         self.known_functions.insert(qualified_name.clone());
                         user_fn_count += 1;
+
+                        // hot-std's own core functions are what the bare
+                        // name reaches everywhere already, on the direct
+                        // paths the runtime has for them.
+                        let std_core = Self::is_core_var(var)
+                            && crate::lang::runtime::native_core::is_hot_std_namespace(
+                                &namespace_str,
+                            );
+                        if !std_core && self.core_variables.contains(func_name) {
+                            self.core_named_functions.insert(qualified_name.clone());
+                        }
 
                         // Also add arity-specific variants for each overload
                         for fn_def in fn_defs {
@@ -3621,10 +3642,12 @@ impl Compiler {
                 if self.is_local_name(name) {
                     return None;
                 }
-                vec![
-                    format!("{}/{}", self.current_namespace, name),
-                    name.to_string(),
-                ]
+                let qualified = format!("{}/{}", self.current_namespace, name);
+                if self.shadows_core_function(name) {
+                    vec![qualified]
+                } else {
+                    vec![qualified, name.to_string()]
+                }
             }
             Value::Ref(Ref::Ns(ns_ref)) => {
                 let resolved_ns_ref = self.resolve_ns_ref_alias(ns_ref);
@@ -3715,9 +3738,14 @@ impl Compiler {
                 let mut candidates = vec![
                     format!("{}/{}/{}", self.current_namespace, name, arity),
                     format!("{}/{}", self.current_namespace, name),
-                    format!("{}/{}", name, arity), // arity-based
-                    name.to_string(),
                 ];
+                // The namespace's own function of a core function's name
+                // is the only one the call can reach.
+                if self.shadows_core_function(name) && !self.is_local_name(name) {
+                    return self.lazy_params_of(&candidates);
+                }
+                candidates.push(format!("{}/{}", name, arity)); // arity-based
+                candidates.push(name.to_string());
 
                 // Check symbol table for function aliases
                 let alias_key = format!("{}/{}", self.current_namespace, name);
@@ -3752,11 +3780,16 @@ impl Compiler {
             _ => vec![],
         };
 
+        self.lazy_params_of(&function_name)
+    }
+
+    /// The lazy parameters of the first of `names` that has any recorded.
+    fn lazy_params_of(&self, names: &[String]) -> (Vec<bool>, bool) {
         // Look up function ID and get lazy params from function info
         // We check both function_mapping and core_functions because they store different key spaces:
         // - function_mapping: signature keys and arity keys (e.g., "::hot::meta/get/1")
         // - core_functions: qualified and unqualified names (e.g., "::hot::meta/get", "get")
-        for name in &function_name {
+        for name in names {
             // Check compiled functions for lazy parameter info
             if let Some(&function_id) = self.function_mapping.get(name)
                 && let Some(function_info) = self.program.functions.get(function_id as usize)
@@ -3856,6 +3889,7 @@ impl Compiler {
                         .get(name)
                         .is_some_and(|q| q.ends_with("::bool/if"))
                     // ...and nothing user-defined may shadow it in this namespace.
+                    && !self.shadows_core_function(name)
                     && !self
                         .function_mapping
                         .contains_key(&format!("{}/if", self.current_namespace))
@@ -4027,6 +4061,7 @@ impl Compiler {
                         .core_lazy_function_names
                         .get(name)
                         .is_some_and(|q| q.ends_with(&format!("::bool/{}", name)))
+                    && !self.shadows_core_function(name)
                     && !self
                         .function_mapping
                         .contains_key(&format!("{}/{}", self.current_namespace, name))
@@ -4452,6 +4487,10 @@ impl Compiler {
                     lookup_key = key;
                 }
 
+                // The namespace's own function of a core function's name:
+                // the only function this call can reach.
+                let shadows_core = !shadowed_by_local && self.shadows_core_function(function_name);
+
                 // Fallback to arity-based lookup (qualified first for correct scoping)
                 if !shadowed_by_local && function_id.is_none() {
                     let arity_key = format!("{}/{}", function_name, arity);
@@ -4463,12 +4502,14 @@ impl Compiler {
                     } else if let Some(&id) = self.function_mapping.get(&qualified_function_name) {
                         function_id = Some(id);
                         lookup_key = qualified_function_name.clone();
-                    } else if let Some(&id) = self.function_mapping.get(&arity_key) {
-                        function_id = Some(id);
-                        lookup_key = arity_key;
-                    } else if let Some(&id) = self.function_mapping.get(function_name) {
-                        function_id = Some(id);
-                        lookup_key = function_name.to_string();
+                    } else if !shadows_core {
+                        if let Some(&id) = self.function_mapping.get(&arity_key) {
+                            function_id = Some(id);
+                            lookup_key = arity_key;
+                        } else if let Some(&id) = self.function_mapping.get(function_name) {
+                            function_id = Some(id);
+                            lookup_key = function_name.to_string();
+                        }
                     }
                 }
 
@@ -4486,6 +4527,18 @@ impl Compiler {
                     function_id = None;
                 }
 
+                // The name a call by name carries. A bare name is looked up
+                // when the call runs, core functions first. The namespace's
+                // own function of a core function's name goes by its
+                // qualified name, which is that function or nothing.
+                let called_name = || {
+                    if shadows_core && !call_local_value {
+                        qualified_function_name.clone()
+                    } else {
+                        function_name.to_string()
+                    }
+                };
+
                 if has_spread {
                     // For spread calls, use the simple function name in a register
                     // This allows runtime to resolve core functions like Vec correctly
@@ -4493,7 +4546,7 @@ impl Compiler {
                     let function_name_reg = self.allocate_register();
                     let function_name_constant = self
                         .program
-                        .add_constant(Constant::Val(function_name.to_string().into()));
+                        .add_constant(Constant::Val(called_name().into()));
 
                     // Load function name into register, or the local value
                     if call_local_value {
@@ -4594,7 +4647,7 @@ impl Compiler {
                     let function_name_reg = self.allocate_register();
                     let function_name_constant = self
                         .program
-                        .add_constant(Constant::Val(function_name.into()));
+                        .add_constant(Constant::Val(called_name().into()));
 
                     // Load function name into register, or the local value
                     if call_local_value {
@@ -5024,6 +5077,9 @@ impl Compiler {
                 // `length` past a namespace's own, and past a local.
                 let shadowed_by_local = self.is_local_name(function_name);
                 let qualified_name = format!("{}/{}", self.current_namespace, function_name);
+                // The namespace's own function of a core function's name
+                // (see `compile_function_call`).
+                let shadows_core = !shadowed_by_local && self.shadows_core_function(function_name);
                 let function_id = if shadowed_by_local {
                     None
                 } else {
@@ -5031,10 +5087,13 @@ impl Compiler {
                         .get(&format!("{}/{}", qualified_name, total_args))
                         .or_else(|| self.function_mapping.get(&qualified_name))
                         .or_else(|| {
+                            if shadows_core {
+                                return None;
+                            }
                             self.function_mapping
                                 .get(&format!("{}/{}", function_name, total_args))
+                                .or_else(|| self.function_mapping.get(function_name))
                         })
-                        .or_else(|| self.function_mapping.get(function_name))
                         .copied()
                         // A function defined in another function's body is
                         // callable by id only from inside that body.
@@ -5079,10 +5138,14 @@ impl Compiler {
                     );
                 } else {
                     // Function not found in mapping, store function name in a register and call it
+                    let called_name = if shadows_core {
+                        qualified_name
+                    } else {
+                        function_name.to_string()
+                    };
                     let function_name_reg = self.allocate_register();
-                    let function_name_constant = self
-                        .program
-                        .add_constant(Constant::Val(function_name.into()));
+                    let function_name_constant =
+                        self.program.add_constant(Constant::Val(called_name.into()));
 
                     self.emit_instruction(Instruction::LoadConst {
                         dest: function_name_reg,
@@ -8156,6 +8219,25 @@ impl Compiler {
     /// (see `local_names`).
     fn is_local_name(&self, name: &str) -> bool {
         self.local_names.iter().any(|local| local == name)
+    }
+
+    /// Whether the current namespace defines a function `name` that shares
+    /// its name with a core function. A bare `name` there is the namespace's
+    /// function, whatever the call passes and wherever the function is
+    /// defined: never the core one, which stays reachable by its qualified
+    /// name.
+    ///
+    /// Such a call must not reach the runtime by its bare name. The lookup
+    /// there tries the core function's direct paths first, so a call the
+    /// compiler couldn't bind to the namespace's function (another argument
+    /// count, a spread, a function defined further down) ran the core
+    /// function when the arguments suited it and the namespace's otherwise.
+    /// It goes by the qualified name instead.
+    fn shadows_core_function(&self, name: &str) -> bool {
+        !self.core_named_functions.is_empty()
+            && self
+                .core_named_functions
+                .contains(&format!("{}/{}", self.current_namespace, name))
     }
 
     /// The parameter names of `function_id` that bind values: lazy
