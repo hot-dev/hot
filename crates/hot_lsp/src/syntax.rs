@@ -7,9 +7,11 @@
 //! under the cursor, the call the cursor is in, and the local bindings and
 //! parameters in scope. Offsets are char offsets, as the lexer reports them.
 
+mod lexemes;
 mod outline;
 
 use hot::lang::lexer::{KeywordKind, Lexer, TokenType};
+pub use lexemes::LexemeKind;
 pub use outline::{OutlineItem, OutlineKind};
 
 /// A token with its char span.
@@ -503,9 +505,17 @@ impl Syntax {
         i
     }
 
-    /// Namespace declarations (`::a::b ns`, `::a::b meta {...} ns`), with
-    /// the char offset where each starts.
+    /// Namespace declarations, with the char offset where each starts.
     pub fn ns_decls(&self) -> Vec<(usize, String)> {
+        self.ns_decl_tokens()
+            .into_iter()
+            .map(|(start, path, _)| (self.toks[start].start, path))
+            .collect()
+    }
+
+    /// Namespace declarations (`::a::b ns`, `::a::b meta {...} ns`): the
+    /// token each starts at, its path, and its `ns` token.
+    fn ns_decl_tokens(&self) -> Vec<(usize, String, usize)> {
         let mut decls = Vec::new();
         for i in self.top_level_statements() {
             let Some((path, mut j)) = self.ns_path_at(i) else {
@@ -529,7 +539,7 @@ impl Syntax {
                 j = self.skip_newlines(j);
             }
             if j < self.toks.len() && self.toks[j].ident() == Some("ns") {
-                decls.push((self.toks[i].start, path));
+                decls.push((i, path, j));
             }
         }
         decls

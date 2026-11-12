@@ -104,7 +104,7 @@ impl Syntax {
 
     /// The token after a `meta` value when `meta` is at token `i`, and
     /// whether the value marks a test.
-    fn meta_end(&self, i: usize) -> Option<(usize, bool)> {
+    pub(super) fn meta_end(&self, i: usize) -> Option<(usize, bool)> {
         if self.name_at(i) != Some("meta") {
             return None;
         }

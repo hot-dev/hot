@@ -19,6 +19,7 @@ mod features;
 mod index;
 mod rename;
 mod render;
+mod semantic;
 mod syntax;
 mod text;
 mod transport;
@@ -189,6 +190,8 @@ struct State {
     symbol_tree: AtomicBool,
     /// Whether the client takes workspace edits that name document versions.
     versioned_edits: AtomicBool,
+    /// Whether the client asks for semantic tokens again when told to.
+    semantic_refresh: AtomicBool,
     /// Whether the client sent `shutdown` (then `exit` is a clean exit).
     shutdown: Arc<AtomicBool>,
     /// REPL session for stateful evaluation
@@ -216,6 +219,7 @@ impl Backend {
                 dynamic_watchers: AtomicBool::new(false),
                 symbol_tree: AtomicBool::new(false),
                 versioned_edits: AtomicBool::new(false),
+                semantic_refresh: AtomicBool::new(false),
                 shutdown,
                 repl_session: tokio::sync::Mutex::new(None),
             }),
@@ -334,6 +338,16 @@ impl State {
                 project_files: output.project_files.clone(),
                 generation,
             });
+            // Semantic tokens depend on what names resolve to: have the
+            // client ask again. It answers after this check is applied.
+            if self.semantic_refresh.load(Ordering::SeqCst) {
+                let client = self.client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.semantic_tokens_refresh().await {
+                        tracing::debug!("Semantic tokens refresh failed: {e}");
+                    }
+                });
+            }
         }
 
         let mut published = self.published.lock().await;
@@ -493,6 +507,16 @@ impl LanguageServer for Backend {
             self.state
                 .versioned_edits
                 .store(versioned_edits, Ordering::SeqCst);
+            let semantic_refresh = params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|w| w.semantic_tokens.as_ref())
+                .and_then(|s| s.refresh_support)
+                .unwrap_or(false);
+            self.state
+                .semantic_refresh
+                .store(semantic_refresh, Ordering::SeqCst);
             self.state.load_workspace(client_root(&params)).await;
 
             Ok(InitializeResult {
@@ -534,6 +558,15 @@ impl LanguageServer for Backend {
                     document_formatting_provider: Some(OneOf::Left(true)),
                     workspace_symbol_provider: Some(OneOf::Left(true)),
                     document_symbol_provider: Some(OneOf::Left(true)),
+                    semantic_tokens_provider: Some(
+                        SemanticTokensOptions {
+                            legend: semantic::legend(),
+                            range: Some(true),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            work_done_progress_options: Default::default(),
+                        }
+                        .into(),
+                    ),
                     rename_provider: Some(OneOf::Right(RenameOptions {
                         prepare_provider: Some(true),
                         work_done_progress_options: Default::default(),
@@ -1012,6 +1045,40 @@ impl LanguageServer for Backend {
         .await
     }
 
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> JsonRpcResult<Option<SemanticTokensResult>> {
+        self.guard("semanticTokens/full", async {
+            Ok(self
+                .semantic_tokens(&params.text_document.uri, None)
+                .map(|data| {
+                    SemanticTokensResult::Tokens(SemanticTokens {
+                        result_id: None,
+                        data,
+                    })
+                }))
+        })
+        .await
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> JsonRpcResult<Option<SemanticTokensRangeResult>> {
+        self.guard("semanticTokens/range", async {
+            Ok(self
+                .semantic_tokens(&params.text_document.uri, Some(params.range))
+                .map(|data| {
+                    SemanticTokensRangeResult::Tokens(SemanticTokens {
+                        result_id: None,
+                        data,
+                    })
+                }))
+        })
+        .await
+    }
+
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -1103,6 +1170,16 @@ fn added_diagnostic<'a>(
 }
 
 impl Backend {
+    /// The semantic tokens of a document, of all of it or of the lines of
+    /// `range`.
+    fn semantic_tokens(&self, uri: &Uri, range: Option<Range>) -> Option<Vec<SemanticToken>> {
+        let doc = self.doc(uri).filter(|_| is_hot(uri))?;
+        let ctx = DocContext::new(&doc.text);
+        let snapshot = self.snapshot();
+        let tokens = semantic::tokens(&snapshot.index, &ctx);
+        Some(semantic::encode(&doc, &tokens, range))
+    }
+
     /// The snapshot of a check of the text as it is now, waiting for a
     /// check that is running. A rename edits by what the snapshot resolves,
     /// so it needs one that parsed every file as it is.

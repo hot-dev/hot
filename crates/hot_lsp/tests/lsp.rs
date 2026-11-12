@@ -1097,3 +1097,202 @@ async fn outline_and_rename() {
 
     client.shutdown().await;
 }
+
+const PAINT: &str = r#"::app::paint ns
+
+Shade enum { Light, Dark }
+Pixel type { x: Int, shade: Shade }
+
+mix fn (a: Pixel, amount: Int)
+    where lte(%.amount, 100)
+    : Pixel
+{
+    note `é 🎉 ${amount} of ${a.x}`
+    Pixel(x: add(a.x, amount), shade: Shade.Dark)
+}
+"#;
+
+/// Semantic tokens as `(line, "word:type.modifier")`, decoded from the
+/// protocol's relative UTF-16 positions against `text`.
+fn decode_tokens(data: &Value, text: &str, legend: &Value) -> Vec<(usize, String)> {
+    let lines: Vec<Vec<u16>> = text.lines().map(|l| l.encode_utf16().collect()).collect();
+    let data: Vec<usize> = data
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let (mut line, mut column) = (0, 0);
+    let mut out = Vec::new();
+    for token in data.chunks(5) {
+        if token[0] > 0 {
+            line += token[0];
+            column = token[1];
+        } else {
+            column += token[1];
+        }
+        let word = String::from_utf16(&lines[line][column..column + token[2]]).unwrap();
+        let mut class = legend["tokenTypes"][token[3]].as_str().unwrap().to_string();
+        let modifiers = legend["tokenModifiers"].as_array().unwrap();
+        for (bit, modifier) in modifiers.iter().enumerate() {
+            if token[4] >> bit & 1 == 1 {
+                class.push('.');
+                class.push_str(modifier.as_str().unwrap());
+            }
+        }
+        out.push((line, format!("{word}:{class}")));
+    }
+    out
+}
+
+/// Semantic tokens, through the protocol.
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    write(&root, "hot.hot", HOT_HOT);
+    let paint = write(&root, "hot/src/app/paint.hot", PAINT);
+
+    let (mut client, capabilities) = Client::start_with(
+        &root,
+        json!({"workspace": {"semanticTokens": {"refreshSupport": true}}}),
+    )
+    .await;
+    let provider = &capabilities["semanticTokensProvider"];
+    assert_eq!(provider["full"], true);
+    assert_eq!(provider["range"], true);
+    let legend = provider["legend"].clone();
+    let since = client.mark();
+    client.open(&paint, PAINT).await;
+    let diagnostics = client.diagnostics(&paint, since, |_| true).await;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let document = json!({"uri": uri(&paint)});
+    let full = client
+        .request(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": document}),
+        )
+        .await;
+    let tokens = decode_tokens(&full["data"], PAINT, &legend);
+    let line = |n: usize| -> Vec<&str> {
+        tokens
+            .iter()
+            .filter(|(line, _)| *line == n)
+            .map(|(_, token)| token.as_str())
+            .collect()
+    };
+    assert_eq!(
+        line(0),
+        ["app:namespace", "paint:namespace", "ns:keyword.declaration"]
+    );
+    assert_eq!(
+        line(2),
+        [
+            "Shade:enum.declaration",
+            "enum:keyword.declaration",
+            "Light:enumMember.declaration",
+            "Dark:enumMember.declaration"
+        ]
+    );
+    assert_eq!(
+        line(3),
+        [
+            "Pixel:struct.declaration",
+            "type:keyword.declaration",
+            "x:property.declaration",
+            "Int:type.defaultLibrary",
+            "shade:property.declaration",
+            "Shade:enum"
+        ]
+    );
+    assert_eq!(
+        line(5),
+        [
+            "mix:function.declaration",
+            "fn:keyword.declaration",
+            "a:parameter.declaration",
+            "Pixel:struct",
+            "amount:parameter.declaration",
+            "Int:type.defaultLibrary"
+        ]
+    );
+    // `where` is a keyword, and `%.amount` the parameter.
+    assert_eq!(
+        line(6),
+        [
+            "where:keyword.declaration",
+            "lte:function.defaultLibrary",
+            "%:parameter.defaultLibrary",
+            "amount:parameter"
+        ]
+    );
+    // In template expressions, after an emoji: UTF-16 columns.
+    assert_eq!(
+        line(9),
+        [
+            "note:variable.declaration",
+            "amount:parameter",
+            "a:parameter",
+            "x:property"
+        ]
+    );
+    // A named argument's label is a property, and its value a name.
+    assert_eq!(
+        line(10),
+        [
+            "Pixel:struct",
+            "x:property",
+            "add:function.defaultLibrary",
+            "a:parameter",
+            "x:property",
+            "amount:parameter",
+            "shade:property",
+            "Shade:enum",
+            "Dark:enumMember"
+        ]
+    );
+
+    // A range: the tokens of its lines.
+    let ranged = client
+        .request(
+            "textDocument/semanticTokens/range",
+            json!({
+                "textDocument": document,
+                "range": {"start": {"line": 6, "character": 0}, "end": {"line": 6, "character": 40}},
+            }),
+        )
+        .await;
+    let ranged = decode_tokens(&ranged["data"], PAINT, &legend);
+    assert_eq!(ranged.len(), 4, "{ranged:?}");
+    assert!(ranged.iter().all(|(line, _)| *line == 6), "{ranged:?}");
+
+    // What a name is depends on the check, so the server asks the client
+    // to fetch tokens again after one.
+    assert!(
+        client
+            .notes
+            .iter()
+            .any(|note| note["method"] == "workspace/semanticTokens/refresh"),
+        "no refresh request"
+    );
+
+    // Text that doesn't parse still gets tokens.
+    let typing = format!("{PAINT}\nnext fn (p: Pixel) {{\n    p.\n");
+    client.change(&paint, 2, &typing).await;
+    let full = client
+        .request(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": document}),
+        )
+        .await;
+    let tokens = decode_tokens(&full["data"], &typing, &legend);
+    let last: Vec<&str> = tokens
+        .iter()
+        .filter(|(line, _)| *line == 13)
+        .map(|(_, token)| token.as_str())
+        .collect();
+    assert_eq!(last, ["fn:keyword.declaration", "Pixel:struct"]);
+
+    client.shutdown().await;
+}
