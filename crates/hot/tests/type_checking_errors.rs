@@ -1132,6 +1132,80 @@ mod type_checking_tests {
             .collect()
     }
 
+    /// The unknown-field warnings of `files` compiled in the order given.
+    fn unknown_fields_of(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        let (errors, warnings) = compile_files(files);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+        unknown_fields(&warnings)
+    }
+
+    // A top-level annotation means what its own namespace reads it as,
+    // wherever the variable is used from. Two namespaces each declare a
+    // `Config`; which one the program loads last must not matter.
+    #[test]
+    fn test_annotations_resolve_in_their_namespace_in_any_file_order() {
+        let models = (
+            "models.hot",
+            "::cor::models::v1 ns\nConfig type { port: Int }\n",
+        );
+        let other = ("other.hot", "::cor::other ns\nConfig type { host: Str }\n");
+        // Through a namespace alias, a var import of the type, and the
+        // namespace's own type of that name.
+        let aliased = (
+            "x.hot",
+            "::cor::x ns\n::m ::cor::models::v1\ncfg: ::m/Config ::m/Config({port: 80})\n",
+        );
+        let imported = (
+            "x.hot",
+            "::cor::x ns\nConfig ::cor::models::v1/Config\ncfg: Config Config({port: 80})\n",
+        );
+        let own = (
+            "x.hot",
+            "::cor::x ns\nConfig type { port: Int }\ncfg: Config Config({port: 80})\n",
+        );
+        // Through an alias again, with the value a plain call.
+        let called = (
+            "x.hot",
+            "::cor::x ns\n::m ::cor::models::v1\nmake fn (): ::m/Config { ::m/Config({port: 80}) }\ncfg: ::m/Config make()\n",
+        );
+        let reads = (
+            "y.hot",
+            "::cor::y ns\nc ::cor::x/cfg\np c.port\nread-port fn (): Int { c.port }\n",
+        );
+        let misreads = ("y.hot", "::cor::y ns\nc ::cor::x/cfg\nh c.host\n");
+
+        for declares in [aliased, imported, own, called] {
+            for order in [
+                [models, other, declares, reads],
+                [other, models, declares, reads],
+                [declares, reads, models, other],
+                [reads, declares, other, models],
+            ] {
+                assert_eq!(
+                    unknown_fields_of(&order),
+                    Vec::<(String, String)>::new(),
+                    "`port` is a field of the `Config` that `{}` names, in the order {:?}",
+                    declares.1,
+                    order.map(|(path, _)| path)
+                );
+            }
+            // The other namespace's `Config` has `host`. This one doesn't,
+            // in either order.
+            for order in [
+                [models, other, declares, misreads],
+                [other, models, declares, misreads],
+            ] {
+                assert_eq!(
+                    unknown_fields_of(&order),
+                    vec![("Config".to_string(), "host".to_string())],
+                    "`host` is no field of the `Config` that `{}` names, in the order {:?}",
+                    declares.1,
+                    order.map(|(path, _)| path)
+                );
+            }
+        }
+    }
+
     fn duplicate_core_names(warnings: &[CompilerError]) -> Vec<(String, String, String)> {
         warnings
             .iter()

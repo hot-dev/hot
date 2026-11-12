@@ -779,8 +779,8 @@ pub struct TypeChecker {
     variant_reads: AHashMap<String, Source>,
     /// Counts changes to the registries an annotation resolves against
     /// (`qualified_types`, `custom_constructors`, `core_types`,
-    /// `known_types`). Every write to one of them bumps it, which retires
-    /// `annotation_scratch`.
+    /// `known_types`, `type_imports`). Every write to one of them bumps it,
+    /// which retires `annotation_scratch`.
     registry_generation: u64,
     /// Annotations already parsed by [`Self::parse_type_annotation_pure`],
     /// with the checker that parses them.
@@ -792,7 +792,10 @@ pub struct TypeChecker {
 struct AnnotationScratch {
     generation: u64,
     checker: Box<TypeChecker>,
-    parsed: AHashMap<String, TypeExpr>,
+    /// The namespace `checker` is set to read annotations in.
+    namespace: Option<String>,
+    /// Namespace → annotation → what it resolves to there.
+    parsed: AHashMap<String, AHashMap<String, TypeExpr>>,
 }
 
 impl Default for TypeChecker {
@@ -1282,6 +1285,7 @@ impl TypeChecker {
                     .cloned();
                 match resolved {
                     Some(resolved) => {
+                        self.registry_generation += 1;
                         self.type_imports.insert(name.clone(), resolved);
                         false
                     }
@@ -1486,9 +1490,11 @@ impl TypeChecker {
                         return self.apply_annotation_constraint_pure(
                             self.infer_val_type(val),
                             var.type_annotation.as_deref(),
+                            ns_str,
+                            alias_map,
                         );
                     }
-                    self.parse_type_annotation_pure(annotation)
+                    self.parse_type_annotation_pure(annotation, ns_str, alias_map)
                 } else {
                     self.infer_val_type(val)
                 }
@@ -1502,14 +1508,14 @@ impl TypeChecker {
                         .map(|arg| {
                             arg.type_annotation
                                 .as_ref()
-                                .map(|s| self.parse_type_annotation_pure(s))
+                                .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                                 .unwrap_or(TypeExpr::Any)
                         })
                         .collect();
                     let ret = first
                         .return_type
                         .as_ref()
-                        .map(|s| self.parse_type_annotation_pure(s))
+                        .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                         .unwrap_or(TypeExpr::Any);
                     TypeExpr::Function(params, Box::new(ret))
                 } else {
@@ -1524,7 +1530,7 @@ impl TypeChecker {
                     .map(|arg| {
                         arg.type_annotation
                             .as_ref()
-                            .map(|s| self.parse_type_annotation_pure(s))
+                            .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                             .unwrap_or(TypeExpr::Any)
                     })
                     .collect();
@@ -1594,7 +1600,12 @@ impl TypeChecker {
             }
             _ => TypeExpr::Any,
         };
-        self.apply_annotation_constraint_pure(inferred, var.type_annotation.as_deref())
+        self.apply_annotation_constraint_pure(
+            inferred,
+            var.type_annotation.as_deref(),
+            ns_str,
+            alias_map,
+        )
     }
 
     /// Resolve a `Ref::Ns` to a fully-qualified `::ns/var` key and look it up
@@ -1678,7 +1689,18 @@ impl TypeChecker {
     /// pre-pass where we don't want to mutate the checker. Falls through to
     /// the regular parser; we only call it for declared annotations, which
     /// are the simple cases the parser already handles deterministically.
-    fn parse_type_annotation_pure(&self, annotation: &str) -> TypeExpr {
+    ///
+    /// The annotation is read as `namespace` reads it, through that
+    /// namespace's `aliases`, own types and var imports. Read with no
+    /// namespace, `::m/Config` kept its alias and `Config` found no type of
+    /// its own, and the leftover name then stood for whichever `Config` the
+    /// program declared last.
+    fn parse_type_annotation_pure(
+        &self,
+        annotation: &str,
+        namespace: &str,
+        aliases: &AHashMap<String, String>,
+    ) -> TypeExpr {
         // Most annotations are a built-in name, which needs no registry.
         if let Some(builtin) = self.try_resolve_builtin_type(annotation.trim()) {
             return builtin;
@@ -1686,11 +1708,12 @@ impl TypeChecker {
 
         // The mutating path is only "mutating" because it might emit errors;
         // for the pre-pass we discard those by routing through a scratch
-        // checker. Its answer depends only on the annotation and the four
-        // registries copied here, so one scratch serves every annotation
-        // until a registry changes. (Building a checker and cloning the
-        // registries per annotation made the pre-pass cost annotations x
-        // types: most of the type check on a large project.)
+        // checker. Its answer depends only on the annotation, the namespace
+        // it is read in and the registries copied here, so one scratch
+        // serves every annotation until a registry changes. (Building a
+        // checker and cloning the registries per annotation made the
+        // pre-pass cost annotations x types: most of the type check on a
+        // large project.)
         let mut slot = self.annotation_scratch.borrow_mut();
         if slot
             .as_ref()
@@ -1701,21 +1724,36 @@ impl TypeChecker {
             checker.custom_constructors = self.custom_constructors.clone();
             checker.core_types = self.core_types.clone();
             checker.known_types = self.known_types.clone();
+            checker.type_imports = self.type_imports.clone();
+            checker.held_namespaces = self.held_namespaces.clone();
+            checker.declared_names = self.declared_names.clone();
             *slot = Some(AnnotationScratch {
                 generation: self.registry_generation,
                 checker,
+                namespace: None,
                 parsed: AHashMap::new(),
             });
         }
         let scratch = slot.as_mut().expect("scratch was just ensured");
-        if let Some(parsed) = scratch.parsed.get(annotation) {
+        if let Some(parsed) = scratch
+            .parsed
+            .get(namespace)
+            .and_then(|parsed| parsed.get(annotation))
+        {
             return parsed.clone();
+        }
+        if scratch.namespace.as_deref() != Some(namespace) {
+            scratch.checker.context.current_namespace = namespace.to_string();
+            scratch.checker.context.set_current_aliases(aliases.clone());
+            scratch.namespace = Some(namespace.to_string());
         }
         let parsed = scratch.checker.parse_type_annotation(annotation, None);
         // Only the type is wanted; drop whatever the parse reported.
         scratch.checker.errors = CompilerErrors::new();
         scratch
             .parsed
+            .entry(namespace.to_string())
+            .or_default()
             .insert(annotation.to_string(), parsed.clone());
         parsed
     }
@@ -4038,11 +4076,13 @@ impl TypeChecker {
         &self,
         actual: TypeExpr,
         annotation: Option<&str>,
+        namespace: &str,
+        aliases: &AHashMap<String, String>,
     ) -> TypeExpr {
         let Some(annotation) = annotation else {
             return actual;
         };
-        let constraint = self.parse_type_annotation_pure(annotation);
+        let constraint = self.parse_type_annotation_pure(annotation, namespace, aliases);
         if matches!(constraint, TypeExpr::Map(_, _)) {
             return constraint;
         }
