@@ -3,7 +3,7 @@
 # change when the bare rust:1.100.0 tag moves to a newer Debian.
 FROM rust:1.100.0-bookworm AS builder
 
-ARG TAILWIND_VERSION=v4.3.3
+ARG TAILWIND_VERSION=v4.3.5
 
 # Download the Tailwind CSS standalone executable for the container
 # architecture, verified against the SHA-256 the script pins per asset.

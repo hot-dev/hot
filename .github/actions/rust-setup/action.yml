@@ -5,7 +5,7 @@ inputs:
     description: "Rust toolchain version (e.g., 1.100.0)"
     required: true
   tailwind-version:
-    description: "Tailwind CLI version (e.g., v4.3.3)"
+    description: "Tailwind CLI version (e.g., v4.3.5)"
     required: true
   save-cache:
     description: >-
@@ -115,7 +115,7 @@ runs:
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
 
     - name: Rust Cache
-      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         # Cache key based on Cargo files and toolchain
         key: ${{ inputs.rust-toolchain }}

@@ -36,8 +36,8 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # The app's stylesheet is generated at build time; CI pins the same release.
-ARG TAILWIND_VERSION=v4.3.0
-ARG TAILWIND_SHA256=73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400
+ARG TAILWIND_VERSION=v4.3.5
+ARG TAILWIND_SHA256=e47695cee3f0d90623a91f3939b08bdee610eb5ad99340adff9d4145b284d6cc
 RUN curl -fsSL -o /usr/local/bin/tailwindcss \
         "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
     && echo "${TAILWIND_SHA256}  /usr/local/bin/tailwindcss" | sha256sum --check - \
