@@ -91,7 +91,7 @@ fn
   files-info(request, {})
 },
 (request: FilesInfoRequest, opts: Map): FilesInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/files.info?file=${request.file}&count=${or(request.count, "")}&page=${or(request.page, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/files.info`, {file: request.file, count: request.count, page: request.page, limit: request.limit, cursor: request.cursor}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { FilesInfoResponse(response.body) }
@@ -407,7 +407,7 @@ fn
   files-remote-info(request, {})
 },
 (request: FilesRemoteInfoRequest, opts: Map): FilesRemoteInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.info?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/files.remote.info`, {file: request.file, external_id: request.external_id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { FilesRemoteInfoResponse(response.body) }
@@ -453,7 +453,7 @@ fn
   files-remote-list(request, {})
 },
 (request: FilesRemoteListRequest, opts: Map): FilesRemoteListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.list?channel=${or(request.channel, "")}&ts_from=${or(request.ts_from, "")}&ts_to=${or(request.ts_to, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/files.remote.list`, {channel: request.channel, ts_from: request.ts_from, ts_to: request.ts_to, limit: request.limit, cursor: request.cursor}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { FilesRemoteListResponse(response.body) }
@@ -536,7 +536,7 @@ fn
   files-remote-share(request, {})
 },
 (request: FilesRemoteShareRequest, opts: Map): FilesRemoteShareResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/files.remote.share?file=${or(request.file, "")}&external_id=${or(request.external_id, "")}&channels=${request.channels}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/files.remote.share`, {file: request.file, external_id: request.external_id, channels: request.channels}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { FilesRemoteShareResponse(response.body) }

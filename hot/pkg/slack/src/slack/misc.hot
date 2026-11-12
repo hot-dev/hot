@@ -85,7 +85,7 @@ fn
   auth-revoke(request, {})
 },
 (request: AuthRevokeRequest, opts: Map): AuthRevokeResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/auth.revoke?test=${or(request.test, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/auth.revoke`, {test: request.test}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { AuthRevokeResponse(response.body) }
@@ -130,7 +130,7 @@ fn
   api-test(request, {})
 },
 (request: ApiTestRequest, opts: Map): ApiTestResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/api.test?error=${or(request.error, "")}&foo=${or(request.foo, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/api.test`, {error: request.error, foo: request.foo}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ApiTestResponse(response.body) }
@@ -173,7 +173,7 @@ fn
   team-info(request, {})
 },
 (request: TeamInfoRequest, opts: Map): TeamInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.info?team=${or(request.team, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/team.info`, {team: request.team}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { TeamInfoResponse(response.body) }
@@ -224,7 +224,7 @@ fn
   team-access-logs(request, {})
 },
 (request: TeamAccessLogsRequest, opts: Map): TeamAccessLogsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.accessLogs?before=${or(request.before, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/team.accessLogs`, {before: request.before, count: request.count, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { TeamAccessLogsResponse(response.body) }
@@ -264,7 +264,7 @@ fn
   team-billable-info(request, {})
 },
 (request: TeamBillableInfoRequest, opts: Map): TeamBillableInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.billableInfo?user=${or(request.user, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/team.billableInfo`, {user: request.user}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { TeamBillableInfoResponse(response.body) }
@@ -311,7 +311,7 @@ fn
   team-integration-logs(request, {})
 },
 (request: TeamIntegrationLogsRequest, opts: Map): TeamIntegrationLogsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.integrationLogs?app_id=${or(request.app_id, "")}&change_type=${or(request.change_type, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&service_id=${or(request.service_id, "")}&user=${or(request.user, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/team.integrationLogs`, {app_id: request.app_id, change_type: request.change_type, count: request.count, page: request.page, service_id: request.service_id, user: request.user}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { TeamIntegrationLogsResponse(response.body) }
@@ -351,7 +351,7 @@ fn
   team-profile-get(request, {})
 },
 (request: TeamProfileGetRequest, opts: Map): TeamProfileGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/team.profile.get?visibility=${or(request.visibility, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/team.profile.get`, {visibility: request.visibility}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { TeamProfileGetResponse(response.body) }
@@ -440,7 +440,7 @@ fn
   dialog-open(request, {})
 },
 (request: DialogOpenRequest, opts: Map): DialogOpenResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dialog.open?dialog=${request.dialog}&trigger_id=${request.trigger_id}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/dialog.open`, {dialog: request.dialog, trigger_id: request.trigger_id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { DialogOpenResponse(response.body) }
@@ -490,7 +490,7 @@ fn
   migration-exchange(request, {})
 },
 (request: MigrationExchangeRequest, opts: Map): MigrationExchangeResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/migration.exchange?users=${request.users}&team_id=${or(request.team_id, "")}&to_old=${or(request.to_old, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/migration.exchange`, {users: request.users, team_id: request.team_id, to_old: request.to_old}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { MigrationExchangeResponse(response.body) }
