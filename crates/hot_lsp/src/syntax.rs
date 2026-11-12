@@ -7,7 +7,12 @@
 //! under the cursor, the call the cursor is in, and the local bindings and
 //! parameters in scope. Offsets are char offsets, as the lexer reports them.
 
+mod lexemes;
+mod outline;
+
 use hot::lang::lexer::{KeywordKind, Lexer, TokenType};
+pub use lexemes::LexemeKind;
+pub use outline::{OutlineItem, OutlineKind};
 
 /// A token with its char span.
 #[derive(Debug, Clone)]
@@ -123,6 +128,30 @@ pub enum WhereSubject {
     /// The arguments of a precondition, by parameter name, with each one's
     /// annotation: `fn (a: Int, b: Int) where lte(%.a, %.b)`.
     Args(Vec<(String, Option<String>)>),
+}
+
+/// A `%.name` in a precondition, which names a parameter:
+/// `fn (amount: Int) where gt(%.amount, 0)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArgRef {
+    pub name: String,
+    /// Char span of the name after `%.`.
+    pub start: usize,
+    pub end: usize,
+    /// Char span of the parameter's name where it is declared.
+    pub param_start: usize,
+    pub param_end: usize,
+    /// The parameter's annotation.
+    pub annotation: Option<String>,
+}
+
+/// A parameter where it is declared.
+#[derive(Debug, Clone)]
+struct Parameter {
+    name: String,
+    start: usize,
+    end: usize,
+    annotation: Option<String>,
 }
 
 /// The call the cursor is in, for signature help.
@@ -398,7 +427,7 @@ impl Syntax {
             return None;
         }
         let i = self.index_at(offset)?;
-        if !self.is_path_tok(i) || self.is_key(i) || self.is_where(i) {
+        if !self.is_path_tok(i) || self.is_label(i) || self.is_where(i) {
             return None;
         }
         let (first, last) = self.chain_around(i);
@@ -428,7 +457,7 @@ impl Syntax {
         let mut out = Vec::new();
         let mut i = 0;
         while i < self.toks.len() {
-            if self.is_key(i) || self.is_where(i) {
+            if self.is_label(i) || self.is_where(i) {
                 i += 1;
             } else if self.is_path_tok(i) {
                 let (first, last) = self.chain_around(i);
@@ -476,9 +505,17 @@ impl Syntax {
         i
     }
 
-    /// Namespace declarations (`::a::b ns`, `::a::b meta {...} ns`), with
-    /// the char offset where each starts.
+    /// Namespace declarations, with the char offset where each starts.
     pub fn ns_decls(&self) -> Vec<(usize, String)> {
+        self.ns_decl_tokens()
+            .into_iter()
+            .map(|(start, path, _)| (self.toks[start].start, path))
+            .collect()
+    }
+
+    /// Namespace declarations (`::a::b ns`, `::a::b meta {...} ns`): the
+    /// token each starts at, its path, and its `ns` token.
+    fn ns_decl_tokens(&self) -> Vec<(usize, String, usize)> {
         let mut decls = Vec::new();
         for i in self.top_level_statements() {
             let Some((path, mut j)) = self.ns_path_at(i) else {
@@ -502,7 +539,7 @@ impl Syntax {
                 j = self.skip_newlines(j);
             }
             if j < self.toks.len() && self.toks[j].ident() == Some("ns") {
-                decls.push((self.toks[i].start, path));
+                decls.push((i, path, j));
             }
         }
         decls
@@ -828,8 +865,8 @@ impl Syntax {
         })
     }
 
-    /// The char span of the `where` clause that contains `offset`. Its
-    /// predicate runs at namespace scope: the locals around it aren't its.
+    /// The char span of the `where` clause that contains `offset`.
+    #[cfg(test)]
     pub fn where_clause_at(&self, offset: usize) -> Option<(usize, usize)> {
         let scope = self.scope_at(offset);
         if !std::ptr::eq(scope, self) {
@@ -837,6 +874,23 @@ impl Syntax {
         }
         let w = self.where_token_at(offset)?;
         Some((self.toks[w].start, self.toks[self.where_end(w) - 1].end))
+    }
+
+    /// The char span of every `where` clause, in this document and its
+    /// template interpolations.
+    pub fn where_clauses(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for scope in self.all_scopes() {
+            for w in 0..scope.toks.len() {
+                if scope.is_where(w) {
+                    let end = scope.where_end(w);
+                    if end > w {
+                        out.push((scope.toks[w].start, scope.toks[end - 1].end));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The `%` at `offset`, if there is one: its char span.
@@ -872,9 +926,8 @@ impl Syntax {
             }
             // `fn (a: Int, b: Int) where`: the precondition.
             TokenType::RightParen => {
-                let open = self.partner[prev]?;
-                if self.declares_parameters(open) {
-                    return Some(WhereSubject::Args(self.parameters(&chars, open, prev)));
+                if let Some((open, close)) = self.precondition_parameters(w) {
+                    return Some(WhereSubject::Args(self.parameters(&chars, open, close)));
                 }
             }
             _ => {}
@@ -909,6 +962,117 @@ impl Syntax {
             }
         }
         None
+    }
+
+    /// The parameter list the `where` at token `w` is the precondition of:
+    /// its `(` and `)`. The list follows `fn`, or starts an arity on its own
+    /// line (`fn` then `(a) where p(%.a) { ... }, (a, b) ...`).
+    fn precondition_parameters(&self, w: usize) -> Option<(usize, usize)> {
+        let close = self.before_newlines(w)?;
+        if !self.toks[close].is(&TokenType::RightParen) {
+            return None;
+        }
+        let open = self.partner[close]?;
+        (self.declares_parameters(open) || !self.is_call_paren(open)).then_some((open, close))
+    }
+
+    /// The parameters a `%` at token `at` stands for the arguments of: those
+    /// of the precondition it is written in. `inherited` are the ones of the
+    /// precondition this whole token sequence is in (a template's `${...}`).
+    fn subject_parameters(
+        &self,
+        chars: &[char],
+        at: usize,
+        inherited: Option<&[Parameter]>,
+    ) -> Option<Vec<Parameter>> {
+        let clause = self.where_token_at(self.toks[at].start);
+        // Inside `%( ... )` the `%` is that lambda's parameter.
+        let outside = clause.and_then(|w| self.parent[w]);
+        let mut level = self.parent[at];
+        while level != outside {
+            let bracket = level?;
+            if bracket > 0
+                && matches!(self.toks[bracket - 1].kind, TokenType::Percent(_))
+                && self.adjacent(bracket - 1, bracket)
+            {
+                return None;
+            }
+            level = self.parent[bracket];
+        }
+        let Some(w) = clause else {
+            return inherited.map(<[Parameter]>::to_vec);
+        };
+        let (open, close) = self.precondition_parameters(w)?;
+        Some(
+            self.parameter_tokens(chars, open, close)
+                .into_iter()
+                .filter_map(|(p, annotation)| {
+                    Some(Parameter {
+                        name: self.toks[p].ident()?.to_string(),
+                        start: self.toks[p].start,
+                        end: self.toks[p].end,
+                        annotation,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn collect_arg_refs(
+        &self,
+        chars: &[char],
+        inherited: Option<&[Parameter]>,
+        out: &mut Vec<ArgRef>,
+    ) {
+        // `%.name`, written with no space.
+        for i in 2..self.toks.len() {
+            let Some(name) = self.toks[i].ident() else {
+                continue;
+            };
+            if !self.toks[i - 1].is(&TokenType::Dot)
+                || !matches!(self.toks[i - 2].kind, TokenType::Percent(0))
+                || !self.adjacent(i - 2, i - 1)
+                || !self.adjacent(i - 1, i)
+            {
+                continue;
+            }
+            let parameter = self
+                .subject_parameters(chars, i - 2, inherited)
+                .and_then(|parameters| parameters.into_iter().find(|p| p.name == name));
+            if let Some(parameter) = parameter {
+                out.push(ArgRef {
+                    name: name.to_string(),
+                    start: self.toks[i].start,
+                    end: self.toks[i].end,
+                    param_start: parameter.start,
+                    param_end: parameter.end,
+                    annotation: parameter.annotation,
+                });
+            }
+        }
+        // A template in a precondition: its `%` is the precondition's.
+        for inner in &self.interpolations {
+            let Some(first) = inner.toks.first() else {
+                continue;
+            };
+            let template = self.toks.iter().position(|t| {
+                matches!(t.kind, TokenType::TemplateString(_))
+                    && t.start <= first.start
+                    && first.start <= t.end
+            });
+            let parameters = template.and_then(|t| self.subject_parameters(chars, t, inherited));
+            inner.collect_arg_refs(chars, parameters.as_deref(), out);
+        }
+    }
+
+    /// Every `%.name` that names a parameter, in this document and its
+    /// template interpolations, in source order.
+    pub fn arg_refs(&self, text: &str) -> Vec<ArgRef> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        self.collect_arg_refs(&chars, None, &mut out);
+        out.sort_by_key(|arg| arg.start);
+        out
     }
 
     /// Whether the `(` at `open` starts a parameter list: after `fn`, or
@@ -1004,6 +1168,143 @@ impl Syntax {
     /// Whether the identifier at `i` is written as a key (see [`Key`]).
     fn is_key(&self, i: usize) -> bool {
         self.key_owner_bracket(i).is_some()
+    }
+
+    /// Whether token `t`, directly inside the bracket at `open`, starts an
+    /// entry: it follows the bracket, a `,` or a newline.
+    fn starts_entry(&self, open: usize, t: usize) -> bool {
+        self.parent[t] == Some(open)
+            && (self.toks[t - 1].is_newline()
+                || self.before_newlines(t).is_some_and(|before| {
+                    before == open
+                        || (self.parent[before] == Some(open)
+                            && self.toks[before].is(&TokenType::Comma))
+                }))
+    }
+
+    /// Whether the identifier at `i` declares a variant: `A` and `B` in
+    /// `Name enum { A, B(T) }`.
+    fn is_variant_declaration(&self, i: usize) -> bool {
+        let Some(brace) = self.parent.get(i).copied().flatten() else {
+            return false;
+        };
+        if self.toks[i].ident().is_none() || !self.toks[brace].is(&TokenType::LeftBrace) {
+            return false;
+        }
+        let is_enum = |j: usize| matches!(self.toks[j].kind, TokenType::Keyword(KeywordKind::Enum));
+        let declares = brace >= 1
+            && (is_enum(brace - 1)
+                || (brace >= 2
+                    && self.toks[brace - 1].ident() == Some("open")
+                    && is_enum(brace - 2)));
+        declares && self.starts_entry(brace, i)
+    }
+
+    /// Whether the identifier at `i` names a branch: `=> name { ... }` in a
+    /// `cond-all` or a `match-all`, whose result is keyed by it.
+    fn is_branch_name(&self, i: usize) -> bool {
+        self.toks[i].ident().is_some()
+            && self
+                .before_newlines(i)
+                .is_some_and(|before| self.toks[before].is(&TokenType::Arrow))
+            && self
+                .toks
+                .get(self.after_newlines(i + 1))
+                .is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        TokenType::LeftBrace
+                            | TokenType::Keyword(
+                                KeywordKind::Serial
+                                    | KeywordKind::Parallel
+                                    | KeywordKind::Cond
+                                    | KeywordKind::CondAll
+                            )
+                    )
+                })
+    }
+
+    /// The variant or branch name at `offset`, where it is declared:
+    /// `Circle` in `Shape enum { Circle(Disc) }`, `gift` in `=> gift { ... }`.
+    pub fn label_at(&self, offset: usize) -> Option<&str> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.label_at(offset);
+        }
+        let i = self.index_at(offset)?;
+        (self.is_variant_declaration(i) || self.is_branch_name(i))
+            .then(|| self.toks[i].ident())
+            .flatten()
+    }
+
+    /// Whether the name at `offset` is a whole entry of a map literal
+    /// (`{name, email}`), where it is the key and the value at once.
+    pub fn punned_at(&self, offset: usize) -> bool {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.punned_at(offset);
+        }
+        let Some(i) = self.index_at(offset) else {
+            return false;
+        };
+        let Some(brace) = self.parent[i] else {
+            return false;
+        };
+        let Some(close) = self.partner[brace] else {
+            return false;
+        };
+        if self.toks[i].ident().is_none() || !self.toks[brace].is(&TokenType::LeftBrace) {
+            return false;
+        }
+        let comma = |j: usize| self.parent[j] == Some(brace) && self.toks[j].is(&TokenType::Comma);
+        let after = self.after_newlines(i + 1);
+        self.before_newlines(i)
+            .is_some_and(|before| before == brace || comma(before))
+            && (after == close || comma(after))
+            // A map literal has a `,` in it. `{name}` is a block.
+            && (brace + 1..close).any(comma)
+    }
+
+    /// Whether the binding declared at `offset` is written directly in a
+    /// block whose result is keyed by its bindings' names: a `parallel`
+    /// block, or one declared `All`.
+    pub fn keys_a_result(&self, offset: usize) -> bool {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.keys_a_result(offset);
+        }
+        let Some(block) = self.index_at(offset).and_then(|i| self.parent[i]) else {
+            return false;
+        };
+        if !self.toks[block].is(&TokenType::LeftBrace) {
+            return false;
+        }
+        // What declares the block: a signature that it is the body of, or
+        // the rest of its line.
+        let signature = (0..block).rev().find(|&open| {
+            self.toks[open].is(&TokenType::LeftParen)
+                && self.partner[open].is_some_and(|close| {
+                    close < block
+                        && self.body_after(close, self.declares_parameters(open)) == Some(block)
+                })
+        });
+        let from = match signature {
+            Some(open) => open.saturating_sub(2),
+            None => (0..block)
+                .rev()
+                .find(|&j| self.toks[j].is_newline() && self.parent[j] == self.parent[block])
+                .map_or(0, |j| j + 1),
+        };
+        (from..block).any(|j| {
+            matches!(self.toks[j].kind, TokenType::Keyword(KeywordKind::Parallel))
+                || self.toks[j].ident() == Some("All")
+        })
+    }
+
+    /// Whether the identifier at `i` names no value: a key, a variant where
+    /// it is declared, a branch name.
+    fn is_label(&self, i: usize) -> bool {
+        self.is_key(i) || self.is_variant_declaration(i) || self.is_branch_name(i)
     }
 
     /// The bracket whose entry the key at `i` starts, when `i` is a key.
@@ -1871,6 +2172,106 @@ mod tests {
             .collect();
         assert_eq!(x.len(), 1);
         assert!(matches!(x[0].kind, LocalKind::Param(_)));
+    }
+
+    #[test]
+    fn a_precondition_names_its_parameters() {
+        let text = "::a ns\n\nwithdraw fn (amount: Int, balance: Int where gte(%, 0))\n    where lte(%.amount, %.balance)\n    : Int where gte(%, 0)\n{\n    sub(balance, amount)\n}\n\nRange type { low: Int, high: Int } where lte(%.low, %.high)\n\nall-positive fn (xs: Vec<Map>, n: Int)\n    where all(%.xs, %(gt(%.n, 0)))\n{ xs }\n\nget\nfn\n(coll: Map): Any { coll },\n(coll: Map, key: Str) where contains(%.key, `${%.coll}`) { coll }\n\nf fn (items: Vec<Map>) { map(items, %.amount) }\n";
+        let syntax = Syntax::new(text);
+        let found: Vec<(String, usize, Option<String>)> = syntax
+            .arg_refs(text)
+            .into_iter()
+            .map(|arg| {
+                assert_eq!(arg.end - arg.start, arg.name.chars().count());
+                (arg.name, arg.param_start, arg.annotation)
+            })
+            .collect();
+        let int = Some("Int".to_string());
+        assert_eq!(
+            found,
+            [
+                // Not a record's field (`%.low`), not a `%( ... )` lambda's
+                // own `%` (`%.n`), not an implicit lambda's (`%.amount`).
+                ("amount".to_string(), offset_of(text, "amount: Int"), int),
+                (
+                    "balance".to_string(),
+                    offset_of(text, "balance: Int"),
+                    Some("Int where gte(%, 0)".to_string())
+                ),
+                (
+                    "xs".to_string(),
+                    offset_of(text, "xs: Vec<Map>"),
+                    Some("Vec<Map>".to_string())
+                ),
+                // The second arity of a function written one arity a line,
+                // and a template in its precondition.
+                (
+                    "key".to_string(),
+                    offset_of(text, "key: Str"),
+                    Some("Str".to_string())
+                ),
+                (
+                    "coll".to_string(),
+                    offset_of(text, "coll: Map, key"),
+                    Some("Map".to_string())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn variants_and_branch_names_are_not_references() {
+        let text = "::a ns\n\nCircle type { radius: Dec }\nShape enum { Circle(Circle), Dot }\nAnimal enum open {\n    Dog,\n    Cat\n}\n\nf fn (gift: Bool): Map {\n    cond-all {\n        gift => gift { gift }\n        => standard parallel { a 1 }\n        => gift\n    }\n}\n";
+        let syntax = Syntax::new(text);
+        let names: Vec<(String, usize)> = syntax
+            .references()
+            .into_iter()
+            .filter_map(|path| Some((path.name?, path.name_start)))
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "Circle" | "Dot" | "Dog" | "Cat" | "gift" | "standard"
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Circle".to_string(), offset_of(text, "Circle type")),
+                // The payload of the variant, not the variant.
+                ("Circle".to_string(), offset_of(text, "Circle), Dot")),
+                ("gift".to_string(), offset_of(text, "gift: Bool")),
+                // The condition and the value, not the branch's name.
+                ("gift".to_string(), offset_of(text, "gift => gift")),
+                ("gift".to_string(), offset_of(text, "gift }")),
+                // With no block after it, the name is the arm's value.
+                ("gift".to_string(), offset_of(text, "gift\n    }")),
+            ]
+        );
+        assert!(syntax.path_at(offset_of(text, "Circle(Circle)")).is_none());
+        assert!(syntax.path_at(offset_of(text, "gift { gift }")).is_none());
+    }
+
+    #[test]
+    fn punned_entries_and_result_keys() {
+        let text = "::a ns\n\nf fn (name: Str, email: Str): Map {\n    one {name,}\n    block {name}\n    both {\n        name,\n        email\n    }\n    keyed {name: name, other: email}\n    data parallel {\n        user fetch(name)\n    }\n    vals: All<Vec> serial {\n        v 1\n    }\n    plain serial {\n        p 1\n    }\n    map([1], (x) {\n        inner x\n        inner\n    })\n}\n\ng fn parallel (id: Str)\n    : Map\n{\n    left fetch(id)\n}\n";
+        let syntax = Syntax::new(text);
+        let punned = |needle: &str, delta: usize| syntax.punned_at(offset_of(text, needle) + delta);
+        assert!(punned("{name,}", 1));
+        assert!(!punned("{name}", 1));
+        assert!(punned("name,\n        email", 0));
+        assert!(punned("email\n    }", 0));
+        assert!(!punned("name: name, other", 0));
+        assert!(!punned("name: name, other", 6));
+        assert!(!punned("fetch(name)", 6));
+        let keys = |needle: &str| syntax.keys_a_result(offset_of(text, needle));
+        assert!(keys("user fetch"));
+        assert!(keys("v 1"));
+        assert!(keys("left fetch"));
+        assert!(!keys("p 1"));
+        assert!(!keys("inner x"));
+        assert!(!keys("data parallel"));
+        assert!(!keys("one {name,}"));
     }
 
     #[test]
