@@ -94,6 +94,7 @@ The `annotations` field follows the MCP specification for tool annotations. Thes
 | `idempotentHint` | Bool | Calling with same args multiple times has same effect as once |
 | `openWorldHint` | Bool | Tool interacts with external systems beyond the server |
 
+<!-- hot-check: assume ::db -->
 ```hot
 safe-lookup
 meta {
@@ -114,6 +115,7 @@ fn (id: Str): Map {
 
 Hot automatically generates JSON Schema for your MCP tool's input and output based on the function's type signature. You rarely need to provide schemas manually.
 
+<!-- hot-check: assume ::db -->
 ```hot
 // Hot automatically generates the input schema from these typed parameters
 search-users
@@ -151,7 +153,7 @@ SearchParams type { query: Str, page: Int, per-page: Int }
 search
 meta {mcp: {service: "search"}}
 fn (params: SearchParams): Vec {
-  // ...
+  search-index(params.query, params.page, params.per-page)
 }
 ```
 
@@ -220,6 +222,7 @@ meta {mcp: {service: "api"}}
 
 A single project can expose tools across multiple services. Functions in different namespaces can belong to the same service, and functions in the same namespace can belong to different services:
 
+<!-- hot-check: assume ::db -->
 ```hot
 ::myapp::users ns
 
@@ -388,7 +391,7 @@ fn (status: Str?): Vec {
   req ::ctx/get("hot.request")
   api-key req.headers.x-api-key
   // api-key value is masked in run logs
-  ...
+  fetch-invoices(api-key, status)
 }
 ```
 

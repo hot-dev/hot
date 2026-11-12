@@ -2,7 +2,7 @@
 # hot-static-checks.sh - Run Hot static checks and documentation snippet validation
 #
 # Usage:
-#   ./scripts/hot-static-checks.sh check     # Run Hot checks, fmt verify, doc snippets, and AI doc blocks
+#   ./scripts/hot-static-checks.sh check     # Run Hot checks, fmt verify, doc snippets, and doc blocks
 #   ./scripts/hot-static-checks.sh fmt       # Verify all Hot source is formatted
 #   ./scripts/hot-static-checks.sh test      # Run tests in doc example files
 #   ./scripts/hot-static-checks.sh extract   # Show all available snippets
@@ -303,13 +303,14 @@ for line in sys.stdin:
         echo -e "${GREEN}✓ No removed flow-result suffix syntax found${NC}"
     fi
 
-    # 7. Compile the ```hot blocks in AGENTS.md and the bundled skills' docs.
+    # 7. Compile the ```hot blocks in AGENTS.md, the bundled skills' docs,
+    # and resources/docs.
     echo ""
-    echo -e "${YELLOW}Step 7: AI doc Hot blocks${NC}"
+    echo -e "${YELLOW}Step 7: Doc Hot blocks${NC}"
     if "$SCRIPT_DIR/check-doc-hot-blocks.sh"; then
-        echo -e "${GREEN}✓ AI doc Hot blocks pass static check${NC}"
+        echo -e "${GREEN}✓ Doc Hot blocks pass static check${NC}"
     else
-        echo -e "${RED}✗ AI doc Hot blocks failed static check${NC}"
+        echo -e "${RED}✗ Doc Hot blocks failed static check${NC}"
         errors=$((errors + 1))
     fi
 
