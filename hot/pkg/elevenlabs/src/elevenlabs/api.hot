@@ -229,14 +229,24 @@ fn (boundary: Str, name: Str, value: Any): Bytes {
     => { Str(value) }
   }
 
-  Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${text}\r\n`)
+  Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${header-safe(name)}"\r\n\r\n${text}\r\n`)
+}
+
+// A value that is safe inside a quoted multipart header parameter: `"`
+// becomes `%22` and line breaks are dropped, so a filename cannot end the
+// quoting or start a new header.
+header-safe
+meta {no-doc: true}
+fn (value: Str): Str {
+  value |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
 }
 
 multipart-file
 meta {
     doc: """
     One `multipart/form-data` file part as Bytes. The file bytes are
-    concatenated verbatim, never interpolated into a string. Exposed for
+    concatenated verbatim, never interpolated into a string. A `"` in the
+    filename is sent as `%22` and line breaks are dropped. Exposed for
     testing.
 
     **Example**
@@ -249,7 +259,7 @@ meta {
 }
 fn (boundary: Str, name: Str, filename: Str, mime-type: Str, data: Bytes): Bytes {
   concat(
-    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${header-safe(name)}"; filename="${header-safe(filename)}"\r\nContent-Type: ${header-safe(mime-type)}\r\n\r\n`),
     data,
     Bytes("\r\n")
   )

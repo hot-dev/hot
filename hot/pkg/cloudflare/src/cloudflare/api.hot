@@ -892,12 +892,22 @@ fn (value: Any): Bytes {
   }
 }
 
+// A value that is safe inside a multipart part header: `"` becomes `%22` and
+// line breaks are dropped, so a name or filename cannot end the quoting or
+// start a new header.
+header-safe
+meta {no-doc: true}
+fn (value: Any): Str {
+  `${value}` |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
+}
+
 multipart-part
 meta {
     doc: """
     One `multipart/form-data` part as Bytes. `part` is
     `{name, value, filename?, content_type?}`; `value` is Str or Bytes
-    (a Map/Vec is JSON-encoded).
+    (a Map/Vec is JSON-encoded). A `"` in the name or filename is sent as
+    `%22` and line breaks are dropped.
 
     **Example**
 
@@ -911,9 +921,9 @@ fn (boundary: Str, part: Map): Bytes {
   filename get(part, "filename")
   content-type get(part, "content_type")
   disposition if(is-some(filename),
-    `form-data; name="${part.name}"; filename="${filename}"`,
-    `form-data; name="${part.name}"`)
-  type-line if(is-some(content-type), `Content-Type: ${content-type}\r\n`, "")
+    `form-data; name="${header-safe(part.name)}"; filename="${header-safe(filename)}"`,
+    `form-data; name="${header-safe(part.name)}"`)
+  type-line if(is-some(content-type), `Content-Type: ${header-safe(content-type)}\r\n`, "")
   concat(
     Bytes(`--${boundary}\r\nContent-Disposition: ${disposition}\r\n${type-line}\r\n`),
     as-bytes(part.value),
