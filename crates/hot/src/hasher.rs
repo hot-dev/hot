@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 18, // Bumped for resolved namespace aliases in union signature keys
+            CacheType::Bytecode => 19, // Bumped for the move plans of functions and lambdas
             CacheType::Ast => 7, // Bumped for expression spreads in vector literals (Value::Spread)
         }
     }

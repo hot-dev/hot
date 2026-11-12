@@ -1991,6 +1991,7 @@ impl Compiler {
                         flow_type: None,
                         instructions: Vec::new(),
                         register_count: 10,
+                        moves: Vec::new(),
                         source: source.clone(),
                     };
                     let reserved_id = self.program.add_function(placeholder_info);
@@ -2676,6 +2677,7 @@ impl Compiler {
             flow_type,
             instructions: Vec::new(),
             register_count: 10, // Default register count, will be updated
+            moves: Vec::new(),
             source,
         };
 
@@ -2724,8 +2726,10 @@ impl Compiler {
         self.local_names.truncate(saved_local_names);
 
         // Update the function info with the compiled instructions
+        let moves = self.plan_moves(&function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(actual_function_id as usize) {
             func_info.register_count = self.next_register;
+            func_info.moves = moves;
             func_info.instructions = function_instructions;
             tracing::trace!(
                 "Compiler: Compiled {} instructions for function '{}'",
@@ -2876,8 +2880,10 @@ impl Compiler {
         self.local_names.truncate(saved_local_names);
 
         // Update the reserved slot with the compiled instructions
+        let moves = self.plan_moves(&function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
             func_info.register_count = self.next_register;
+            func_info.moves = moves;
             func_info.instructions = function_instructions;
             tracing::trace!(
                 "Compiler: Compiled {} instructions for function '{}' (reserved ID: {})",
@@ -3396,6 +3402,7 @@ impl Compiler {
                         parameters: func_info.param_names.clone(),
                         instructions: func_info.instructions.clone(),
                         register_count: func_info.register_count,
+                        moves: func_info.moves.clone(),
                         capture_vars,
                         closure_env,
                         defining_namespace: func_info.namespace.clone(),
@@ -4896,12 +4903,14 @@ impl Compiler {
             // Pre-compute used registers
             let used_registers =
                 crate::lang::bytecode::LambdaInfo::compute_used_registers(&lambda_instructions);
+            let moves = self.plan_moves(&lambda_instructions);
 
             // Create the lambda info
             let lambda_info = crate::lang::bytecode::LambdaInfo {
                 parameters: vec![],
                 instructions: lambda_instructions,
                 register_count: 1,
+                moves,
                 capture_vars: vec![capture_name],
                 closure_env: AHashMap::new(),
                 defining_namespace: self.current_namespace.clone(),
@@ -5275,11 +5284,13 @@ impl Compiler {
         // Pre-compute used registers for efficient save/restore during lambda execution
         let used_registers =
             crate::lang::bytecode::LambdaInfo::compute_used_registers(&lambda_instructions);
+        let moves = self.plan_moves(&lambda_instructions);
 
         let lambda_info = crate::lang::bytecode::LambdaInfo {
             parameters: parameters.clone(),
             instructions: lambda_instructions,
             register_count,
+            moves,
             capture_vars,
             closure_env,
             defining_namespace: self.current_namespace.clone(),
@@ -5401,12 +5412,14 @@ impl Compiler {
         // Pre-compute used registers for efficient save/restore
         let used_registers =
             crate::lang::bytecode::LambdaInfo::compute_used_registers(&thunk_instructions);
+        let moves = self.plan_moves(&thunk_instructions);
 
         // Create LambdaInfo structure (zero parameters = thunk)
         let thunk_info = crate::lang::bytecode::LambdaInfo {
             parameters: Vec::new(), // Zero args - this is a thunk
             instructions: thunk_instructions,
             register_count: thunk_register_count,
+            moves,
             capture_vars,
             closure_env,
             defining_namespace: self.current_namespace.clone(),
@@ -5588,6 +5601,21 @@ impl Compiler {
         self.enclosing_bindings.iter().any(|bound| bound == name)
     }
 
+    /// What each instruction of a finished body may move instead of copy
+    /// (see `lang::moves`).
+    fn plan_moves(&self, instructions: &[Instruction]) -> Vec<u8> {
+        let moves = crate::lang::moves::plan(instructions);
+        // The compiler writes an argument register for one call, so a plan
+        // moves every call's arguments. A call it leaves copying them
+        // means a register is read where this compiler never read one.
+        debug_assert!(
+            crate::lang::moves::calls_keeping_arguments(instructions, &moves).is_empty(),
+            "an argument register is read after its call, at instructions {:?}",
+            crate::lang::moves::calls_keeping_arguments(instructions, &moves)
+        );
+        moves
+    }
+
     /// Check if a variable name is a known function (not a variable that needs capturing)
     fn is_known_global(&self, name: &str) -> bool {
         // Check if it's in the function mapping (namespace-prefixed functions)
@@ -5670,6 +5698,7 @@ impl Compiler {
                 parameters: func_info.param_names.clone(),
                 instructions: func_info.instructions.clone(),
                 register_count: func_info.register_count,
+                moves: func_info.moves.clone(),
                 capture_vars,
                 closure_env,
                 defining_namespace: func_info.namespace.clone(),
@@ -6230,6 +6259,7 @@ impl Compiler {
                 flow_type: None,
                 instructions,
                 register_count: 10,
+                moves: Vec::new(),
                 source: None,
             }
         } else {
@@ -6272,6 +6302,7 @@ impl Compiler {
                     Instruction::Return { value: 0 },
                 ],
                 register_count: 3,
+                moves: Vec::new(),
                 source: None,
             }
         };
@@ -6351,6 +6382,7 @@ impl Compiler {
                     Instruction::Return { value: 0 },
                 ],
                 register_count: 2,
+                moves: Vec::new(),
                 source: None,
             };
             self.program.functions.push(function_info);
@@ -6410,7 +6442,8 @@ impl Compiler {
                 ],
             },
             register_count: 3, // Registers 0 (return), 1 (data), 2 (checked data)
-            source: None,      // Type constructor without custom fn definitions
+            moves: Vec::new(),
+            source: None, // Type constructor without custom fn definitions
         };
 
         self.program.functions.push(function_info);

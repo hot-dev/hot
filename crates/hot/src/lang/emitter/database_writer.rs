@@ -3487,6 +3487,7 @@ mod tests {
                 crate::lang::bytecode::Instruction::Return { value: 1 },
             ],
             register_count: 2,
+            moves: Vec::new(),
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),

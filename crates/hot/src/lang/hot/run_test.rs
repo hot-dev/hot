@@ -607,6 +607,39 @@ grown assoc(m, "b", 1)
         assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
     }
 
+    /// The collection writes `src` makes in the interpreter, as (in place,
+    /// on a copy). Loading hot-std makes some of its own, the same for every
+    /// program, so compare two programs rather than read one count.
+    fn interpreted_writes(src: &str) -> (usize, usize) {
+        let before = crate::val::write_stats::counts();
+        compile_and_run_with_std_conf(src, Some(val!({"jit": {"mode": "off"}}))).expect("run");
+        let after = crate::val::write_stats::counts();
+        (after.0 - before.0, after.1 - before.1)
+    }
+
+    /// A call gives its argument registers up, so a writer that receives
+    /// the result of another call is that value's only holder and writes it
+    /// in place. Only the first writer of a chain copies: it is handed a
+    /// literal, which the program's constants hold too.
+    #[test]
+    fn a_writer_writes_in_place_what_a_call_handed_it() {
+        let chain = |links: usize| {
+            let mut expression = "[0]".to_string();
+            for link in 1..=links {
+                expression = format!("concat({expression}, [{link}])");
+            }
+            format!("::t ns\nrun fn (): Vec {{ {expression} }}\nlength(run())")
+        };
+        let short = interpreted_writes(&chain(2));
+        let long = interpreted_writes(&chain(12));
+        assert_eq!(long.1, short.1, "copies don't grow with the chain");
+        assert_eq!(long.0, short.0 + 10, "every further link writes in place");
+        assert_eq!(
+            compile_and_run_with_std_conf(&chain(12), None).expect("run"),
+            Val::Int(13)
+        );
+    }
+
     /// A read costs the same whatever the size of the collection. One that
     /// scaled would take far longer on the large collection, so the margin
     /// leaves only that able to fail this. `bench-large-reads.hot` prints the

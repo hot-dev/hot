@@ -87,6 +87,20 @@ pub fn fast_concat_vec(a: &[Val], b: &[Val]) -> Val {
     Val::vec(result)
 }
 
+/// [`fast_concat_vec`] for two Vecs the caller gives up: the first is
+/// extended in place when nothing else holds it.
+#[inline(always)]
+pub fn fast_concat_vec_given(mut args: Vec<Val>) -> Val {
+    match (args.pop(), args.pop()) {
+        (Some(Val::Vec(b)), Some(Val::Vec(mut a))) => {
+            crate::val::make_mut(&mut a).extend(b.iter().cloned());
+            Val::Vec(a)
+        }
+        // Not two Vecs: the caller checks before calling.
+        _ => Val::Null,
+    }
+}
+
 /// Build an Int range [0..end) — the most common range call. Returns `None` if
 /// the element count cannot be represented (so the caller falls back to the
 /// hotlib `range` for exact semantics rather than silently yielding an empty

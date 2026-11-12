@@ -99,6 +99,7 @@ fn sum_down_vm(jit: Val) -> VirtualMachine {
     let n = program.constants.len() as u32;
     program.constants.push(Constant::Val(val!("n")));
     program.functions.push(FunctionInfo {
+        moves: Vec::new(),
         name: "::t/sum-down".to_string(),
         namespace: "::t".to_string(),
         arity: 1,
@@ -532,6 +533,7 @@ fn a_compiled_lambda_owns_its_dec_constants() {
             Instruction::Return { value: 0 },
         ],
         register_count: 1,
+        moves: Vec::new(),
         capture_vars: vec![],
         closure_env: AHashMap::new(),
         defining_namespace: "::test".to_string(),

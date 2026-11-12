@@ -624,6 +624,11 @@ pub struct FunctionInfo {
     pub instructions: Vec<Instruction>,
     /// Number of registers needed for execution
     pub register_count: u32,
+    /// What each instruction may move instead of copy: one entry of
+    /// `lang::moves::flag` bits per instruction. Used only when its length
+    /// is that of `instructions`; empty means nothing is moved.
+    #[serde(default)]
+    pub moves: Vec<u8>,
     /// Source location where function is defined
     pub source: Option<SourceLocation>,
 }
@@ -668,6 +673,11 @@ pub struct LambdaInfo {
     pub instructions: Vec<Instruction>,
     /// Number of registers needed for execution
     pub register_count: u32,
+    /// What each instruction may move instead of copy, as
+    /// `FunctionInfo::moves`. Derived from `instructions`, so it is not part
+    /// of equality or of the structural hash.
+    #[serde(default)]
+    pub moves: Vec<u8>,
     /// Variables captured from outer scope
     pub capture_vars: Vec<String>,
     /// Closure environment (captured variable values)

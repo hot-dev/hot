@@ -441,3 +441,28 @@ meta ["test"] fn () {
     assert-eq(2, n)
     assert(is-err(called), "a Vec is not callable")
 }
+
+// A function defined in another's body runs both by id (called from that
+// body or its own) and as a closure (passed as a value), on the same
+// registers. Each call keeps what it had pending when an inner one returns.
+recurse-as-a-value fn (xs: Vec): Vec {
+    sum-down fn (n) { if(lte(n, 0), 0, add(n, sum-down(sub(n, 1)))) }
+    stars fn (n) { if(lte(n, 0), "", concat("*", stars(sub(n, 1)))) }
+    grow fn (n, acc) { if(lte(n, 0), acc, [n, ...grow(sub(n, 1), [...acc, n])]) }
+    [
+        sum-down(3),
+        map(xs, sum-down),
+        map(xs, (x) { sum-down(x) }),
+        map(xs, stars),
+        grow(2, [0]),
+        map(xs, (x) { grow(x, []) }),
+    ]
+}
+
+test-a-local-function-that-recurses-through-its-closure
+meta ["test"] fn () {
+    assert-eq(
+        [6, [6, 10], [6, 10], ["***", "****"], [2, 1, 0, 2, 1], [[3, 2, 1, 3, 2, 1], [4, 3, 2, 1, 4, 3, 2, 1]]],
+        recurse-as-a-value([3, 4])
+    )
+}

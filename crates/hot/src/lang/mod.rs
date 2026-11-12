@@ -25,6 +25,7 @@ pub mod hot;
 pub mod json_schema;
 pub mod lexer;
 pub mod masking;
+pub mod moves;
 pub mod parser;
 pub(crate) mod phase_timing;
 pub mod project;

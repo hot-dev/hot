@@ -374,6 +374,114 @@ pub(crate) enum CallTarget<'a> {
     Native(&'a str),
 }
 
+/// A call's arguments: lent by a caller that keeps them, or given up by one
+/// that doesn't. A callee binds a given argument by moving it, so the
+/// binding is the only holder of a value its caller has no other use for.
+pub(crate) enum CallArgs<'a> {
+    Lent(&'a [Val]),
+    Given(Vec<Val>),
+}
+
+impl<'a> From<&'a [Val]> for CallArgs<'a> {
+    fn from(args: &'a [Val]) -> Self {
+        CallArgs::Lent(args)
+    }
+}
+
+impl<'a> From<&'a Vec<Val>> for CallArgs<'a> {
+    fn from(args: &'a Vec<Val>) -> Self {
+        CallArgs::Lent(args)
+    }
+}
+
+impl From<Vec<Val>> for CallArgs<'_> {
+    fn from(args: Vec<Val>) -> Self {
+        CallArgs::Given(args)
+    }
+}
+
+impl CallArgs<'_> {
+    /// The arguments, to read. A bound argument reads as Null afterwards.
+    pub(crate) fn as_slice(&self) -> &[Val] {
+        match self {
+            CallArgs::Lent(args) => args,
+            CallArgs::Given(args) => args,
+        }
+    }
+
+    /// Argument `index` for the callee to keep, Null when there is none:
+    /// moved out of given arguments, copied from lent ones.
+    fn bind(&mut self, index: usize) -> Val {
+        match self {
+            CallArgs::Lent(args) => args.get(index).cloned().unwrap_or(Val::Null),
+            CallArgs::Given(args) => args
+                .get_mut(index)
+                .map(|arg| std::mem::replace(arg, Val::Null))
+                .unwrap_or(Val::Null),
+        }
+    }
+
+    /// The arguments from `index` on, for a variadic parameter to keep.
+    fn bind_rest(&mut self, index: usize) -> Vec<Val> {
+        match self {
+            CallArgs::Lent(args) => args.get(index..).unwrap_or_default().to_vec(),
+            CallArgs::Given(args) if index < args.len() => args.drain(index..).collect(),
+            CallArgs::Given(_) => Vec::new(),
+        }
+    }
+}
+
+/// What a register holds once an instruction has moved its value out: the
+/// plan (`lang::moves`) found no later read of it. A debug build leaves a
+/// marker that fails any read, so a plan that is wrong about a register
+/// fails a test instead of handing Null to whatever read it.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+struct MovedOut;
+
+#[cfg(debug_assertions)]
+impl crate::val::ValBox for MovedOut {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::val::ValBox> {
+        Box::new(MovedOut)
+    }
+    fn equals(&self, other: &dyn crate::val::ValBox) -> bool {
+        other.as_any().is::<MovedOut>()
+    }
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
+    fn to_string(&self) -> String {
+        "<moved>".to_string()
+    }
+    fn compare(&self, _other: &dyn crate::val::ValBox) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn serialize_json(&self) -> Result<serde_json::Value, String> {
+        Err("a moved register has no value".to_string())
+    }
+    fn type_name(&self) -> &'static str {
+        "MovedOut"
+    }
+}
+
+#[cfg(debug_assertions)]
+fn moved_out() -> Val {
+    Val::Box(Box::new(MovedOut))
+}
+
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn moved_out() -> Val {
+    Val::Null
+}
+
 /// Source of `LexicalScope::frame_id`.
 static NEXT_FRAME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -1659,7 +1767,7 @@ impl VirtualMachine {
                     last_result_register = dest;
                 }
 
-                self.execute_instruction(instruction)?;
+                self.execute_instruction(instruction, 0)?;
             }
 
             Ok(self.get_register(last_result_register)?.clone())
@@ -1955,7 +2063,7 @@ impl VirtualMachine {
         let mut last_result_register = 0;
 
         for instruction in instructions.iter() {
-            self.execute_instruction(instruction)?;
+            self.execute_instruction(instruction, 0)?;
 
             // Track which register holds the result (for Return instructions)
             if let Instruction::Return { value } = instruction {
@@ -2161,7 +2269,7 @@ impl VirtualMachine {
                     last_result_register = dest;
                 }
 
-                self.execute_instruction(instruction)?;
+                self.execute_instruction(instruction, 0)?;
             }
 
             self.get_register(last_result_register).cloned()
@@ -2364,7 +2472,11 @@ impl VirtualMachine {
         execution_result
     }
 
-    fn execute_instruction(&mut self, instruction: &Instruction) -> VmResult<()> {
+    /// Run one instruction. `moves` is its entry in the plan of the body it
+    /// belongs to (`lang::moves`): the operands it is the last to read, which
+    /// it may move instead of copy. Zero, as for code outside a function or
+    /// lambda body, moves nothing.
+    fn execute_instruction(&mut self, instruction: &Instruction, moves: u8) -> VmResult<()> {
         // The containing main/function/lambda loop owns periodic polling.
         tracing::trace!(
             "VM: Executing instruction at {}: {:?}",
@@ -3096,13 +3208,7 @@ impl VirtualMachine {
 
                 // Collect arguments from consecutive registers, prepared
                 // for the callee's parameters
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    tracing::trace!("VM: Call arg {}: {:?}", i, arg_val);
-                    args.push(arg_val);
-                }
+                let args = self.consume_registers(args_start, args_count as usize, moves)?;
                 let args = self.prepare_args_for_register(function as RegisterId, args)?;
 
                 // Get function information from the program
@@ -3110,7 +3216,7 @@ impl VirtualMachine {
                     "VM: About to call execute_function_call with function register: {}",
                     function
                 );
-                let result = self.execute_function_call(function, &args)?;
+                let result = self.execute_function_call(function, args)?;
                 tracing::trace!("VM: Call result: {:?}", result);
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3138,10 +3244,11 @@ impl VirtualMachine {
                 );
 
                 // Collect arguments, spreading Vecs where indicated by spread_mask
+                let dead = moves & crate::lang::moves::flag::RANGE != 0;
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
+                    let arg_val = self.consume_register(arg_reg, dead)?;
                     tracing::trace!("VM: CallWithSpread arg {}: {:?}", i, arg_val);
 
                     // Check if this argument should be spread
@@ -3177,7 +3284,7 @@ impl VirtualMachine {
                 tracing::trace!("VM: CallWithSpread final args count: {}", args.len());
 
                 // Execute the function call - `function` is a register like in `Call`
-                let result = self.execute_function_call(function, &args)?;
+                let result = self.execute_function_call(function, args)?;
                 tracing::trace!("VM: CallWithSpread result: {:?}", result);
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3210,11 +3317,7 @@ impl VirtualMachine {
 
                 // Collect arguments from consecutive registers, prepared for
                 // the native
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    args.push(self.get_register(arg_reg)?.clone());
-                }
+                let args = self.consume_registers(args_start, args_count as usize, moves)?;
                 let args = self.prepare_call_args(CallTarget::Native(&function_name), args)?;
                 let result = match self.call_hotlib_function(&function_name, &args) {
                     Ok(v) => v,
@@ -3247,15 +3350,11 @@ impl VirtualMachine {
 
                 // Collect arguments from consecutive registers, prepared for
                 // the lambda's parameters
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    args.push(self.get_register(arg_reg)?.clone());
-                }
+                let args = self.consume_registers(args_start, args_count as usize, moves)?;
                 let args = self.prepare_call_args(CallTarget::Value(&lambda_val), args)?;
 
                 // Execute the lambda
-                let result = match self.execute_lambda(&lambda_val, &args) {
+                let result = match self.execute_lambda_args(&lambda_val, args.into()) {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
@@ -3288,11 +3387,7 @@ impl VirtualMachine {
                 );
 
                 // Collect arguments from consecutive registers
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    args.push(self.get_register(arg_reg)?.clone());
-                }
+                let args = self.consume_registers(args_start, args_count as usize, moves)?;
 
                 // Overload dispatch and implicit coercion at the
                 // static-dispatch boundary. The compiler may have picked
@@ -3310,7 +3405,7 @@ impl VirtualMachine {
                 let args = self.coerce_call_args(function_id, args)?;
 
                 // Execute the user function directly
-                let result = match self.execute_user_function(function_id, &args) {
+                let result = match self.execute_user_function(function_id, args.into()) {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
@@ -3807,7 +3902,8 @@ impl VirtualMachine {
                 let function_val = self.get_register(function)?.clone();
 
                 // LAZY ARGUMENT HANDLING: Check if args contain lazy thunks before evaluating
-                let args_val = self.get_register(args)?.clone();
+                let args_val =
+                    self.consume_register(args, moves & crate::lang::moves::flag::SECOND != 0)?;
 
                 let function_name = self.value_to_string(&function_val);
                 // CallLibBuiltin instruction executing
@@ -3844,7 +3940,8 @@ impl VirtualMachine {
                     return Ok(());
                 }
 
-                // Regular hotlib function call (not call-lib)
+                // Regular hotlib function call (not call-lib). The argument
+                // Vec gives its items up when nothing else holds it.
                 let args_owned = match args_val {
                     Val::Vec(vec) => Arc::unwrap_or_clone(vec).into_inner(),
                     // Single argument, wrap in slice
@@ -3894,12 +3991,7 @@ impl VirtualMachine {
                 let elements_start = *elements_start;
                 let count = *count;
                 // Create vector from consecutive registers
-                let mut elements = Vec::new();
-                for i in 0..count {
-                    let element_reg = elements_start + i as RegisterId;
-                    let element_val = self.get_register(element_reg)?.clone();
-                    elements.push(element_val);
-                }
+                let elements = self.consume_registers(elements_start, count as usize, moves)?;
 
                 let vector_val = Val::vec(elements);
                 self.set_register(dest, vector_val)?;
@@ -3936,10 +4028,11 @@ impl VirtualMachine {
                 let count = *count;
                 let spread_mask = *spread_mask;
                 // Create vector from consecutive registers, spreading elements marked in spread_mask
+                let dead = moves & crate::lang::moves::flag::RANGE != 0;
                 let mut elements = Vec::new();
                 for i in 0..count {
                     let element_reg = elements_start + i as RegisterId;
-                    let element_val = self.get_register(element_reg)?.clone();
+                    let element_val = self.consume_register(element_reg, dead)?;
 
                     // Check if this element should be spread
                     if (spread_mask >> i) & 1 == 1 {
@@ -4482,9 +4575,20 @@ impl VirtualMachine {
     }
 
     fn get_register(&self, reg_id: RegisterId) -> VmResult<&Val> {
-        self.registers
+        let value = self
+            .registers
             .get(reg_id as usize)
-            .ok_or(VmError::InvalidRegister(reg_id))
+            .ok_or(VmError::InvalidRegister(reg_id))?;
+        #[cfg(debug_assertions)]
+        if let Val::Box(boxed) = value
+            && boxed.as_any().is::<MovedOut>()
+        {
+            return Err(VmError::runtime(format!(
+                "internal error: register {} was read after its value was moved out",
+                reg_id
+            )));
+        }
+        Ok(value)
     }
 
     /// Move a register's value out, leaving Null. A write to the value it
@@ -4495,6 +4599,58 @@ impl VirtualMachine {
             &mut self.registers[reg_id as usize],
             Val::Null,
         ))
+    }
+
+    /// Read a register for the last time when its instruction's plan entry
+    /// says so (`dead`): the value is moved out. Otherwise a copy.
+    fn consume_register(&mut self, reg_id: RegisterId, dead: bool) -> VmResult<Val> {
+        if !dead {
+            return self.get_register(reg_id).cloned();
+        }
+        self.get_register(reg_id)?;
+        Ok(std::mem::replace(
+            &mut self.registers[reg_id as usize],
+            moved_out(),
+        ))
+    }
+
+    /// The values of `count` consecutive registers from `start`: a call's
+    /// arguments or a literal's elements. They are moved out when the plan
+    /// marks the whole range dead (`moves::flag::RANGE`), so the Vec
+    /// returned is then their only holder.
+    fn consume_registers(
+        &mut self,
+        start: RegisterId,
+        count: usize,
+        moves: u8,
+    ) -> VmResult<Vec<Val>> {
+        let dead = moves & crate::lang::moves::flag::RANGE != 0;
+        let mut values = Vec::with_capacity(count);
+        for offset in 0..count {
+            values.push(self.consume_register(start + offset as RegisterId, dead)?);
+        }
+        Ok(values)
+    }
+
+    /// Give up the single-register operands `instruction` was the last to
+    /// read, after it has run. The handlers of calls and literals move
+    /// their operand ranges out themselves, before they run.
+    #[inline]
+    fn release_operands(&mut self, instruction: &Instruction, moves: u8) {
+        use crate::lang::moves::flag;
+        if moves & (flag::FIRST | flag::SECOND | flag::THIRD) == 0 {
+            return;
+        }
+        let Some(operands) = crate::lang::moves::operands(instruction) else {
+            return;
+        };
+        for (position, register) in operands.reads.iter().enumerate() {
+            if moves & (1 << position) != 0
+                && let Some(slot) = register.and_then(|id| self.registers.get_mut(id as usize))
+            {
+                *slot = moved_out();
+            }
+        }
     }
 
     fn set_register(&mut self, reg_id: RegisterId, value: Val) -> VmResult<()> {
@@ -7027,7 +7183,11 @@ impl VirtualMachine {
     // Removed try_resolve_varref_marker - strings are just strings, no automatic resolution
 
     /// Execute a function call with proper Hot semantics
-    fn execute_function_call(&mut self, function_register: u32, args: &[Val]) -> VmResult<Val> {
+    fn execute_function_call(
+        &mut self,
+        function_register: u32,
+        mut args: Vec<Val>,
+    ) -> VmResult<Val> {
         // Inspect without stringifying so lambdas and refs are preserved
         let mut function_val = self.get_register(function_register as RegisterId)?.clone();
 
@@ -7102,7 +7262,7 @@ impl VirtualMachine {
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
         {
-            let exec = self.execute_lambda(&function_val, args);
+            let exec = self.execute_lambda_args(&function_val, args.into());
             if !is_dispatch_function {
                 self.decrement_function_call_depth("<lambda>");
             }
@@ -7139,7 +7299,7 @@ impl VirtualMachine {
 
         // Handle built-in functions first (call-lib only - call is now defined in Hot code)
         if function_name == "call-lib" {
-            let result = self.execute_call_lib_builtin(args);
+            let result = self.execute_call_lib_builtin(&args);
             if !is_dispatch_function {
                 self.decrement_function_call_depth(function_name);
             }
@@ -7153,20 +7313,75 @@ impl VirtualMachine {
         if !self
             .native_core_shadows_ref()
             .shadows(&self.current_namespace, function_name)
-            && let Some(result) = self.core_fast_path(function_name, args, true)
         {
-            if !is_dispatch_function {
-                self.decrement_function_call_depth(function_name);
+            match self.core_fast_path_given(function_name, args) {
+                Ok(result) => {
+                    if !is_dispatch_function {
+                        self.decrement_function_call_depth(function_name);
+                    }
+                    return result;
+                }
+                Err(unused) => args = unused,
             }
-            return result;
         }
 
         // Use unified function lookup for all other functions
-        let result = self.unified_function_lookup(function_name, args);
+        let result = self.unified_function_lookup_given(function_name, args);
         if !is_dispatch_function {
             self.decrement_function_call_depth(function_name);
         }
         result
+    }
+
+    /// [`Self::core_fast_path`] for a caller that gives its arguments up, as
+    /// an interpreted call does: a path that writes a collection writes the
+    /// caller's own when nothing else holds it. The arguments come back
+    /// untouched when no path takes the call.
+    fn core_fast_path_given(
+        &mut self,
+        function_name: &str,
+        args: Vec<Val>,
+    ) -> Result<VmResult<Val>, Vec<Val>> {
+        if function_name == "concat" && matches!(args.as_slice(), [Val::Vec(_), Val::Vec(_)]) {
+            return Ok(Ok(crate::lang::hot::coll::fast_concat_vec_given(args)));
+        }
+        match self.core_fast_path(function_name, &args, true) {
+            Some(result) => Ok(result),
+            None => Err(args),
+        }
+    }
+
+    /// [`Self::unified_function_lookup`] for a caller that gives its
+    /// arguments up. A bare name that resolves to a compiled function it has
+    /// called before binds them by moving; every other resolution goes
+    /// through the full lookup, which this never reorders: a local of the
+    /// name is still called before any function.
+    fn unified_function_lookup_given(
+        &mut self,
+        function_name: &str,
+        args: Vec<Val>,
+    ) -> VmResult<Val> {
+        if function_name != "call-lib"
+            && !function_name.starts_with("::")
+            && self.lookup_variable(function_name).is_err()
+        {
+            let cache_key = Self::dispatch_cache_key(function_name, &args);
+            if let Some(&cached_fn_id) = self.dispatch_cache.get(&cache_key) {
+                return self.execute_compiled_user_function_given(cached_fn_id, args);
+            }
+        }
+        self.unified_function_lookup(function_name, &args)
+    }
+
+    /// [`Self::execute_compiled_user_function`] for a caller that gives its
+    /// arguments up.
+    fn execute_compiled_user_function_given(
+        &mut self,
+        function_id: u32,
+        args: Vec<Val>,
+    ) -> VmResult<Val> {
+        let args = self.coerce_call_args(function_id, args)?;
+        self.execute_user_function(function_id, args.into())
     }
 
     /// The direct paths for hot-std's core functions, on the argument types
@@ -7579,7 +7794,7 @@ impl VirtualMachine {
         args: &[Val],
     ) -> VmResult<Val> {
         let coerced = self.coerce_args_of_value_call(function_id, args)?;
-        self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args))
+        self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args).into())
     }
 
     /// Call a function bypassing unified_function_lookup to avoid recursion
@@ -7605,7 +7820,7 @@ impl VirtualMachine {
             let function_id = self
                 .overload_for_args(function_id, args)
                 .unwrap_or(function_id);
-            return self.execute_user_function(function_id, args);
+            return self.execute_user_function(function_id, args.into());
         }
 
         // 2. Try hotlib functions, but SKIP the call function to avoid recursion
@@ -8672,7 +8887,7 @@ impl VirtualMachine {
             let function_id = self
                 .overload_for_args(function_id, args)
                 .unwrap_or(function_id);
-            return self.execute_user_function(function_id, args);
+            return self.execute_user_function(function_id, args.into());
         } else {
             tracing::trace!(
                 "VM: No compiled user function overload found for '{}' with {} args",
@@ -9244,6 +9459,16 @@ impl VirtualMachine {
 
     /// Execute a lambda
     pub fn execute_lambda(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Val> {
+        self.execute_lambda_args(lambda_val, CallArgs::Lent(args))
+    }
+
+    /// Run a lambda on arguments its caller lends or gives up; a given
+    /// argument is bound to its parameter by moving it.
+    pub(crate) fn execute_lambda_args(
+        &mut self,
+        lambda_val: &Val,
+        mut args: CallArgs<'_>,
+    ) -> VmResult<Val> {
         self.poll_execution_cancelled()?;
         // Lambda self-recursion (CallLambda -> execute_lambda -> ...) never
         // passes through execute_user_function's depth guard, so the stack
@@ -9281,17 +9506,17 @@ impl VirtualMachine {
         tracing::trace!(
             "VM: Executing lambda with {} parameters, {} args, {} captured vars, is_lazy_param: {}",
             lambda_info_ref.parameters.len(),
-            args.len(),
+            args.as_slice().len(),
             lambda_info_ref.capture_vars.len(),
             lambda_info_ref.is_lazy_param
         );
 
         // Relaxed parameter count handling: bind up to min length; extra args ignored, missing args as Null
-        if args.len() != lambda_info_ref.parameters.len() {
+        if args.as_slice().len() != lambda_info_ref.parameters.len() {
             tracing::trace!(
                 "VM: Lambda parameter count mismatch (expected {}, got {}), proceeding with relaxed binding",
                 lambda_info_ref.parameters.len(),
-                args.len()
+                args.as_slice().len()
             );
         }
 
@@ -9438,7 +9663,7 @@ impl VirtualMachine {
         // Bind lambda parameters to arguments SECOND
         // (parameters take precedence over captured variables with the same name)
         for (i, param_name) in lambda_info.parameters.iter().enumerate() {
-            let arg_value = args.get(i).cloned().unwrap_or(Val::Null);
+            let arg_value = args.bind(i);
             tracing::trace!("VM: Binding lambda parameter '{}' to value", param_name);
             lambda_scope.variables.insert(param_name.clone(), arg_value);
         }
@@ -9493,9 +9718,17 @@ impl VirtualMachine {
         // The body runs in a closure so that an error still restores the
         // caller's registers, scope and namespace below.
         let body = (|| -> VmResult<()> {
+            // What each instruction may move (see `lang::moves`); none when
+            // the lambda carries no plan for these instructions.
+            let plan: &[u8] = if lambda_info.moves.len() == lambda_info.instructions.len() {
+                &lambda_info.moves
+            } else {
+                &[]
+            };
             while lambda_ip < lambda_info.instructions.len() {
                 self.poll_execution_cancelled()?;
                 let instruction = &lambda_info.instructions[lambda_ip];
+                let moves = plan.get(lambda_ip).copied().unwrap_or(0);
                 // A `where` predicate draws each instruction from its budget.
                 self.charge_constraint_fuel()?;
 
@@ -9512,7 +9745,7 @@ impl VirtualMachine {
                                 // Execute via the main instruction machinery to clear the skip flag
                                 let saved_main_ip = self.instruction_pointer;
                                 self.instruction_pointer = lambda_ip;
-                                self.execute_instruction(instruction)?;
+                                self.execute_instruction(instruction, 0)?;
                                 self.instruction_pointer = saved_main_ip;
 
                                 // Track result for value-producing instructions
@@ -9653,7 +9886,8 @@ impl VirtualMachine {
                         last_result = self.get_register(*dest)?.clone();
                     }
                     Instruction::Move { dest, src } => {
-                        let value = self.get_register(*src)?.clone();
+                        let dead = moves & crate::lang::moves::flag::FIRST != 0;
+                        let value = self.consume_register(*src, dead)?;
                         self.set_register(*dest, value)?;
                         last_result = self.get_register(*dest)?.clone();
                     }
@@ -9673,13 +9907,10 @@ impl VirtualMachine {
                         // arguments are prepared for the callee's parameters
                         // (Ok unwraps, Err escalates with its payload message,
                         // unless the parameter is lazy or declared `Result`).
-                        let mut args = Vec::new();
-                        for i in 0..*args_count {
-                            let arg_reg = args_start + i as RegisterId;
-                            args.push(self.get_register(arg_reg)?.clone());
-                        }
+                        let args =
+                            self.consume_registers(*args_start, *args_count as usize, moves)?;
                         let args = self.prepare_args_for_register(*function as RegisterId, args)?;
-                        let result = self.execute_function_call(*function, &args)?;
+                        let result = self.execute_function_call(*function, args)?;
                         self.set_register(*dest, result)?;
                         last_result = self.get_register(*dest)?.clone();
                     }
@@ -9714,8 +9945,9 @@ impl VirtualMachine {
                         // and restore it after execution
                         let saved_main_ip = self.instruction_pointer;
                         self.instruction_pointer = lambda_ip;
-                        self.execute_instruction(instruction)?;
+                        self.execute_instruction(instruction, moves)?;
                         self.instruction_pointer = saved_main_ip;
+                        self.release_operands(instruction, moves);
 
                         // Track result for value-producing instructions
                         if let Some(dest) = self.get_instruction_dest(instruction)
@@ -9970,7 +10202,7 @@ impl VirtualMachine {
     /// it — without this guard, 100k-deep recursion kills the process with a
     /// native stack overflow (which bypasses catch_unwind) instead of
     /// returning a structured error.
-    fn execute_user_function(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+    fn execute_user_function(&mut self, function_id: u32, args: CallArgs<'_>) -> VmResult<Val> {
         // Arguments the call site proved, for this call's prologue only. Take
         // them before anything can return early, so a failed call can't leave
         // them for a later one.
@@ -9997,8 +10229,15 @@ impl VirtualMachine {
         // and restore them after — otherwise the inner call clobbers pending
         // intermediates of the outer expression (e.g. the first operand of
         // `add(fib(n-1), fib(n-2))`). First-entry calls skip this entirely.
+        //
+        // A lambda, or a function defined in another function's body, also
+        // runs as a lambda value (`execute_lambda`), on the same registers
+        // and without counting as active here. A call of it by id can
+        // arrive while that form is running (a local function that recurses,
+        // passed to `map`), so its registers are always saved.
         let fid = function_id as usize;
-        let reentrant = self.function_active_depth.get(fid).copied().unwrap_or(0) > 0;
+        let reentrant = self.function_active_depth.get(fid).copied().unwrap_or(0) > 0
+            || self.program.local_functions.contains(&function_id);
         let saved_from = self.saved_registers.len();
         if reentrant {
             let used = self.function_used_registers(function_id);
@@ -10359,16 +10598,24 @@ impl VirtualMachine {
         used
     }
 
-    fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+    fn execute_user_function_impl(
+        &mut self,
+        function_id: u32,
+        mut args: CallArgs<'_>,
+    ) -> VmResult<Val> {
         if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
-            self.jit.record_call(function_id, args);
+            self.jit.record_call(function_id, args.as_slice());
 
             let was_halted = self.has_failed() || self.has_cancelled();
-            if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
-                VmError::RuntimeError(
-                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
-                )
-            })? {
+            if let Some(result) =
+                self.try_jit_call(function_id, args.as_slice())
+                    .map_err(|msg| {
+                        VmError::RuntimeError(
+                            RuntimeError::new(msg)
+                                .with_instruction_pointer(self.instruction_pointer),
+                        )
+                    })?
+            {
                 self.propagate_jit_halt(was_halted)?;
                 return Ok(result);
             }
@@ -10379,7 +10626,7 @@ impl VirtualMachine {
             })?;
             let function_name = &function_info.name;
 
-            if self.jit.should_compile_now(function_id, args)
+            if self.jit.should_compile_now(function_id, args.as_slice())
                 && !self.jit_blocked_by_overload_dispatch(function_id)
             {
                 let shadows = self.native_core_shadows();
@@ -10388,7 +10635,7 @@ impl VirtualMachine {
                     &program,
                     function_id,
                     function_info,
-                    args,
+                    args.as_slice(),
                     CallNames::new(&self.namespace_variables, &self.core_functions, &shadows)
                         .traced(self.traces_calls())
                         .param_arrows(&param_arrows),
@@ -10397,8 +10644,9 @@ impl VirtualMachine {
                 match compile_result {
                     Ok(()) => {
                         tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
-                        if let Some(result) =
-                            self.try_jit_call(function_id, args).map_err(|msg| {
+                        if let Some(result) = self
+                            .try_jit_call(function_id, args.as_slice())
+                            .map_err(|msg| {
                                 VmError::RuntimeError(
                                     RuntimeError::new(msg)
                                         .with_function(function_name.to_owned())
@@ -10439,16 +10687,17 @@ impl VirtualMachine {
         let function_has_instructions = !function_info.instructions.is_empty();
         let function_instructions_len = function_info.instructions.len();
 
-        let call_id = self.begin_traced_call(function_info, args);
+        let call_id = self.begin_traced_call(function_info, args.as_slice());
 
         {
             // Check arity (basic validation)
-            if !function_is_variadic && args.len() != function_arity as usize {
+            let arg_count = args.as_slice().len();
+            if !function_is_variadic && arg_count != function_arity as usize {
                 tracing::trace!(
                     "⚠️  VM: Argument mismatch for function '{}': expected {}, got {}",
                     function_name,
                     function_arity,
-                    args.len()
+                    arg_count
                 );
 
                 // Be lenient with argument mismatches during test execution; the
@@ -10457,7 +10706,7 @@ impl VirtualMachine {
                     "VM: Handling argument mismatch for function '{}' (expected {}, got {})",
                     function_name,
                     function_arity,
-                    args.len()
+                    arg_count
                 );
                 // Continue with argument adjustment
             }
@@ -10492,11 +10741,7 @@ impl VirtualMachine {
             for (i, param_name) in function_param_names.iter().enumerate() {
                 if function_is_variadic && i == variadic_param_index {
                     // This is the variadic parameter - collect all remaining args into a Vec
-                    let variadic_args: Vec<Val> = if i < args.len() {
-                        args[i..].to_vec()
-                    } else {
-                        vec![]
-                    };
+                    let variadic_args: Vec<Val> = args.bind_rest(i);
                     let variadic_len = variadic_args.len();
                     function_scope
                         .variables
@@ -10507,11 +10752,12 @@ impl VirtualMachine {
                         variadic_len,
                         i
                     );
-                } else if i < args.len() {
-                    // Non-variadic parameter with a provided arg
+                } else if i < arg_count {
+                    // Non-variadic parameter with a provided arg: moved in
+                    // when the caller gave its arguments up
                     function_scope
                         .variables
-                        .insert(param_name.clone(), args[i].clone());
+                        .insert(param_name.clone(), args.bind(i));
                 } else {
                     // Missing argument - provide default value
                     function_scope
@@ -10608,7 +10854,7 @@ impl VirtualMachine {
                 // namespace, scopes and registry bindings.
                 (|| -> VmResult<Val> {
                     Ok(loop {
-                        if let Some(current_args) = tail_args.take() {
+                        if let Some(mut current_args) = tail_args.take() {
                             // A tail call is a new call: a fresh frame with the
                             // tail call's args, without the previous
                             // iteration's locals or leftover flow scopes.
@@ -10616,16 +10862,18 @@ impl VirtualMachine {
                             let mut frame = LexicalScope::new(ScopeType::Function, None);
                             frame.is_boundary = is_boundary;
                             for (i, param_name) in function_param_names.iter().enumerate() {
+                                // The tail call's arguments are this
+                                // frame's alone: it binds them by moving.
                                 let value = if function_is_variadic && i == variadic_param_index {
                                     // Variadic parameter - collect remaining args
                                     let variadic_args: Vec<Val> = if i < current_args.len() {
-                                        current_args[i..].to_vec()
+                                        current_args.drain(i..).collect()
                                     } else {
                                         vec![]
                                     };
                                     Val::vec(variadic_args)
                                 } else if i < current_args.len() {
-                                    current_args[i].clone()
+                                    std::mem::replace(&mut current_args[i], Val::Null)
                                 } else {
                                     Val::Null
                                 };
@@ -10636,7 +10884,11 @@ impl VirtualMachine {
 
                         // Execute the function instructions - borrow from outer Arc clone
                         let instructions = &function_info.instructions;
-                        match self.execute_function_instructions(instructions, Some(function_id))? {
+                        match self.execute_function_instructions(
+                            instructions,
+                            &function_info.moves,
+                            Some(function_id),
+                        )? {
                             FunctionExecutionResult::Value(val) => {
                                 // Normal return - exit the loop with the result
                                 break val;
@@ -10654,7 +10906,8 @@ impl VirtualMachine {
                                         tail_fn_id
                                     );
                                     // Execute as a regular call
-                                    break self.execute_user_function(tail_fn_id, &new_args)?;
+                                    break self
+                                        .execute_user_function(tail_fn_id, new_args.into())?;
                                 }
 
                                 // The next iteration's prologue skips the
@@ -12557,8 +12810,16 @@ impl VirtualMachine {
     fn execute_function_instructions(
         &mut self,
         instructions: &[Instruction],
+        plan: &[u8],
         function_id: Option<FunctionId>,
     ) -> Result<FunctionExecutionResult, VmError> {
+        // What each instruction may move (see `lang::moves`); none unless
+        // the plan is for these instructions.
+        let plan: &[u8] = if plan.len() == instructions.len() {
+            plan
+        } else {
+            &[]
+        };
         if instructions.is_empty() {
             return Ok(FunctionExecutionResult::Value(Val::Null));
         }
@@ -12629,6 +12890,7 @@ impl VirtualMachine {
         while func_ip < instructions.len() {
             self.poll_execution_cancelled()?;
             let instruction = &instructions[func_ip];
+            let moves = plan.get(func_ip).copied().unwrap_or(0);
             // Set instruction pointer for debugging
             self.instruction_pointer = func_ip;
             // A `where` predicate draws each instruction from its budget.
@@ -12755,11 +13017,7 @@ impl VirtualMachine {
             } = instruction
             {
                 // Collect new argument values from registers
-                let mut new_args = Vec::with_capacity(*args_count as usize);
-                for i in 0..*args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    new_args.push(self.get_register(arg_reg)?.clone());
-                }
+                let new_args = self.consume_registers(*args_start, *args_count as usize, moves)?;
 
                 // The compiler only emits TailCall for a call it resolved to
                 // the current function, but runtime args can still select a
@@ -12792,7 +13050,7 @@ impl VirtualMachine {
                     if let Instruction::CondBranchEnd { branch_name, .. } = instruction {
                         if branch_name == skip_branch {
                             // Execute this to clear the skip flag using normal machinery
-                            match self.execute_instruction(instruction) {
+                            match self.execute_instruction(instruction, 0) {
                                 Ok(()) => {
                                     if let Some(dest) = self.get_instruction_dest(instruction)
                                         && let Ok(val) = self.get_register(dest)
@@ -12961,8 +13219,9 @@ impl VirtualMachine {
                 _ => {}
             }
 
-            match self.execute_instruction(instruction) {
+            match self.execute_instruction(instruction, moves) {
                 Ok(()) => {
+                    self.release_operands(instruction, moves);
                     // For functions, we typically want the result of the last instruction
                     // For now, we'll use a simple heuristic to get the result
                     match instruction {
