@@ -157,10 +157,9 @@ meta {
 fn (doc: Any): Vec<Str> {
   verifications ::api/included(doc, "verification")
   reports ::api/included(doc, "report")
-  v-reasons reduce(verifications, (acc, v) {
-    d verification-decision(v)
-    if(in(d.decision, ["declined", "needs-review", "failed"]), concat(acc, d.reasons), acc)
-  }, [])
+  // Every reason a verification gives: failed, under review, canceled, or
+  // waiting on a retry. A passed or still-running one gives none.
+  v-reasons reduce(verifications, (acc, v) { concat(acc, verification-decision(v).reasons) }, [])
 
   r-reasons reduce(reports, (acc, r) {
     d report-decision(r)

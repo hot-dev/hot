@@ -614,3 +614,11 @@ meta ["test"] fn () {
     assert(is-err(::aws::s3/abort-multipart-upload("bkt", "k", "u", echo())))
     assert-eq("k", ::aws::s3/to-doc-file({key: "k"}).id)
 }
+
+// A non-2xx answer is an Err, as it is for every other call.
+test-delete-bucket-failure-is-an-err
+meta ["test"] fn () {
+    result ::buckets/delete-bucket("bkt", echo())
+    assert(is-err(result), "delete-bucket returns an Err on a non-2xx")
+    assert-eq(418, err-value(result).status)
+}

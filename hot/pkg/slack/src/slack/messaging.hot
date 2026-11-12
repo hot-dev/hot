@@ -128,7 +128,7 @@ fn
   chat-get-permalink(request, {})
 },
 (request: ChatGetPermalinkRequest, opts: Map): ChatGetPermalinkResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/chat.getPermalink?channel=${request.channel}&message_ts=${request.message_ts}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/chat.getPermalink`, {channel: request.channel, message_ts: request.message_ts}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ChatGetPermalinkResponse(response.body) }
@@ -572,7 +572,7 @@ fn
   reactions-get(request, {})
 },
 (request: ReactionsGetRequest, opts: Map): ReactionsGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reactions.get?channel=${or(request.channel, "")}&file=${or(request.file, "")}&file_comment=${or(request.file_comment, "")}&full=${or(request.full, "")}&timestamp=${or(request.timestamp, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/reactions.get`, {channel: request.channel, file: request.file, file_comment: request.file_comment, full: request.full, timestamp: request.timestamp}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ReactionsGetResponse(response.body) }
@@ -620,7 +620,7 @@ fn
   reactions-list(request, {})
 },
 (request: ReactionsListRequest, opts: Map): ReactionsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reactions.list?user=${or(request.user, "")}&full=${or(request.full, "")}&count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/reactions.list`, {user: request.user, full: request.full, count: request.count, page: request.page, cursor: request.cursor, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ReactionsListResponse(response.body) }
@@ -717,7 +717,7 @@ fn
   search-messages(request, {})
 },
 (request: SearchMessagesRequest, opts: Map): SearchMessagesResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/search.messages?query=${request.query}&count=${or(request.count, "")}&highlight=${or(request.highlight, "")}&page=${or(request.page, "")}&sort=${or(request.sort, "")}&sort_dir=${or(request.sort_dir, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/search.messages`, {query: request.query, count: request.count, highlight: request.highlight, page: request.page, sort: request.sort, sort_dir: request.sort_dir}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { SearchMessagesResponse(response.body) }
@@ -883,7 +883,7 @@ fn
   reminders-info(request, {})
 },
 (request: RemindersInfoRequest, opts: Map): RemindersInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/reminders.info?reminder=${request.reminder}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/reminders.info`, {reminder: request.reminder}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { RemindersInfoResponse(response.body) }
@@ -1002,7 +1002,7 @@ fn
   pins-list(request, {})
 },
 (request: PinsListRequest, opts: Map): PinsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/pins.list?channel=${request.channel}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/pins.list`, {channel: request.channel}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { PinsListResponse(response.body) }
@@ -1133,7 +1133,7 @@ fn
   stars-list(request, {})
 },
 (request: StarsListRequest, opts: Map): StarsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/stars.list?count=${or(request.count, "")}&page=${or(request.page, "")}&cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/stars.list`, {count: request.count, page: request.page, cursor: request.cursor, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { StarsListResponse(response.body) }

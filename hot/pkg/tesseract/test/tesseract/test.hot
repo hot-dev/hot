@@ -182,3 +182,10 @@ fn () {
     assert-eq("bin", ::tesseract/file-ext("hot://uploads/a.$(id)"))
     assert-eq("bin", ::tesseract/file-ext("hot://uploads/a.x y"))
 }
+
+// The default image installs tesseract first. That output must stay out of
+// stdout, which `ocr` returns as the text and `version` parses.
+test-install-output-stays-out-of-stdout
+meta ["test"] fn () {
+    assert(ends-with(::tesseract/INSTALL_CMD, "> /dev/null"), ::tesseract/INSTALL_CMD)
+}

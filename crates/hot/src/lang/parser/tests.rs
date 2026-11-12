@@ -23,6 +23,39 @@ fn test_removed_result_modifier_syntax_errors() {
     }
 }
 
+// A qualified type ends at its name. The `::` after it starts the value:
+// read as more of the type, it left `x` bound to `(1)` and the function
+// never called.
+#[test]
+fn test_qualified_annotation_ends_at_its_name() {
+    for (src, annotation) in [
+        ("x: ::net/Port ::net/parse(1)", "::net/Port"),
+        ("x: ::net/Port? ::net/parse(1)", "::net/Port?"),
+        ("x: ::net/Reply.Ok ::net/parse(1)", "::net/Reply.Ok"),
+        ("x: Vec<::net/Port> ::net/parse(1)", "Vec<::net/Port>"),
+        ("x: ::a::b/Port | Str ::a::b/parse(1)", "::a::b/Port | Str"),
+    ] {
+        let program = parse_hot(src).expect(src);
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let (var, value) = default_ns
+            .scope
+            .vars
+            .iter()
+            .find(|(var, _)| var.sym.name() == "x")
+            .expect("x should exist");
+        assert_eq!(var.type_annotation.as_deref(), Some(annotation), "{src}");
+        let Value::FnCall(call) = value else {
+            panic!("expected a call as the value of {src:?}, got {value:?}");
+        };
+        assert!(
+            matches!(&*call.function, Value::Ref(Ref::Ns(ns_ref))
+                if ns_ref.function_name.as_deref() == Some("parse")),
+            "expected a call of `parse` in {src:?}, got {:?}",
+            call.function
+        );
+    }
+}
+
 #[test]
 fn test_typed_bindings_in_value_position_blocks() {
     // `name: Type value` must parse anywhere a block statement can

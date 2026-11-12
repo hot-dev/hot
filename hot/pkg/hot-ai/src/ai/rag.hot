@@ -75,6 +75,7 @@ fn (history: Vec): Str {
                     Role.User      => { "user" }
                     Role.Assistant => { "assistant" }
                     Role.System    => { "system" }
+                    Role.Tool      => { "tool" }
                 }
                 `${role-str}: ${m.content}`
             })
@@ -580,20 +581,39 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): MemoryCapsule {
 
     messages ::ai::memory/recent(mem, o)
     summary summarize(mem, chat-opts, o)
+
+    // A failed read or summary is returned as the Err. Passing it on to the
+    // next step would halt the run, which `compact-window-safe` cannot catch.
+    cond {
+        is-err(messages) => { messages }
+        is-err(summary) => { summary }
+        => { store-window-capsule(mem, capsule-id, summary, messages, o, emit-stream-on) }
+    }
+}
+
+store-window-capsule
+meta {no-doc: true}
+fn (mem: AgentMemory, capsule-id: Str, summary: Str, messages: Vec, o: Map, emit-stream-on: Any): MemoryCapsule {
     capsule ::ai::memory/capsule-from-window(capsule-id, summary, messages, o)
-    ::ai::memory/store-capsule(mem, capsule)
+    stored if-ok(capsule, (c) { ::ai::memory/store-capsule(mem, c) })
 
     cond {
-        emit-stream-on => {
-        if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_END, {
-            agent-name: mem.agent-name,
-            capsule-id: capsule-id,
-            source-count: length(messages),
-        }), null)
-    }
-    }
+        is-err(capsule) => { capsule }
+        is-err(stored) => { stored }
+        => {
+            cond {
+                emit-stream-on => {
+                    if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_END, {
+                        agent-name: mem.agent-name,
+                        capsule-id: capsule-id,
+                        source-count: length(messages),
+                    }), null)
+                }
+            }
 
-    capsule
+            capsule
+        }
+    }
 }
 
 compact-window-safe
@@ -637,7 +657,7 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Map {
         }
     })
     cond {
-        and(is-map(res), contains(keys(res), "ok")) => { res }
+        and(is-map(res), in("ok", keys(res))) => { res }
         => {
             {
                 ok: true,

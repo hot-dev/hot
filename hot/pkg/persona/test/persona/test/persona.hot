@@ -573,3 +573,20 @@ meta ["test"] fn () {
     assert(::reports/is-done({type: "report/watchlist", attributes: {status: "errored"}}), "errored report is done")
     assert(not(::reports/is-done({type: "report/watchlist", attributes: {status: "pending"}})), "pending report is not")
 }
+
+// A verification waiting on a retry gives a reason, as the doc says. A passed
+// or still-running one gives none.
+test-included-reasons-keeps-retry-needed-verifications
+meta ["test"]
+fn () {
+    doc {
+        included: [
+            {id: "ver_1", type: "verification/selfie", attributes: {status: "requires_retry"}},
+            {id: "ver_2", type: "verification/government-id", attributes: {status: "passed"}},
+            {id: "ver_3", type: "verification/database", attributes: {status: "initiated"}},
+            {id: "ver_4", type: "verification/document", attributes: {status: "failed"}}
+        ]
+    }
+
+    assert-eq(["verification/selfie requires retry", "verification/document failed"], ::decisions/included-reasons(doc))
+}

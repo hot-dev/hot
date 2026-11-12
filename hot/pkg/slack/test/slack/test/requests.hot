@@ -1,0 +1,37 @@
+::slack::test::requests ns
+meta ["test"]
+
+// Hermetic tests for the query strings GET calls build.
+
+::api ::slack::api
+::users ::slack::users
+
+BASE "https://slack.com/api"
+
+test-with-query-encodes-values
+meta ["test"]
+fn () {
+  assert-eq(`${BASE}/search.messages?query=in%3A%23general%20a%26b`, ::api/with-query(`${BASE}/search.messages`, {query: "in:#general a&b"}), "# and & stay in the value")
+  assert-eq(`${BASE}/users.lookupByEmail?email=a%2Bb%40example.com`, ::api/with-query(`${BASE}/users.lookupByEmail`, {email: "a+b@example.com"}), "a plus address")
+  assert-eq(`${BASE}/users.list?limit=20`, ::api/with-query(`${BASE}/users.list`, {limit: 20, cursor: null, include_locale: ""}), "unset values are left out")
+  assert-eq(`${BASE}/users.list`, ::api/with-query(`${BASE}/users.list`, {cursor: null}))
+  assert-eq(`${BASE}/x?exclude_archived=false`, ::api/with-query(`${BASE}/x`, {exclude_archived: false}), "false is a value")
+}
+
+test-with-query-lists-and-json
+meta ["test"]
+fn () {
+  assert-eq(`${BASE}/x?types=public_channel%2Cprivate_channel`, ::api/with-query(`${BASE}/x`, {types: ["public_channel", "private_channel"]}), "a list is comma-separated")
+  assert-eq(`${BASE}/dialog.open?dialog=%7B%22title%22%3A%22Hi%22%7D`, ::api/with-query(`${BASE}/dialog.open`, {dialog: {title: "Hi"}}), "a Map is sent as JSON")
+}
+
+// team_id is in both request types and must reach Slack: an org-wide token needs it.
+test-users-calls-send-team-id
+meta ["test"]
+fn () {
+  conversations ::users/users-conversations-url(::users/UsersConversationsRequest({user: "U1", team_id: "T1", exclude_archived: true}))
+  assert-eq(`${BASE}/users.conversations?user=U1&exclude_archived=true&team_id=T1`, conversations)
+  listing ::users/users-list-url(::users/UsersListRequest({limit: 50, team_id: "T1"}))
+  assert-eq(`${BASE}/users.list?limit=50&team_id=T1`, listing)
+  assert-eq(`${BASE}/users.list`, ::users/users-list-url(::users/UsersListRequest({})), "nothing set, no query")
+}

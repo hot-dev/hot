@@ -1379,7 +1379,7 @@ meta {
     sum fn (x: Int, y: Int): Int { add(x, y) }
 
     opts ::ai::chat/ChatOptions({
-        chat-fn: ::anthropic::messages/chat-with-tools,
+        chat-fn: ::anthropic::chat-tools/chat-with-tools,
         model: "claude-sonnet-4-5",
         tools: [::ai::tool/from-fn(sum)],
         max-iterations: 5
@@ -1404,7 +1404,7 @@ meta {
 
     ```hot
     opts ::ai::chat/ChatOptions({
-        chat-fn: ::anthropic::messages/chat-with-tools,
+        chat-fn: ::anthropic::chat-tools/chat-with-tools,
         model: "claude-sonnet-4-5"
     })
 

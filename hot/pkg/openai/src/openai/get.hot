@@ -381,9 +381,9 @@ fn
 
 GetChatCompletionMessagesRequest type {
   completion-id: Str,
-  after: Str,
-  limit: Str,
-  order: Str
+  after: Str?,
+  limit: Str?,
+  order: Str?
 }
 
 GetChatCompletionMessagesResponse type {
@@ -419,7 +419,7 @@ fn
   get-chat-messages(request, {})
 },
 (request: GetChatCompletionMessagesRequest, opts: Map): GetChatCompletionMessagesResponse {
-  response api-request("GET", `/chat/completions/${request.completion-id}/messages?after=${request.after}&limit=${request.limit}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/chat/completions/${request.completion-id}/messages`, {after: request.after, limit: request.limit, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetChatCompletionMessagesResponse(response.body) }
@@ -470,10 +470,10 @@ fn
 
 GetEvalRunsRequest type {
   eval-id: Str,
-  after: Str,
-  limit: Str,
-  order: Str,
-  status: Str
+  after: Str?,
+  limit: Str?,
+  order: Str?,
+  status: Str?
 }
 
 GetEvalRunsResponse type {
@@ -504,7 +504,7 @@ fn
   get-eval-runs(request, {})
 },
 (request: GetEvalRunsRequest, opts: Map): GetEvalRunsResponse {
-  response api-request("GET", `/evals/${request.eval-id}/runs?after=${request.after}&limit=${request.limit}&order=${request.order}&status=${request.status}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/evals/${request.eval-id}/runs`, {after: request.after, limit: request.limit, order: request.order, status: request.status}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetEvalRunsResponse(response.body) }
@@ -567,10 +567,10 @@ fn
 GetEvalRunOutputItemsRequest type {
   eval-id: Str,
   run-id: Str,
-  after: Str,
-  limit: Str,
-  status: Str,
-  order: Str
+  after: Str?,
+  limit: Str?,
+  status: Str?,
+  order: Str?
 }
 
 GetEvalRunOutputItemsResponse type {
@@ -606,7 +606,7 @@ fn
   get-eval-run-output-items(request, {})
 },
 (request: GetEvalRunOutputItemsRequest, opts: Map): GetEvalRunOutputItemsResponse {
-  response api-request("GET", `/evals/${request.eval-id}/runs/${request.run-id}/output_items?after=${request.after}&limit=${request.limit}&status=${request.status}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/evals/${request.eval-id}/runs/${request.run-id}/output_items`, {after: request.after, limit: request.limit, status: request.status, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetEvalRunOutputItemsResponse(response.body) }
@@ -667,7 +667,7 @@ fn
 
 GetCertificateRequest type {
   certificate-id: Str,
-  include: Str
+  include: Str?
 }
 
 GetCertificateResponse type {
@@ -700,7 +700,7 @@ fn
   get-certificate(request, {})
 },
 (request: GetCertificateRequest, opts: Map): GetCertificateResponse {
-  response api-request("GET", `/organization/certificates/${request.certificate-id}?include=${request.include}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/certificates/${request.certificate-id}`, {include: request.include}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetCertificateResponse(response.body) }
@@ -710,10 +710,10 @@ fn
 
 GetResponseRequest type {
   response-id: Str,
-  include: Str,
-  stream: Str,
-  starting-after: Str,
-  include-obfuscation: Str
+  include: Str?,
+  stream: Str?,
+  starting-after: Str?,
+  include-obfuscation: Str?
 }
 
 // Retrieved response object
@@ -739,7 +739,7 @@ fn
   get-model-response(request, {})
 },
 (request: GetResponseRequest, opts: Map): GetResponseResponse {
-  response api-request("GET", `/responses/${request.response-id}?include=${request.include}&stream=${request.stream}&starting_after=${request.starting-after}&include_obfuscation=${request.include-obfuscation}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/responses/${request.response-id}`, {include: request.include, stream: request.stream, starting_after: request.starting-after, include_obfuscation: request.include-obfuscation}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetResponseResponse(response.body) }
@@ -911,7 +911,7 @@ GetRunStepRequest type {
   thread-id: Str,
   run-id: Str,
   step-id: Str,
-  include: Str
+  include: Str?
 }
 
 GetRunStepResponse type {
@@ -957,7 +957,7 @@ fn
   retrieve-run-step(request, {})
 },
 (request: GetRunStepRequest, opts: Map): GetRunStepResponse {
-  response api-request("GET", `/threads/${request.thread-id}/runs/${request.run-id}/steps/${request.step-id}?include[]=${request.include}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/threads/${request.thread-id}/runs/${request.run-id}/steps/${request.step-id}`, {"include[]": request.include}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetRunStepResponse(response.body) }

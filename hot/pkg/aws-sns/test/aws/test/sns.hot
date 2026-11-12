@@ -117,3 +117,20 @@ meta ["test"] fn () {
     assert(is-err(out), "it would be interpolated into the hostname")
     assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
 }
+
+// A non-2xx answer is an Err, as it is for every other call.
+test-topic-failures-are-errs
+meta ["test"] fn () {
+    arn "arn:aws:sns:eu-west-1:1:t"
+    results [
+        ::topics/delete-topic(arn, echo()),
+        ::topics/set-topic-attributes(arn, "DisplayName", "x", echo()),
+        ::topics/tag-resource(arn, [{Key: "k", Value: "v"}], echo()),
+        ::topics/untag-resource(arn, ["k"], echo()),
+        ::topics/list-tags-for-resource(arn, echo())
+    ]
+    for-each(results, (result: Result) {
+        assert(is-err(result), "a non-2xx is an Err")
+        assert-eq(418, err-value(result).status)
+    })
+}

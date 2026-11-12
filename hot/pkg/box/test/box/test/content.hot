@@ -123,6 +123,17 @@ meta ["test"] fn () {
     assert-eq({version: "55"}, ::content/download-params({version: "55", range: {start: 0, end: 1}, chunk-size: 9}))
 }
 
+// A shared-link item needs `boxapi` on every request, not only the first.
+test-follow-up-calls-keep-boxapi
+meta ["test"] fn () {
+    opts {token: "t", boxapi: "shared_link=https://app.box.com/s/abc", chunk-size: 4, fields: "id"}
+    assert-eq({token: "t", boxapi: "shared_link=https://app.box.com/s/abc"}, ::content/follow-up-opts(opts))
+    assert-eq({token: "t"}, ::content/follow-up-opts({token: "t", chunk-size: 4}))
+    assert-eq({boxapi: "shared_link=https://app.box.com/s/abc", Range: "bytes=0-3"}, ::content/chunk-headers(0, 3, opts))
+    assert-eq({Range: "bytes=4-7"}, ::content/chunk-headers(4, 7, {token: "t"}))
+    assert-eq("shared_link=https://app.box.com/s/abc", get(::box::files/file-headers(::content/follow-up-opts(opts)), "boxapi"))
+}
+
 REPS {
     representations: {entries: [
         {representation: "pdf", status: {state: "success"}},

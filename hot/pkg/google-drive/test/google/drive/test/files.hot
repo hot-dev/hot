@@ -70,3 +70,17 @@ meta ["test"] fn () {
     removed sort(::changes/removed-file-ids(CHANGES))
     assert-eq(["b", "c"], removed, "removed and trashed ids; a file restored later is not removed")
 }
+
+// A file changed and then removed in one set is gone: it is in
+// removed-file-ids only, never in both lists.
+test-a-later-removal-drops-an-earlier-change
+meta ["test"] fn () {
+    changes [
+        {changeType: "file", fileId: "a", removed: false, file: {id: "a", name: "A", mimeType: "text/plain"}},
+        {changeType: "file", fileId: "e", removed: false, file: {id: "e", name: "E", mimeType: "text/plain"}},
+        {changeType: "file", fileId: "a", removed: true},
+        {changeType: "file", fileId: "e", removed: false, file: {id: "e", name: "E", mimeType: "text/plain", trashed: true}}
+    ]
+    assert-eq([], ::changes/changed-files(changes), "removed and trashed later")
+    assert-eq(["a", "e"], sort(::changes/removed-file-ids(changes)))
+}

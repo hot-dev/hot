@@ -128,7 +128,23 @@ fn (opts: Map): Map {
 company-path
 meta {no-doc: true}
 fn (number: Any): Str {
-  `/company/${::api/path-segment(company-number(number))}`
+  n company-number(number)
+  cond {
+    is-err(n) => { n }
+    => { `/company/${::api/path-segment(n)}` }
+  }
+}
+
+// Call `f` with the company's path, or return the Err for an invalid number
+// without sending anything.
+with-company-path
+meta {no-doc: true}
+fn (number: Any, f: Fn): Any {
+  path company-path(number)
+  cond {
+    is-err(path) => { path }
+    => { f(path) }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +266,10 @@ fn
   company(number, {})
 },
 (number: Any, opts: Map): Map? {
-  with-key(opts, (cfg, auth) {
-    ::api/get-json-or-null(`${cfg.base-url}${company-path(number)}`, {Authorization: auth})
+  with-company-path(number, (path) {
+    with-key(opts, (cfg, auth) {
+      ::api/get-json-or-null(`${cfg.base-url}${path}`, {Authorization: auth})
+    })
   })
 }
 
@@ -273,7 +291,7 @@ fn
   registered-office-address(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/registered-office-address`, {}, opts)
+  with-company-path(number, (path) { ch-get(`${path}/registered-office-address`, {}, opts) })
 }
 
 officers
@@ -297,12 +315,14 @@ fn
   officers(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/officers`, {
-    register_type: get(opts, "register-type"),
-    register_view: get(opts, "register-view"),
-    order_by: get(opts, "order-by"),
-    ...page-params(opts)
-  }, opts)
+  with-company-path(number, (path) {
+    ch-get(`${path}/officers`, {
+      register_type: get(opts, "register-type"),
+      register_view: get(opts, "register-view"),
+      order_by: get(opts, "order-by"),
+      ...page-params(opts)
+    }, opts)
+  })
 }
 
 officer-appointments
@@ -371,7 +391,7 @@ fn
   persons-with-significant-control(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/persons-with-significant-control`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts)
+  with-company-path(number, (path) { ch-get(`${path}/persons-with-significant-control`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts) })
 }
 
 psc-statements
@@ -392,7 +412,7 @@ fn
   psc-statements(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/persons-with-significant-control-statements`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts)
+  with-company-path(number, (path) { ch-get(`${path}/persons-with-significant-control-statements`, {register_view: get(opts, "register-view"), ...page-params(opts)}, opts) })
 }
 
 filing-history
@@ -417,7 +437,7 @@ fn
   filing-history(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/filing-history`, {category: get(opts, "category"), ...page-params(opts)}, opts)
+  with-company-path(number, (path) { ch-get(`${path}/filing-history`, {category: get(opts, "category"), ...page-params(opts)}, opts) })
 }
 
 filing
@@ -438,7 +458,7 @@ fn
   filing(number, transaction-id, {})
 },
 (number: Any, transaction-id: Str, opts: Map): Map {
-  ch-get(`${company-path(number)}/filing-history/${::api/path-segment(transaction-id)}`, {}, opts)
+  with-company-path(number, (path) { ch-get(`${path}/filing-history/${::api/path-segment(transaction-id)}`, {}, opts) })
 }
 
 charges
@@ -459,7 +479,7 @@ fn
   charges(number, {})
 },
 (number: Any, opts: Map): Map {
-  ch-get(`${company-path(number)}/charges`, page-params(opts), opts)
+  with-company-path(number, (path) { ch-get(`${path}/charges`, page-params(opts), opts) })
 }
 
 // ---------------------------------------------------------------------------

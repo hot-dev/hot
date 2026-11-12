@@ -2,7 +2,7 @@
 
 hot.pkg.courtlistener {
   name: "hot.dev/courtlistener",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "3.0.2",
   description: "The Free Law Project CourtListener REST API v4 for Hot: opinion and RECAP search, dockets, docket entries, opinions and clusters by id, and cursor paging.",
   author: "Hot Dev",

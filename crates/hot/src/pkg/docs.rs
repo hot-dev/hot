@@ -2390,19 +2390,26 @@ fn clean_type_annotation(s: &str, resolver: &TypeResolver) -> String {
 
 /// A function definition's documented signature.
 fn signature_from_fn_def(fn_def: &FnDef, resolver: &TypeResolver) -> FunctionSignature {
+    // A variadic function's last parameter is its `...rest`.
+    let rest_index = fn_def
+        .args
+        .variadic
+        .then(|| fn_def.args.args.len().checked_sub(1))
+        .flatten();
     FunctionSignature {
         params: fn_def
             .args
             .args
             .iter()
-            .map(|arg| FunctionParam {
+            .enumerate()
+            .map(|(index, arg)| FunctionParam {
                 name: arg.var.sym.name().to_string(),
                 type_annotation: arg
                     .type_annotation
                     .as_ref()
                     .map(|t| clean_type_annotation(t, resolver)),
                 is_lazy: arg.lazy,
-                is_variadic: false,
+                is_variadic: rest_index == Some(index),
             })
             .collect(),
         return_type: fn_def
@@ -3410,6 +3417,38 @@ clamp fn (n: Int where gte(%, 0), hi: Int) where lte(%.n, %.hi): Int where gte(%
         assert_eq!(port.refinement.as_deref(), Some("between(%, 1, 65535)"));
         let window = ns.types.iter().find(|t| t.name == "Window").unwrap();
         assert_eq!(window.refinement.as_deref(), Some("lte(%.start, %.finish)"));
+    }
+
+    #[test]
+    fn variadic_parameter_is_marked_in_docs() {
+        let ns = parse_doc_namespace(
+            r#"
+::query ns
+
+all-of fn (...terms: Str): Str {
+    join(terms, " and ")
+}
+
+pair fn (first: Str, ...others: Str): Str {
+    first
+}
+
+one fn (term: Str): Str {
+    term
+}
+"#,
+        );
+        let variadic = |name: &str| -> Vec<bool> {
+            let function = ns.functions.iter().find(|f| f.name == name).unwrap();
+            function.signatures[0]
+                .params
+                .iter()
+                .map(|p| p.is_variadic)
+                .collect()
+        };
+        assert_eq!(variadic("all-of"), vec![true]);
+        assert_eq!(variadic("pair"), vec![false, true]);
+        assert_eq!(variadic("one"), vec![false]);
     }
 
     #[test]

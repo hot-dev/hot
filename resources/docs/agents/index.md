@@ -357,8 +357,8 @@ later. Add both to your project's deps, at the versions on their package pages:
 
 ```hot
 hot.project.support.deps {
-  "hot.dev/hot-ai": "1.9.2",
-  "hot.dev/hot-ai-agent": "1.5.3",
+  "hot.dev/hot-ai": "1.9.3",
+  "hot.dev/hot-ai-agent": "1.5.4",
 }
 ```
 

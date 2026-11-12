@@ -186,3 +186,12 @@ meta ["test"] fn () {
     assert(is-err(::converse/converse-stream(MODEL, [{role: "user", content: [{text: "hi"}]}], bad)))
     assert(is-err(::chat/chat(MODEL, "hi", bad)))
 }
+
+// A non-2xx answer is an Err, as it is for `converse`.
+test-converse-stream-failure-is-an-err
+meta ["test"] fn () {
+    msgs [{role: "user", content: [{text: "hi"}]}]
+    result ::converse/converse-stream(MODEL, msgs, echo())
+    assert(is-err(result), "converse-stream returns an Err on a non-2xx")
+    assert-eq(418, err-value(result).status)
+}

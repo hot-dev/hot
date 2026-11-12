@@ -355,3 +355,13 @@ meta ["test"] fn () {
     message if-err(out, (e) { e.message })
     assert(contains(message, "cloudflare.turnstile.secret"))
 }
+
+// A filename cannot end the quoted parameter or add a header line.
+test-multipart-part-escapes-header-values
+meta ["test"]
+fn () {
+    part Str(::api/multipart-part("b", {name: "file", value: "x", filename: "a\"; name=\"evil\".txt\r\nX-Injected: 1", content_type: "text/plain\r\nX-Other: 1"}))
+    assert-eq("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a%22; name=%22evil%22.txtX-Injected: 1\"\r\nContent-Type: text/plainX-Other: 1\r\n\r\nx\r\n", part)
+    plain Str(::api/multipart-part("b", {name: "branch", value: "main"}))
+    assert-eq("--b\r\nContent-Disposition: form-data; name=\"branch\"\r\n\r\nmain\r\n", plain, "an ordinary part is unchanged")
+}

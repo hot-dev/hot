@@ -3125,6 +3125,8 @@ async fn process_task_inner(
         "queue_backend": queue_backend_label(&task_queue),
         "enqueued_at": queue_timing.enqueued_at.map(|value| value.to_rfc3339()),
         "claimed_at": queue_timing.claimed_at.to_rfc3339(),
+        // The row, environment, admission, build and project reads are done.
+        "admitted_at": chrono::Utc::now().to_rfc3339(),
         "publish_wait_ms": publish_wait_ms,
         "queue_wait_ms": if queue_timing.redelivered { None } else { Some(queue_wait_ms) },
         "retry_queue_age_ms": if queue_timing.redelivered { Some(queue_wait_ms) } else { None },
@@ -5998,6 +6000,7 @@ async fn record_task_workload_start(
     capacity_wait_ms: i64,
     image_pull_ms: i64,
     runtime_start_ms: i64,
+    code_setup_started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) {
     let claimed_to_workload_ms = workload_started_at
         .signed_duration_since(claimed_at)
@@ -6007,13 +6010,18 @@ async fn record_task_workload_start(
         .saturating_sub(capacity_wait_ms.max(0))
         .saturating_sub(image_pull_ms.max(0))
         .saturating_sub(runtime_start_ms.max(0));
-    let patch = serde_json::json!({
+    let mut patch = serde_json::json!({
         "workload_started_at": workload_started_at.to_rfc3339(),
         "capacity_wait_ms": capacity_wait_ms.max(0),
         "image_pull_ms": image_pull_ms.max(0),
         "runtime_start_ms": runtime_start_ms.max(0),
         "worker_preparation_ms": worker_preparation_ms,
     });
+    // A code task's own setup (its message channel, bytecode and context),
+    // which begins once the task holds its lease and its slots.
+    if let Some(code_setup_started_at) = code_setup_started_at {
+        patch["code_setup_started_at"] = code_setup_started_at.to_rfc3339().into();
+    }
     match tokio::time::timeout(
         TASK_TIMING_DB_TIMEOUT,
         Task::merge_timing(db, task_id, &patch),
@@ -6049,6 +6057,7 @@ async fn persist_container_timings(
         capacity_wait_ms,
         timings.image_pull_ms,
         timings.runtime_start_ms,
+        None,
     )
     .await;
     match tokio::time::timeout(
@@ -6213,6 +6222,7 @@ async fn process_code_task(
     task_deadline: tokio::time::Instant,
     run_slot_handle: hot::run_slots::RunSlotHandle,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let code_setup_started_at = chrono::Utc::now();
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
     let org_id = request
@@ -6628,6 +6638,7 @@ async fn process_code_task(
             capacity_wait_ms,
             0,
             0,
+            Some(code_setup_started_at),
         )
         .await;
     });
@@ -12497,6 +12508,7 @@ flaky fn (args: Any): Map {
                         enqueued_at: None,
                         queue_wait: std::time::Duration::ZERO,
                         redelivered: false,
+                        buffered: None,
                     },
                     "worker-a".to_string(),
                 )

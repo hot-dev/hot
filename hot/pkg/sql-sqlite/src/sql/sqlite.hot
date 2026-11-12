@@ -26,7 +26,9 @@ meta {
     """
 }
 fn (sql: Str): Str {
-  ::str/uppercase(first(split(::str/trim(sql), " ")))
+  // The first word ends at any whitespace: a statement may break the line after it.
+  word ::hot::regex/capture(::str/trim(sql), "^(\\S+)")
+  if(is-null(word), "", ::str/uppercase(word.groups[0]))
 }
 
 sqlite-execute

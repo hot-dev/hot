@@ -171,15 +171,17 @@ get-current-user-guild-member
 meta {
     doc: """
     GET /users/@me/guilds/{guild_id}/member - The current user's member
-    object in a guild. Needs the `guilds.members.read` OAuth2 scope (user
-    tokens); bots should use `::discord::guilds/get-guild-member`.
+    object in a guild. Needs a user OAuth2 token with the
+    `guilds.members.read` scope: pass it as `{bearer: ...}` in `opts`. Bots
+    should use `::discord::guilds/get-guild-member`.
 
     **Example**
 
     ```hot
     ::users ::discord::users
 
-    member ::users/get-current-user-guild-member(::users/GetCurrentUserGuildMemberRequest({guild_id: "1000000000000000000"}))
+    request ::users/GetCurrentUserGuildMemberRequest({guild_id: "1000000000000000000"})
+    member ::users/get-current-user-guild-member(request, {bearer: ::hot::ctx/get("discord.user.token")})
     member.roles
     ```
     """
@@ -251,13 +253,13 @@ get-current-user-connections
 meta {
     doc: """
     GET /users/@me/connections - The current user's connected accounts.
-    Needs a user OAuth2 token with the `connections` scope; bot tokens are
-    rejected.
+    Needs a user OAuth2 token with the `connections` scope: pass it as
+    `{bearer: ...}` in `opts`. Bot tokens are rejected.
 
     **Example**
 
     ```hot
-    connections ::discord::users/get-current-user-connections()
+    connections ::discord::users/get-current-user-connections({bearer: ::hot::ctx/get("discord.user.token")})
     map(connections, %.type)
     ```
     """

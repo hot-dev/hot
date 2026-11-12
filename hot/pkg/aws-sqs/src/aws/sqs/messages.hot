@@ -86,9 +86,16 @@ DeleteMessageBatchResponse type {
 extract-region-from-url
 meta {no-doc: true}
 fn (queue_url: Str): Str {
-    // Queue URL format: https://sqs.{region}.amazonaws.com/{account}/{queue}
-    // or https://{queue}.{region}.amazonaws.com
-    get-region()
+    // Queue URL formats: https://sqs.{region}.amazonaws.com/{account}/{queue}
+    // and the legacy https://{region}.queue.amazonaws.com/{account}/{queue}.
+    // Any other URL (a custom endpoint) falls back to the configured region.
+    current ::hot::regex/capture(queue_url, "^https?://sqs\\.([a-z0-9-]+)\\.amazonaws\\.com")
+    legacy ::hot::regex/capture(queue_url, "^https?://([a-z0-9-]+)\\.queue\\.amazonaws\\.com")
+    cond {
+        is-some(current) => { current.groups[0] }
+        is-some(legacy) => { legacy.groups[0] }
+        => { get-region() }
+    }
 }
 
 // Send a message to an SQS queue

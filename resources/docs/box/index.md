@@ -271,7 +271,7 @@ devmapper snapshotter:
     snapshotter = "devmapper"
 ```
 
-Without the Transfer service, a worker can't pull with `registry-auth`. From a registry other than Docker Hub, the task shows only the message above, and the reason is in the worker log.
+The host image for Hot's self-hosted stacks has this entry. Without the Transfer service, a worker can't pull with `registry-auth`. From a registry other than Docker Hub, the task shows only the message above, and the reason is in the worker log.
 
 The task worker needs the same `HOT_ENCRYPTION_KEY` as the run worker so it
 can open the sealed credential.

@@ -8,8 +8,9 @@ DownloadFileRequest type {
   file-id: Str
 }
 
+// `value` is the file's content as the API returned it: text, parsed JSON, or Bytes.
 DownloadFileResponse type {
-    value: Str
+    value: Any
 }
 
 
@@ -37,7 +38,7 @@ fn
   response api-request("GET", `/files/${request.file-id}/content`, {}, "", opts)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { DownloadFileResponse(response.body) }
+    is-ok-response(response) => { DownloadFileResponse({value: response.body}) }
     => { err(HttpError(response)) }
   }
 }

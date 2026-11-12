@@ -438,6 +438,10 @@ pub struct QueueLeaseTiming {
     /// True when this claim came from a backend retry/reclaim path. In that
     /// case queue_wait is the item's age, not a fresh queue residence.
     pub redelivered: bool,
+    /// The part of `queue_wait` the item spent in this process after the
+    /// backend delivered it and before a claimer took it: the Redis prefetch
+    /// buffer. `None` on backends that claim one item at a time.
+    pub buffered: Option<std::time::Duration>,
 }
 
 impl<T> ProcessingQueueLease<T>

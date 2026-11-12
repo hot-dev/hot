@@ -934,7 +934,7 @@ fn (input: Str): Map {
 
     box-size or(opts.size, "medium")
     info start-ffmpeg-box(script, box-size, opts.image, or(opts.timeout, 300))
-    assoc(info, "data", {output-prefix})
+    assoc(info, "data", {output-prefix: output-prefix})
 }
 
 start-transcode

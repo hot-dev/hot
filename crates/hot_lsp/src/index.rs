@@ -8,7 +8,7 @@
 //! core registry (which knows the namespace that defines it). Var-imports
 //! are followed to the definition they name.
 
-use crate::syntax::{Local, RefPath, Syntax};
+use crate::syntax::{ArgRef, Local, RefPath, Syntax};
 use ahash::AHashMap;
 use hot::lang::ast::{Namespace, Program, Ref, Value, Var};
 
@@ -274,6 +274,10 @@ pub struct DocContext {
     aliases: Vec<(String, String, String)>,
     imports: Vec<(String, String, RefPath)>,
     locals: Vec<Local>,
+    /// The char span of every `where` clause.
+    clauses: Vec<(usize, usize)>,
+    /// Every `%.name` that names a parameter of a precondition.
+    pub arg_refs: Vec<ArgRef>,
 }
 
 impl DocContext {
@@ -283,6 +287,8 @@ impl DocContext {
         let aliases = syntax.aliases();
         let imports = syntax.imports();
         let locals = syntax.locals(text);
+        let clauses = syntax.where_clauses();
+        let arg_refs = syntax.arg_refs(text);
         Self {
             syntax,
             text: text.to_string(),
@@ -290,7 +296,50 @@ impl DocContext {
             aliases,
             imports,
             locals,
+            clauses,
+            arg_refs,
         }
+    }
+
+    /// The innermost `where` clause that contains `offset`. Its predicate
+    /// runs at namespace scope: the locals around it aren't its.
+    fn clause_at(&self, offset: usize) -> Option<(usize, usize)> {
+        self.clauses
+            .iter()
+            .filter(|(start, end)| *start <= offset && offset <= *end)
+            .max_by_key(|(start, _)| *start)
+            .copied()
+    }
+
+    /// Whether `local` can be named at `offset`, which is in `clause`.
+    fn sees(local: &Local, offset: usize, clause: Option<(usize, usize)>) -> bool {
+        // On its own declaration, or where it is in scope.
+        (local.start <= offset && offset <= local.end)
+            || (local.scope.0 <= offset
+                && offset <= local.scope.1
+                && local.visible_from <= offset
+                && clause.is_none_or(|(start, _)| local.start >= start))
+    }
+
+    /// The innermost local named `name` that `offset` sees.
+    pub fn local_at(&self, name: &str, offset: usize) -> Option<&Local> {
+        let clause = self.clause_at(offset);
+        self.locals
+            .iter()
+            .filter(|l| l.name == name && Self::sees(l, offset, clause))
+            .max_by_key(|l| l.start)
+    }
+
+    /// Every local binding and parameter of the document.
+    pub fn locals(&self) -> &[Local] {
+        &self.locals
+    }
+
+    /// The `%.name` at `offset` that names a parameter.
+    pub fn arg_ref_at(&self, offset: usize) -> Option<&ArgRef> {
+        self.arg_refs
+            .iter()
+            .find(|arg| arg.start <= offset && offset <= arg.end)
     }
 
     /// The namespace in effect at `offset`.
@@ -320,7 +369,21 @@ pub struct Scope<'a> {
 
 impl<'a> Scope<'a> {
     pub fn new(index: &'a Index, doc: &DocContext, offset: usize) -> Self {
-        let ns = doc.namespace_at(offset);
+        let mut scope = Self::of_namespace(index, doc, doc.namespace_at(offset));
+        // A `where` predicate runs at namespace scope: of the locals around
+        // it, it sees only its own (a lambda predicate's parameter).
+        let clause = doc.clause_at(offset);
+        scope.locals = doc
+            .locals
+            .iter()
+            .filter(|l| DocContext::sees(l, offset, clause))
+            .cloned()
+            .collect();
+        scope
+    }
+
+    /// The scope of namespace `ns` as `doc` writes it, with no locals.
+    fn of_namespace(index: &'a Index, doc: &DocContext, ns: String) -> Self {
         let mut aliases: Vec<(String, String)> = doc
             .aliases
             .iter()
@@ -334,28 +397,12 @@ impl<'a> Scope<'a> {
             .filter(|(import_ns, _, _)| *import_ns == ns)
             .map(|(_, name, target)| (name.clone(), target.clone()))
             .collect();
-        // A `where` predicate runs at namespace scope: of the locals around
-        // it, it sees only its own (a lambda predicate's parameter).
-        let clause = doc.syntax.where_clause_at(offset);
-        let locals = doc
-            .locals
-            .iter()
-            .filter(|l| {
-                // On its own declaration, or where it is in scope.
-                (l.start <= offset && offset <= l.end)
-                    || (l.scope.0 <= offset
-                        && offset <= l.scope.1
-                        && l.visible_from <= offset
-                        && clause.is_none_or(|(start, _)| l.start >= start))
-            })
-            .cloned()
-            .collect();
         Self {
             index,
             ns,
             aliases,
             imports,
-            locals,
+            locals: Vec::new(),
         }
     }
 
@@ -448,6 +495,50 @@ impl<'a> Scope<'a> {
             Resolved::Def(def) => Some(def),
             Resolved::Local(_) => None,
         }
+    }
+}
+
+/// Resolves the references of one whole document. A [`Scope`] is built for
+/// one position; this keeps one per namespace and looks locals up in place,
+/// and answers what a `Scope` at each position would.
+pub struct Resolver<'a, 'd> {
+    index: &'a Index,
+    doc: &'d DocContext,
+    scopes: Vec<Scope<'a>>,
+}
+
+impl<'a, 'd> Resolver<'a, 'd> {
+    pub fn new(index: &'a Index, doc: &'d DocContext) -> Self {
+        Self {
+            index,
+            doc,
+            scopes: Vec::new(),
+        }
+    }
+
+    /// The namespace scope in effect at `offset`, without locals.
+    pub fn scope(&mut self, offset: usize) -> &Scope<'a> {
+        let ns = self.doc.namespace_at(offset);
+        let at = match self.scopes.iter().position(|s| s.ns == ns) {
+            Some(at) => at,
+            None => {
+                self.scopes
+                    .push(Scope::of_namespace(self.index, self.doc, ns));
+                self.scopes.len() - 1
+            }
+        };
+        &self.scopes[at]
+    }
+
+    /// Resolve the name part of a reference written at `offset`.
+    pub fn resolve(&mut self, path: &RefPath, offset: usize) -> Option<Resolved<'a>> {
+        let name = path.name.as_deref()?;
+        if path.ns.is_none()
+            && let Some(local) = self.doc.local_at(name, offset)
+        {
+            return Some(Resolved::Local(local.clone()));
+        }
+        self.scope(offset).resolve(path)
     }
 }
 

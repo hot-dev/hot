@@ -67,6 +67,11 @@ package documentation, and local integration tests.
 - `noisy-load-benchmark.sh` runs the `hot/test/noisy-load` stress project
   against SQLite/memory and PostgreSQL/Valkey, then writes DB/queue/log metrics
   under `target/noisy-load-runs/`.
+- `queue-wait-benchmark.sh` runs the end-to-end queue-wait benchmark
+  (`crates/hot_cli/tests/queue_wait_e2e.rs`): publish to first instruction for
+  events and code tasks, by stage, on SQLite with the memory and SQLite queues
+  and on PostgreSQL with a Redis-protocol queue. It writes its report under
+  `target/queue-wait-runs/`. See `docs/queue-wait-benchmark.md`.
 - `git-hooks/` contains hook scripts installed by `setup-git-hooks.sh`.
 
 ## Placement

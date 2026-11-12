@@ -180,7 +180,7 @@ fn
   conversations-history(request, {})
 },
 (request: ConversationsHistoryRequest, opts: Map): ConversationsHistoryResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.history?channel=${request.channel}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/conversations.history`, {channel: request.channel, latest: request.latest, oldest: request.oldest, inclusive: request.inclusive, limit: request.limit, cursor: request.cursor}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ConversationsHistoryResponse(response.body) }
@@ -222,7 +222,7 @@ fn
   conversations-info(request, {})
 },
 (request: ConversationsInfoRequest, opts: Map): ConversationsInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.info?channel=${request.channel}&include_locale=${or(request.include_locale, "")}&include_num_members=${or(request.include_num_members, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/conversations.info`, {channel: request.channel, include_locale: request.include_locale, include_num_members: request.include_num_members}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ConversationsInfoResponse(response.body) }
@@ -433,7 +433,7 @@ fn
   conversations-list(request, {})
 },
 (request: ConversationsListRequest, opts: Map): ConversationsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.list?exclude_archived=${or(request.exclude_archived, "")}&types=${or(request.types, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&team_id=${or(request.team_id, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/conversations.list`, {exclude_archived: request.exclude_archived, types: request.types, limit: request.limit, cursor: request.cursor, team_id: request.team_id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ConversationsListResponse(response.body) }
@@ -517,7 +517,7 @@ fn
   conversations-members(request, {})
 },
 (request: ConversationsMembersRequest, opts: Map): ConversationsMembersResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.members?channel=${request.channel}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/conversations.members`, {channel: request.channel, limit: request.limit, cursor: request.cursor}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ConversationsMembersResponse(response.body) }
@@ -660,7 +660,7 @@ fn
   conversations-replies(request, {})
 },
 (request: ConversationsRepliesRequest, opts: Map): ConversationsRepliesResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/conversations.replies?channel=${request.channel}&ts=${request.ts}&latest=${or(request.latest, "")}&oldest=${or(request.oldest, "")}&inclusive=${or(request.inclusive, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/conversations.replies`, {channel: request.channel, ts: request.ts, latest: request.latest, oldest: request.oldest, inclusive: request.inclusive, limit: request.limit, cursor: request.cursor}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ConversationsRepliesResponse(response.body) }

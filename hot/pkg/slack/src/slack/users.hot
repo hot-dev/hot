@@ -17,6 +17,12 @@ UsersConversationsRequest type {
   team_id: Str?
 }
 
+users-conversations-url
+meta {no-doc: true}
+fn (request: UsersConversationsRequest): Str {
+  ::slack::api/with-query(`${::slack::core/BASE_URL}/users.conversations`, {user: request.user, types: request.types, exclude_archived: request.exclude_archived, limit: request.limit, cursor: request.cursor, team_id: request.team_id})
+}
+
 UsersConversationsResponse type {
   ok: Bool?,
   error: Str?,
@@ -49,7 +55,7 @@ fn
   users-conversations(request, {})
 },
 (request: UsersConversationsRequest, opts: Map): UsersConversationsResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.conversations?user=${or(request.user, "")}&types=${or(request.types, "")}&exclude_archived=${or(request.exclude_archived, "")}&limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}`, {}, "", opts)
+  response api-request("GET", users-conversations-url(request), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersConversationsResponse(response.body) }
@@ -131,7 +137,7 @@ fn
   users-get-presence(request, {})
 },
 (request: UsersGetPresenceRequest, opts: Map): UsersGetPresenceResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.getPresence?user=${request.user}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/users.getPresence`, {user: request.user}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersGetPresenceResponse(response.body) }
@@ -213,7 +219,7 @@ fn
   users-info(request, {})
 },
 (request: UsersInfoRequest, opts: Map): UsersInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.info?user=${request.user}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/users.info`, {user: request.user, include_locale: request.include_locale}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersInfoResponse(response.body) }
@@ -226,6 +232,12 @@ UsersListRequest type {
   cursor: Str?,
   include_locale: Bool?,
   team_id: Str?
+}
+
+users-list-url
+meta {no-doc: true}
+fn (request: UsersListRequest): Str {
+  ::slack::api/with-query(`${::slack::core/BASE_URL}/users.list`, {limit: request.limit, cursor: request.cursor, include_locale: request.include_locale, team_id: request.team_id})
 }
 
 UsersListResponse type {
@@ -259,7 +271,7 @@ fn
   users-list(request, {})
 },
 (request: UsersListRequest, opts: Map): UsersListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.list?limit=${or(request.limit, "")}&cursor=${or(request.cursor, "")}&include_locale=${or(request.include_locale, "")}`, {}, "", opts)
+  response api-request("GET", users-list-url(request), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersListResponse(response.body) }
@@ -304,7 +316,7 @@ fn
   users-lookup-by-email(request, {})
 },
 (request: UsersLookupByEmailRequest, opts: Map): UsersLookupByEmailResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.lookupByEmail?email=${request.email}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/users.lookupByEmail`, {email: request.email}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersLookupByEmailResponse(response.body) }
@@ -549,7 +561,7 @@ fn
   dnd-info(request, {})
 },
 (request: DndInfoRequest, opts: Map): DndInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dnd.info?user=${or(request.user, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/dnd.info`, {user: request.user}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { DndInfoResponse(response.body) }
@@ -631,7 +643,7 @@ fn
   dnd-team-info(request, {})
 },
 (request: DndTeamInfoRequest, opts: Map): DndTeamInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/dnd.teamInfo?users=${request.users}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/dnd.teamInfo`, {users: request.users}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { DndTeamInfoResponse(response.body) }
@@ -808,7 +820,7 @@ fn
   usergroups-list(request, {})
 },
 (request: UsergroupsListRequest, opts: Map): UsergroupsListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.list?include_users=${or(request.include_users, "")}&include_count=${or(request.include_count, "")}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/usergroups.list`, {include_users: request.include_users, include_count: request.include_count, include_disabled: request.include_disabled}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsergroupsListResponse(response.body) }
@@ -895,7 +907,7 @@ fn
   usergroups-users-list(request, {})
 },
 (request: UsergroupsUsersListRequest, opts: Map): UsergroupsUsersListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/usergroups.users.list?usergroup=${request.usergroup}&include_disabled=${or(request.include_disabled, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/usergroups.users.list`, {usergroup: request.usergroup, include_disabled: request.include_disabled}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsergroupsUsersListResponse(response.body) }
@@ -983,7 +995,7 @@ fn
   users-profile-get(request, {})
 },
 (request: UsersProfileGetRequest, opts: Map): UsersProfileGetResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/users.profile.get?user=${or(request.user, "")}&include_labels=${or(request.include_labels, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/users.profile.get`, {user: request.user, include_labels: request.include_labels}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsersProfileGetResponse(response.body) }
