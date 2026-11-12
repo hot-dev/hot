@@ -437,11 +437,13 @@ Fresh installations can select GCS from the start with no migration.
 | `hot.file.aws.s3.prefix` / `hot.build.aws.s3.prefix` | Key prefix |
 | `hot.file.aws.s3.region` / `hot.build.aws.s3.region` | Region override |
 
-S3 uses the standard AWS credential chain unless `access-key-id` and
-`secret-access-key` are set under `hot.file.aws` or `hot.build.aws`
-(`HOT_FILE_AWS_ACCESS_KEY_ID` and so on). Set both or neither. Add
-`session-token` (`HOT_FILE_AWS_SESSION_TOKEN` / `HOT_BUILD_AWS_SESSION_TOKEN`)
-for temporary credentials.
+S3 uses the standard AWS credential chain unless you set a key pair:
+`hot.file.aws.access-key-id` and `hot.file.aws.secret-access-key` for files
+(`HOT_FILE_AWS_ACCESS_KEY_ID`, `HOT_FILE_AWS_SECRET_ACCESS_KEY`), and
+`hot.build.aws.access-key-id` and `hot.build.aws.secret-access-key` for builds
+(`HOT_BUILD_AWS_ACCESS_KEY_ID`, `HOT_BUILD_AWS_SECRET_ACCESS_KEY`). Set both of
+a pair or neither. Add `session-token` (`HOT_FILE_AWS_SESSION_TOKEN` /
+`HOT_BUILD_AWS_SESSION_TOKEN`) for temporary credentials.
 
 ## Local Filesystem
 

@@ -19,14 +19,14 @@ The `retry` field supports two forms.
 
 Simple form:
 
-<!-- hot-check: skip -->
+<!-- hot-check: fragment -->
 ```hot
 retry: 3
 ```
 
 Full form:
 
-<!-- hot-check: skip -->
+<!-- hot-check: fragment -->
 ```hot
 retry: {
   attempts: 5,

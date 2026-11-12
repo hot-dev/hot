@@ -71,6 +71,7 @@ Use `parallel` when:
 
 Hot automatically analyzes dependencies and executes in "levels" - variables at the same level run concurrently, but levels execute in order:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Parallel with automatic dependency resolution
 enrich-user fn parallel (id: Str): All<Map> {
@@ -522,6 +523,7 @@ Flow result shape controls whether a flow returns its single produced value or
 all produced values. Use a plain type annotation for the single value case and
 `All<Vec>` / `All<Map>` when you want a collected result:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Single value (the default for serial, cond, match, and pipe)
 result: Int serial {
@@ -579,6 +581,7 @@ Each flow type has a sensible default:
 
 Override the default when you need different results:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Parallel defaults to All<Map>
 data parallel {

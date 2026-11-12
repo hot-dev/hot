@@ -533,6 +533,8 @@ A single arrow declaration both **enrolls a variant** in an open enum and
 shorthand:
 
 ```hot
+Animal enum open { Dog, Cat }
+
 Bird type { species: Str, wingspan: Dec }
 Bird -> Animal.Bird           // bodyless — wraps the source value as-is
 
@@ -544,6 +546,8 @@ The variant name does not need to match the source type name. This is a
 than the data type name:
 
 ```hot
+Animal enum open { Dog, Cat }
+
 Lizard type { length-cm: Dec }
 Lizard -> Animal.Reptile      // tag is Reptile, payload is Lizard
 ```

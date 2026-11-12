@@ -1,0 +1,59 @@
+{
+  "about": "What resources/docs/demos states about hot-demos, as checked against the commit below. Written by scripts/check-demo-doc-pins.py --demos DIR --write.",
+  "repository": "https://github.com/hot-dev/hot-demos",
+  "branch": "main",
+  "commit": "41d60138be33ec04e1fe349a980573915a20888d",
+  "facts": {
+    "demos/hot-chat.md": {
+      "paths": [
+        "hot-chat",
+        "hot-chat/hot",
+        "hot-chat/hot.hot",
+        "hot-chat/hot/src",
+        "hot-chat/hot/src/personal-agent.hot",
+        "hot-chat/hot/src/team-agent.hot",
+        "hot-chat/hot/test",
+        "hot-chat/hot/test/personal-agent.hot",
+        "hot-chat/hot/test/team-agent.hot",
+        "hot-chat/src",
+        "hot-chat/src/app/api/chat/route.ts",
+        "hot-chat/src/lib/agent-client.ts"
+      ],
+      "packages": {
+        "hot.dev/anthropic": null,
+        "hot.dev/hot-ai": null,
+        "hot.dev/hot-ai-agent": null,
+        "hot.dev/openai": null
+      },
+      "commands": [
+        "/ask",
+        "/brief",
+        "/decisions",
+        "/guide",
+        "/recall",
+        "/remember",
+        "/summary",
+        "/tasks",
+        "/whoami"
+      ],
+      "env": [
+        "ANTHROPIC_API_KEY",
+        "HOT_API_KEY",
+        "HOT_API_URL",
+        "OPENAI_API_KEY"
+      ],
+      "npm-scripts": [
+        "build",
+        "dev",
+        "start"
+      ]
+    },
+    "demos/index.md": {
+      "paths": [
+        "graph-rag-memory",
+        "my-news",
+        "slack-bot"
+      ]
+    }
+  }
+}

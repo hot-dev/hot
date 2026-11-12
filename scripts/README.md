@@ -22,12 +22,26 @@ package documentation, and local integration tests.
   detects unsynchronized source changes. A full sync removes mirror directories
   whose canonical skill was deleted.
   `check-doc-hot-blocks.sh` runs `hot check` on every ```hot block in the AI
-  docs, with stubs for the helpers they leave undefined (never for a name the
-  block declares; `--show-stubs` lists them); mark a block that is not meant
-  to compile with `<!-- hot-check: skip -->` on the line before it. Skipped
-  blocks are still swept: their `name fn (params)` signatures, `::ns/name`
-  references and "- `::hot::ns` — `name`" bullets must name functions that
-  exist with those arities.
+  docs and in `resources/docs`, with stubs for the helpers they leave
+  undefined (never for a name the block declares; `--show-stubs` lists them).
+  A block that names a namespace of a package in `hot/pkg` is checked with
+  that package loaded. A marker on the line before a block changes how it is
+  checked: `<!-- hot-check: assume ::db -->` for namespaces that stand for
+  the reader's own code, `<!-- hot-check: fragment -->` for the inside of a
+  map literal, and `<!-- hot-check: skip -->` for a block that is not meant
+  to compile. Skipped blocks are still swept: their `name fn (params)`
+  signatures, `::ns/name` references and "- `::hot::ns` — `name`" bullets
+  must name functions that exist with those arities.
+  `check-doc-links.py` checks the internal links, heading anchors and
+  `nav.md` of `resources/docs`; it reads files only.
+  `check-demo-doc-pins.py` checks what `resources/docs/demos` says about the
+  hot-demos repository (paths, packages, slash commands, environment
+  variables, npm scripts) against `demo-doc-pins.json`. With
+  `--demos HOT_DEMOS_CHECKOUT` it checks the pages against the checkout
+  (nightly), and with `--write` as well it records them in the manifest.
+  The CLI and configuration references are checked against clap and the
+  `all` template by Rust tests: `cargo test -p hot_cli --lib cli_docs` and
+  `cargo test -p hot_cli --lib conf_docs`.
   `check-go-doc-snippets.sh HOT_GO_CHECKOUT` compiles every ```go block in
   `resources/docs/api` against a hot-go checkout.
   `check-sdk-doc-pins.mjs` checks that the SDK version
