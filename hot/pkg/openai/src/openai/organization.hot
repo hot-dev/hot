@@ -339,9 +339,9 @@ ApiKeyList type {
 }
 
 AdminApiKeysListRequest type {
-  after: Str,
-  order: Str,
-  limit: Str
+  after: Str?,
+  order: Str?,
+  limit: Str?
 }
 
 AdminApiKeysListResponse type {
@@ -376,7 +376,7 @@ fn
   list-all-organization-and-project-api-keys(request, {})
 },
 (request: AdminApiKeysListRequest, opts: Map): AdminApiKeysListResponse {
-  response api-request("GET", `/organization/admin_api_keys?after=${request.after}&order=${request.order}&limit=${request.limit}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/admin_api_keys`, {after: request.after, order: request.order, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { AdminApiKeysListResponse(response.body) }
@@ -514,15 +514,15 @@ fn
 }
 
 ListAuditLogsRequest type {
-  effective-at: Str,
-  project-ids: Str,
-  event-types: Str,
-  actor-ids: Str,
-  actor-emails: Str,
-  resource-ids: Str,
-  limit: Str,
-  after: Str,
-  before: Str
+  effective-at: Str?,
+  project-ids: Str?,
+  event-types: Str?,
+  actor-ids: Str?,
+  actor-emails: Str?,
+  resource-ids: Str?,
+  limit: Str?,
+  after: Str?,
+  before: Str?
 }
 
 ListAuditLogsResponse type {
@@ -556,7 +556,7 @@ fn
   list-audit-logs(request, {})
 },
 (request: ListAuditLogsRequest, opts: Map): ListAuditLogsResponse {
-  response api-request("GET", `/organization/audit_logs?effective_at=${request.effective-at}&project_ids[]=${request.project-ids}&event_types[]=${request.event-types}&actor_ids[]=${request.actor-ids}&actor_emails[]=${request.actor-emails}&resource_ids[]=${request.resource-ids}&limit=${request.limit}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/audit_logs`, {effective_at: request.effective-at, "project_ids[]": request.project-ids, "event_types[]": request.event-types, "actor_ids[]": request.actor-ids, "actor_emails[]": request.actor-emails, "resource_ids[]": request.resource-ids, limit: request.limit, after: request.after, before: request.before}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListAuditLogsResponse(response.body) }
@@ -566,12 +566,12 @@ fn
 
 UsageCostsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageCostsResponse type {
@@ -606,7 +606,7 @@ fn
   costs(request, {})
 },
 (request: UsageCostsRequest, opts: Map): UsageCostsResponse {
-  response api-request("GET", `/organization/costs?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/costs`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageCostsResponse(response.body) }
@@ -615,8 +615,8 @@ fn
 }
 
 ListInvitesRequest type {
-  limit: Str,
-  after: Str
+  limit: Str?,
+  after: Str?
 }
 
 ListInvitesResponse type {
@@ -647,7 +647,7 @@ fn
   list-invites(request, {})
 },
 (request: ListInvitesRequest, opts: Map): ListInvitesResponse {
-  response api-request("GET", `/organization/invites?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/invites`, {limit: request.limit, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListInvitesResponse(response.body) }
@@ -740,9 +740,9 @@ fn
 }
 
 ListProjectsRequest type {
-  limit: Str,
-  after: Str,
-  include-archived: Str
+  limit: Str?,
+  after: Str?,
+  include-archived: Str?
 }
 
 ListProjectsResponse type {
@@ -773,7 +773,7 @@ fn
   list-projects(request, {})
 },
 (request: ListProjectsRequest, opts: Map): ListProjectsResponse {
-  response api-request("GET", `/organization/projects?limit=${request.limit}&after=${request.after}&include_archived=${request.include-archived}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects`, {limit: request.limit, after: request.after, include_archived: request.include-archived}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectsResponse(response.body) }
@@ -909,8 +909,8 @@ fn
 
 ListProjectApiKeysRequest type {
   project-id: Str,
-  limit: Str,
-  after: Str
+  limit: Str?,
+  after: Str?
 }
 
 ListProjectApiKeysResponse type {
@@ -940,7 +940,7 @@ fn
   list-project-api-keys(request, {})
 },
 (request: ListProjectApiKeysRequest, opts: Map): ListProjectApiKeysResponse {
-  response api-request("GET", `/organization/projects/${request.project-id}/api_keys?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects/${request.project-id}/api_keys`, {limit: request.limit, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectApiKeysResponse(response.body) }
@@ -1080,9 +1080,9 @@ fn
 
 ListProjectRateLimitsRequest type {
   project-id: Str,
-  limit: Str,
-  after: Str,
-  before: Str
+  limit: Str?,
+  after: Str?,
+  before: Str?
 }
 
 ListProjectRateLimitsResponse type {
@@ -1116,7 +1116,7 @@ fn
   list-project-rate-limits(request, {})
 },
 (request: ListProjectRateLimitsRequest, opts: Map): ListProjectRateLimitsResponse {
-  response api-request("GET", `/organization/projects/${request.project-id}/rate_limits?limit=${request.limit}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects/${request.project-id}/rate_limits`, {limit: request.limit, after: request.after, before: request.before}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectRateLimitsResponse(response.body) }
@@ -1177,8 +1177,8 @@ fn
 
 ListProjectServiceAccountsRequest type {
   project-id: Str,
-  limit: Str,
-  after: Str
+  limit: Str?,
+  after: Str?
 }
 
 ListProjectServiceAccountsResponse type {
@@ -1212,7 +1212,7 @@ fn
   list-project-service-accounts(request, {})
 },
 (request: ListProjectServiceAccountsRequest, opts: Map): ListProjectServiceAccountsResponse {
-  response api-request("GET", `/organization/projects/${request.project-id}/service_accounts?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects/${request.project-id}/service_accounts`, {limit: request.limit, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectServiceAccountsResponse(response.body) }
@@ -1354,8 +1354,8 @@ fn
 
 ListProjectUsersRequest type {
   project-id: Str,
-  limit: Str,
-  after: Str
+  limit: Str?,
+  after: Str?
 }
 
 ListProjectUsersResponse type {
@@ -1385,7 +1385,7 @@ fn
   list-project-users(request, {})
 },
 (request: ListProjectUsersRequest, opts: Map): ListProjectUsersResponse {
-  response api-request("GET", `/organization/projects/${request.project-id}/users?limit=${request.limit}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects/${request.project-id}/users`, {limit: request.limit, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectUsersResponse(response.body) }
@@ -1569,15 +1569,15 @@ fn
 
 UsageAudioSpeechesRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageAudioSpeechesResponse type {
@@ -1611,7 +1611,7 @@ fn
   audio-speeches(request, {})
 },
 (request: UsageAudioSpeechesRequest, opts: Map): UsageAudioSpeechesResponse {
-  response api-request("GET", `/organization/usage/audio_speeches?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/audio_speeches`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageAudioSpeechesResponse(response.body) }
@@ -1621,15 +1621,15 @@ fn
 
 UsageAudioTranscriptionsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageAudioTranscriptionsResponse type {
@@ -1662,7 +1662,7 @@ fn
   audio-transcriptions(request, {})
 },
 (request: UsageAudioTranscriptionsRequest, opts: Map): UsageAudioTranscriptionsResponse {
-  response api-request("GET", `/organization/usage/audio_transcriptions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/audio_transcriptions`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageAudioTranscriptionsResponse(response.body) }
@@ -1672,12 +1672,12 @@ fn
 
 UsageCodeInterpreterSessionsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageCodeInterpreterSessionsResponse type {
@@ -1711,7 +1711,7 @@ fn
   code-interpreter-sessions(request, {})
 },
 (request: UsageCodeInterpreterSessionsRequest, opts: Map): UsageCodeInterpreterSessionsResponse {
-  response api-request("GET", `/organization/usage/code_interpreter_sessions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/code_interpreter_sessions`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageCodeInterpreterSessionsResponse(response.body) }
@@ -1721,16 +1721,16 @@ fn
 
 UsageCompletionsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  batch: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  batch: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageCompletionsResponse type {
@@ -1764,7 +1764,7 @@ fn
   completions(request, {})
 },
 (request: UsageCompletionsRequest, opts: Map): UsageCompletionsResponse {
-  response api-request("GET", `/organization/usage/completions?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&batch=${request.batch}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/completions`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, batch: request.batch, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageCompletionsResponse(response.body) }
@@ -1774,15 +1774,15 @@ fn
 
 UsageEmbeddingsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageEmbeddingsResponse type {
@@ -1815,7 +1815,7 @@ fn
   embeddings(request, {})
 },
 (request: UsageEmbeddingsRequest, opts: Map): UsageEmbeddingsResponse {
-  response api-request("GET", `/organization/usage/embeddings?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/embeddings`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageEmbeddingsResponse(response.body) }
@@ -1825,17 +1825,17 @@ fn
 
 UsageImagesRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  sources: Str,
-  sizes: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  sources: Str?,
+  sizes: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageImagesResponse type {
@@ -1868,7 +1868,7 @@ fn
   images(request, {})
 },
 (request: UsageImagesRequest, opts: Map): UsageImagesResponse {
-  response api-request("GET", `/organization/usage/images?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&sources=${request.sources}&sizes=${request.sizes}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/images`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, sources: request.sources, sizes: request.sizes, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageImagesResponse(response.body) }
@@ -1878,15 +1878,15 @@ fn
 
 UsageModerationsRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  user-ids: Str,
-  api-key-ids: Str,
-  models: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  user-ids: Str?,
+  api-key-ids: Str?,
+  models: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageModerationsResponse type {
@@ -1919,7 +1919,7 @@ fn
   moderations(request, {})
 },
 (request: UsageModerationsRequest, opts: Map): UsageModerationsResponse {
-  response api-request("GET", `/organization/usage/moderations?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&user_ids=${request.user-ids}&api_key_ids=${request.api-key-ids}&models=${request.models}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/moderations`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, user_ids: request.user-ids, api_key_ids: request.api-key-ids, models: request.models, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageModerationsResponse(response.body) }
@@ -1929,12 +1929,12 @@ fn
 
 UsageVectorStoresRequest type {
   start-time: Str,
-  end-time: Str,
-  bucket-width: Str,
-  project-ids: Str,
-  group-by: Str,
-  limit: Str,
-  page: Str
+  end-time: Str?,
+  bucket-width: Str?,
+  project-ids: Str?,
+  group-by: Str?,
+  limit: Str?,
+  page: Str?
 }
 
 UsageVectorStoresResponse type {
@@ -1967,7 +1967,7 @@ fn
   vector-stores(request, {})
 },
 (request: UsageVectorStoresRequest, opts: Map): UsageVectorStoresResponse {
-  response api-request("GET", `/organization/usage/vector_stores?start_time=${request.start-time}&end_time=${request.end-time}&bucket_width=${request.bucket-width}&project_ids=${request.project-ids}&group_by=${request.group-by}&limit=${request.limit}&page=${request.page}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/usage/vector_stores`, {start_time: request.start-time, end_time: request.end-time, bucket_width: request.bucket-width, project_ids: request.project-ids, group_by: request.group-by, limit: request.limit, page: request.page}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { UsageVectorStoresResponse(response.body) }
@@ -1976,9 +1976,9 @@ fn
 }
 
 ListUsersRequest type {
-  limit: Str,
-  after: Str,
-  emails: Str
+  limit: Str?,
+  after: Str?,
+  emails: Str?
 }
 
 ListUsersResponse type {
@@ -2009,7 +2009,7 @@ fn
   list-users(request, {})
 },
 (request: ListUsersRequest, opts: Map): ListUsersResponse {
-  response api-request("GET", `/organization/users?limit=${request.limit}&after=${request.after}&emails=${request.emails}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/users`, {limit: request.limit, after: request.after, emails: request.emails}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListUsersResponse(response.body) }

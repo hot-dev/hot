@@ -172,7 +172,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { true }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },

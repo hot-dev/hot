@@ -181,6 +181,7 @@ fn (messages: Vec): Str {
                 Role.User      => { "user" }
                 Role.Assistant => { "assistant" }
                 Role.System    => { "system" }
+                Role.Tool      => { "tool" }
             }
             `${role-str}: ${m.content}`
         })

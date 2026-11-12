@@ -205,7 +205,9 @@ meta {
 }
 fn (rt: AgentRuntime, where: Str, msg: Str): Any {
     ts now-epoch-secs()
-    ::store/put(rt.errors-store, `${ts}:${where}`, {
+    // The id keeps two errors from one place in the same second apart, as a
+    // fan-out over sessions produces.
+    ::store/put(rt.errors-store, `${ts}:${where}:${Uuid()}`, {
         where: where,
         msg: msg,
         ts: ts,

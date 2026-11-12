@@ -14,8 +14,14 @@ fn () {
 test-quoted-and-encoded-values
 meta ["test"]
 fn () {
-  assert-eq("email=eq.%22a%40b.com%22", ::f/eq("email", "a@b.com"))
-  assert-eq("name=eq.%22Alice%20Smith%22", ::f/eq("name", "Alice Smith"))
+  // A single-value filter is never quoted: PostgREST would match the quotes.
+  assert-eq("email=eq.a%40b.com", ::f/eq("email", "a@b.com"))
+  assert-eq("name=eq.Alice%20Smith", ::f/eq("name", "Alice Smith"))
+  assert-eq("created_at=gte.2026-01-01T00%3A00%3A00Z", ::f/gte("created_at", "2026-01-01T00:00:00Z"))
+  assert-eq("tags=cs.%7Ba%2Cb%7D", ::f/cs("tags", "{a,b}"))
+  assert-eq("note=eq.say%20%22hi%22", ::f/eq("note", "say \"hi\""))
+  assert-eq("deleted_at=isdistinct.null", ::f/filter("deleted_at", "isdistinct", null))
+  // List items with reserved characters are quoted.
   assert-eq("status=in.(active,pending)", ::f/in_("status", ["active", "pending"]))
   assert-eq("tag=in.(%22a%2Cb%22,%22c%20d%22)", ::f/in_("tag", ["a,b", "c d"]))
 }

@@ -95,6 +95,42 @@ fn (opts: Map): Map {
   resolve-from(opts, {"postmark.server.token": ::ctx/get("postmark.server.token")})
 }
 
+query-pairs
+meta {no-doc: true}
+fn (key: Str, value: Any): Vec<Str> {
+  cond {
+    is-null(value) => { [] }
+    is-vec(value) => { reduce(value, (acc, item) { concat(acc, query-pairs(key, item)) }, []) }
+    is-map(value) => { reduce(keys(value), (acc, k) { concat(acc, query-pairs(`${key}[${k}]`, get(value, k))) }, []) }
+    => {
+      text `${value}`
+      if(is-empty(text), [], [`${key}=${::hot::uri/encode(text)}`])
+    }
+  }
+}
+
+with-query
+meta {
+    doc: """
+    Add query parameters to a path (pure). Values are URL-encoded. A null or
+    empty value is left out, a Vec repeats its key, and a Map becomes
+    `key[name]=value` pairs.
+
+    **Example**
+
+    ```hot
+    ::postmark::api/with-query("/messages/outbound", {limit: 20, after: null, order: "desc"})
+    // "/messages/outbound?limit=20&order=desc"
+    ::postmark::api/with-query("/messages/outbound", {q: "a&b #c"})
+    // "/messages/outbound?q=a%26b%20%23c"
+    ```
+    """
+}
+fn (path: Str, params: Map): Str {
+  pairs reduce(keys(params), (acc, k) { concat(acc, query-pairs(Str(k), get(params, k))) }, [])
+  if(is-empty(pairs), path, `${path}?${join(pairs, "&")}`)
+}
+
 encode-body
 meta {
     doc: """

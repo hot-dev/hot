@@ -1,0 +1,40 @@
+::resend::test::requests ns
+meta ["test"]
+
+// Hermetic tests for the bodies and paths the update calls build.
+
+::audiences ::resend::audiences
+::emails ::resend::emails
+
+// An update sends the fields that change. It used to send no body at all.
+test-update-email-sends-scheduled-at
+meta ["test"]
+fn () {
+  request ::emails/PATCHEmailsEmailIdRequest({email-id: "em_1", scheduled_at: "2026-12-01T09:00:00Z"})
+  assert-eq({scheduled_at: "2026-12-01T09:00:00Z"}, ::emails/update-email-body(request))
+  assert-eq({}, ::emails/update-email-body(::emails/PATCHEmailsEmailIdRequest({email-id: "em_1"})), "the id is not part of the body")
+  updated ::emails/PATCHEmailsEmailIdResponse({object: "email", id: "em_1"})
+  assert-eq("em_1", updated.id, "the response is `{object, id}`")
+}
+
+test-update-contact-by-email-sends-its-fields
+meta ["test"]
+fn () {
+  request ::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({
+    email: "ada@example.com",
+    audience-id: "aud_1",
+    first_name: "Ada",
+    unsubscribed: false
+  })
+  assert-eq({first_name: "Ada", unsubscribed: false}, ::audiences/update-contact-body(request), "false is sent, null is not")
+  bare ::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({email: "ada@example.com", audience-id: "aud_1"})
+  assert-eq({}, ::audiences/update-contact-body(bare))
+}
+
+// An address is one path segment, whatever characters it has.
+test-contact-email-path-encodes-the-address
+meta ["test"]
+fn () {
+  assert-eq("/audiences/aud_1/contacts/ada%40example.com", ::audiences/contact-email-path("aud_1", "ada@example.com"))
+  assert-eq("/audiences/aud_1/contacts/a%2Bb%2Fc%40example.com", ::audiences/contact-email-path("aud_1", "a+b/c@example.com"))
+}

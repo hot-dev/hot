@@ -133,7 +133,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },
@@ -276,7 +276,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },
@@ -320,7 +320,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },
@@ -361,7 +361,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { { success: true } }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },
@@ -403,7 +403,7 @@ fn
         cond {
             is-err(response) => { response }
             is-ok-response(response) => { { tags: if(is-null(response.body.Tags), [], response.body.Tags) } }
-            => { AwsError(response) }
+            => { err(AwsError(response)) }
         }
     })
 },

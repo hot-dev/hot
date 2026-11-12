@@ -287,3 +287,34 @@ meta ["test"] fn () {
     // The -safe variant degrades to "" so interactive paths stay up.
     assert-eq("", ::rag/build-context-safe(m, "hello", {}))
 }
+
+// ============================================================================
+// compact-window-safe
+// ============================================================================
+
+// A failed compaction comes back as `{ok: false, capsule: null, error}`.
+test-compact-window-safe-reports-a-failure
+meta ["test"]
+fn () {
+    mem test-memory()
+    failing (model, prompt, system) { err("provider timed out") }
+    opts ::ai::chat/ChatOptions({chat-fn: failing, model: "test-model"})
+    now ::time/epoch-seconds()
+    ::mem/remember(mem, test-message("m1", "first note", sub(now, 60)))
+    ::mem/remember(mem, test-message("m2", "second note", sub(now, 30)))
+    result ::rag/compact-window-safe(mem, opts, {hours: 24})
+    assert-eq(false, result.ok, "a failed compaction is ok: false")
+    assert(is-null(result.capsule))
+    assert(contains(result.error, "provider timed out"), result.error)
+}
+
+// ============================================================================
+// Tool messages keep their role
+// ============================================================================
+
+test-format-thread-lines-names-the-tool-role
+meta ["test"]
+fn () {
+    lines ::rag/format-thread-lines([::msg/user-msg("run it"), ::msg/tool-msg("42")])
+    assert(contains(lines, "user: run it\ntool: 42"), lines)
+}

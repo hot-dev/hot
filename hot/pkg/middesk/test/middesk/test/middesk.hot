@@ -340,3 +340,17 @@ meta ["test"] fn () {
     assert-eq("mk_test_tenant_d", ::api/resolve(RequestOptions({api-key: "mk_test_tenant_d"})).api-key, "typed options")
     assert(is-null(::hot::ctx/get("middesk.api.key")), "per-call keys are not written to ctx")
 }
+
+// find-by-external-id never returns a business with another external_id.
+test-match-external-id
+meta ["test"]
+fn () {
+    mine {id: "biz_1", external_id: "acct-42"}
+    other {id: "biz_2", external_id: "acct-7"}
+    assert-eq(mine, ::businesses/match-external-id([mine], "acct-42"))
+    assert-eq(mine, ::businesses/match-external-id([other, mine], "acct-42"), "the match, wherever it is on the page")
+    assert(is-null(::businesses/match-external-id([], "acct-42")), "an empty page is not found")
+    ignored ::businesses/match-external-id([other], "acct-42")
+    assert(is-err(ignored), "an unrelated business means the filter was ignored")
+    assert(contains(Str(err-value(ignored)), "external_id filter was not applied"), Str(err-value(ignored)))
+}

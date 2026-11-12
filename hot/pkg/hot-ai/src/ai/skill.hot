@@ -448,7 +448,7 @@ fn
             required: ["name"]
         },
         output-schema: null,
-        fn: (name: Str, ctx: Map): Str {
+        fn: (name: Str, ctx: Map?): Str {
             s find-skill(skills, name)
             enriched merge(or(ctx, {}), or(skill-context, {}))
             if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))
@@ -773,7 +773,7 @@ fn
             required: ["name"]
         },
         output-schema: null,
-        fn: (name: Str, ctx: Map): Str {
+        fn: (name: Str, ctx: Map?): Str {
             s resolver.read-fn(name)
             enriched merge(or(ctx, {}), or(skill-context, {}))
             if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))

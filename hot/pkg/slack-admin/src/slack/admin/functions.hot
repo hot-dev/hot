@@ -121,7 +121,7 @@ meta {
     doc: """
     admin.functions.permissions.set - Set who can use a function: `everyone`, `app_collaborators`, `named_entities` (with `user_ids`) or `no_one`.
 
-    Scope: `admin.workflows:read`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
+    Scope: `admin.workflows:write`. Returns Slack's response body; `ok: false` comes back as an `Err(SlackError)`.
 
     **Example**
 

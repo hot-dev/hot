@@ -61,11 +61,22 @@ meta {
 
     gz ::analytics/get-file(::analytics/GetFileRequest({type: "member", date: "2026-10-31"}))
     ::hot::file/write-file-bytes("member-2026-10-31.json.gz", gz)
+
+    // With a per-call token
+    ::analytics/get-file(::analytics/GetFileRequest({type: "member", date: "2026-10-31"}), {token: ::hot::ctx/get("tenant-b.slack.admin.token")})
     ```
     """
 }
-fn (request: GetFileRequest): Bytes {
-  file-result(::hot::http/request(::api/build-request("admin.analytics.getFile", request)))
+fn
+(request: GetFileRequest): Bytes {
+  get-file(request, {})
+},
+(request: GetFileRequest, opts: Map): Bytes {
+  req ::api/build-request("admin.analytics.getFile", request, opts)
+  cond {
+    is-err(req) => { req }
+    => { file-result(::hot::http/request(req)) }
+  }
 }
 
 parse-records
@@ -106,6 +117,10 @@ meta {
     ```
     """
 }
-fn (request: GetFileRequest): Vec<Map> {
-  get-file(request) |> if-ok(parse-records)
+fn
+(request: GetFileRequest): Vec<Map> {
+  get-records(request, {})
+},
+(request: GetFileRequest, opts: Map): Vec<Map> {
+  get-file(request, opts) |> if-ok(parse-records)
 }

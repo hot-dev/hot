@@ -258,19 +258,19 @@ meta {
     **Example**
 
     ```hot
-    // The request path is not filled in from the request yet, so no certificate id can be passed.
-    cert ::openai::modify/modify-certificate(::openai::modify/ModifyCertificateRequest({
+    cert ::openai::modify/modify-certificate("cert_abc123", ::openai::modify/ModifyCertificateRequest({
       name: "Production cert"
     }))
+    cert.name
     ```
     """
 }
 fn
-(request: ModifyCertificateRequest): ModifyCertificateResponse {
-  modify-certificate(request, {})
+(certificate-id: Str, request: ModifyCertificateRequest): ModifyCertificateResponse {
+  modify-certificate(certificate-id, request, {})
 },
-(request: ModifyCertificateRequest, opts: Map): ModifyCertificateResponse {
-  response api-request("POST", "/organization/certificates/{certificate_id}", {}, request, opts)
+(certificate-id: Str, request: ModifyCertificateRequest, opts: Map): ModifyCertificateResponse {
+  response api-request("POST", `/organization/certificates/${certificate-id}`, {}, request, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ModifyCertificateResponse(response.body) }

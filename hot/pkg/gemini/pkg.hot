@@ -2,7 +2,7 @@
 
 hot.pkg.gemini {
   name: "hot.dev/gemini",
-  version: "1.2.3",
+  version: "1.2.4",
   hot-min-version: "3.0.2",
   description: "Google Gemini API bindings for Hot. Includes GenerateContent, Models, Embeddings, Files, Cached Content, and Image Generation (Imagen) APIs.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.gemini {
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.9.2"
+    "hot.dev/hot-ai": "1.9.3"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

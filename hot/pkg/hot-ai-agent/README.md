@@ -12,14 +12,14 @@ for the application harness code that many agents otherwise reimplement.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/hot-ai-agent": "1.5.3"
+"hot.dev/hot-ai-agent": "1.5.4"
 ```
 
 `hot-ai-agent` 1.5.0 needs Hot 3.0.1 and depends on `hot-ai` 1.7.0 or later.
 On Hot 3.0.0, stay on `hot-ai-agent` 1.4.1. A current pair is:
 
 ```hot
-"hot.dev/hot-ai": "1.9.2",
+"hot.dev/hot-ai": "1.9.3",
 "hot.dev/hot-ai-agent": "1.5.0",
 ```
 

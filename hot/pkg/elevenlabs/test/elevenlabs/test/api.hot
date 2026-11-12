@@ -94,6 +94,15 @@ meta ["test"] fn () {
     assert-eq(expected, body)
 }
 
+// A filename cannot end the quoted parameter or add a header line.
+test-multipart-file-escapes-the-filename
+meta ["test"] fn () {
+    part Str(::api/multipart-file("B", "file", "a\"; name=\"model_id\".wav\r\nX-Injected: 1", "audio/wav\r\nX-Other: 1", Bytes("hi")))
+    assert-eq("--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a%22; name=%22model_id%22.wavX-Injected: 1\"\r\nContent-Type: audio/wavX-Other: 1\r\n\r\nhi\r\n", part)
+    plain Str(::api/multipart-file("B", "file", "a.txt", "text/plain", Bytes("hi")))
+    assert-eq("--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhi\r\n", plain, "an ordinary filename is unchanged")
+}
+
 test-stt-multipart-without-file
 meta ["test"] fn () {
     body Str(::stt/multipart-body(::stt/SpeechToTextRequest({}), null, "", "B"))

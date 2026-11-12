@@ -48,7 +48,7 @@ fn
   get-templates-associated-with-this-server(request, {})
 },
 (request: ListTemplatesRequest, opts: Map): ListTemplatesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/templates?Count=${request.count}&Offset=${request.offset}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/templates`, {Count: request.count, Offset: request.offset}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListTemplatesResponse(response.body) }
@@ -88,7 +88,7 @@ fn
   list-inbound-rule-triggers(request, {})
 },
 (request: ListInboundRulesRequest, opts: Map): ListInboundRulesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/triggers/inboundrules?count=${request.count}&offset=${request.offset}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/triggers/inboundrules`, {count: request.count, offset: request.offset}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListInboundRulesResponse(response.body) }

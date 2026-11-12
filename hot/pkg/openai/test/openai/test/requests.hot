@@ -1,0 +1,101 @@
+::openai::test::requests ns
+meta ["test"]
+
+// Hermetic tests for the URLs typed functions build, and the records their
+// responses fill.
+
+::api    ::openai::api
+::create ::openai::create
+::delete ::openai::delete
+::modify ::openai::modify
+::list   ::openai::list
+::org    ::openai::organization
+
+// Port 1 refuses connections, so a call fails at the connection with an error
+// that names the URL it was sent to, and no request leaves the machine.
+OFFLINE {api-key: "sk-tenant", base-url: "http://127.0.0.1:1/v1"}
+
+// The URL a refused call was sent to, in the `(url)` form the error uses.
+sent-url fn (call: Fn): Str {
+    result ::hot::internal::exec/contain(call)
+    message Str(err-value(result))
+    found ::hot::regex/capture(message, "\\((http://127\\.0\\.0\\.1:1[^)]*)\\)")
+    if(is-null(found), message, found.groups[0])
+}
+
+// ============================================================================
+// with-query
+// ============================================================================
+
+test-with-query-drops-empty-values-and-encodes
+meta ["test"] fn () {
+    assert-eq("/assistants?limit=20&order=desc", ::api/with-query("/assistants", {limit: 20, after: null, order: "desc", before: ""}))
+    assert-eq("/assistants", ::api/with-query("/assistants", {after: null}))
+    assert-eq("/x?q=a%26b%20%23c%2Bd", ::api/with-query("/x", {q: "a&b #c+d"}))
+    assert-eq("/x?ids[]=a&ids[]=b%20c", ::api/with-query("/x", {"ids[]": ["a", "b c"]}), "a Vec repeats its key")
+    assert-eq("/x?effective_at[gt]=1&effective_at[lt]=2", ::api/with-query("/x", {effective_at: {gt: 1, lt: 2}}), "a Map becomes bracketed keys")
+}
+
+// ============================================================================
+// List and usage requests
+// ============================================================================
+
+// A list request no longer needs every query field, and unset ones are not sent.
+test-list-requests-send-only-what-is-set
+meta ["test"] fn () {
+    typed ::list/ListAssistantsRequest({limit: "20"})
+    assert(not(is-err(typed)), "a typed request with one field is valid")
+    assert-eq("http://127.0.0.1:1/v1/assistants?limit=20", sent-url(() { ::list/list-assistants(typed, OFFLINE) }))
+    assert-eq("http://127.0.0.1:1/v1/assistants", sent-url(() { ::list/list-assistants({}, OFFLINE) }), "a plain Map with nothing set")
+    assert-eq("http://127.0.0.1:1/v1/organization/admin_api_keys?after=key%261&limit=5", sent-url(() {
+        ::org/list-all-organization-and-project-api-keys({after: "key&1", limit: "5"}, OFFLINE)
+    }), "values are URL-encoded")
+}
+
+// ============================================================================
+// Certificates
+// ============================================================================
+
+test-certificate-paths-carry-the-id
+meta ["test"] fn () {
+    assert-eq("http://127.0.0.1:1/v1/organization/certificates/cert_abc", sent-url(() {
+        ::delete/delete-certificate(::delete/DeleteCertificateRequest({certificate-id: "cert_abc"}), OFFLINE)
+    }))
+    assert-eq("http://127.0.0.1:1/v1/organization/certificates/cert_abc", sent-url(() {
+        ::modify/modify-certificate("cert_abc", ::modify/ModifyCertificateRequest({name: "Production cert"}), OFFLINE)
+    }))
+}
+
+// ============================================================================
+// Response records
+// ============================================================================
+
+// DELETE /responses/{id} answers `{id, object, deleted}`.
+test-delete-model-response-record
+meta ["test"] fn () {
+    deleted ::delete/DeleteResponseResponse({id: "resp_abc", object: "response", deleted: true})
+    assert(not(is-err(deleted)), "a successful delete body fills the record")
+    assert-eq("resp_abc", deleted.id)
+    assert-eq(true, deleted.deleted)
+}
+
+// GET /files/{id}/content answers with the file itself, not a JSON object.
+test-file-content-record-holds-any-body
+meta ["test"] fn () {
+    text ::openai::download/DownloadFileResponse({value: "{\"prompt\": \"hi\"}\n"})
+    assert-eq("{\"prompt\": \"hi\"}\n", text.value)
+    parsed ::openai::download/DownloadFileResponse({value: {a: 1}})
+    assert-eq({a: 1}, parsed.value)
+    bytes ::openai::download/DownloadFileResponse({value: Bytes("abc")})
+    assert-eq(Bytes("abc"), bytes.value)
+}
+
+// ============================================================================
+// Multipart file names
+// ============================================================================
+
+test-multipart-filename-cannot-break-the-header
+meta ["test"] fn () {
+    assert-eq("a%22; name=%22model%22.wavX: 1", ::create/header-safe("a\"; name=\"model\".wav\r\nX: 1"))
+    assert-eq("clip.wav", ::create/header-safe("clip.wav"))
+}

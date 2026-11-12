@@ -30,5 +30,6 @@ meta {
 BASE_URL "https://discord.com/api/v10"
 
 // Discord requires a `DiscordBot ($url, $versionNumber)` User-Agent;
-// requests without a valid one may be blocked by Cloudflare.
-USER_AGENT "DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.0)"
+// requests without a valid one may be blocked by Cloudflare. The version is
+// this package's: change it with the version in pkg.hot.
+USER_AGENT "DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.3)"

@@ -118,3 +118,14 @@ fn () {
 
     assert(is-err(::gleif/collect(fetch, {}, 100)), "a 429 mid-way comes back as the Err")
 }
+
+test-is-not-found-reads-a-typed-error
+meta ["test"]
+fn () {
+    response HttpResponse({status: 404, headers: {}, body: null})
+    assert(::api/is-not-found(::api/http-error(response, "https://x.example")), "the typed value `http-error` returns")
+    assert(::api/is-not-found({status: 404}), "the plain Map an Err carries")
+    assert(not(::api/is-not-found({status: 500})), "500")
+    assert(not(::api/is-not-found("connection refused")), "a transport failure is a Str")
+    assert(not(::api/is-not-found(null)), "null")
+}
