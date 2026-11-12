@@ -113,6 +113,9 @@ test-command-tag
 meta ["test"] fn () {
     assert-eq("INSERT", ::sqlite/command-tag("insert into t values (1)"))
     assert-eq("SELECT", ::sqlite/command-tag("  SELECT 1"))
+    assert-eq("CREATE", ::sqlite/command-tag("create\ntable t (id int)"), "a newline ends the first word")
+    assert-eq("UPDATE", ::sqlite/command-tag("update\tt set x = 1"), "a tab ends the first word")
+    assert-eq("", ::sqlite/command-tag("   "), "a blank statement has no tag")
 }
 
 test-sync-refuses-open-transaction

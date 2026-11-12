@@ -640,7 +640,9 @@ fn (result: Any, sql: Str): Any {
 command-word
 meta {no-doc: true}
 fn (sql: Str): Str {
-    ::hot::str/uppercase(first(split(::hot::str/trim(sql), " ")))
+    // The first word ends at any whitespace: a statement may break the line after it.
+    word ::hot::regex/capture(::hot::str/trim(sql), "^(\\S+)")
+    if(is-null(word), "", ::hot::str/uppercase(word.groups[0]))
 }
 
 close
