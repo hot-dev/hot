@@ -890,6 +890,14 @@ fn (path: Str): Str {
   }
 }
 
+// A filename that is safe inside the quoted header parameter: `"` becomes
+// `%22` and line breaks are dropped.
+header-safe
+meta {no-doc: true}
+fn (value: Str): Str {
+  value |> replace("\"", "%22") |> replace("\r", "") |> replace("\n", "")
+}
+
 multipart-file-field
 meta {no-doc: true}
 fn (boundary: Str, name: Str, path: Str): Bytes {
@@ -897,7 +905,7 @@ fn (boundary: Str, name: Str, path: Str): Bytes {
   mime-type audio-file-mime-type(path)
   file-bytes ::file/read-file-bytes(path)
   concat(
-    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
+    Bytes(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${header-safe(filename)}"\r\nContent-Type: ${mime-type}\r\n\r\n`),
     file-bytes,
     Bytes("\r\n")
   )
@@ -2002,7 +2010,7 @@ fn
   create-run(thread-id, include, request, {})
 },
 (thread-id: Str, include: Str, request: CreateRunRequest, opts: Map): CreateRunResponse {
-  response api-request("POST", `/threads/${thread-id}/runs?include[]=${include}`, {}, request, opts)
+  response api-request("POST", ::openai::api/with-query(`/threads/${thread-id}/runs`, {"include[]": include}), {}, request, opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { CreateRunResponse(response.body) }

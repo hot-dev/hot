@@ -51,9 +51,9 @@ CreateContainerFileBody type {
 }
 
 ListContainersRequest type {
-  limit: Str,
-  order: Str,
-  after: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?
 }
 
 ListContainersResponse type {
@@ -85,7 +85,7 @@ fn
   list-containers(request, {})
 },
 (request: ListContainersRequest, opts: Map): ListContainersResponse {
-  response api-request("GET", `/containers?limit=${request.limit}&order=${request.order}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/containers`, {limit: request.limit, order: request.order, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListContainersResponse(response.body) }
@@ -219,9 +219,9 @@ fn
 
 ListContainerFilesRequest type {
   container-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?
 }
 
 ListContainerFilesResponse type {
@@ -251,7 +251,7 @@ fn
   list-container-files(request, {})
 },
 (request: ListContainerFilesRequest, opts: Map): ListContainerFilesResponse {
-  response api-request("GET", `/containers/${request.container-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/containers/${request.container-id}/files`, {limit: request.limit, order: request.order, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListContainerFilesResponse(response.body) }
