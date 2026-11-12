@@ -62,6 +62,12 @@ struct Client {
 
 impl Client {
     async fn start(root: &Path) -> Self {
+        Self::start_with(root, json!({})).await.0
+    }
+
+    /// Start a session as a client with `capabilities`. Returns the
+    /// server's capabilities with it.
+    async fn start_with(root: &Path, capabilities: Value) -> (Self, Value) {
         use_repo_hot_std();
         let session = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         let (client_io, server_io) = tokio::io::duplex(1 << 22);
@@ -109,13 +115,13 @@ impl Client {
                     "processId": null,
                     "rootUri": uri(root),
                     "workspaceFolders": [{"uri": uri(root), "name": "test"}],
-                    "capabilities": {},
+                    "capabilities": capabilities,
                 }),
             )
             .await;
         assert!(result.get("capabilities").is_some(), "{result}");
         client.notify("initialized", json!({})).await;
-        client
+        (client, result["capabilities"].clone())
     }
 
     async fn send(&mut self, message: Value) {
@@ -763,6 +769,115 @@ async fn constraints_and_named_arguments() {
         .await;
     assert_eq!(help["signatures"][0]["label"], "Point(x: Int, y: Int)");
     assert_eq!(help["activeParameter"], 1);
+
+    // A client that takes no symbol tree gets a list, each symbol with what
+    // contains it.
+    client.change(&shop, 3, SHOP).await;
+    let symbols = client
+        .request(
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri(&shop)}}),
+        )
+        .await;
+    let listed: Vec<(&str, &str)> = symbols
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap(),
+                s["containerName"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("::app::shop", ""),
+            ("Port", "::app::shop"),
+            ("Point", "::app::shop"),
+            ("x", "Point"),
+            ("y", "Point"),
+            ("Range", "::app::shop"),
+            ("low", "Range"),
+            ("high", "Range"),
+            ("withdraw", "::app::shop"),
+            ("origin", "::app::shop"),
+            ("describe", "::app::shop"),
+        ]
+    );
+    // The invariant on the line after the type's body is part of the type.
+    assert_eq!(
+        symbols[5]["location"]["range"]["end"]["line"],
+        pos(SHOP, "where lte(%.low", 0)["line"]
+    );
+
+    client.shutdown().await;
+}
+
+const ORDERS: &str = r#"::app::orders ns
+
+::shop ::app::shop
+origin ::app::shop/origin
+
+Size type "🎉" | "b"
+
+pay fn (amount: Int): Int {
+    start origin(1)
+    ::shop/withdraw(amount, add(start.x, 100))
+}
+"#;
+
+/// The outline of a document, through the protocol.
+#[tokio::test(flavor = "multi_thread")]
+async fn outline() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    write(&root, "hot.hot", HOT_HOT);
+    write(&root, "hot/src/app/shop.hot", SHOP);
+    let orders = write(&root, "hot/src/app/orders.hot", ORDERS);
+
+    let (mut client, capabilities) = Client::start_with(
+        &root,
+        json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}}}),
+    )
+    .await;
+    assert_eq!(capabilities["documentSymbolProvider"], true);
+    let since = client.mark();
+    client.open(&orders, ORDERS).await;
+    let diagnostics = client.diagnostics(&orders, since, |_| true).await;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // The outline: the namespace, with what it declares inside it.
+    let symbols = client
+        .request(
+            "textDocument/documentSymbol",
+            json!({"textDocument": {"uri": uri(&orders)}}),
+        )
+        .await;
+    let namespace = &symbols[0];
+    assert_eq!(namespace["name"], "::app::orders");
+    assert_eq!(namespace["kind"], 3);
+    let children = namespace["children"].as_array().unwrap();
+    let names: Vec<&str> = children
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Size", "pay"]);
+    // Columns are UTF-16: the member after the emoji.
+    let size = &children[0];
+    assert_eq!(size["kind"], 10);
+    let member = &size["children"][1];
+    assert_eq!(member["name"], "\"b\"");
+    assert_eq!(member["range"]["start"], pos(ORDERS, "\"b\"", 0));
+    let pay = &children[1];
+    assert_eq!(pay["kind"], 12);
+    assert_eq!(pay["detail"], "(amount: Int): Int");
+    assert_eq!(pay["selectionRange"]["start"], pos(ORDERS, "pay fn", 0));
+    assert_eq!(pay["selectionRange"]["end"], pos(ORDERS, "pay fn", 3));
+    assert_eq!(pay["range"]["start"], pos(ORDERS, "pay fn", 0));
+    assert_eq!(pay["range"]["end"]["line"], 10);
+    assert_eq!(namespace["range"]["end"], pay["range"]["end"]);
 
     client.shutdown().await;
 }

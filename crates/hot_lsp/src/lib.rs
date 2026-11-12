@@ -177,6 +177,8 @@ struct State {
     analysis: tokio::sync::Mutex<()>,
     /// Whether the client can register file watchers.
     dynamic_watchers: AtomicBool,
+    /// Whether the client takes document symbols as a tree.
+    symbol_tree: AtomicBool,
     /// Whether the client sent `shutdown` (then `exit` is a clean exit).
     shutdown: Arc<AtomicBool>,
     /// REPL session for stateful evaluation
@@ -200,6 +202,7 @@ impl Backend {
                 generation: AtomicU64::new(0),
                 analysis: tokio::sync::Mutex::new(()),
                 dynamic_watchers: AtomicBool::new(false),
+                symbol_tree: AtomicBool::new(false),
                 shutdown,
                 repl_session: tokio::sync::Mutex::new(None),
             }),
@@ -455,6 +458,14 @@ impl LanguageServer for Backend {
                 .and_then(|w| w.dynamic_registration)
                 .unwrap_or(false);
             self.state.dynamic_watchers.store(dynamic, Ordering::SeqCst);
+            let symbol_tree = params
+                .capabilities
+                .text_document
+                .as_ref()
+                .and_then(|t| t.document_symbol.as_ref())
+                .and_then(|s| s.hierarchical_document_symbol_support)
+                .unwrap_or(false);
+            self.state.symbol_tree.store(symbol_tree, Ordering::SeqCst);
             self.state.load_workspace(client_root(&params)).await;
 
             Ok(InitializeResult {
@@ -495,6 +506,7 @@ impl LanguageServer for Backend {
                     references_provider: Some(OneOf::Left(true)),
                     document_formatting_provider: Some(OneOf::Left(true)),
                     workspace_symbol_provider: Some(OneOf::Left(true)),
+                    document_symbol_provider: Some(OneOf::Left(true)),
                     ..Default::default()
                 },
                 server_info: Some(ServerInfo {
@@ -821,6 +833,26 @@ impl LanguageServer for Backend {
                     Ok(None)
                 }
             }
+        })
+        .await
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> JsonRpcResult<Option<DocumentSymbolResponse>> {
+        self.guard("documentSymbol", async {
+            let uri = params.text_document.uri;
+            let Some(doc) = self.doc(&uri).filter(|_| is_hot(&uri)) else {
+                return Ok(None);
+            };
+            let ctx = DocContext::new(&doc.text);
+            let symbols = features::document_symbols(&doc, &ctx);
+            Ok(Some(if self.state.symbol_tree.load(Ordering::SeqCst) {
+                DocumentSymbolResponse::Nested(symbols)
+            } else {
+                DocumentSymbolResponse::Flat(features::flat_symbols(&uri, &symbols))
+            }))
         })
         .await
     }

@@ -7,7 +7,10 @@
 //! under the cursor, the call the cursor is in, and the local bindings and
 //! parameters in scope. Offsets are char offsets, as the lexer reports them.
 
+mod outline;
+
 use hot::lang::lexer::{KeywordKind, Lexer, TokenType};
+pub use outline::{OutlineItem, OutlineKind};
 
 /// A token with its char span.
 #[derive(Debug, Clone)]
@@ -1004,6 +1007,18 @@ impl Syntax {
     /// Whether the identifier at `i` is written as a key (see [`Key`]).
     fn is_key(&self, i: usize) -> bool {
         self.key_owner_bracket(i).is_some()
+    }
+
+    /// Whether token `t`, directly inside the bracket at `open`, starts an
+    /// entry: it follows the bracket, a `,` or a newline.
+    fn starts_entry(&self, open: usize, t: usize) -> bool {
+        self.parent[t] == Some(open)
+            && (self.toks[t - 1].is_newline()
+                || self.before_newlines(t).is_some_and(|before| {
+                    before == open
+                        || (self.parent[before] == Some(open)
+                            && self.toks[before].is(&TokenType::Comma))
+                }))
     }
 
     /// The bracket whose entry the key at `i` starts, when `i` is a key.

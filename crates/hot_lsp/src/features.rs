@@ -3,7 +3,8 @@
 use crate::index::{Def, DocContext, Index, Resolved, Scope};
 use crate::render;
 use crate::syntax::{
-    CompletionContext, Key, KeyOwner, LocalKind, RefPath, ValueShape, WhereSubject,
+    CompletionContext, Key, KeyOwner, LocalKind, OutlineItem, OutlineKind, RefPath, ValueShape,
+    WhereSubject,
 };
 use crate::text::{Document, LineIndex};
 use ahash::{AHashMap, AHashSet};
@@ -11,8 +12,9 @@ use hot::lang::ast::{Source, Value};
 use hot::val::Val;
 use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
-    CompletionItem, CompletionItemKind, Hover, HoverContents, InsertTextFormat, Location,
-    MarkupContent, MarkupKind, Position, Range, SignatureHelp, SymbolInformation, SymbolKind, Uri,
+    CompletionItem, CompletionItemKind, DocumentSymbol, Hover, HoverContents, InsertTextFormat,
+    Location, MarkupContent, MarkupKind, Position, Range, SignatureHelp, SymbolInformation,
+    SymbolKind, Uri,
 };
 
 /// Text of files that locations point into: open documents first, then disk.
@@ -830,6 +832,85 @@ pub fn workspace_symbols(
             container_name: Some(def.ns.to_string()),
         });
     }
+    out
+}
+
+fn symbol_kind(kind: OutlineKind) -> SymbolKind {
+    match kind {
+        OutlineKind::Namespace => SymbolKind::NAMESPACE,
+        OutlineKind::Function | OutlineKind::Test => SymbolKind::FUNCTION,
+        OutlineKind::Constructor => SymbolKind::CONSTRUCTOR,
+        OutlineKind::Struct => SymbolKind::STRUCT,
+        OutlineKind::Enum => SymbolKind::ENUM,
+        OutlineKind::Type => SymbolKind::CLASS,
+        OutlineKind::Field => SymbolKind::FIELD,
+        OutlineKind::Variant => SymbolKind::ENUM_MEMBER,
+        OutlineKind::Binding => SymbolKind::VARIABLE,
+        OutlineKind::Property => SymbolKind::PROPERTY,
+        OutlineKind::Arrow => SymbolKind::OPERATOR,
+    }
+}
+
+fn document_symbol(doc: &Document, item: &OutlineItem) -> DocumentSymbol {
+    let detail = match (item.kind, &item.detail) {
+        (OutlineKind::Test, Some(detail)) => Some(format!("test {detail}")),
+        (OutlineKind::Test, None) => Some("test".to_string()),
+        (_, detail) => detail.clone(),
+    };
+    #[allow(deprecated)]
+    DocumentSymbol {
+        name: item.name.clone(),
+        detail,
+        kind: symbol_kind(item.kind),
+        tags: None,
+        deprecated: None,
+        range: doc.char_range(item.start, item.end - item.start),
+        selection_range: doc.char_range(item.name_start, item.name_end - item.name_start),
+        children: (!item.children.is_empty()).then(|| {
+            item.children
+                .iter()
+                .map(|child| document_symbol(doc, child))
+                .collect()
+        }),
+    }
+}
+
+/// The declarations of a document, as a tree: a namespace holds what is
+/// declared in it, a type its fields, variants and constructors, and a
+/// function with several arities each of them.
+pub fn document_symbols(doc: &Document, ctx: &DocContext) -> Vec<DocumentSymbol> {
+    ctx.syntax
+        .outline(&doc.text)
+        .iter()
+        .map(|item| document_symbol(doc, item))
+        .collect()
+}
+
+/// A symbol tree as a list, for a client that takes no tree.
+pub fn flat_symbols(uri: &Uri, symbols: &[DocumentSymbol]) -> Vec<SymbolInformation> {
+    fn flatten(
+        uri: &Uri,
+        symbols: &[DocumentSymbol],
+        container: Option<&str>,
+        out: &mut Vec<SymbolInformation>,
+    ) {
+        for symbol in symbols {
+            #[allow(deprecated)]
+            out.push(SymbolInformation {
+                name: symbol.name.clone(),
+                kind: symbol.kind,
+                tags: None,
+                deprecated: None,
+                location: Location::new(uri.clone(), symbol.range),
+                container_name: container.map(str::to_string),
+            });
+            if let Some(children) = &symbol.children {
+                flatten(uri, children, Some(&symbol.name), out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    flatten(uri, symbols, None, &mut out);
     out
 }
 
