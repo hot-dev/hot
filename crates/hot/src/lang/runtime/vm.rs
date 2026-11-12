@@ -5776,6 +5776,12 @@ impl VirtualMachine {
                     if is_takeable(value) {
                         return Ok(std::mem::replace(value, Val::Box(Box::new(MovedBinding))));
                     }
+                    // What stays is read here: this is the binding a
+                    // lookup finds first. (A moved one goes to the lookup,
+                    // which reports it.)
+                    if !is_moved_binding(value) {
+                        return Ok(value.clone());
+                    }
                     break;
                 }
                 // The frame of the current call: what is below it is
@@ -10466,7 +10472,7 @@ impl VirtualMachine {
 
         let saved_proven = std::mem::replace(&mut self.entry_proven, proven);
         self.user_function_depth += 1;
-        let result = self.execute_user_function_impl(function_id, args);
+        let result = self.execute_user_function_impl(function_id, args, reentrant);
         self.user_function_depth -= 1;
         self.entry_proven = saved_proven;
         if result.is_err() {
@@ -10783,11 +10789,10 @@ impl VirtualMachine {
         }
     }
 
-    /// Empty the registers `function_id`'s body writes, at the end of a
+    /// Empty `registers`: those a function's body writes, at the end of a
     /// call of it.
-    fn clear_function_registers(&mut self, function_id: FunctionId) {
-        let used = self.function_used_registers(function_id);
-        for &register in used.iter() {
+    fn clear_registers(&mut self, registers: &[u32]) {
+        for &register in registers {
             if let Some(slot) = self.registers.get_mut(register as usize) {
                 *slot = Val::Null;
             }
@@ -10820,10 +10825,13 @@ impl VirtualMachine {
         used
     }
 
+    /// `registers_saved` is whether the caller saved the registers this
+    /// function writes and puts them back when the call ends.
     fn execute_user_function_impl(
         &mut self,
         function_id: u32,
         mut args: CallArgs<'_>,
+        registers_saved: bool,
     ) -> VmResult<Val> {
         if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
             self.jit.record_call(function_id, args.as_slice());
@@ -11070,6 +11078,9 @@ impl VirtualMachine {
                 // Parameters were already bound into the function scope above,
                 // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
+                // The registers the body writes, once a tail call needs
+                // them emptied.
+                let mut written: Option<std::rc::Rc<[u32]>> = None;
                 // The body runs in a closure so that an error still reaches
                 // the cleanup below. A caller that contains the error (a JIT
                 // trampoline, `contain`) then carries on with its own
@@ -11079,7 +11090,9 @@ impl VirtualMachine {
                         if let Some(mut current_args) = tail_args.take() {
                             // The iteration before is over, as a call that
                             // returned would be.
-                            self.clear_function_registers(function_id);
+                            let written = written
+                                .get_or_insert_with(|| self.function_used_registers(function_id));
+                            self.clear_registers(written);
                             // A tail call is a new call: a fresh frame with the
                             // tail call's args, without the previous
                             // iteration's locals or leftover flow scopes.
@@ -11243,9 +11256,11 @@ impl VirtualMachine {
             }
             // Nothing the call wrote outlives it: a register left holding a
             // collection would make the next writer of that collection copy
-            // it. (A re-entrant call's registers are its outer call's, which
-            // `execute_user_function` puts back.)
-            self.clear_function_registers(function_id);
+            // it. (Saved registers are an outer call's, and are put back.)
+            if !registers_saved {
+                let written = self.function_used_registers(function_id);
+                self.clear_registers(&written);
+            }
 
             // Restore the caller's namespace, if the call left it
             let restored = match saved_namespace {
@@ -13409,6 +13424,16 @@ impl VirtualMachine {
                         func_ip += 1;
                         continue;
                     }
+                }
+                // The commonest instruction: an argument on its way to its
+                // slot. Moved, when the plan marks the source dead.
+                Instruction::Move { dest, src } => {
+                    let dead = moves & crate::lang::moves::flag::FIRST != 0;
+                    let value = self.consume_register(*src, dead)?;
+                    last_result = value.clone();
+                    self.set_register(*dest, value)?;
+                    func_ip += 1;
+                    continue;
                 }
                 Instruction::Eq { dest, left, right } => {
                     let left_val = self.get_register(*left)?;

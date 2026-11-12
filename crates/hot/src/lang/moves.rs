@@ -74,6 +74,11 @@ pub struct Operands {
     /// A register read and then written through (the target of an in-place
     /// write). It is never moved from: its value stays where it is.
     pub update: Option<RegisterId>,
+    /// Bit `n` set: the read at position `n` is never marked dead. It holds
+    /// what there is nothing to gain by moving (a callee's name, a
+    /// condition, a number), and giving the register up after every such
+    /// read would cost every call something.
+    pub kept: u8,
 }
 
 impl Operands {
@@ -103,10 +108,17 @@ impl Operands {
         self.update = Some(target);
         self
     }
-    fn also_reads(mut self, register: RegisterId) -> Self {
-        if let Some(slot) = self.reads.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(register);
+    /// Also read `register`, without ever moving it (see `kept`).
+    fn also_keeps(mut self, register: RegisterId) -> Self {
+        if let Some(position) = self.reads.iter().position(Option::is_none) {
+            self.reads[position] = Some(register);
+            self.kept |= 1 << position;
         }
+        self
+    }
+    /// Never move the reads at `positions` (see `kept`).
+    fn keeps(mut self, positions: u8) -> Self {
+        self.kept |= positions;
         self
     }
 
@@ -158,7 +170,9 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             dest,
             value,
             type_path,
-        } => Operands::reads2(*value, *type_path).writes(*dest),
+        } => Operands::reads2(*value, *type_path)
+            .keeps(flag::SECOND)
+            .writes(*dest),
 
         I::DotAccess { dest, object, .. } | I::DotAccessOrDefault { dest, object, .. } => {
             Operands::reads(*object).writes(*dest)
@@ -174,17 +188,23 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
         | I::Mul { dest, left, right }
         | I::Eq { dest, left, right }
         | I::Gt { dest, left, right }
-        | I::Lt { dest, left, right } => Operands::reads2(*left, *right).writes(*dest),
+        | I::Lt { dest, left, right } => Operands::reads2(*left, *right)
+            .keeps(flag::FIRST | flag::SECOND)
+            .writes(*dest),
         I::StrEndsWith {
             dest,
             string,
             suffix,
-        } => Operands::reads2(*string, *suffix).writes(*dest),
+        } => Operands::reads2(*string, *suffix)
+            .keeps(flag::FIRST | flag::SECOND)
+            .writes(*dest),
         I::StrStartsWith {
             dest,
             string,
             prefix,
-        } => Operands::reads2(*string, *prefix).writes(*dest),
+        } => Operands::reads2(*string, *prefix)
+            .keeps(flag::FIRST | flag::SECOND)
+            .writes(*dest),
 
         // `function` is the register that holds the callee.
         I::Call {
@@ -200,7 +220,7 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             args_count,
             ..
         } => Operands::range(*args_start, u32::from(*args_count))
-            .also_reads(*function)
+            .also_keeps(*function)
             .writes(*dest),
         I::CallLambda {
             dest,
@@ -208,7 +228,7 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             args_start,
             args_count,
         } => Operands::range(*args_start, u32::from(*args_count))
-            .also_reads(*lambda)
+            .also_keeps(*lambda)
             .writes(*dest),
         I::CallNative {
             dest,
@@ -236,7 +256,9 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             dest,
             function,
             args,
-        } => Operands::reads2(*function, *args).writes(*dest),
+        } => Operands::reads2(*function, *args)
+            .keeps(flag::FIRST)
+            .writes(*dest),
 
         I::MakeVec {
             dest,
@@ -274,7 +296,7 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             Operands::reads(*value)
         }
         I::DeferredVarExpr { thunk, .. } => Operands::reads(*thunk),
-        I::CondBranchStart { condition, .. } => Operands::reads(*condition),
+        I::CondBranchStart { condition, .. } => Operands::reads(*condition).keeps(flag::FIRST),
         I::CondBranchEnd { result, .. } => Operands::reads(*result),
         I::Return { value } => Operands::reads(*value),
         I::ReturnIfErr { src } => Operands::reads(*src),
@@ -777,7 +799,7 @@ fn plan_registers(
         };
         let mut entry = 0u8;
         for (position, register) in ops.reads.iter().enumerate() {
-            if register.is_some_and(dead) {
+            if ops.kept & (1 << position) == 0 && register.is_some_and(dead) {
                 entry |= 1 << position;
             }
         }
@@ -1100,6 +1122,25 @@ mod tests {
         let plan = registers_only(&body);
         assert_eq!(plan[1], 0);
         assert_eq!(plan[4], flag::FIRST);
+    }
+
+    #[test]
+    fn a_callees_name_and_a_condition_stay_in_their_registers() {
+        let body = [
+            constant(1, 0),
+            constant(9, 0),
+            call(2, 9, 1, 1),
+            branch(2),
+            Instruction::CallLibBuiltin {
+                dest: 3,
+                function: 9,
+                args: 2,
+            },
+        ];
+        let plan = registers_only(&body);
+        assert_eq!(plan[2], flag::RANGE, "the arguments move, the name stays");
+        assert_eq!(plan[3], 0);
+        assert_eq!(plan[4], flag::SECOND, "the argument Vec moves");
     }
 
     #[test]
