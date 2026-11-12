@@ -7160,7 +7160,12 @@ async fn execute_single_event_handler_inner(
     let run_started = tokio::time::Instant::now();
     let run_started_at = chrono::Utc::now();
     let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
-    let execution_context_for_events = _execution_context.clone();
+    let mut execution_context_for_events = _execution_context.clone();
+    if let Some(timing) = execution_context_for_events.queue_timing.as_mut() {
+        timing.stages.blocking_slot_wait_us =
+            Some(blocking_slot_wait.as_micros().min(u128::from(u64::MAX)) as u64);
+        timing.stages.vm_scheduled_at = Some(run_started_at);
+    }
 
     let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -8376,6 +8381,10 @@ impl RunStartPublisher {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        // This runs on the VM thread after the run's start time is taken and
+        // before its first instruction, so it is in no stored metric: the
+        // run's own duration absorbs it.
+        let publish_started = std::time::Instant::now();
         handle.block_on(async {
             match tokio::time::timeout(RUN_START_FLUSH_TIMEOUT, self.inner.flush_run(self.run_id))
                 .await
@@ -8384,6 +8393,11 @@ impl RunStartPublisher {
                 Ok(Err(e)) => warn!(run_id = %self.run_id, "Failed to flush run start before publishing it: {}", e),
                 Err(_) => warn!(run_id = %self.run_id, "Flushing run start timed out; publishing it anyway"),
             }
+            debug!(
+                "TIMING [{}]: run_start_flush: {:?}",
+                self.run_id.as_simple(),
+                publish_started.elapsed()
+            );
             let stream_event = StreamEvent::RunStart {
                 run_id: self.run_id,
                 env_id: self.env_id,
@@ -8406,6 +8420,11 @@ impl RunStartPublisher {
                 warn!(run_id = %self.run_id, "Failed to publish run start env event: {}", e);
             }
         });
+        debug!(
+            "TIMING [{}]: run_start_publish: {:?} (flush and both publishes)",
+            self.run_id.as_simple(),
+            publish_started.elapsed()
+        );
     }
 }
 
@@ -10167,6 +10186,7 @@ pub async fn run_with_components_shared_context_and_db(
                                         "EventMessage" => {
                                             // TIMING: Start timing from dequeue
                                             let event_dequeue_time = std::time::Instant::now();
+                                            let executor_started_at = chrono::Utc::now();
 
                                             // Convert to EventMessage and process
                                             let event_message: EventMessage = message.try_into()
@@ -10207,6 +10227,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                         Err(error) if error.downcast_ref::<ParkedEvent>().is_some() => return Ok(()),
                                                         Err(error) => return Err(error),
                                                     };
+                                                let hydrated_at = chrono::Utc::now();
                                                 let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment {
                                                     org_id: event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no org scope"))?,
                                                     env_id: event_message.body.event.env_id,
@@ -10224,6 +10245,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                             as u64,
                                                         redelivered: queue_lease_timing.redelivered,
                                                         handler_dispatched_at: None,
+                                                        stages: hot::lang::event::QueueStageTiming {
+                                                            prefetch_wait_us: queue_lease_timing
+                                                                .buffered
+                                                                .map(|buffered| buffered.as_micros().min(u128::from(u64::MAX)) as u64),
+                                                            executor_started_at: Some(executor_started_at),
+                                                            hydrated_at: Some(hydrated_at),
+                                                            ..Default::default()
+                                                        },
                                                     });
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());

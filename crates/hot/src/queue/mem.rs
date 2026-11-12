@@ -337,6 +337,7 @@ where
                 .retry_item
                 .as_ref()
                 .is_some_and(|item| item.redelivered),
+            buffered: None,
         }
     }
 
