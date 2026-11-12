@@ -39,7 +39,7 @@ as `task:.*`, and subscribe to it.
 | Alert Event | Description |
 |-------------|-------------|
 | `task:failed` | A [task](/docs/tasks) failed or timed out. A task with a `retry` fires one for each failed attempt. Payload includes `task_id`, `env_id`, `error`, and `timestamp`. |
-| `task:cancelled` | A task was cancelled. Same payload as `task:failed`. |
+| `task:cancelled` | A code task was cancelled. Same payload as `task:failed`. A cancelled [container task](/docs/box) fires no alert. |
 | `usage:cus_warning` | The organization has used 80% of its plan's monthly [Compute Unit Seconds](/docs/box/billing). Payload includes `org_id`, `threshold_pct`, `compute_units_used`, `compute_units_limit`, `usage_pct`, and `timestamp`. |
 | `usage:cus_exceeded` | The organization has used 100% of its plan's monthly Compute Unit Seconds. Same payload as `usage:cus_warning`. |
 

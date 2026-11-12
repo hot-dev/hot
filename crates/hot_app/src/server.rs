@@ -250,7 +250,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         };
         let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
         let serialization = conf
-            .get_str_or_default("serialization.type", "zstd-json")
+            .get_str_or_default("serialization.type", "zstdjson")
             .parse::<hot::data::serialization::Serialization>()
             .unwrap_or_default();
 

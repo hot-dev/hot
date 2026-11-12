@@ -800,7 +800,7 @@ async fn run_action_handler(
 
     let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
 
-    let serialization_str = conf.get_str_or_default("serialization.type", "zstd-json");
+    let serialization_str = conf.get_str_or_default("serialization.type", "zstdjson");
     let serialization =
         hot::data::serialization::Serialization::from_str(&serialization_str).unwrap_or_default();
 

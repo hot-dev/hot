@@ -84,7 +84,7 @@ Publishing checks the event's own type, so `event:user:*` with `create` allows `
 
 Sessions and service keys can call only the event, stream, task, MCP, and webhook routes. Every other route takes API keys only. A session or service key gets `403` `forbidden` there, whatever it is granted. The [API permission matrix](/docs/api/management#environment-api-keys) lists the grant each route checks.
 
-Service keys accept only the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. A service key request that names `call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`, or `*:*` is rejected with `400`.
+Service keys accept only the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. A `run` grant is accepted but opens nothing: the `/v1/runs` routes take API keys only, so a service key follows its work through the task routes. A service key request that names `call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`, or `*:*` is rejected with `400`.
 
 Org API keys use qualified URNs such as `org:*`, `org:{org}/env:*/api-key:*`, and `org:{org}/env:{env}/project:*`; see [Sub-organizations](/docs/api/management#permissions). Environment credentials reject `org:` URNs.
 
@@ -153,7 +153,7 @@ A `429` from these limits uses the standard error envelope with `retry_after` se
 }
 ```
 
-The in-flight `429` also sends a `Retry-After: 1` header. The SSE `429` carries the wait only in the body.
+Both also send a `Retry-After: 1` header.
 
 ## Response Format
 
@@ -1474,7 +1474,7 @@ for line in response.iter_lines():
 **Notes:**
 - The stream closes about 5 minutes after it opens, without a closing event. Reconnect to continue receiving events.
 - Events are scoped to the environment associated with your API key.
-- This endpoint requires pub/sub to be configured on the server. Without it the request returns `503`.
+- This endpoint requires pub/sub to be configured on the server. Without it the request returns `503` `pubsub_not_configured`.
 
 ---
 
@@ -2176,7 +2176,8 @@ Removes a custom domain. The domain must belong to the authenticated environment
 | `internal_server_error` | 500 | Server error |
 | `service_unavailable` | 503 | A dependency, such as the database, cannot be reached; retry the request |
 | `custom_domains_disabled` | 503 | Custom domain provisioning is not enabled on this installation |
-| `encryption_not_configured` | 503 | The API server has no usable encryption key for context variables |
+| `encryption_not_configured` | 503 | The API server has no usable encryption key for context variables or service key metadata |
+| `pubsub_not_configured` | 503 | The environment subscription needs pub/sub, which the server does not have configured |
 | `redeploy_required` | 503 | The webhook's project was deployed with another major version of Hot. It works again once the project is redeployed |
 | `mcp_disabled` | 503 | MCP is turned off on this installation (`mcp.enabled`). Returned by the HTTP+SSE transport; Streamable HTTP returns a JSON-RPC error instead |
 

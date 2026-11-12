@@ -2918,15 +2918,23 @@ impl Parser {
         let is_open_alias = if let Some(token) = self.peek()
             && matches!(&token.token_type, TokenType::Identifier(s) if s == "open")
             && self.peek_n(1).is_some_and(|t| {
-                matches!(
-                    t.token_type,
+                // A type name after `open` (`Foo type open Int`) is still the
+                // modifier, so the type checker can reject it. Read alone,
+                // `open` would become an alias to a type named `open` and the
+                // name after it a stray expression.
+                match &t.token_type {
                     TokenType::Pipe
-                        | TokenType::String(_)
-                        | TokenType::Int(_)
-                        | TokenType::Dec(_)
-                        | TokenType::Bool(_)
-                        | TokenType::Null
-                )
+                    | TokenType::String(_)
+                    | TokenType::Int(_)
+                    | TokenType::Dec(_)
+                    | TokenType::Bool(_)
+                    | TokenType::Null
+                    | TokenType::DoubleColon => true,
+                    TokenType::Identifier(name) => {
+                        name.chars().next().is_some_and(char::is_uppercase)
+                    }
+                    _ => false,
+                }
             }) {
             self.next(); // consume `open`
             true

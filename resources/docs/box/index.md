@@ -288,11 +288,11 @@ task ::box/start(::box/BoxConf({
 }))
 
 // task.id — the task ID
-// task.stream-id — the stream ID
+// task.stream.id — the stream ID
 ```
 
-The `TaskInfo` from `::hot::box/start` has `id`, `stream-id` and `data`. See
-[TaskInfo](/docs/tasks#taskinfo) for how it differs from a code task's.
+`::hot::box/start` returns the same [TaskInfo](/docs/tasks#taskinfo) as
+`::hot::task/start`.
 
 Using `script` for multi-line shell commands:
 

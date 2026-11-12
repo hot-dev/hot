@@ -135,7 +135,7 @@ pub async fn enqueue_deployment_message(conf: &Val, build_id: Uuid) -> Result<()
     };
     let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
 
-    let serialization_str = conf.get_str_or_default("serialization.type", "zstd-json");
+    let serialization_str = conf.get_str_or_default("serialization.type", "zstdjson");
     let serialization = Serialization::from_str(&serialization_str).unwrap_or_default();
 
     let queue = ProcessingQueue::<Message>::new_with_cluster(

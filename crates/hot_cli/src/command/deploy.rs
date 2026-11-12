@@ -377,6 +377,11 @@ pub(crate) async fn run_deploy(
     // CLI flag wins; otherwise honor `hot.deploy.ctx.strict` so CI pipelines
     // can pin strict behavior without remembering the flag every time.
     let strict = strict_flag || conf.get_bool("deploy.ctx.strict");
+    if strict_flag && !local {
+        eprintln!(
+            "Warning: --strict applies only with --local. A deploy through the API does not check required context variables."
+        );
+    }
     // If no build ID provided, create a new bundle build from current source
     let build_uuid = if let Some(build_id) = build_id_opt {
         Uuid::from_str(build_id).map_err(|_| format!("Invalid build ID format: {}", build_id))?

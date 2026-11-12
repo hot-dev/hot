@@ -404,6 +404,20 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         return HotResult::Err(e);
     }
 
+    HotResult::Ok(task_info(vm, &ctx, &task_id, &stream_id, false))
+}
+
+/// The `TaskInfo` that `::hot::task/start` and `::hot::box/start` return: the
+/// task's ID, its stream, and the run that started it. `legacy_stream_id`
+/// also keeps the bare `stream-id` that `::hot::box/start` used to return in
+/// place of `stream`.
+pub(crate) fn task_info(
+    vm: &VirtualMachine,
+    ctx: &crate::lang::event::ExecutionContext,
+    task_id: &uuid::Uuid,
+    stream_id: &uuid::Uuid,
+    legacy_stream_id: bool,
+) -> Val {
     // Build typed Stream value
     let stream_val = crate::val!({
         "$type": "::hot::stream/Stream",
@@ -447,18 +461,18 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     });
 
-    // Return TaskInfo
-    let result = crate::val!({
+    let mut fields = indexmap::IndexMap::new();
+    fields.insert(Val::from("id"), Val::from(task_id.to_string()));
+    fields.insert(Val::from("stream"), stream_val);
+    fields.insert(Val::from("origin-run"), origin_run_val);
+    if legacy_stream_id {
+        fields.insert(Val::from("stream-id"), Val::from(stream_id.to_string()));
+    }
+    fields.insert(Val::from("data"), Val::Null);
+    crate::val!({
         "$type": "::hot::task/TaskInfo",
-        "$val": {
-            "id": task_id.to_string(),
-            "stream": stream_val,
-            "origin-run": origin_run_val,
-            "data": Val::Null
-        }
-    });
-
-    HotResult::Ok(result)
+        "$val": Val::map(fields)
+    })
 }
 
 /// A task's result stored in blob storage, for the caller's org and the task's

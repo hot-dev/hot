@@ -54,7 +54,8 @@ hot.project.{{PROJECT_NAME}}.resources.excludes []
 //   hot.project.{{PROJECT_NAME}}.skills.codegen.namespace "::skills"
 
 // Ignore Configuration
-// Project-wide ignore rules applied to source, test, and resource discovery.
+// Project-wide ignore rules for resource files, skill codegen, and the
+// Hot App source browser. Source and test discovery do not use them.
 // `respect-gitignore` honors .gitignore + .hotignore (true by default).
 // `excludes` accepts standard glob patterns, applied on top of the above.
 hot.project.{{PROJECT_NAME}}.ignore.respect-gitignore true
@@ -74,6 +75,8 @@ hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
 hot.db.local.retention.call.days Int(::env/get("HOT_DB_LOCAL_RETENTION_CALL_DAYS", "7"))
 
 // SQLite performance tuning (applied on every connection when db.uri is sqlite:...)
+// The HOT_DB_SQLITE_* variables work through these lines. Without them in
+// hot.hot, set the keys themselves.
 // cache-size-kb: page cache in KiB (negative PRAGMA cache_size value).
 hot.db.sqlite.cache-size-kb Int(::env/get("HOT_DB_SQLITE_CACHE_SIZE_KB", "65536"))
 // mmap-size-bytes: bytes of the DB file to memory-map for reads (0 disables).
@@ -154,6 +157,18 @@ hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
 hot.api.host Str(::env/get("HOT_API_HOST", "localhost"))
 hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
 
+// Run time limits, in seconds: a webhook handler, and an MCP tools/call
+hot.webhook.timeout Int(::env/get("HOT_WEBHOOK_TIMEOUT", "30"))
+hot.mcp.timeout Int(::env/get("HOT_MCP_TIMEOUT", "60"))
+
+// Open SSE subscriptions: per credential, per organization, per API server.
+// 0 turns a limit off. Mode "observe" logs a connection over the limit and
+// lets it through; "enforce" refuses it with 429.
+hot.api.sse-per-credential-connection-limit Int(::env/get("HOT_API_SSE_PER_CREDENTIAL_CONNECTION_LIMIT", "128"))
+hot.api.sse-per-org-connection-limit Int(::env/get("HOT_API_SSE_PER_ORG_CONNECTION_LIMIT", "1024"))
+hot.api.sse-global-connection-limit Int(::env/get("HOT_API_SSE_GLOBAL_CONNECTION_LIMIT", "10000"))
+hot.api.sse-connection-limit-mode ::env/get("HOT_API_SSE_CONNECTION_LIMIT_MODE", "observe")
+
 // Trusted proxy client IP resolution (disabled for compatibility by default)
 hot.network.client-ip.trusted-proxy Bool(::env/get("HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY", "false"))
 hot.network.client-ip.header ::env/get("HOT_NETWORK_CLIENT_IP_HEADER", "x-forwarded-for")
@@ -164,7 +179,7 @@ hot.app.host Str(::env/get("HOT_APP_HOST", "localhost"))
 hot.app.port Int(::env/get("HOT_APP_PORT", "4680"))
 
 // App Session Configuration
-// Session timeout in hours (default: 24 hours)
+// Session timeout in hours. Without this key, sessions last 720 hours (30 days).
 hot.app.session.timeout Int(::env/get("HOT_APP_SESSION_TIMEOUT", "24"))
 // Session secret for JWT signing (required in production)
 hot.app.session.secret ::env/get("HOT_APP_SESSION_SECRET", "")
@@ -242,8 +257,9 @@ hot.file.aws.secret-access-key ::env/get("HOT_FILE_AWS_SECRET_ACCESS_KEY", "")
 // Useful for self-hosted deployments that want a lower cap than the plan allows.
 hot.file.max-bytes Int(::env/get("HOT_FILE_MAX_BYTES", "-1"))
 
-// Custom Domain Configuration (ACM + CloudFront provisioning)
-// Mode: "none" (disabled) or "aws" (ACM certificates + CloudFront distributions)
+// Custom Domain Configuration
+// Mode: "none" (disabled), or the name of a domain provider. Hot itself ships
+// no provider, so the hot.domain.aws.* keys below do nothing on their own.
 hot.domain.mode ::env/get("HOT_DOMAIN_MODE", "none")
 hot.domain.aws.region ::env/get("HOT_DOMAIN_AWS_REGION", "us-east-1")
 hot.domain.aws.access-key-id ::env/get("HOT_DOMAIN_AWS_ACCESS_KEY_ID", "")
@@ -314,7 +330,8 @@ hot.retry.max-delay-ms Int(::env/get("HOT_RETRY_MAX_DELAY_MS", "3600000"))
 hot.retry.default-delay-ms Int(::env/get("HOT_RETRY_DEFAULT_DELAY_MS", "1000"))
 
 // Serialization Configuration
-// Type: "json" (default) or "zstdjson" (compressed, better for large payloads)
+// Type: "json" or "zstdjson" (compressed, better for large payloads).
+// Without this key, Hot uses "zstdjson".
 hot.serialization.type "json"
 
 // Value Output Format
@@ -323,7 +340,7 @@ hot.serialization.type "json"
 hot.value.format "hot"
 
 // LSP Configuration
-// Transport: "stdio" or "tcp"
+// Transport: "stdio" (the only one supported)
 hot.lsp.transport "stdio"
 
 // File Watcher Configuration

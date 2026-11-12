@@ -85,9 +85,10 @@ fn get_encryption() -> Option<ContextEncryption> {
 fn require_encryption() -> Result<ContextEncryption, (StatusCode, Json<ApiErrorResponse>)> {
     get_encryption().ok_or_else(|| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(
-                "Encryption not configured for metadata",
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorResponse::new(
+                "encryption_not_configured",
+                "Service key metadata needs encryption: set HOT_ENCRYPTION_KEY on the API server",
             )),
         )
     })

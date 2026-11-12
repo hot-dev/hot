@@ -82,7 +82,7 @@ async fn check_image_registry(
 ///
 /// Validates the input (image allowlist, field types), creates a TaskRequest
 /// with `task_type: "container"`, inserts a task DB row, enqueues to the task
-/// queue, and returns `TaskInfo { id, stream-id }`.
+/// queue, and returns the same `TaskInfo` as `::hot::task/start`.
 ///
 /// The task worker picks up the request and runs the container via Docker.
 /// Results are stored in the task DB record.
@@ -372,17 +372,7 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         "box.start.task_created"
     );
 
-    // Return TaskInfo (same shape as ::hot::task/start)
-    let result = crate::val!({
-        "$type": "::hot::task/TaskInfo",
-        "$val": {
-            "id": task_id.to_string(),
-            "stream-id": stream_id.to_string(),
-            "data": Val::Null
-        }
-    });
-
-    HotResult::Ok(result)
+    HotResult::Ok(super::task::task_info(vm, &ctx, &task_id, &stream_id, true))
 }
 
 // =============================================================================
@@ -1288,6 +1278,16 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
             let mut map = indexmap::IndexMap::new();
             map.insert(Val::from("$type"), Val::from("::hot::box/BoxQuota"));
             let mut val_map = indexmap::IndexMap::new();
+            // The limits tell `-1 = unlimited` apart from a paid plan that is
+            // exactly one unit over.
+            val_map.insert(
+                Val::from("minutes-limit"),
+                Val::Int((features.task_minutes_per_month() as i64).max(-1)),
+            );
+            val_map.insert(
+                Val::from("compute-units-limit"),
+                Val::Int(features.compute_units_per_month().max(-1)),
+            );
             val_map.insert(Val::from("minutes-remaining"), Val::Int(minutes_remaining));
             val_map.insert(
                 Val::from("compute-units-remaining"),
