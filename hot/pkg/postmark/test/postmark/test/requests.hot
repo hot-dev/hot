@@ -1,0 +1,53 @@
+::postmark::test::requests ns
+meta ["test"]
+
+// Hermetic tests for query strings, request records and response records.
+
+::api ::postmark::api
+::get ::postmark::get
+::search ::postmark::search
+::send ::postmark::send
+
+test-with-query-encodes-and-drops-empty-values
+meta ["test"]
+fn () {
+  assert-eq("/messages/outbound?count=10&offset=0&recipient=a%2Bb%40example.com", ::api/with-query("/messages/outbound", {count: 10, offset: 0, recipient: "a+b@example.com", tag: null, status: ""}))
+  assert-eq("/x?subject=Q3%20%26%20Q4%20%23final", ::api/with-query("/x", {subject: "Q3 & Q4 #final"}))
+  assert-eq("/x", ::api/with-query("/x", {tag: null}))
+}
+
+// A stats or search request names only the filters it uses.
+test-query-requests-take-only-the-filters-in-use
+meta ["test"]
+fn () {
+  stats ::get/GetOutboundClickCountsByBrowserFamilyRequest({tag: "welcome"})
+  assert(not(is-err(stats)), "tag alone is a valid stats request")
+  assert(is-null(stats.fromdate))
+  search ::search/SearchOutboundMessagesRequest({count: "10", offset: "0", recipient: "a+b@example.com"})
+  assert(not(is-err(search)), "count, offset and one filter")
+  assert(is-err(::search/SearchOutboundMessagesRequest({recipient: "a@example.com"})), "count and offset stay required, as Postmark requires them")
+}
+
+// A template is named by its id or its alias, not both.
+test-template-requests-take-an-alias-or-an-id
+meta ["test"]
+fn () {
+  by-alias ::send/SendEmailWithTemplateRequest({TemplateAlias: "welcome", TemplateModel: {name: "Ada"}, From: "sender@example.com", To: "ada@example.com"})
+  assert(not(is-err(by-alias)), "TemplateAlias alone")
+  assert(not(in("TemplateId", keys(from-json(to-json(untype(by-alias)))))), "an unset TemplateId is not sent")
+  by-id ::send/SendEmailWithTemplateRequest({TemplateId: 12345, TemplateModel: {}, From: "sender@example.com", To: "ada@example.com"})
+  assert-eq(12345, by-id.TemplateId)
+  batch-item ::send/EmailWithTemplateRequest({TemplateAlias: "welcome", TemplateModel: {}, From: "sender@example.com", To: "ada@example.com"})
+  assert(not(is-err(batch-item)), "the batch item takes an alias alone too")
+}
+
+// Postmark's body has `Days` and one key per browser family, and no `value` key.
+test-browser-usage-response-holds-the-body
+meta ["test"]
+fn () {
+  body {Days: [{Date: "2026-10-01", Chrome: 2}], Chrome: 2}
+  usage ::get/GetOutboundClickCountsByBrowserFamilyResponse({value: body})
+  assert(not(is-err(usage)))
+  assert-eq(2, usage.value.Chrome)
+  assert-eq("2026-10-01", first(usage.value.Days).Date)
+}

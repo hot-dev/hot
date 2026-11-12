@@ -115,8 +115,8 @@ fn
 }
 
 EmailWithTemplateRequest type {
-    TemplateId: Int,
-    TemplateAlias: Str,
+    TemplateId: Int?,
+    TemplateAlias: Str?,
     TemplateModel: Map,
     InlineCss: Bool?,
     From: Str,
@@ -132,8 +132,8 @@ EmailWithTemplateRequest type {
 }
 
 SendEmailWithTemplateRequest type {
-    TemplateId: Int,
-    TemplateAlias: Str,
+    TemplateId: Int?,
+    TemplateAlias: Str?,
     TemplateModel: Map,
     InlineCss: Bool?,
     From: Str,

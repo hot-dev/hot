@@ -242,13 +242,13 @@ fn
 GetBouncesRequest type {
   count: Str,
   offset: Str,
-  type-param: Str,
-  inactive: Str,
-  email-filter: Str,
-  message-id: Str,
-  tag: Str,
-  todate: Str,
-  fromdate: Str
+  type-param: Str?,
+  inactive: Str?,
+  email-filter: Str?,
+  message-id: Str?,
+  tag: Str?,
+  todate: Str?,
+  fromdate: Str?
 }
 
 GetBouncesResponse type {
@@ -285,7 +285,7 @@ fn
   get-bounces(request, {})
 },
 (request: GetBouncesRequest, opts: Map): GetBouncesResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/bounces?count=${request.count}&offset=${request.offset}&type=${request.type-param}&inactive=${request.inactive}&emailFilter=${request.email-filter}&messageID=${request.message-id}&tag=${request.tag}&todate=${request.todate}&fromdate=${request.fromdate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/bounces`, {count: request.count, offset: request.offset, type: request.type-param, inactive: request.inactive, emailFilter: request.email-filter, messageID: request.message-id, tag: request.tag, todate: request.todate, fromdate: request.fromdate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetBouncesResponse(response.body) }
@@ -519,7 +519,7 @@ fn
   retrieve-message-opens(request, {})
 },
 (request: GetOpensForSingleOutboundMessageRequest, opts: Map): GetOpensForSingleOutboundMessageResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/opens/${request.messageid}?count=${request.count}&offset=${request.offset}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/messages/outbound/opens/${request.messageid}`, {count: request.count, offset: request.offset}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOpensForSingleOutboundMessageResponse(response.body) }
@@ -557,7 +557,7 @@ fn
   retrieve-message-clicks(request, {})
 },
 (request: GetClicksForSingleOutboundMessageRequest, opts: Map): GetClicksForSingleOutboundMessageResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/messages/outbound/clicks/${request.messageid}?count=${request.count}&offset=${request.offset}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/messages/outbound/clicks/${request.messageid}`, {count: request.count, offset: request.offset}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetClicksForSingleOutboundMessageResponse(response.body) }
@@ -608,9 +608,9 @@ fn
 }
 
 GetOutboundOverviewStatisticsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundOverviewStatisticsResponse type {
@@ -652,7 +652,7 @@ fn
   get-outbound-overview(request, {})
 },
 (request: GetOutboundOverviewStatisticsRequest, opts: Map): GetOutboundOverviewStatisticsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundOverviewStatisticsResponse(response.body) }
@@ -661,9 +661,9 @@ fn
 }
 
 GetSentCountsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetSentCountsResponse type {
@@ -691,7 +691,7 @@ fn
   get-sent-counts(request, {})
 },
 (request: GetSentCountsRequest, opts: Map): GetSentCountsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/sends?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/sends`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetSentCountsResponse(response.body) }
@@ -700,9 +700,9 @@ fn
 }
 
 GetBounceCountsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetBounceCountsResponse type {
@@ -733,7 +733,7 @@ fn
   get-bounce-counts(request, {})
 },
 (request: GetBounceCountsRequest, opts: Map): GetBounceCountsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/bounces?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/bounces`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetBounceCountsResponse(response.body) }
@@ -742,9 +742,9 @@ fn
 }
 
 GetSpamComplaintsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetSpamComplaintsResponse type {
@@ -772,7 +772,7 @@ fn
   get-spam-complaints(request, {})
 },
 (request: GetSpamComplaintsRequest, opts: Map): GetSpamComplaintsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/spam?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/spam`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetSpamComplaintsResponse(response.body) }
@@ -781,9 +781,9 @@ fn
 }
 
 GetTrackedEmailCountsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetTrackedEmailCountsResponse type {
@@ -811,7 +811,7 @@ fn
   get-tracked-email-counts(request, {})
 },
 (request: GetTrackedEmailCountsRequest, opts: Map): GetTrackedEmailCountsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/tracked?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/tracked`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetTrackedEmailCountsResponse(response.body) }
@@ -820,9 +820,9 @@ fn
 }
 
 GetOutboundOpenCountsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundOpenCountsResponse type {
@@ -850,7 +850,7 @@ fn
   get-email-open-counts(request, {})
 },
 (request: GetOutboundOpenCountsRequest, opts: Map): GetOutboundOpenCountsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/opens`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundOpenCountsResponse(response.body) }
@@ -859,9 +859,9 @@ fn
 }
 
 GetOutboundOpenCountsByPlatformRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundOpenCountsByPlatformResponse type {
@@ -892,7 +892,7 @@ fn
   get-email-platform-usage(request, {})
 },
 (request: GetOutboundOpenCountsByPlatformRequest, opts: Map): GetOutboundOpenCountsByPlatformResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens/platforms?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/opens/platforms`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundOpenCountsByPlatformResponse(response.body) }
@@ -901,9 +901,9 @@ fn
 }
 
 GetOutboundOpenCountsByEmailClientRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundOpenCountsByEmailClientResponse type {
@@ -933,7 +933,7 @@ fn
   get-email-client-usage(request, {})
 },
 (request: GetOutboundOpenCountsByEmailClientRequest, opts: Map): GetOutboundOpenCountsByEmailClientResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/opens/emailclients?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/opens/emailclients`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundOpenCountsByEmailClientResponse(response.body) }
@@ -942,9 +942,9 @@ fn
 }
 
 GetOutboundClickCountsRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundClickCountsResponse type {
@@ -972,7 +972,7 @@ fn
   get-click-counts(request, {})
 },
 (request: GetOutboundClickCountsRequest, opts: Map): GetOutboundClickCountsResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/clicks`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundClickCountsResponse(response.body) }
@@ -981,11 +981,13 @@ fn
 }
 
 GetOutboundClickCountsByBrowserFamilyRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
+// `value` is Postmark's body: `Days` plus one count per browser family, whose
+// names vary, so they are not fields.
 GetOutboundClickCountsByBrowserFamilyResponse type {
     value: Map
 }
@@ -1000,7 +1002,8 @@ meta {
     **Example**
 
     ```hot
-    ::postmark::get/get-browser-usage-by-family(::postmark::get/GetOutboundClickCountsByBrowserFamilyRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    usage ::postmark::get/get-browser-usage-by-family(::postmark::get/GetOutboundClickCountsByBrowserFamilyRequest({tag: "welcome", fromdate: "2026-10-01", todate: "2026-10-31"}))
+    usage.value.Days
     ```
     """
 }
@@ -1009,18 +1012,18 @@ fn
   get-browser-usage-by-family(request, {})
 },
 (request: GetOutboundClickCountsByBrowserFamilyRequest, opts: Map): GetOutboundClickCountsByBrowserFamilyResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/browserfamilies?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/clicks/browserfamilies`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { GetOutboundClickCountsByBrowserFamilyResponse(response.body) }
+    is-ok-response(response) => { GetOutboundClickCountsByBrowserFamilyResponse({value: response.body}) }
     => { err(HttpError(response)) }
   }
 }
 
 GetOutboundClickCountsByPlatformRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundClickCountsByPlatformResponse type {
@@ -1051,7 +1054,7 @@ fn
   get-browser-plaform-usage(request, {})
 },
 (request: GetOutboundClickCountsByPlatformRequest, opts: Map): GetOutboundClickCountsByPlatformResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/platforms?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/clicks/platforms`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundClickCountsByPlatformResponse(response.body) }
@@ -1060,9 +1063,9 @@ fn
 }
 
 GetOutboundClickCountsByLocationRequest type {
-  tag: Str,
-  fromdate: Str,
-  todate: Str
+  tag: Str?,
+  fromdate: Str?,
+  todate: Str?
 }
 
 GetOutboundClickCountsByLocationResponse type {
@@ -1090,7 +1093,7 @@ fn
   get-clicks-by-body-location(request, {})
 },
 (request: GetOutboundClickCountsByLocationRequest, opts: Map): GetOutboundClickCountsByLocationResponse {
-  response api-request("GET", `${::postmark/BASE_URL}/stats/outbound/clicks/location?tag=${request.tag}&fromdate=${request.fromdate}&todate=${request.todate}`, {}, "", opts)
+  response api-request("GET", ::postmark::api/with-query(`${::postmark/BASE_URL}/stats/outbound/clicks/location`, {tag: request.tag, fromdate: request.fromdate, todate: request.todate}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GetOutboundClickCountsByLocationResponse(response.body) }
