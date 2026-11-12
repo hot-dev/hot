@@ -241,7 +241,11 @@ meta {
     """
 }
 fn (e: Any): Bool {
-  and(is-map(e), eq(get(e, "status"), 404))
+  cond {
+    or(is-null(e), is-str(e)) => { false }
+    // `is-map` is false for a typed HttpError, so untype before reading it.
+    => { eq(get(untype(e), "status"), 404) }
+  }
 }
 
 // ---------------------------------------------------------------------------
