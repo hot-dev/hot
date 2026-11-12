@@ -4191,8 +4191,9 @@ mod tests {
         let kept = original.clone();
         let changed = written(assoc_owned(vec![original, Val::from("a"), Val::Int(2)]));
         assert_ne!(storage(&changed), storage(&kept));
+        // Both of the map's items were copied.
         let (in_place, copied) = crate::val::write_stats::counts();
-        assert_eq!((in_place - counted.0, copied - counted.1), (0, 1));
+        assert_eq!((in_place - counted.0, copied - counted.1), (0, 2));
         assert_eq!(kept, val!({"a": 1, "nested": {"x": 1}}));
 
         // A nested map is shared with `kept` even though the outer map is

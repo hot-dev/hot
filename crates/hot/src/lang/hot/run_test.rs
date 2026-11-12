@@ -607,9 +607,10 @@ grown assoc(m, "b", 1)
         assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
     }
 
-    /// The collection writes `src` makes in the interpreter, as (in place,
-    /// on a copy). Loading hot-std makes some of its own, the same for every
-    /// program, so compare two programs rather than read one count.
+    /// The collection writes `src` makes in the interpreter: how many were
+    /// in place, and how many items the others copied. Loading hot-std
+    /// makes some of its own, the same for every program, so compare two
+    /// programs rather than read one count.
     fn interpreted_writes(src: &str) -> (usize, usize) {
         let before = crate::val::write_stats::counts();
         compile_and_run_with_std_conf(src, Some(val!({"jit": {"mode": "off"}}))).expect("run");
@@ -632,7 +633,7 @@ grown assoc(m, "b", 1)
         };
         let short = interpreted_writes(&chain(2));
         let long = interpreted_writes(&chain(12));
-        assert_eq!(long.1, short.1, "copies don't grow with the chain");
+        assert_eq!(long.1, short.1, "no more is copied for a longer chain");
         assert_eq!(long.0, short.0 + 10, "every further link writes in place");
         assert_eq!(
             compile_and_run_with_std_conf(&chain(12), None).expect("run"),
@@ -642,11 +643,11 @@ grown assoc(m, "b", 1)
 
     /// Building a collection one element at a time writes it in place: the
     /// last read of a variable moves its value out, a call gives its
-    /// arguments up and `reduce` gives its accumulator up, so each writer
-    /// is the only holder of what it writes. A copy per element is what
-    /// made these builds quadratic, so the number of copies must not grow
-    /// with the number of elements. (A writer reached through a function
-    /// still copies: the function's return register holds its last result.)
+    /// arguments up, `reduce` gives its accumulator up, and a function
+    /// returns by moving, so each writer is the only holder of what it
+    /// writes. A copy per element is what made these builds quadratic: the
+    /// items copied grew with the square of the size. So building eleven
+    /// times as much must copy next to nothing more.
     #[test]
     fn building_a_collection_copies_it_a_fixed_number_of_times() {
         let builders = [
@@ -668,14 +669,66 @@ grown assoc(m, "b", 1)
     }, [])
 }"#,
             ),
+            (
+                "assoc",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { assoc(acc, x, x) }, {}) }",
+            ),
+            (
+                "assoc twice, after a read of the map",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { assoc(assoc(acc, "count", add(get(acc, "count", 0), 1)), x, x) }, {})
+}"#,
+            ),
+            (
+                "map spread",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { {...assoc(acc, x, x), newest: x} }, {})
+}"#,
+            ),
+            (
+                "merge",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { merge(acc, assoc({}, x, x)) }, {}) }",
+            ),
+            (
+                "update",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { update(assoc(acc, x, x), "count", (c) { add(if(is-null(c), 0, c), 1) }) }, {})
+}"#,
+            ),
+            (
+                "a typed tail call carrying the map",
+                r#"step fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, step(add(i, 1), n, assoc(acc, i, i)))
+}
+run fn (n: Int): Map { step(0, n, {}) }"#,
+            ),
+            (
+                "a function that takes the collection last",
+                r#"put fn (k: Int, v: Int, m: Map): Map { assoc(m, k, v) }
+run fn (n: Int): Map { reduce(range(n), (acc, x) { put(x, x, acc) }, {}) }"#,
+            ),
+            (
+                "locals in a function",
+                r#"step fn (xs: Vec, x: Int): Vec {
+    longer [...xs, x]
+    longest [...longer, x]
+    longest
+}
+run fn (n: Int): Vec { reduce(range(n), step, []) }"#,
+            ),
+            (
+                "a named reducer",
+                r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
+            ),
         ];
         for (name, body) in builders {
             let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
             let small = interpreted_writes(&program(40));
             let large = interpreted_writes(&program(440));
             assert!(
-                large.1 <= small.1 + 2,
-                "{name}: copies grew with the collection, from {small:?} to {large:?}"
+                large.1 <= small.1 + 8,
+                "{name}: the items copied grew with the collection, from {small:?} to {large:?}"
             );
             assert!(
                 large.0 >= small.0 + 400,

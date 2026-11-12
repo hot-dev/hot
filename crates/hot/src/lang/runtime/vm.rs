@@ -7483,25 +7483,83 @@ impl VirtualMachine {
     }
 
     /// [`Self::unified_function_lookup`] for a caller that gives its
-    /// arguments up. A bare name that resolves to a compiled function it has
-    /// called before binds them by moving; every other resolution goes
-    /// through the full lookup, which this never reorders: a local of the
-    /// name is still called before any function.
+    /// arguments up. A bare name that reaches a compiled function or a
+    /// lambda binds them by moving: through the value the name is bound to
+    /// (a core function's name is bound to its qualified name), or through
+    /// the dispatch cache. Every other resolution goes through the full
+    /// lookup, which this never reorders: a binding of the name is still
+    /// called before any function.
     fn unified_function_lookup_given(
         &mut self,
         function_name: &str,
         args: Vec<Val>,
     ) -> VmResult<Val> {
-        if function_name != "call-lib"
-            && !function_name.starts_with("::")
-            && self.lookup_variable(function_name).is_err()
-        {
-            let cache_key = Self::dispatch_cache_key(function_name, &args);
-            if let Some(&cached_fn_id) = self.dispatch_cache.get(&cache_key) {
-                return self.execute_compiled_user_function_given(cached_fn_id, args);
+        if function_name != "call-lib" && !function_name.starts_with("::") {
+            match self.lookup_variable(function_name) {
+                Ok(bound) => {
+                    // As in the full lookup, a lazy parameter of this name
+                    // doesn't shadow the function.
+                    let lazy_parameter = matches!(
+                        &bound,
+                        Val::Box(boxed) if boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                            .is_some_and(|lambda| lambda.is_lazy_param)
+                    );
+                    if !lazy_parameter {
+                        return self.call_function_value_given(&bound, args);
+                    }
+                }
+                Err(_) => {
+                    let cache_key = Self::dispatch_cache_key(function_name, &args);
+                    if let Some(&cached_fn_id) = self.dispatch_cache.get(&cache_key) {
+                        return self.execute_compiled_user_function_given(cached_fn_id, args);
+                    }
+                }
             }
         }
         self.unified_function_lookup(function_name, &args)
+    }
+
+    /// [`Self::call_function_value`] for a caller that gives its arguments
+    /// up: a lambda, or a compiled function the value names, binds them by
+    /// moving. Any other value is called as that function calls it.
+    fn call_function_value_given(&mut self, function_val: &Val, args: Vec<Val>) -> VmResult<Val> {
+        // A core function's name is bound to its qualified name, which is
+        // called as `execute_function_call_by_qualified_name` calls it.
+        if let Val::Str(name) = function_val
+            && name.starts_with("::")
+            && name.contains('/')
+            && let Some(function_id) = self.find_best_function_overload(name, &args)
+        {
+            let function_id = self
+                .overload_for_args(function_id, &args)
+                .unwrap_or(function_id);
+            return self.execute_user_function(function_id, args.into());
+        }
+        if let Val::Box(boxed) = function_val {
+            if boxed
+                .as_any()
+                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                .is_some()
+            {
+                return self.execute_lambda_args(function_val, args.into());
+            }
+            if let Some(function_ref) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
+            ) && let Some(function_id) =
+                self.find_best_function_overload(function_ref.name(), &args)
+            {
+                // An arity match ignores the argument types; prefer the
+                // overload that fits them, as a direct call does.
+                let function_id = self
+                    .overload_for_args(function_id, &args)
+                    .unwrap_or(function_id);
+                return self.execute_compiled_user_function_given(function_id, args);
+            }
+        }
+        self.call_function_value(function_val, &args)
     }
 
     /// [`Self::execute_compiled_user_function`] for a caller that gives its
@@ -10042,6 +10100,8 @@ impl VirtualMachine {
                         // arguments are prepared for the callee's parameters
                         // (Ok unwraps, Err escalates with its payload message,
                         // unless the parameter is lazy or declared `Result`).
+                        // As below: the call's result replaces this one.
+                        last_result = Val::Null;
                         let args =
                             self.consume_registers(*args_start, *args_count as usize, moves)?;
                         let args = self.prepare_args_for_register(*function as RegisterId, args)?;
@@ -10050,7 +10110,8 @@ impl VirtualMachine {
                         last_result = self.get_register(*dest)?.clone();
                     }
                     Instruction::Return { value } => {
-                        last_result = self.get_register(*value)?.clone();
+                        let dead = moves & crate::lang::moves::flag::FIRST != 0;
+                        last_result = self.consume_register(*value, dead)?;
                         break; // Exit lambda execution
                     }
                     // An Err (such as a failed `where` check on a parameter)
@@ -10076,6 +10137,20 @@ impl VirtualMachine {
                         }
                     }
                     _ => {
+                        // A call replaces `last_result` with its own when
+                        // it returns. Until then the previous one may hold
+                        // the collection the call receives, and a writer
+                        // copies a collection something else holds.
+                        if matches!(
+                            instruction,
+                            Instruction::CallLambda { .. }
+                                | Instruction::CallWithSpread { .. }
+                                | Instruction::CallNative { .. }
+                                | Instruction::CallUserFunction { .. }
+                                | Instruction::CallLibBuiltin { .. }
+                        ) {
+                            last_result = Val::Null;
+                        }
                         // For other instructions, we need to temporarily set the main IP
                         // and restore it after execution
                         let saved_main_ip = self.instruction_pointer;
@@ -10708,6 +10783,17 @@ impl VirtualMachine {
         }
     }
 
+    /// Empty the registers `function_id`'s body writes, at the end of a
+    /// call of it.
+    fn clear_function_registers(&mut self, function_id: FunctionId) {
+        let used = self.function_used_registers(function_id);
+        for &register in used.iter() {
+            if let Some(slot) = self.registers.get_mut(register as usize) {
+                *slot = Val::Null;
+            }
+        }
+    }
+
     /// Written-register set for a function body (lazily computed and cached).
     /// The name of the function whose instructions ran last.
     fn current_debug_function_name(&self) -> Option<&str> {
@@ -10991,6 +11077,9 @@ impl VirtualMachine {
                 (|| -> VmResult<Val> {
                     Ok(loop {
                         if let Some(mut current_args) = tail_args.take() {
+                            // The iteration before is over, as a call that
+                            // returned would be.
+                            self.clear_function_registers(function_id);
                             // A tail call is a new call: a fresh frame with the
                             // tail call's args, without the previous
                             // iteration's locals or leftover flow scopes.
@@ -11152,6 +11241,11 @@ impl VirtualMachine {
             if self.registers.len() > saved_register_count_for_call {
                 self.registers.truncate(saved_register_count_for_call);
             }
+            // Nothing the call wrote outlives it: a register left holding a
+            // collection would make the next writer of that collection copy
+            // it. (A re-entrant call's registers are its outer call's, which
+            // `execute_user_function` puts back.)
+            self.clear_function_registers(function_id);
 
             // Restore the caller's namespace, if the call left it
             let restored = match saved_namespace {
@@ -13097,9 +13191,12 @@ impl VirtualMachine {
             if let Instruction::Return { value } = instruction {
                 // Processing Return instruction
                 tracing::trace!("VM: Processing Return instruction with register {}", value);
-                match self.get_register(*value) {
+                // The frame ends here: its register gives the value up
+                // rather than keep a second hold on what the caller gets.
+                let dead = moves & crate::lang::moves::flag::FIRST != 0;
+                match self.consume_register(*value, dead) {
                     Ok(val) => {
-                        last_result = val.clone();
+                        last_result = val;
                         // Return value retrieved successfully
                         tracing::trace!(
                             "VM: Return value successfully retrieved: {:?}",
@@ -13357,6 +13454,19 @@ impl VirtualMachine {
                 _ => {}
             }
 
+            // A call replaces `last_result` with its own when it returns.
+            // Until then the previous one may hold the collection the call
+            // receives, and a writer copies a collection something else
+            // holds. (Only the calls whose result is tracked below.)
+            if matches!(
+                instruction,
+                Instruction::Call { .. }
+                    | Instruction::CallNative { .. }
+                    | Instruction::CallUserFunction { .. }
+                    | Instruction::CallLibBuiltin { .. }
+            ) {
+                last_result = Val::Null;
+            }
             match self.execute_instruction(instruction, moves) {
                 Ok(()) => {
                     self.release_operands(instruction, moves);

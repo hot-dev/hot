@@ -168,29 +168,57 @@ pub(crate) mod write_stats {
         static COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     }
 
-    /// The writes since the thread started, as (in place, on a copy).
+    /// The writes since the thread started: how many were in place, and
+    /// how many items the others copied. A write that copies a collection
+    /// each time it grows copies a number of items that grows with its
+    /// square; one that copies a fresh literal copies next to none.
     pub(crate) fn counts() -> (usize, usize) {
         COUNTS.with(Cell::get)
     }
 
-    pub(super) fn note(in_place: bool) {
+    pub(super) fn note(in_place: bool, items: usize) {
         COUNTS.with(|counts| {
             let (kept, copied) = counts.get();
             counts.set(if in_place {
                 (kept + 1, copied)
             } else {
-                (kept, copied + 1)
+                (kept, copied + items)
             });
         });
+    }
+}
+
+/// Collection storage whose writes `write_stats` counts.
+pub(crate) trait Stored {
+    /// How many items a copy of the storage copies.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn stored_items(&self) -> usize;
+}
+
+impl Stored for ValVec {
+    fn stored_items(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Stored for ValMap {
+    fn stored_items(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Stored for Vec<u8> {
+    fn stored_items(&self) -> usize {
+        self.len()
     }
 }
 
 /// Count a write to `storage` that is about to happen (see `write_stats`):
 /// in place when this is its only holder. Nothing outside tests.
 #[inline(always)]
-pub(crate) fn note_write<T>(storage: &Arc<T>) {
+pub(crate) fn note_write<T: Stored>(storage: &Arc<T>) {
     #[cfg(test)]
-    write_stats::note(Arc::strong_count(storage) == 1);
+    write_stats::note(Arc::strong_count(storage) == 1, storage.stored_items());
     #[cfg(not(test))]
     let _ = storage;
 }
@@ -198,7 +226,7 @@ pub(crate) fn note_write<T>(storage: &Arc<T>) {
 /// `Arc::make_mut` for a collection's storage: the write is in place when
 /// nothing else holds it, and on a copy otherwise.
 #[inline(always)]
-pub(crate) fn make_mut<T: Clone>(storage: &mut Arc<T>) -> &mut T {
+pub(crate) fn make_mut<T: Clone + Stored>(storage: &mut Arc<T>) -> &mut T {
     note_write(storage);
     Arc::make_mut(storage)
 }
