@@ -278,7 +278,7 @@ fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-round
 
 // Call a tool with SSE streaming. Returns an iterator of StreamEvent values.
 // The stream carries progress notifications, log messages, and the final
-// JSON-RPC response. Use for-each to process events in real time.
+// JSON-RPC response. The events are read until the server closes the stream.
 call-stream-tool
 meta {
     doc: """
@@ -318,7 +318,8 @@ Call a tool on the MCP server with SSE streaming.
 
 Returns an iterator of StreamEvent values. Each event contains a parsed
 JSON-RPC message — progress notifications, log messages, or the final result.
-Use `collect` to gather all events, or iterate to process them in real time.
+The events are read until the server closes the stream and then returned, so
+nothing is delivered while the call is still running.
 
 **Example**
 

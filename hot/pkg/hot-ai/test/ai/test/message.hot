@@ -108,3 +108,10 @@ meta ["test"] fn () {
     assert(contains(result, "user: What's up?"))
     assert(contains(result, "assistant: Not much!"))
 }
+
+test-format-chat-messages-names-the-tool-role
+meta ["test"]
+fn () {
+    result ::msg/format-chat-messages([::msg/user-msg("run it"), ::msg/tool-msg("42")])
+    assert-eq("user: run it\ntool: 42", result)
+}

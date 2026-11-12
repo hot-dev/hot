@@ -2,6 +2,7 @@
 meta ["test"]
 
 ::ct      ::ai::agent::chat-turn
+::att     ::ai::agent::attachments
 ::request ::ai::agent::request
 ::rt      ::ai::agent::runtime
 ::memory  ::ai::memory
@@ -228,4 +229,22 @@ fn () {
     result ::ct/run-chat-turn(cfg, input)
     assert(result.ok)
     assert-eq("(stub)", result.text)
+}
+
+// The model sees the attachment's text, not only its name and size. The
+// persisted body keeps the short summary.
+test-user-prompt-weaves-attachment-content
+meta ["test"]
+fn () {
+    base build-input("Review this.", null)
+    notes ::att/Attachment({name: "notes.md", type: "text/markdown", size: 7, content-text: "# Notes"})
+    photo ::att/Attachment({name: "photo.png", type: "image/png", size: 900})
+    input ::ct/TurnInput({...untype(base), attachments: [notes, photo]})
+
+    prompt ::ct/user-prompt(input)
+    assert(starts-with(prompt, "Review this.\n\n<attachment name=\"notes.md\" type=\"text/markdown\">\n# Notes\n</attachment>"), prompt)
+    assert(contains(prompt, "Referenced (not inlined): photo.png"), prompt)
+
+    assert-eq("Review this.", ::ct/user-prompt(base), "no attachments, no block")
+    assert-eq("Review this.\nAttachments:\n- notes.md (text/markdown, 7B)\n- photo.png (image/png, 900B)", ::ct/user-body(input), "the persisted body is the summary")
 }

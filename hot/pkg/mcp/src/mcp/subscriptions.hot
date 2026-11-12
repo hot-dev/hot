@@ -104,11 +104,13 @@ fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Map {
 listen
 meta {
     doc: """
-    Open a modern long-lived notification stream.
+    Open a modern notification stream and read it until the server closes it.
 
-    Returns an iterator of parsed `StreamEvent` values. The final event, when a
-    server closes the subscription gracefully, contains the
-    `subscriptions/listen` JSON-RPC result.
+    Returns an iterator of parsed `StreamEvent` values. The events are
+    collected first, so nothing is delivered while the stream is still open.
+    The final event, when a server closes the subscription gracefully,
+    contains the `subscriptions/listen` JSON-RPC result. Returns an Err for a
+    legacy session, without sending anything.
 
     **Example**
 
@@ -122,10 +124,16 @@ meta {
     """
 }
 fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Iter {
-  if(
-    ne(or(session.era, "legacy"), "modern"),
-    err("subscriptions/listen requires MCP 2026-07-28")
-  )
+  cond {
+    // A legacy session has no subscriptions/listen. Nothing is sent.
+    ne(or(session.era, "legacy"), "modern") => { err("subscriptions/listen requires MCP 2026-07-28") }
+    => { listen-modern(session, filter) }
+  }
+}
+
+listen-modern
+meta {no-doc: true}
+fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Iter {
   notifications validate-filter(session, filter)
   response ::client/session-request-stream(
     session,
