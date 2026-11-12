@@ -1318,6 +1318,7 @@ where
             enqueued_at: self.enqueued_at,
             queue_wait: self.queue_wait,
             redelivered: self.redelivered,
+            buffered: None,
         }
     }
 
