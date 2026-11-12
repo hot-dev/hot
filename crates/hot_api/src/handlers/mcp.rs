@@ -3692,6 +3692,109 @@ mod tests {
         assert!(build_json_schema(&json!(null), "inputSchema").is_err());
     }
 
+    /// Known answers for tool schemas of the shapes MCP servers publish.
+    /// They pin what a `jsonschema` upgrade must keep: which arguments a
+    /// schema accepts, and the message a client reads when it refuses them.
+    #[test]
+    fn test_json_schema_validation_known_answers() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "pattern": "^[a-z][a-z0-9-]*$"},
+                "count": {"type": "integer", "minimum": 0, "maximum": 100},
+                "ratio": {"type": "number", "exclusiveMinimum": 0},
+                "mode": {"enum": ["fast", "safe"]},
+                "when": {"type": "string", "format": "date-time"},
+                "tags": {"type": "array", "items": {"type": "string"}, "uniqueItems": true, "maxItems": 3},
+                "target": {"$ref": "#/$defs/target"},
+                "big": {"type": "integer", "maximum": 9007199254740993i64}
+            },
+            "required": ["name", "count"],
+            "additionalProperties": false,
+            "$defs": {
+                "target": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"kind": {"const": "url"}, "url": {"type": "string"}},
+                            "required": ["kind", "url"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"kind": {"const": "id"}, "id": {"type": "integer"}},
+                            "required": ["kind", "id"]
+                        }
+                    ]
+                }
+            }
+        });
+        assert!(build_json_schema(&schema, "inputSchema").is_ok());
+
+        let accepted = [
+            json!({"name": "a", "count": 0}),
+            // A whole float is an integer in draft 2020-12.
+            json!({"name": "job-1", "count": 100.0, "ratio": 0.5, "mode": "safe"}),
+            // `format` is an annotation unless a schema opts into assertion.
+            json!({"name": "a", "count": 1, "when": "not a date"}),
+            json!({"name": "a", "count": 1, "tags": ["x", "y", "z"]}),
+            json!({"name": "a", "count": 1, "target": {"kind": "url", "url": "https://example.com"}}),
+            json!({"name": "a", "count": 1, "target": {"kind": "id", "id": 7}}),
+            json!({"name": "a", "count": 1, "big": 9007199254740993i64}),
+        ];
+        for arguments in &accepted {
+            let result = validate_json_schema_instance(&schema, arguments, "tool arguments");
+            assert_eq!(result, Ok(()), "{arguments}");
+        }
+
+        let refused = [
+            (
+                json!({"count": 1}),
+                r#"tool arguments validation failed: "name" is a required property"#,
+            ),
+            (
+                json!({"name": "a", "count": 1, "extra": true}),
+                "tool arguments validation failed: Additional properties are not allowed ('extra' was unexpected)",
+            ),
+            (
+                json!({"name": "A", "count": 1}),
+                r#"tool arguments validation failed: "A" does not match "^[a-z][a-z0-9-]*$""#,
+            ),
+            (
+                json!({"name": "a", "count": 1.5}),
+                r#"tool arguments validation failed: 1.5 is not of type "integer""#,
+            ),
+            (
+                json!({"name": "a", "count": 101}),
+                "tool arguments validation failed: 101 is greater than the maximum of 100",
+            ),
+            (
+                json!({"name": "a", "count": 1, "ratio": 0}),
+                "tool arguments validation failed: 0 is less than or equal to the minimum of 0",
+            ),
+            (
+                json!({"name": "a", "count": 1, "mode": "slow"}),
+                r#"tool arguments validation failed: "slow" is not one of "fast" or "safe""#,
+            ),
+            (
+                json!({"name": "a", "count": 1, "tags": ["x", "x"]}),
+                r#"tool arguments validation failed: ["x","x"] has non-unique elements"#,
+            ),
+            (
+                json!({"name": "a", "count": 1, "target": {"kind": "id", "id": "7"}}),
+                r#"tool arguments validation failed: {"kind":"id","id":"7"} is not valid under any of the schemas listed in the 'oneOf' keyword"#,
+            ),
+            (
+                json!({"name": "a", "count": 1, "big": 9007199254740994i64}),
+                "tool arguments validation failed: 9007199254740994 is greater than the maximum of 9007199254740993",
+            ),
+        ];
+        for (arguments, message) in &refused {
+            let result = validate_json_schema_instance(&schema, arguments, "tool arguments");
+            assert_eq!(result, Err(message.to_string()), "{arguments}");
+        }
+    }
+
     #[test]
     fn test_input_required_result_validates_capabilities_and_preserves_meta() {
         let protocol = ProtocolContext {
