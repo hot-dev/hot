@@ -41,7 +41,7 @@ const FUSION_NAMES: &[&str] = &[
 /// Hot-std's own namespaces. A hot-std core function that shares a native
 /// name (such as `::hot::str/length`) is the native one or an alias of it.
 /// The `::hot::test::` namespaces are this repository's tests, not hot-std.
-fn is_hot_std_namespace(namespace: &str) -> bool {
+pub(crate) fn is_hot_std_namespace(namespace: &str) -> bool {
     namespace.starts_with("::hot::") && !namespace.starts_with("::hot::test::")
 }
 

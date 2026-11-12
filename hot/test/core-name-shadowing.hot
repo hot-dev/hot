@@ -1,0 +1,103 @@
+// Regression: a function a namespace declares, or imports, under the name of
+// a core function is the one its calls run. `hot check` used to check those
+// calls against the core function: `add("x", "y")` was a type mismatch
+// ("expected Int, got Str") in a program that ran correctly. This file must
+// check clean, and each call must reach the namespace's own function.
+::hot::test::core-name-shadowing::lib ns
+
+add fn (a: Str, b: Str): Str { `${a}+${b}` }
+length fn (n: Int): Str { `length of ${n}` }
+
+::hot::test::core-name-shadowing::guards ns
+
+// `if`, `is-int` and `assert-eq` with shapes the core functions refuse.
+if fn (n: Int): Str { `if ${n}` }
+is-int fn (a: Int, b: Int): Str { `is-int ${a} ${b}` }
+assert-eq fn (n: Int): Str { `assert-eq ${n}` }
+
+if-result if(9)
+is-int-result is-int(1, 2)
+assert-eq-result assert-eq(7)
+
+::hot::test::core-name-shadowing::importer ns
+
+::lib ::hot::test::core-name-shadowing::lib
+
+// Var imports named like core functions, and one under another name.
+add ::hot::test::core-name-shadowing::lib/add
+length ::lib/length
+plus ::lib/add
+
+top-level add("x", "y")
+top-level-piped "x" |> add("y")
+
+in-body fn (): Vec {
+    [add("x", "y"), "x" |> add("y"), plus("x", "y"), length(3), ::lib/add("x", "y")]
+}
+
+as-value fn (): Vec { map(["a", "b"], add(%, "z")) }
+
+::hot::test::core-name-shadowing ns
+meta ["test"]
+
+::guards ::hot::test::core-name-shadowing::guards
+::importer ::hot::test::core-name-shadowing::importer
+
+add fn (a: Str, b: Str): Str { `${a}&${b}` }
+sub fn (a: Str): Str { `-${a}` }
+concat fn (n: Int): Str { `concat ${n}` }
+mul fn (a: Str, b: Str): Str { `${a}*${b}` }
+
+// Top-level code reports every mismatch, in a body only what a literal
+// proves: both are covered.
+top-level add("x", "y")
+top-level-piped "x" |> add("y")
+top-level-sub sub("x")
+top-level-concat concat(5)
+top-level-value map(["a", "b"], sub)
+
+test-namespace-function-shadows-core-function
+meta ["test"] fn () {
+    assert-eq("x&y", top-level, "direct call at top level")
+    assert-eq("x&y", top-level-piped, "piped call at top level")
+    assert-eq("-x", top-level-sub, "one argument where core `sub` takes numbers")
+    assert-eq("concat 5", top-level-concat, "one argument where core `concat` takes two")
+    assert-eq(["-a", "-b"], top-level-value, "passed as a value")
+    assert-eq("x&y", add("x", "y"), "direct call in a body")
+    assert-eq("x&y", "x" |> add("y"), "piped call in a body")
+    assert-eq("x*y", mul("x", "y"), "a core name with no built-in signature")
+    held add
+    assert-eq("x&y", held("x", "y"), "bound to a local")
+    assert-eq("a&b&c", reduce(["b", "c"], add, "a"), "as a reducer")
+}
+
+// A function is called at the argument counts it declares. Any other count
+// still reaches the core function.
+test-other-argument-counts-reach-the-core-function
+meta ["test"] fn () {
+    assert-eq(6, add(1, 2, 3), "core `add` takes three")
+    assert-eq(2, sub(5, 3), "core `sub` takes two")
+    assert-eq(24, mul(2, 3, 4), "core `mul` takes three")
+    assert-eq("ab", concat("a", "b"), "core `concat` takes two")
+}
+
+test-shadowing-stays-in-its-namespace
+meta ["test"] fn () {
+    assert-eq("if 9", ::guards/if-result, "namespace `if`")
+    assert-eq("is-int 1 2", ::guards/is-int-result, "namespace `is-int`")
+    assert-eq("assert-eq 7", ::guards/assert-eq-result, "namespace `assert-eq`")
+    // This namespace declares none of the three, so it reaches core's.
+    assert-eq("yes", if(is-int(1), "yes", "no"), "core `if` and `is-int`")
+}
+
+test-imported-function-shadows-core-function
+meta ["test"] fn () {
+    assert-eq("x+y", ::importer/top-level, "import called at top level")
+    assert-eq("x+y", ::importer/top-level-piped, "import piped at top level")
+    assert-eq(
+        ["x+y", "x+y", "x+y", "length of 3", "x+y"],
+        ::importer/in-body(),
+        "imports called in a body",
+    )
+    assert-eq(["a+z", "b+z"], ::importer/as-value(), "import inside a lambda")
+}

@@ -5379,10 +5379,25 @@ impl TypeChecker {
         }
 
         if let Some(func_name) = function_name {
-            // Resolve a leading namespace alias if the call is written as `::alias/fn`.
+            // A bare name the namespace binds calls that binding, whatever
+            // core function shares the name. Otherwise resolve a leading
+            // namespace alias if the call is written as `::alias/fn`.
             // E.g. with `::ctx ::hot::ctx` declared, `::ctx/get` becomes `::hot::ctx/get`.
-            let resolved_name = self.resolve_aliased_function_name(&func_name);
+            let namespace_callee = self.namespace_callee(fn_call);
+            let bound_in_namespace = namespace_callee.is_some();
+            let imported = namespace_callee
+                .as_ref()
+                .is_some_and(|(_, imported)| *imported);
+            let resolved_name = namespace_callee
+                .map(|(qualified, _)| qualified)
+                .or_else(|| self.resolve_aliased_function_name(&func_name));
             let lookup_name = resolved_name.as_deref().unwrap_or(&func_name);
+            // Diagnostics name a namespace's binding as the call wrote it.
+            let reported_name = if bound_in_namespace {
+                func_name.as_str()
+            } else {
+                lookup_name
+            };
 
             // Deprecation: if the callee was declared `meta { deprecated: ... }`,
             // emit a non-fatal warning at the call site. Surfaced by both
@@ -5401,7 +5416,7 @@ impl TypeChecker {
                         .as_ref()
                         .map(|s| self.source_to_error_location(s));
                     self.errors.add_warning(CompilerError::DeprecatedUsage {
-                        name: lookup_name.to_string(),
+                        name: reported_name.to_string(),
                         note,
                         location,
                     });
@@ -5449,42 +5464,32 @@ impl TypeChecker {
                 return t;
             }
 
-            // Try to find function signature:
-            // 1. First try the (possibly alias-resolved) name
-            // 2. Then try qualified name using current namespace (for local functions)
-            // 3. Finally try the core variable registry (auto-imported
+            // Try to find function signature, as the call resolves when run:
+            // 1. The function a name bound in this namespace names: the
+            //    binding shadows any core function
+            // 2. The (possibly alias-resolved) qualified name
+            // 3. The built-in signature of a bare name that reaches
+            //    hot-std's core function
+            // 4. The core variable registry (auto-imported
             //    `meta {core: true}` functions defined in another namespace)
-            let signatures = self
-                .context
-                .get_function_signature(lookup_name)
-                .cloned()
-                .or_else(|| {
-                    let qualified_name =
-                        format!("{}/{}", self.context.current_namespace, lookup_name);
-                    self.context
-                        .get_function_signature(&qualified_name)
-                        .cloned()
-                })
-                .or_else(|| {
-                    // Auto-imported core functions: collect signatures from
-                    // every namespace that exports `lookup_name` as a core
-                    // function. The runtime dispatches dynamically across
-                    // these aliases (e.g. `length` lives in both
-                    // `::hot::coll` and `::hot::str`), so the type checker
-                    // accepts the call when ANY available signature matches.
-                    self.core_variables
-                        .get(lookup_name)
-                        .map(|qualifieds| {
-                            let mut combined = Vec::new();
-                            for qualified in qualifieds {
-                                if let Some(sigs) = self.context.get_function_signature(qualified) {
-                                    combined.extend(sigs.iter().cloned());
-                                }
-                            }
-                            combined
-                        })
-                        .filter(|s| !s.is_empty())
-                });
+            let signatures = if bound_in_namespace {
+                match self.context.get_function_signature(lookup_name).cloned() {
+                    // A function this namespace declares is called by id at
+                    // each parameter count it declares. A call with another
+                    // count, or with a spread, goes by name when run, and
+                    // reaches the core function of that name when there is
+                    // one. A var import is its target at every count.
+                    Some(mut own) if !imported && !self.calls_declared_arity(&own, fn_call) => {
+                        own.extend(self.core_signatures(&func_name).unwrap_or_default());
+                        Some(own)
+                    }
+                    own => own,
+                }
+            } else if lookup_name.starts_with("::") {
+                self.context.get_function_signature(lookup_name).cloned()
+            } else {
+                self.core_signatures(lookup_name)
+            };
 
             if let Some(signatures) = signatures {
                 // Infer each argument once. Every check below reuses these
@@ -5524,7 +5529,7 @@ impl TypeChecker {
                 self.validate_function_call_arguments(
                     fn_call,
                     &arg_types,
-                    lookup_name,
+                    reported_name,
                     &signatures,
                 );
 
@@ -5627,6 +5632,89 @@ impl TypeChecker {
         let arg_type = self.infer_value_type(arg);
         self.in_pipe_flow = saved_pipe;
         arg_type
+    }
+
+    /// The qualified name of what a call by bare name reaches when the
+    /// current namespace binds that name: its own function, or through its
+    /// var imports (`plus ::lib/add`) the function or type they name, and
+    /// whether it is such an import. The binding is what the call runs, so
+    /// a core function of the same name is not. `None` when the namespace
+    /// declares no such name.
+    fn namespace_callee(&self, fn_call: &FnCall) -> Option<(String, bool)> {
+        let Value::Ref(Ref::Var(var_ref)) = &*fn_call.function else {
+            return None;
+        };
+        if var_ref.var.deep_path.is_some() {
+            return None;
+        }
+        let mut qualified = format!(
+            "{}/{}",
+            self.context.current_namespace,
+            var_ref.var.sym.name()
+        );
+        if !self.qualified_variables.contains_key(&qualified)
+            && self.context.get_function_signature(&qualified).is_none()
+        {
+            return None;
+        }
+        // The bound guards against an import cycle.
+        let mut imported = false;
+        for _ in 0..16 {
+            match self.declared_functions.get(&qualified) {
+                Some(DeclaredFunction::Import(target)) => {
+                    qualified.clone_from(target);
+                    imported = true;
+                }
+                _ => break,
+            }
+        }
+        Some((qualified, imported))
+    }
+
+    /// The signatures of the core function a bare `name` reaches: hot-std's
+    /// built-in one, else those of every namespace that exports `name` as
+    /// a core function. The runtime dispatches dynamically across these
+    /// aliases (e.g. `length` lives in both `::hot::coll` and
+    /// `::hot::str`), so the type checker accepts the call when ANY
+    /// available signature matches.
+    fn core_signatures(&self, name: &str) -> Option<Vec<FunctionSignature>> {
+        if !self.project_declares_core(name)
+            && let Some(built_in) = self.context.get_function_signature(name)
+        {
+            return Some(built_in.clone());
+        }
+        let qualifieds = self.core_variables.get(name)?;
+        let combined: Vec<FunctionSignature> = qualifieds
+            .iter()
+            .filter_map(|qualified| self.context.get_function_signature(qualified))
+            .flatten()
+            .cloned()
+            .collect();
+        (!combined.is_empty()).then_some(combined)
+    }
+
+    /// Whether a call passes exactly as many arguments as one of
+    /// `signatures` declares parameters, a rest parameter counting as one.
+    /// Functions are registered by that count, so such a call is compiled
+    /// to that function. A spread's length is only known when run.
+    fn calls_declared_arity(&self, signatures: &[FunctionSignature], fn_call: &FnCall) -> bool {
+        let written = self.written_args(fn_call);
+        Self::positioned_args(fn_call) == fn_call.args.len()
+            && signatures
+                .iter()
+                .any(|sig| sig.parameter_types.len() == written)
+    }
+
+    /// Whether a project declares a core function `name` of its own. Every
+    /// bare call then reaches that function rather than hot-std's (see
+    /// `NativeCoreShadows`), so hot-std's built-in signature doesn't apply.
+    fn project_declares_core(&self, name: &str) -> bool {
+        self.core_variables.get(name).is_some_and(|qualifieds| {
+            qualifieds.iter().any(|qualified| {
+                let namespace = qualified.rsplit_once('/').map_or("", |(ns, _)| ns);
+                !crate::lang::runtime::native_core::is_hot_std_namespace(namespace)
+            })
+        })
     }
 
     /// If `func_name` begins with a namespace alias declared in the current namespace

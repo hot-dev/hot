@@ -1315,6 +1315,246 @@ mod type_checking_tests {
         );
     }
 
+    /// The type mismatches and arity mismatches a source reports, as text.
+    fn call_errors(source: &str) -> Vec<String> {
+        compile_and_get_type_errors(source)
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    CompilerError::TypeMismatch { .. } | CompilerError::ArityMismatch { .. }
+                )
+            })
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    // A name a namespace binds is what its calls run, whatever core function
+    // shares the name: checked against the namespace's own function in a
+    // direct call, a pipe, as a value and from inside a body.
+    #[test]
+    fn test_namespace_function_named_like_a_core_one_is_checked_as_itself() {
+        let source = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { `${a}+${b}` }
+            sub fn (a: Str): Str { a }
+            concat fn (a: Int): Int { a }
+            is-int fn (a: Int, b: Int): Bool { true }
+            assert-eq fn (a: Int): Int { a }
+            if fn (a: Int): Int { a }
+            mul fn (a: Str, b: Str): Str { a }
+            length fn (a: Int): Int { a }
+
+            direct-add add("x", "y")
+            direct-sub sub("x")
+            direct-concat concat(5)
+            direct-is-int is-int(1, 2)
+            direct-assert-eq assert-eq(7)
+            direct-if if(9)
+            direct-mul mul("x", "y")
+            direct-length length(3)
+            piped "p" |> add("q")
+            piped-sub "p" |> sub()
+            as-value map(["a", "b"], sub)
+            in-literal {total: add("x", "y")}
+
+            in-body fn (): Str {
+                first add("x", "y")
+                second "p" |> add("q")
+                held add
+                held("x", "y")
+            }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+    }
+
+    // At an argument count the namespace's function declares, it is the
+    // only one checked against: a call it refuses is an error even where
+    // the core function would take it.
+    #[test]
+    fn test_namespace_function_named_like_a_core_one_still_reports() {
+        let source = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { a }
+
+            wrong-type add(1, "y")
+            wrong-both add(1, 2)
+            wrong-pipe "p" |> add(2)
+
+            in-body fn (): Str { add("x", 2) }
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 5, "{errors:?}");
+        assert!(
+            errors[0].contains("'add' argument 1: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].contains("'add' argument 1: expected Str, got Int")
+                && errors[2].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[3].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[4].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+    }
+
+    // A function is compiled to by the argument count it declares. A call
+    // with another count goes by name when run and reaches the core
+    // function, so that is what it is checked against.
+    #[test]
+    fn test_other_argument_counts_still_reach_the_core_function() {
+        let source = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { a }
+            sub fn (a: Str): Str { a }
+            if fn (a: Int): Int { a }
+            mul fn (a: Str, b: Str): Str { a }
+
+            three add(1, 2, 3)
+            two sub(5, 3)
+            core-if if(true, 1, 2)
+            core-mul mul(2, 3, 4)
+            piped 1 |> add(2, 3)
+            xs [1, 2, 3]
+            spread add(...xs)
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        // And the core function still refuses what it doesn't take.
+        let wrong = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { a }
+            if fn (a: Int): Int { a }
+
+            three add("x", "y", "z")
+            four if(true, 1, 2, 3)
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(
+            errors[..3]
+                .iter()
+                .all(|e| e.contains("expected Int, got Str")),
+            "{errors:?}"
+        );
+        assert!(
+            errors[3].contains("'if' expects") && errors[3].contains("but 4 were provided"),
+            "{errors:?}"
+        );
+    }
+
+    // Where no namespace binds the name, a bare call still reaches the
+    // core function and its built-in signature.
+    #[test]
+    fn test_core_function_is_checked_where_nothing_shadows_it() {
+        let source = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+
+            ::test ns
+            sum: Int add(1, 2)
+            wrong add("x", "y")
+            few sub()
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].contains("expected Int, got Str"), "{errors:?}");
+        assert!(errors[1].contains("expected Int, got Str"), "{errors:?}");
+        assert!(
+            errors[2].contains("'sub' expects at least 1 arguments"),
+            "{errors:?}"
+        );
+    }
+
+    // From another namespace the function is reached by its path, through a
+    // namespace alias, or through a var import under any name, the name of
+    // a core function included.
+    #[test]
+    fn test_imported_function_named_like_a_core_one_is_checked_as_itself() {
+        let source = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+            length fn (a: Int): Int { a }
+
+            ::test ns
+            ::l ::lib
+            plus ::lib/add
+            add ::l/add
+            length ::lib/length
+
+            by-path ::lib/add("x", "y")
+            by-alias ::l/add("x", "y")
+            by-import plus("x", "y")
+            by-core-name add("x", "y")
+            piped "x" |> add("y")
+            other-core-name length(3)
+            as-value map(["a"], add(%, "b"))
+
+            in-body fn (): Str {
+                first add("x", "y")
+                second "x" |> add("y")
+                third length(3)
+                plus("x", "y")
+            }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        let wrong = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+
+            ::test ns
+            ::l ::lib
+            plus ::lib/add
+            add ::l/add
+
+            by-alias ::l/add(1, 2)
+            by-import plus("x")
+            by-core-name add(1, 2)
+            by-core-arity add("x", "y", "z")
+
+            in-body fn (): Str { add("x", 2) }
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 7, "{errors:?}");
+        assert!(
+            errors.iter().all(|e| !e.contains("expected Int")),
+            "No call is checked against core `add`. Got: {errors:?}"
+        );
+        assert!(
+            errors[2].contains("'plus' expects 2 arguments, but 1 were provided"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[5].contains("'add' expects 2 arguments, but 3 were provided"),
+            "{errors:?}"
+        );
+    }
+
+    // A core function a project declares is the one every bare call
+    // reaches, so hot-std's built-in signature for the name steps aside.
+    #[test]
+    fn test_project_core_function_named_like_a_built_in_is_checked_as_itself() {
+        let source = r#"
+            ::lib ns
+            concat meta {core: true} fn (a: Int): Int { a }
+
+            ::test ns
+            one concat(5)
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+    }
+
     fn mismatches(source: &str) -> Vec<String> {
         compile_and_get_type_errors(source)
             .iter()
