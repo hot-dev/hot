@@ -283,6 +283,27 @@ greet fn (name: Str?): Str {
 }
 ```
 
+### Union Subjects
+
+When the matched name is typed as a union, `hot check` knows what it holds in
+each arm. Inside a type arm the name has the type the arm names. In the
+default arm it has the members that no earlier arm took:
+
+```hot
+describe fn (id: Int | Str | Null): Str {
+  match id {
+    Int => { `number ${add(id, 1)}` }   // id is an Int
+    Null => { "none" }
+    _ => { uppercase(id) }               // id is a Str
+  }
+}
+```
+
+This holds for built-in and declared types, at namespace level and inside
+functions, and for the first parameter of a `fn match`. A value arm such as
+`0 =>` takes one value, so the rest still includes its type. `match-all` runs
+every matching arm, so its default arm keeps the declared type.
+
 ### The Any Pattern
 
 `Any` is the top type: it matches every value. An `Any` arm acts like a
