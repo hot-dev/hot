@@ -31,6 +31,17 @@ meta ["test"] fn () {
     assert(is-err(::sites/parse-site-url("http://contoso.sharepoint.com/sites/eng")))
 }
 
+// A site may be named like a library or page folder.
+test-parse-site-url-keeps-a-stop-word-site-name
+meta ["test"] fn () {
+    host "contoso.sharepoint.com"
+    assert-eq({hostname: host, path: "/sites/documents"}, ::sites/parse-site-url("https://contoso.sharepoint.com/sites/documents"))
+    assert-eq({hostname: host, path: "/sites/Lists"}, ::sites/parse-site-url("https://contoso.sharepoint.com/sites/Lists/Shared%20Documents/Forms/AllItems.aspx"))
+    assert-eq({hostname: host, path: "/teams/pages"}, ::sites/parse-site-url("https://contoso.sharepoint.com/teams/pages/SitePages/Home.aspx"))
+    assert-eq({hostname: host, path: "/sites/forms"}, ::sites/parse-site-url("https://contoso.sharepoint.com/sites/forms/Lists/Tasks"))
+    assert-eq({hostname: host, path: "/sites/eng"}, ::sites/parse-site-url("https://contoso.sharepoint.com/sites/eng/documents"), "a library after the site name still ends the path")
+}
+
 test-search-path
 meta ["test"] fn () {
     assert-eq("/sites?search=engineering%20docs", ::sites/search-path("engineering docs"))

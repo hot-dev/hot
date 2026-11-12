@@ -195,6 +195,24 @@ meta ["test"] fn () {
     assert(not(in("Authorization", keys(req.headers))), "webhook-token routes send no bot token")
 }
 
+// A user's OAuth2 token goes out as Bearer, and no bot token is needed.
+test-bearer-token-for-user-routes
+meta ["test"] fn () {
+    req ::api/build-request("GET", "/users/@me/connections", {bearer: "user-tkn"})
+    assert-eq("Bearer user-tkn", req.headers.Authorization)
+    both ::api/build-request("GET", "/users/@me/connections", {bearer: "user-tkn", token: "bot-tkn"})
+    assert-eq("Bearer user-tkn", both.headers.Authorization, "bearer wins over a bot token")
+    assert(is-err(::api/build-request("GET", "/users/@me/connections", {bearer: ""})), "a blank bearer is an Err, never a fallback")
+    no-auth ::api/build-request("POST", "/webhooks/1/tok", {bearer: "user-tkn", auth: false})
+    assert(not(in("Authorization", keys(no-auth.headers))), "token-in-path routes send no Authorization")
+}
+
+// The User-Agent names this package's version.
+test-user-agent-version
+meta ["test"] fn () {
+    assert-eq("DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.3)", ::discord::core/USER_AGENT)
+}
+
 test-search-query-is-encoded
 meta ["test"] fn () {
     req ::api/build-request("GET", "/guilds/1/members/search", {query: {query: "a&b c", limit: null}, token: "t"})

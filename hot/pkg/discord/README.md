@@ -7,7 +7,7 @@ Discord API v10 bindings for Hot: send messages with embeds, components, polls a
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/discord": "1.1.2"
+"hot.dev/discord": "1.1.3"
 ```
 
 ## Setup
@@ -67,6 +67,7 @@ Every function that calls Discord takes an optional trailing `opts` Map, so one 
 | Key | Effect |
 |---|---|
 | `token` | The bot token for this call, instead of `discord.bot.token` |
+| `bearer` | A user's OAuth2 access token, sent as `Bearer` instead of a bot token. For the routes that only accept a user token, such as `get-current-user-connections` and `get-current-user-guild-member` |
 
 `opts` always comes last.
 
@@ -195,7 +196,7 @@ Calls are not retried automatically.
 
 ## Notes and limits
 
-- Requests go to `https://discord.com/api/v10` with a `DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.0)` User-Agent.
+- Requests go to `https://discord.com/api/v10` with a `DiscordBot (https://hot.dev/pkg/hot.dev/discord, 1.1.3)` User-Agent.
 - Pins use the current `/channels/{id}/messages/pins` endpoints, which return `{items: [{pinned_at, message}], has_more}`; the older `/channels/{id}/pins` routes are deprecated. Pinning needs the `PIN_MESSAGES` permission.
 - Reaction `emoji` takes the character itself (`"👍"`) or `name:id` for custom emoji; it is URL-encoded for you.
 - Webhook-token and interaction-token routes never send the bot token, so an HTTP-only interactions app only needs `discord.public.key`.

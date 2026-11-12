@@ -139,7 +139,9 @@ meta {
     Split a site URL into `{hostname, path}` (pure), dropping any query
     or fragment, and a library/page suffix after the site
     (`/Shared Documents/...`, `/Lists/...`, `/SitePages/...`,
-    `/_layouts/...`). Returns an Err for a non-https URL.
+    `/_layouts/...`). The name after `/sites/` or `/teams/` is always kept,
+    so a site called `documents` or `lists` parses. Returns an Err for a
+    non-https URL.
 
     **Example**
 
@@ -161,8 +163,12 @@ fn (url: Str): Map {
       segments map(filter(rest(parts), (s) { not(is-empty(s)) }), ::hot::uri/decode)
       stops ["shared documents", "lists", "sitepages", "_layouts", "forms", "pages", "siteassets", "documents"]
       walked reduce(segments, (acc, seg) {
+        // The segment after /sites/ or /teams/ is the site's own name, which
+        // may be a word that elsewhere starts a library or page path.
+        is-site-name and(eq(length(acc.kept), 1), in(lowercase(first(acc.kept)), ["sites", "teams"]))
         cond {
           acc.stopped => { acc }
+          is-site-name => { {...acc, kept: concat(acc.kept, [seg])} }
           in(lowercase(seg), stops) => { {...acc, stopped: true} }
           ends-with(lowercase(seg), ".aspx") => { {...acc, stopped: true} }
           => { {...acc, kept: concat(acc.kept, [seg])} }
