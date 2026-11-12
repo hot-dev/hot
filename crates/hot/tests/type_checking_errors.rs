@@ -1756,51 +1756,110 @@ mod type_checking_tests {
         );
     }
 
-    // A function is compiled to by the argument count it declares. A call
-    // with another count goes by name when run and reaches the core
-    // function, so that is what it is checked against.
+    // A function a namespace defines takes its name for the whole namespace,
+    // at every argument count and wherever it is written. A count it doesn't
+    // declare is an arity error, not a call of the core function.
     #[test]
-    fn test_other_argument_counts_still_reach_the_core_function() {
+    fn test_namespace_function_shadows_the_core_one_at_every_count() {
         let source = r#"
             ::test ns
+
+            before fn (): Any { uppercase("x") }
 
             add fn (a: Str, b: Str): Str { a }
             sub fn (a: Str): Str { a }
             if fn (a: Int): Int { a }
             mul fn (a: Str, b: Str): Str { a }
+            length fn (a: Int, b: Int): Int { a }
+            uppercase fn (a: Int, b: Int): Int { a }
 
             three add(1, 2, 3)
             two sub(5, 3)
             core-if if(true, 1, 2)
             core-mul mul(2, 3, 4)
             piped 1 |> add(2, 3)
-            xs [1, 2, 3]
-            spread add(...xs)
+            one length("abc")
+
+            in-body fn (): Any { add(1, 2, 3) }
+        "#;
+        let errors = call_errors(source);
+        let expected = [
+            "'uppercase' expects 2 arguments, but 1 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+            "'sub' expects 1 arguments, but 2 were provided",
+            "'if' expects 1 arguments, but 3 were provided",
+            "'mul' expects 2 arguments, but 3 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+            "'length' expects 2 arguments, but 1 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+        ];
+        assert_eq!(errors.len(), expected.len(), "{errors:?}");
+        for (error, expected) in errors.iter().zip(expected) {
+            assert!(error.contains(expected), "{expected}: {errors:?}");
+        }
+    }
+
+    // The core function stays reachable by its path. A rest parameter and a
+    // spread reach the namespace's function at any count, so they are
+    // checked against it alone.
+    #[test]
+    fn test_shadowed_core_function_is_reached_by_its_path() {
+        let source = r#"
+            ::test ns
+            ::m ::hot::math
+
+            add fn (a: Str, b: Str): Str { a }
+            concat fn (...parts: Int): Int { 0 }
+
+            by-path ::hot::math/add(1, 2, 3)
+            by-alias ::m/add(1, 2)
+            strs ["a", "b"]
+            spread add(...strs)
+            none concat()
+            many concat(1, 2, 3)
         "#;
         assert_eq!(call_errors(source), Vec::<String>::new());
 
-        // And the core function still refuses what it doesn't take.
         let wrong = r#"
             ::test ns
 
-            add fn (a: Str, b: Str): Str { a }
-            if fn (a: Int): Int { a }
+            concat fn (...parts: Int): Int { 0 }
 
-            three add("x", "y", "z")
-            four if(true, 1, 2, 3)
+            strs concat("a", "b")
         "#;
         let errors = call_errors(wrong);
-        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
-            errors[..3]
+            errors
                 .iter()
-                .all(|e| e.contains("expected Int, got Str")),
-            "{errors:?}"
+                .all(|e| e.contains("'concat' argument") && e.contains("expected Int, got Str")),
+            "Checked against the namespace's `concat`, not the core one. Got: {errors:?}"
         );
-        assert!(
-            errors[3].contains("'if' expects") && errors[3].contains("but 4 were provided"),
-            "{errors:?}"
+    }
+
+    // A namespace split across files is one namespace: a function one file
+    // defines shadows the core function in the other, whichever loads first.
+    #[test]
+    fn test_shadowing_spans_the_files_of_a_namespace() {
+        let defines = (
+            "defines.hot",
+            "::split ns\nadd fn (a: Str, b: Str): Str { a }\n",
         );
+        let calls = (
+            "calls.hot",
+            "::split ns\nsum add(1, 2, 3)\njoined add(\"x\", \"y\")\n",
+        );
+        for order in [[defines, calls], [calls, defines]] {
+            let errors: Vec<String> = compile_files_and_get_errors(&order)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(
+                errors[0].contains("'add' expects 2 arguments, but 3 were provided"),
+                "{errors:?}"
+            );
+        }
     }
 
     // Where no namespace binds the name, a bare call still reaches the

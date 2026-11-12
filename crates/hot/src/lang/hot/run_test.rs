@@ -2555,6 +2555,110 @@ assert-eq fn (a: Str?, b: Str?): Any { "function" }
         );
     }
 
+    /// A function a namespace defines under a core function's name is what
+    /// a bare call there reaches, whatever the call passes and wherever the
+    /// function is written. A call the compiler couldn't bind to it (a
+    /// spread, arguments for a rest parameter, a function defined further
+    /// down) went by the bare name, which the runtime looks up core-first:
+    /// it ran the core function when the arguments suited its direct path,
+    /// and `if`, `and` and `or` were compiled inline.
+    #[test]
+    fn a_namespace_function_shadows_a_core_one_in_every_position() {
+        let src = r#"::t ns
+before fn (): Vec {
+    [add(1, 2), 1 |> add(2), length([1, 2, 3]), if(true, 1, 2), and(true, 5)]
+}
+add fn (a: Any, b: Any): Str { "add" }
+length fn (v: Any): Str { "length" }
+if fn (...args: Any): Str { "if" }
+and fn (...args: Any): Str { "and" }
+mul fn (...xs: Any): Str { `mul ${::hot::coll/length(xs)}` }
+pair [1, 2]
+after fn (): Vec {
+    [
+        add(1, 2), add(...pair), mul(2, 3, 4), 2 |> mul(3, 4), mul(...pair),
+        map([pair], (p) { add(...p) }), `${mul(1, 2, 3)}`, reduce(pair, add, 0),
+        if(true, 1, 2), and(true, 5)
+    ]
+}
+[before(), after(), ::hot::math/add(1, 2, 3), ::hot::bool/if(true, 1, 2)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                strs(&["add", "add", "length", "if", "and"]),
+                Val::vec(vec![
+                    Val::from("add"),
+                    Val::from("add"),
+                    Val::from("mul 3"),
+                    Val::from("mul 3"),
+                    Val::from("mul 2"),
+                    strs(&["add"]),
+                    Val::from("mul 3"),
+                    Val::from("add"),
+                    Val::from("if"),
+                    Val::from("and"),
+                ]),
+                Val::Int(6),
+                Val::Int(1),
+            ]),
+        );
+    }
+
+    /// The name is the namespace's function at every argument count, so a
+    /// count it doesn't declare is an arity error that says so, never a call
+    /// of the core function: from a spread, whose count only the run knows,
+    /// and from a call of the function as a value. `call` and `apply` give
+    /// the error as an Err, which `Str` consumes here.
+    #[test]
+    fn a_count_a_namespace_function_does_not_declare_is_an_arity_error() {
+        for call in [
+            "sub(...pair)",
+            "map([pair], (p) { sub(...p) })",
+            "`${sub(...pair)}`",
+            "reduce(pair, sub, 10)",
+            "apply(pair, sub)",
+            "call(sub, pair)",
+        ] {
+            let src = format!(
+                "::t ns\nsub fn (a: Any): Str {{ \"sub\" }},\n\
+                 (a: Any, b: Any, c: Any): Str {{ \"sub\" }}\npair [1, 2]\nStr({call})"
+            );
+            for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+                let label = if conf.is_some() { "jit" } else { "interpreter" };
+                let error = compile_and_run_with_std_conf(&src, conf)
+                    .expect_err("no `sub` takes two arguments");
+                assert!(
+                    error.contains("Function '::t/sub' expects 1 or 3 arguments, got 2"),
+                    "{label} error for `{call}`: {error}"
+                );
+            }
+        }
+    }
+
+    /// What full shadowing leaves alone: another namespace still reaches the
+    /// core function, a var import is its target, and a project's own core
+    /// function replaces hot-std's for every bare call.
+    #[test]
+    fn shadowing_a_core_function_stays_in_the_namespace_that_defines_it() {
+        let src = r#"::lib ns
+add fn (a: Any, b: Any): Str { "lib" }
+concat meta {core: true} fn (a: Any): Str { "core" }
+
+::other ns
+others [add(1, 2, 3), add(1, 2), concat(5)]
+
+::user ns
+add ::lib/add
+[add(1, 2), ::other/others]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("lib"),
+                Val::vec(vec![Val::Int(6), Val::Int(3), Val::from("core")]),
+            ]),
+        );
+    }
+
     /// Functions with lazy parameters still defer: the core ones, a
     /// namespace's own, an import, and one defined in the body, which a local
     /// binding of the name doesn't hide.

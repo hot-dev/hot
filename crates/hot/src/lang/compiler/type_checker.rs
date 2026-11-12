@@ -5585,12 +5585,8 @@ impl TypeChecker {
             // E.g. with `::ctx ::hot::ctx` declared, `::ctx/get` becomes `::hot::ctx/get`.
             let namespace_callee = self.namespace_callee(fn_call);
             let bound_in_namespace = namespace_callee.is_some();
-            let imported = namespace_callee
-                .as_ref()
-                .is_some_and(|(_, imported)| *imported);
-            let resolved_name = namespace_callee
-                .map(|(qualified, _)| qualified)
-                .or_else(|| self.resolve_aliased_function_name(&func_name));
+            let resolved_name =
+                namespace_callee.or_else(|| self.resolve_aliased_function_name(&func_name));
             let lookup_name = resolved_name.as_deref().unwrap_or(&func_name);
             // Diagnostics name a namespace's binding as the call wrote it.
             let reported_name = if bound_in_namespace {
@@ -5665,27 +5661,16 @@ impl TypeChecker {
             }
 
             // Try to find function signature, as the call resolves when run:
-            // 1. The function a name bound in this namespace names: the
-            //    binding shadows any core function
+            // 1. The function a name bound in this namespace names, and
+            //    nothing else: the binding shadows a core function of the
+            //    same name at every argument count, so a count it doesn't
+            //    declare is an arity error, not a call of the core function
             // 2. The (possibly alias-resolved) qualified name
             // 3. The built-in signature of a bare name that reaches
             //    hot-std's core function
             // 4. The core variable registry (auto-imported
             //    `meta {core: true}` functions defined in another namespace)
-            let signatures = if bound_in_namespace {
-                match self.context.get_function_signature(lookup_name).cloned() {
-                    // A function this namespace declares is called by id at
-                    // each parameter count it declares. A call with another
-                    // count, or with a spread, goes by name when run, and
-                    // reaches the core function of that name when there is
-                    // one. A var import is its target at every count.
-                    Some(mut own) if !imported && !self.calls_declared_arity(&own, fn_call) => {
-                        own.extend(self.core_signatures(&func_name).unwrap_or_default());
-                        Some(own)
-                    }
-                    own => own,
-                }
-            } else if lookup_name.starts_with("::") {
+            let signatures = if bound_in_namespace || lookup_name.starts_with("::") {
                 self.context.get_function_signature(lookup_name).cloned()
             } else {
                 self.core_signatures(lookup_name)
@@ -5836,11 +5821,12 @@ impl TypeChecker {
 
     /// The qualified name of what a call by bare name reaches when the
     /// current namespace binds that name: its own function, or through its
-    /// var imports (`plus ::lib/add`) the function or type they name, and
-    /// whether it is such an import. The binding is what the call runs, so
-    /// a core function of the same name is not. `None` when the namespace
-    /// declares no such name.
-    fn namespace_callee(&self, fn_call: &FnCall) -> Option<(String, bool)> {
+    /// var imports (`plus ::lib/add`) the function or type they name. The
+    /// binding is what the call runs, whatever it passes and wherever in
+    /// the namespace the binding is written, so a core function of the same
+    /// name has no say in it. `None` when the namespace declares no such
+    /// name.
+    fn namespace_callee(&self, fn_call: &FnCall) -> Option<String> {
         let Value::Ref(Ref::Var(var_ref)) = &*fn_call.function else {
             return None;
         };
@@ -5858,17 +5844,13 @@ impl TypeChecker {
             return None;
         }
         // The bound guards against an import cycle.
-        let mut imported = false;
         for _ in 0..16 {
             match self.declared_functions.get(&qualified) {
-                Some(DeclaredFunction::Import(target)) => {
-                    qualified.clone_from(target);
-                    imported = true;
-                }
+                Some(DeclaredFunction::Import(target)) => qualified.clone_from(target),
                 _ => break,
             }
         }
-        Some((qualified, imported))
+        Some(qualified)
     }
 
     /// The signatures of the core function a bare `name` reaches: hot-std's
@@ -5891,18 +5873,6 @@ impl TypeChecker {
             .cloned()
             .collect();
         (!combined.is_empty()).then_some(combined)
-    }
-
-    /// Whether a call passes exactly as many arguments as one of
-    /// `signatures` declares parameters, a rest parameter counting as one.
-    /// Functions are registered by that count, so such a call is compiled
-    /// to that function. A spread's length is only known when run.
-    fn calls_declared_arity(&self, signatures: &[FunctionSignature], fn_call: &FnCall) -> bool {
-        let written = self.written_args(fn_call);
-        Self::positioned_args(fn_call) == fn_call.args.len()
-            && signatures
-                .iter()
-                .any(|sig| sig.parameter_types.len() == written)
     }
 
     /// Whether a project declares a core function `name` of its own. Every

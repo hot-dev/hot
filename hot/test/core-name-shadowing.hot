@@ -1,8 +1,11 @@
 // Regression: a function a namespace declares, or imports, under the name of
 // a core function is the one its calls run. `hot check` used to check those
 // calls against the core function: `add("x", "y")` was a type mismatch
-// ("expected Int, got Str") in a program that ran correctly. This file must
-// check clean, and each call must reach the namespace's own function.
+// ("expected Int, got Str") in a program that ran correctly. And a call the
+// compiler couldn't bind to the namespace's function (a spread, a rest
+// parameter's arguments, a function defined further down) ran the core
+// function when the arguments suited it. This file must check clean, and
+// each call must reach the namespace's own function.
 ::hot::test::core-name-shadowing::lib ns
 
 add fn (a: Str, b: Str): Str { `${a}+${b}` }
@@ -37,11 +40,38 @@ in-body fn (): Vec {
 
 as-value fn (): Vec { map(["a", "b"], add(%, "z")) }
 
+::hot::test::core-name-shadowing::full ns
+
+// Written before the definitions: where a function sits in its namespace
+// does not change what its name means there.
+before fn (): Vec {
+    [add(1, 2), 1 |> add(2), length([1, 2, 3]), if(true, 1, 2), and(true, 5)]
+}
+
+// Functions that take what the core ones take, so a call that reached the
+// core function would show: `add(1, 2)` would be 3.
+add fn (a: Any, b: Any): Str { "add" }
+length fn (v: Any): Str { "length" }
+if fn (...args: Any): Str { "if" }
+and fn (...args: Any): Str { "and" }
+mul fn (...xs: Any): Str { `mul ${::hot::coll/length(xs)}` }
+
+pair [1, 2]
+
+spread fn (): Vec { [add(...pair), mul(...pair), map([pair], (p) { add(...p) })] }
+rest fn (): Vec { [mul(2, 3, 4), 2 |> mul(3, 4), `${mul(1, 2, 3)}`] }
+as-value fn (): Any { reduce(pair, add, 0) }
+lazy-names fn (): Vec { [if(true, 1, 2), and(true, 5)] }
+by-path fn (): Vec {
+    [::hot::math/add(1, 2, 3), ::hot::bool/if(true, 1, 2), ::hot::coll/length(pair)]
+}
+
 ::hot::test::core-name-shadowing ns
 meta ["test"]
 
 ::guards ::hot::test::core-name-shadowing::guards
 ::importer ::hot::test::core-name-shadowing::importer
+::full ::hot::test::core-name-shadowing::full
 
 add fn (a: Str, b: Str): Str { `${a}&${b}` }
 sub fn (a: Str): Str { `-${a}` }
@@ -71,14 +101,22 @@ meta ["test"] fn () {
     assert-eq("a&b&c", reduce(["b", "c"], add, "a"), "as a reducer")
 }
 
-// A function is called at the argument counts it declares. Any other count
-// still reaches the core function.
-test-other-argument-counts-reach-the-core-function
+// The name belongs to the namespace's function at every argument count, in
+// every position, and wherever in the namespace the function is written. A
+// count it doesn't declare is an arity error, so only counts it takes can be
+// written here. The core function stays reachable by its path.
+test-shadowing-holds-at-every-count-and-position
 meta ["test"] fn () {
-    assert-eq(6, add(1, 2, 3), "core `add` takes three")
-    assert-eq(2, sub(5, 3), "core `sub` takes two")
-    assert-eq(24, mul(2, 3, 4), "core `mul` takes three")
-    assert-eq("ab", concat("a", "b"), "core `concat` takes two")
+    assert-eq(
+        ["add", "add", "length", "if", "and"],
+        ::full/before(),
+        "calls written before the definitions",
+    )
+    assert-eq(["add", "mul 2", ["add"]], ::full/spread(), "spread calls")
+    assert-eq(["mul 3", "mul 3", "mul 3"], ::full/rest(), "rest parameters")
+    assert-eq("add", ::full/as-value(), "passed as a value")
+    assert-eq(["if", "and"], ::full/lazy-names(), "`if` and `and`")
+    assert-eq([6, 1, 2], ::full/by-path(), "the core functions, by their paths")
 }
 
 test-shadowing-stays-in-its-namespace
