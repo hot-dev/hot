@@ -190,6 +190,22 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "HOT_QUEUE_EVENT_ORPHAN_IDLE_MS",
         "queue.event-orphan-idle-ms",
     ),
+    (
+        "HOT_API_SSE_PER_CREDENTIAL_CONNECTION_LIMIT",
+        "api.sse-per-credential-connection-limit",
+    ),
+    (
+        "HOT_API_SSE_PER_ORG_CONNECTION_LIMIT",
+        "api.sse-per-org-connection-limit",
+    ),
+    (
+        "HOT_API_SSE_GLOBAL_CONNECTION_LIMIT",
+        "api.sse-global-connection-limit",
+    ),
+    (
+        "HOT_API_SSE_CONNECTION_LIMIT_MODE",
+        "api.sse-connection-limit-mode",
+    ),
 ];
 
 /// The configuration key an environment variable sets, given the

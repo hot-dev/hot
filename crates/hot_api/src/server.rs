@@ -673,6 +673,9 @@ async fn error_envelope_middleware(
         .unwrap_or("");
     let plain = content_type.starts_with("text/plain");
     if !content_type.is_empty() && !plain {
+        if status == axum::http::StatusCode::TOO_MANY_REQUESTS {
+            return with_retry_after_header(response).await;
+        }
         return response;
     }
     let (mut parts, body) = response.into_parts();
@@ -692,9 +695,90 @@ async fn error_envelope_middleware(
     axum::response::Response::from_parts(parts, axum::body::Body::from(body))
 }
 
+/// Copy a 429's `error.retry_after` into a `Retry-After` header when the
+/// handler set only the body. Handlers that return `(StatusCode, Json)` have
+/// no way to attach one.
+async fn with_retry_after_header(response: axum::response::Response) -> axum::response::Response {
+    use axum::http::header::RETRY_AFTER;
+    if response.headers().contains_key(RETRY_AFTER) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::empty());
+    };
+    let seconds = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|error| error.pointer("/error/retry_after")?.as_u64());
+    if let Some(seconds) = seconds {
+        parts
+            .headers
+            .insert(RETRY_AFTER, axum::http::HeaderValue::from(seconds));
+    }
+    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the error envelope middleware makes of a handler's response.
+    async fn through_envelope<R>(response: R) -> axum::response::Response
+    where
+        R: axum::response::IntoResponse + Clone + Send + Sync + 'static,
+    {
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route(
+                "/v1/thing",
+                axum::routing::get(move || {
+                    let response = response.clone();
+                    async move { response }
+                }),
+            )
+            .layer(middleware::from_fn(error_envelope_middleware));
+        app.oneshot(
+            axum::http::Request::get("/v1/thing")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_429_with_retry_after_in_the_body_gets_the_header() {
+        use axum::http::StatusCode;
+        let response = through_envelope((
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({
+                "error": {"code": "rate_limit_exceeded", "message": "slow down", "retry_after": 7}
+            })),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "7");
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["retry_after"], 7);
+
+        // A handler's own header wins, and a body with no wait adds none.
+        let response = through_envelope((
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", "3")],
+            axum::Json(serde_json::json!({"error": {"retry_after": 7}})),
+        ))
+        .await;
+        assert_eq!(response.headers()["retry-after"], "3");
+        let response = through_envelope((
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(serde_json::json!({"error": {"code": "session_limit_exceeded"}})),
+        ))
+        .await;
+        assert!(!response.headers().contains_key("retry-after"));
+    }
 
     thread_local! {
         static LOG: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };

@@ -876,6 +876,15 @@ pub async fn subscribe_with_event(
                 )
             })?;
 
+    // Resolve the project filter before publishing, for the same reason as the
+    // scope below: a bad `?project=` must fail with nothing published.
+    let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
+        let project = get_and_verify_project(&db, &api_key, project_name_or_id).await?;
+        Some(project.project_id)
+    } else {
+        None
+    };
+
     // Resolve the stream's scope before publishing: failing after the event
     // is accepted would make the caller retry and publish it twice.
     let stream_scope = crate::auth::runtime_database_scope(&db, auth.env_id())
@@ -960,13 +969,6 @@ pub async fn subscribe_with_event(
         stream_id
     );
 
-    // Optional: resolve project filter to project_id
-    let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
-        let project = get_and_verify_project(&db, &api_key, project_name_or_id).await?;
-        Some(project.project_id)
-    } else {
-        None
-    };
     // Step 6: Create the SSE stream, opening with the publish confirmation
     let published_event = serde_json::to_string(&serde_json::json!({
         "type": "event:published",

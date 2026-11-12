@@ -201,8 +201,9 @@ pub async fn subscribe_to_env(
     if subscriber.is_none() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiErrorResponse::internal_error(
-                "Real-time updates not available (pub/sub not configured)",
+            Json(ApiErrorResponse::new(
+                "pubsub_not_configured",
+                "Real-time environment updates need pub/sub, which this server does not have configured",
             )),
         ));
     }

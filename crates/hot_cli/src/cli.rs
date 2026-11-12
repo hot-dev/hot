@@ -649,7 +649,8 @@ pub(crate) enum Command {
         /// Block the deploy if any required context variables reachable from
         /// your code are unset. Without this flag, missing required ctx
         /// vars produce a warning but the deploy proceeds. Equivalent to
-        /// setting `hot.deploy.ctx.strict: true` in `hot.hot`.
+        /// setting `hot.deploy.ctx.strict: true` in `hot.hot`. Applies only
+        /// with `--local`: a deploy through the API does not run this check.
         #[arg(long = "strict")]
         strict: bool,
     },
@@ -741,7 +742,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DepsAction,
     },
-    /// Manage project context variables (encrypted key-value storage)
+    /// Manage project context variables (encrypted key-value storage; needs --local)
     #[command(display_order = 44, alias = "ctx")]
     Context {
         #[command(flatten)]
@@ -1062,7 +1063,8 @@ pub(crate) enum ContextAction {
     ///
     /// Builds the project (in-process, no DB writes) and computes the same
     /// set of required ctx keys that `hot deploy` would gate on. Useful to
-    /// answer "what do I actually need to set before deploying?".
+    /// answer "what do I actually need to set before deploying?". Like the
+    /// other `hot context` commands, it needs `--local`.
     Required {
         /// Project name (defaults to configured default project / -p flag)
         project_name: Option<String>,
@@ -1194,7 +1196,7 @@ Commands:
     project      Manage a project (activate/deactivate)
     projects     List projects in the current environment
     deps         Manage project dependencies
-    context      Manage project context variables (encrypted key-value storage)
+    context      Manage project context variables (encrypted; needs --local)
     key          Manage API keys in the local environment database
     admin        Create the first administrator or reset a password (self-hosted installs)
     conf         Show or generate configuration

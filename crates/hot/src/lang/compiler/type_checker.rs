@@ -8743,12 +8743,8 @@ mod tests {
 
     #[test]
     fn test_open_modifier_on_non_literal_alias_is_error() {
-        // Note: this test exercises type-checker semantics directly. The
-        // parser's `open` detection requires a leading `|` or literal
-        // token, so `Foo type open Int` doesn't reach the type checker
-        // through the parser. We construct the AST manually to verify
-        // the type-checker guard still fires if a future parser path
-        // (or programmatic AST construction) lands here.
+        // The type-checker guard on its own, from a hand-built AST. The
+        // test below covers the same source through the parser.
         use crate::lang::ast::{Sym, TypeDef, TypeExpr as AstTy};
         use crate::lang::errors::CompilerError;
 
@@ -8790,6 +8786,40 @@ mod tests {
             "non-literal alias must not be marked as literal-union despite `open`"
         );
         assert!(entry.literal_members.is_empty());
+    }
+
+    #[test]
+    fn test_open_before_a_type_name_is_the_modifier_not_a_type() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        for alias in ["Int", "::hot::type/Int", "Vec<Str>"] {
+            let source = format!("::test::lit ns\nCount type open {alias}\n");
+            let program = parse_hot(&source).expect("parse");
+            let mut checker = TypeChecker::new();
+            let _ = checker.check_program(&program);
+            assert!(
+                checker.errors.errors.iter().any(|e| matches!(
+                    e,
+                    CompilerError::OpenLiteralUnionMismatch { type_name, .. } if type_name == "Count"
+                )),
+                "`Count type open {alias}` must be rejected: {:?}",
+                checker.errors.errors
+            );
+        }
+
+        // A lowercase name after `open` is not a type, so `open` keeps its
+        // old reading there and the parser does not take it as the modifier.
+        let program = parse_hot("::test::lit ns\nCount type open\n").expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        assert!(
+            !checker
+                .errors
+                .errors
+                .iter()
+                .any(|e| matches!(e, CompilerError::OpenLiteralUnionMismatch { .. }))
+        );
     }
 
     #[test]

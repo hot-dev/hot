@@ -657,6 +657,11 @@ two different types is yours to rule out. An enum variant isn't read this way, a
 `type-mismatch` error from `hot check`. Strings are ordered by `sort` alone, which
 reads a declared type over a string the same way.
 
+`hot check` can't see inside an `Any`, such as a field of parsed JSON. Given two
+strings that way, `gt`, `gte`, `lt` and `lte` order them at run time, and `between`
+returns an `Err`. Don't build on the ordering: `sort` is the supported way to order
+strings.
+
 Other operations keep the type. `add(Money(80.0), 1)` gives an `Err`, so convert
 with `Dec(x)` first, and `eq(Money(80.0), 80.0)` is false, because the type is part
 of the value.

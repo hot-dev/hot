@@ -65,7 +65,7 @@ From the [Hot App](/docs/app), click **New Service Key**. You'll specify:
 - **Permissions** — A granular permission map using the [permissions model](#permissions-model) below.
 - **Expiration** — Optional. Leave empty for a key that never expires.
 
-> **Resource type restriction:** Because service keys are customer-facing, they can only carry permissions for the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. Administrative resource types (`call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`) and the full-access grant `*:*` are rejected when creating a service key.
+> **Resource type restriction:** Because service keys are customer-facing, they can only carry permissions for the `mcp`, `webhook`, `stream`, `event`, and `run` resource types. A `run` grant is accepted but has no effect: the run routes take API keys only. Administrative resource types (`call`, `project`, `build`, `context`, `key`, `session`, `env`, `file`, `blob`, `domain`) and the full-access grant `*:*` are rejected when creating a service key.
 
 The generated token is displayed **only once** at creation time. It has no `hot_` prefix, making it suitable for white-label integrations where your customers shouldn't see Hot branding.
 

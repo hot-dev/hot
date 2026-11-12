@@ -250,16 +250,22 @@ meta {
 
     **Fields**
 
-    - `tasks-remaining` — tasks left this period (-1 = unlimited, 0 = exhausted)
-    - `minutes-remaining` — wall-clock minutes left this period (-1 = unlimited)
-    - `compute-units-remaining` — CUS left this period (-1 = unlimited)
+    - `minutes-limit` — the plan's wall-clock minutes per period (-1 = unlimited)
+    - `compute-units-limit` — the plan's CUS per period (-1 = unlimited)
+    - `minutes-remaining` — wall-clock minutes left this period (-1 when the limit is unlimited)
+    - `compute-units-remaining` — CUS left this period (-1 when the limit is unlimited)
     - `compute-units-used` — CUS consumed this period
     - `concurrent-remaining` — concurrent container slots available (-1 = unlimited)
     - `overage` — true if usage exceeds included amount (paid plans only)
+
+    The Free plan stops at 0. A paid plan's remaining values go negative as
+    overage accrues, so read a limit of -1, not a remaining value of -1, as
+    unlimited.
     """
 }
 type {
-    tasks-remaining: Int,
+    minutes-limit: Int,
+    compute-units-limit: Int,
     minutes-remaining: Int,
     compute-units-remaining: Int,
     compute-units-used: Int,
@@ -326,7 +332,7 @@ fn (): Bool {
 start
 meta {
     doc: """
-    Start a container as an async task. Returns immediately with a TaskInfo containing the task ID.
+    Start a container as an async task. Returns immediately with the same `TaskInfo` as `::hot::task/start`: the task ID, its stream, and the run that started it.
 
     The container runs asynchronously in the task worker using the configured backend (Docker or Kata/Firecracker). Results are stored in the task record and can be retrieved via the task system.
 
@@ -339,7 +345,8 @@ meta {
         "cmd": ["python", "-c", "print('Hello from container')"]
     }))
     // task.id — the task ID
-    // task.stream-id — the stream ID
+    // task.stream.id — the stream ID
+    // task.origin-run.id — the run that started it
 
     // Start with environment variables and custom limits
     task ::hot::box/start(::hot::box/BoxConf({
@@ -421,8 +428,8 @@ meta {
     doc: """
     Check remaining container task quota for the current organization.
 
-    Returns a `BoxQuota` with remaining tasks, minutes, compute units,
-    concurrent slots, and overage status.
+    Returns a `BoxQuota` with the plan's limits, remaining minutes and
+    compute units, concurrent slots, and overage status.
 
     **Example**
 
@@ -430,7 +437,7 @@ meta {
     q ::hot::box/quota()
     q.compute-units-remaining  // 47660
     q.compute-units-used       // 2340
-    if(eq(q.tasks-remaining, 0), fail("No container tasks remaining"), "OK")
+    if(eq(q.concurrent-remaining, 0), fail("No container slots free"), "OK")
     ```
     """
 }
@@ -449,7 +456,7 @@ meta {
 
     **Fields**
     - `memory-mb` — Maximum container memory in MB (-1 = unlimited)
-    - `cpu-pct` — Maximum CPU percentage (10–100, -1 = unlimited)
+    - `cpu-pct` — Maximum CPU percentage (10–100; an unlimited plan reads 100)
     - `tmp-mb` — Maximum `/tmp` tmpfs size in MB (-1 = unlimited)
     - `disk-mb` — Maximum `/data` disk size in MB (-1 = unlimited)
     - `timeout-secs` — Maximum container timeout in seconds (-1 = unlimited)

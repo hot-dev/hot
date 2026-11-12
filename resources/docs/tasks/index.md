@@ -178,29 +178,20 @@ See [Containers](/docs/box) for full container documentation.
 
 ## TaskInfo
 
-Both `::hot::task/start` and `::hot::box/start` return a `TaskInfo`. Its `id`
-is the task's UUID as a `Str` in both. The other fields differ by task type.
-
-A code task's `TaskInfo`, from `::hot::task/start`:
+Both `::hot::task/start` and `::hot::box/start` return a `TaskInfo`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | `Str` | Unique task identifier (UUID) |
 | `stream` | `Stream` | Stream this task belongs to. Its ID is `info.stream.id` |
 | `origin-run` | `Run` | The run that started the task. Its ID is `info.origin-run.id` |
-| `data` | `Any?` | `null` from `::hot::task/start` |
+| `data` | `Any?` | `null` from both. Container packages set it, for example to an output URL |
 
-A container task's `TaskInfo`, from `::hot::box/start`:
+A task runs in the stream of the run that started it, so `info().stream.id` in
+that run is the same ID.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `Str` | Unique task identifier (UUID) |
-| `stream-id` | `Str` | ID of the stream this task belongs to |
-| `data` | `Any?` | `null` from `::hot::box/start`. Container packages set it, for example to an output URL |
-
-A container task's `TaskInfo` has no `stream` or `origin-run`, and a code
-task's has no `stream-id`. Both tasks run in the stream of the run that started
-them, so `info().stream.id` in that run is the same ID.
+`::hot::box/start` also returns a bare `stream-id`, the stream's ID as a `Str`.
+It predates `stream` there and stays for existing code. Use `stream.id`.
 
 ## Waiting for Completion
 

@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:349e79885b9b
+<!-- HOT_LANGUAGE_SECTION_START --> hash:5198c2a4738b
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -85,8 +85,8 @@ shadows a function, and `hot test` warns about a test with no assertions.
 - Function return annotations name the successful value. Hot supplies the
   `Result` wrapper, so successful returns usually do not need `ok(...)`.
 - Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
-  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
-  variant and exposes its payload inside the selected arm.
+  propagates `Err`. A parameter declared `Result` receives the Result intact;
+  `match` selects by variant and exposes its payload inside the selected arm.
 - Hot is gradually typed: known records are checked structurally, while
   constructed types and enum variants retain nominal runtime tags.
 - A parameter annotated with a built-in type is checked at the call. Another

@@ -90,15 +90,19 @@ Use `::hot::box/quota()` to check remaining CUS before starting containers:
 
 ```hot
 q ::hot::box/quota()
-q.compute-units-remaining   // CUS left this period (-1 = unlimited)
+q.compute-units-limit       // The plan's CUS per period (-1 = unlimited)
+q.compute-units-remaining   // CUS left this period
 q.compute-units-used        // CUS consumed this period
-q.minutes-remaining         // Container minutes left this period (-1 = unlimited)
+q.minutes-limit             // The plan's container minutes per period (-1 = unlimited)
+q.minutes-remaining         // Container minutes left this period
 q.concurrent-remaining      // Containers that can start now (-1 = unlimited)
 q.overage                   // true if usage exceeds included (paid plans)
 ```
 
 On the Free plan, `compute-units-remaining` and `minutes-remaining` stop at `0`.
 On a paid plan they go below `0` as overage accrues, and `overage` is `true`.
+With no limit they read `-1`, which a paid plan one unit over also reads: check
+the limit for `-1` to tell an unlimited plan from overage.
 `concurrent-remaining` counts the organization's running containers against
 the plan's limit, and never goes below `0`.
 

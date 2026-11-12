@@ -186,8 +186,6 @@
             <ul class="list-disc pl-5 space-y-1">
                 <li><code>run:failed</code> - Triggered when a run fails (after all retries exhausted)</li>
                 <li><code>run:cancelled</code> - Triggered when a run is cancelled</li>
-                <li><code>task:failed</code> - Triggered when a task fails or times out</li>
-                <li><code>task:cancelled</code> - Triggered when a task is cancelled</li>
                 <li><code>deploy:failed</code> - Triggered when a deployment fails</li>
                 <li><code>deploy:succeeded</code> - Triggered when a deployment succeeds</li>
             </ul>
@@ -195,6 +193,10 @@
             <p>
                 You can create custom channels with regex patterns to match specific alert types.
                 For example, <code>run:.*</code> would match all run-related alerts.
+            </p>
+            <p>
+                Tasks publish <code>task:failed</code> and <code>task:cancelled</code>, which no built-in channel matches.
+                Add a custom channel such as <code>task:.*</code> to receive them.
             </p>
         </div>
     </div>
