@@ -9,7 +9,7 @@ the same API.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/mcp": "1.5.3"
+"hot.dev/mcp": "1.5.4"
 ```
 
 This package depends on `hot.dev/json-rpc` for JSON-RPC 2.0 message framing (installed automatically).

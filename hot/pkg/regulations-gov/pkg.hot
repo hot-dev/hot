@@ -2,7 +2,7 @@
 
 hot.pkg.regulations-gov {
   name: "hot.dev/regulations-gov",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "3.0.2",
   description: "The Regulations.gov API for Hot: documents, dockets and public comments, with filters, paging and lastModifiedDate windows for large result sets.",
   author: "Hot Dev",

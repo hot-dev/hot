@@ -7,7 +7,7 @@ Qwen bindings for Hot. Qwen models are served by [Alibaba Cloud Model Studio](ht
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/qwen": "1.0.6"
+"hot.dev/qwen": "1.0.7"
 ```
 
 It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.9.0.
