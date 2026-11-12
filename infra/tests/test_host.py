@@ -421,8 +421,33 @@ class HostImage(unittest.TestCase):
         config = tomllib.loads(heredoc("/etc/kata-containerd/config.toml")
                                .replace("${KATA_CONTAINERD_GID}", "2000"))
         self.assertIn("io.containerd.grpc.v1.cri", config["disabled_plugins"])
-        self.assertEqual(list(config["plugins"]), ["io.containerd.snapshotter.v1.devmapper"])
+        self.assertEqual(list(config["plugins"]),
+                         ["io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"])
         self.assertEqual(config["grpc"]["gid"], 2000)
+
+    def test_boxes_start_on_a_host_without_selinux(self):
+        # Kata creates no container when guest SELinux is on and the host has
+        # none, and an absent setting leaves it on. Ubuntu ships AppArmor.
+        kata = tomllib.loads(heredoc("/opt/kata/share/defaults/kata-containers/configuration.toml")
+                             .replace("${rootfs}", "/rootfs.img"))
+        self.assertIs(kata["hypervisor"]["qemu"]["disable_guest_selinux"], True)
+        self.assertIn('[[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]', SETUP)
+
+    def test_private_images_unpack_into_the_task_workers_snapshotter(self):
+        # A pull with registry-auth goes through containerd's Transfer service,
+        # which unpacks only into the pairs its configuration lists.
+        config = tomllib.loads(heredoc("/etc/kata-containerd/config.toml")
+                               .replace("${KATA_CONTAINERD_GID}", "2000"))
+        executor = (ROOT.parent / "crates/hot_task_worker/src/executor.rs").read_text()
+        snapshotter = re.search(r'const SNAPSHOTTER: &str = "(\w+)";', executor).group(1)
+        self.assertIn(f"io.containerd.snapshotter.v1.{snapshotter}", config["plugins"])
+        # The recipe refuses any host that is not amd64.
+        self.assertIn('[[ "$(uname -m)" == "x86_64" ]]', SETUP)
+        self.assertEqual(config["plugins"]["io.containerd.transfer.v1.local"]["unpack_config"],
+                         [{"platform": "linux/amd64", "snapshotter": snapshotter}])
+        # The same entry the box guide gives operators who build their own host.
+        guide = (ROOT.parent / "resources/docs/box/index.md").read_text()
+        self.assertIn(f'    platform = "linux/amd64"\n    snapshotter = "{snapshotter}"', guide)
 
     def test_firewall_restart_leaves_kata_containerd_running(self):
         unit = "/etc/systemd/system/kata-containerd.service"
