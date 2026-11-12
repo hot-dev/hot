@@ -2,7 +2,7 @@ name: nightly
 
 # Checks too slow, too networked or too large for every pull request:
 # advisories for vendored libraries, published SDK pins, doc snippets compiled
-# against the SDKs, a Linux aarch64 release-build lane with the JIT under
+# against the SDKs, the demo pages against hot-demos, a Linux aarch64 release-build lane with the JIT under
 # glibc heap checks and a 1 GiB memory cap, the self-host bundle against real
 # images, fuzzing, and a differential check against the previous release.
 # Nothing here needs a secret.
@@ -62,6 +62,23 @@ jobs:
         with:
           go-version: stable
       - run: ./scripts/check-go-doc-snippets.sh .ci/hot-go
+
+  # Pull requests check the demo pages against scripts/demo-doc-pins.json.
+  # This checks the pages against hot-demos itself, so a change there that
+  # the pages have not followed fails here. To fix: correct the pages, then
+  # `python3 scripts/check-demo-doc-pins.py --demos ../hot-demos --write`.
+  demo-doc-pins:
+    name: Demo pages match hot-demos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: hot-dev/hot-demos
+          path: .ci/hot-demos
+          persist-credentials: false
+      - run: python3 scripts/check-demo-doc-pins.py --demos .ci/hot-demos
 
   self-host-bundle:
     name: Self-host bundle against real images
