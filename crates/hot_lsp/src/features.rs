@@ -83,7 +83,7 @@ fn markdown(value: String) -> Hover {
 }
 
 /// The reference at `offset` without its member accesses.
-fn head(path: &RefPath) -> RefPath {
+pub fn head(path: &RefPath) -> RefPath {
     RefPath {
         members: Vec::new(),
         cursor_member: None,
@@ -810,6 +810,8 @@ pub struct RefSite {
     /// Char span of the name.
     pub start: usize,
     pub end: usize,
+    /// Written with no namespace (`name`, not `::ns/name`).
+    pub bare: bool,
 }
 
 /// Each name in a document that refers to `target`, its declaration
@@ -842,6 +844,7 @@ pub fn reference_sites(index: &Index, ctx: &DocContext, target: &Target) -> Vec<
                 sites.push(RefSite {
                     start: path.name_start,
                     end: path.name_end,
+                    bare: path.ns.is_none(),
                 });
             }
         }
@@ -855,6 +858,7 @@ pub fn reference_sites(index: &Index, ctx: &DocContext, target: &Target) -> Vec<
                 .map(|arg| RefSite {
                     start: arg.start,
                     end: arg.end,
+                    bare: false,
                 }),
         );
     }

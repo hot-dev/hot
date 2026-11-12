@@ -17,6 +17,7 @@
 mod analysis;
 mod features;
 mod index;
+mod rename;
 mod render;
 mod syntax;
 mod text;
@@ -138,6 +139,8 @@ struct Snapshot {
     project_files_raw: AHashSet<String>,
     /// Project source files, canonical.
     project_files: Vec<PathBuf>,
+    /// The check that parsed it (see `State::generation`).
+    generation: u64,
 }
 
 impl Snapshot {
@@ -149,6 +152,7 @@ impl Snapshot {
             }),
             project_files_raw: AHashSet::new(),
             project_files: Vec::new(),
+            generation: 0,
         }
     }
 }
@@ -173,12 +177,18 @@ struct State {
     /// Bumped by every change; a scheduled check runs only if no later
     /// change superseded it.
     generation: AtomicU64,
+    /// The last check that finished, and whether it stopped at parse
+    /// errors.
+    checked: AtomicU64,
+    parse_failed: AtomicBool,
     /// Held while a check or a workspace reload runs.
     analysis: tokio::sync::Mutex<()>,
     /// Whether the client can register file watchers.
     dynamic_watchers: AtomicBool,
     /// Whether the client takes document symbols as a tree.
     symbol_tree: AtomicBool,
+    /// Whether the client takes workspace edits that name document versions.
+    versioned_edits: AtomicBool,
     /// Whether the client sent `shutdown` (then `exit` is a clean exit).
     shutdown: Arc<AtomicBool>,
     /// REPL session for stateful evaluation
@@ -200,9 +210,12 @@ impl Backend {
                 snapshot: RwLock::new(Arc::new(Snapshot::empty())),
                 published: tokio::sync::Mutex::new(Published::default()),
                 generation: AtomicU64::new(0),
+                checked: AtomicU64::new(0),
+                parse_failed: AtomicBool::new(false),
                 analysis: tokio::sync::Mutex::new(()),
                 dynamic_watchers: AtomicBool::new(false),
                 symbol_tree: AtomicBool::new(false),
+                versioned_edits: AtomicBool::new(false),
                 shutdown,
                 repl_session: tokio::sync::Mutex::new(None),
             }),
@@ -302,7 +315,7 @@ impl State {
                     .collect(),
             };
             match tokio::task::spawn_blocking(move || analysis::run(input)).await {
-                Ok(output) => state.apply(output).await,
+                Ok(output) => state.apply(output, generation).await,
                 Err(e) => {
                     let message = format!("hot-lsp: check failed: {e}");
                     tracing::error!("{message}");
@@ -313,12 +326,13 @@ impl State {
     }
 
     /// Publish a check's diagnostics and keep its program for navigation.
-    async fn apply(&self, output: analysis::Output) {
+    async fn apply(&self, output: analysis::Output, generation: u64) {
         if let Some(index) = output.index {
             *write(&self.snapshot) = Arc::new(Snapshot {
                 index,
                 project_files_raw: output.project_files_raw.into_iter().collect(),
                 project_files: output.project_files.clone(),
+                generation,
             });
         }
 
@@ -385,6 +399,9 @@ impl State {
         next.retain(|_, diagnostics| !diagnostics.is_empty());
         published.diagnostics = next;
         published.from_parse_failure = from_parse_failure;
+        self.parse_failed
+            .store(output.parse_failed, Ordering::SeqCst);
+        self.checked.store(generation, Ordering::SeqCst);
     }
 
     /// Load the project at `root` and make it current.
@@ -466,6 +483,16 @@ impl LanguageServer for Backend {
                 .and_then(|s| s.hierarchical_document_symbol_support)
                 .unwrap_or(false);
             self.state.symbol_tree.store(symbol_tree, Ordering::SeqCst);
+            let versioned_edits = params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|w| w.workspace_edit.as_ref())
+                .and_then(|e| e.document_changes)
+                .unwrap_or(false);
+            self.state
+                .versioned_edits
+                .store(versioned_edits, Ordering::SeqCst);
             self.state.load_workspace(client_root(&params)).await;
 
             Ok(InitializeResult {
@@ -507,6 +534,10 @@ impl LanguageServer for Backend {
                     document_formatting_provider: Some(OneOf::Left(true)),
                     workspace_symbol_provider: Some(OneOf::Left(true)),
                     document_symbol_provider: Some(OneOf::Left(true)),
+                    rename_provider: Some(OneOf::Right(RenameOptions {
+                        prepare_provider: Some(true),
+                        work_done_progress_options: Default::default(),
+                    })),
                     ..Default::default()
                 },
                 server_info: Some(ServerInfo {
@@ -837,6 +868,150 @@ impl LanguageServer for Backend {
         .await
     }
 
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> JsonRpcResult<Option<PrepareRenameResponse>> {
+        self.guard("prepareRename", async {
+            let uri = params.text_document.uri;
+            let snapshot = self.checked_snapshot().await.map_err(refusal)?;
+            let Some((doc, ctx, offset)) = self.at(&uri, params.position) else {
+                return Ok(None);
+            };
+            let renaming = rename::prepare(
+                &snapshot.index,
+                &uri,
+                &ctx,
+                offset,
+                &snapshot.project_files_raw,
+            )
+            .map_err(refusal)?;
+            Ok(
+                renaming.map(|renaming| PrepareRenameResponse::RangeWithPlaceholder {
+                    range: doc.char_range(renaming.span.0, renaming.span.1 - renaming.span.0),
+                    placeholder: renaming.old,
+                }),
+            )
+        })
+        .await
+    }
+
+    async fn rename(&self, params: RenameParams) -> JsonRpcResult<Option<WorkspaceEdit>> {
+        self.guard("rename", async {
+            let pos = params.text_document_position;
+            let uri = pos.text_document.uri;
+            let new = params.new_name;
+            let snapshot = self.checked_snapshot().await.map_err(refusal)?;
+            let Some((_, ctx, offset)) = self.at(&uri, pos.position) else {
+                return Ok(None);
+            };
+            let Some(renaming) = rename::prepare(
+                &snapshot.index,
+                &uri,
+                &ctx,
+                offset,
+                &snapshot.project_files_raw,
+            )
+            .map_err(refusal)?
+            else {
+                return Ok(None);
+            };
+            if renaming.old == new {
+                return Ok(None);
+            }
+            rename::check_name(&snapshot.index, &renaming, &new).map_err(refusal)?;
+
+            // A local lives in its document. A definition: every project
+            // file, open or not, and every open document.
+            let workspace = self.workspace();
+            let open = self.open_by_path();
+            let mut files = features::Files::new(&workspace.root, &open);
+            let mut paths: Vec<PathBuf> = Vec::new();
+            match &renaming.target {
+                features::Target::Local { .. } => paths.extend(uri_path(&uri)),
+                features::Target::Def { .. } => {
+                    paths.extend(snapshot.project_files.iter().cloned());
+                    for path in open.keys() {
+                        if !paths.contains(path) {
+                            paths.push(path.clone());
+                        }
+                    }
+                }
+            }
+            let mut changed: Vec<RenamedFile> = Vec::new();
+            for path in paths {
+                let Some((file_uri, text)) = files.text(&path) else {
+                    continue;
+                };
+                if !text.contains(renaming.old.as_str()) {
+                    continue;
+                }
+                let ctx = DocContext::new(&text);
+                let edits =
+                    rename::edits(&snapshot.index, &ctx, &renaming, &new).map_err(refusal)?;
+                if edits.is_empty() {
+                    continue;
+                }
+                let lines = text::LineIndex::new(&text);
+                let text_edits = edits
+                    .iter()
+                    .map(|edit| {
+                        TextEdit::new(
+                            lines.char_range(&text, edit.start, edit.end - edit.start),
+                            edit.text.clone(),
+                        )
+                    })
+                    .collect();
+                changed.push(RenamedFile {
+                    version: open.get(&path).map(|(_, doc)| doc.version),
+                    text: rename::apply(&text, &edits),
+                    path,
+                    uri: file_uri,
+                    edits: text_edits,
+                });
+            }
+            if changed.is_empty() {
+                return Ok(None);
+            }
+            let after: Vec<(PathBuf, String)> = changed
+                .iter()
+                .map(|file| (file.path.clone(), file.text.clone()))
+                .collect();
+            self.check_renamed(&renaming.old, &new, snapshot.generation, after)
+                .await
+                .map_err(refusal)?;
+
+            Ok(Some(if self.state.versioned_edits.load(Ordering::SeqCst) {
+                WorkspaceEdit {
+                    document_changes: Some(DocumentChanges::Edits(
+                        changed
+                            .into_iter()
+                            .map(|file| TextDocumentEdit {
+                                text_document: OptionalVersionedTextDocumentIdentifier {
+                                    uri: file.uri,
+                                    version: file.version,
+                                },
+                                edits: file.edits.into_iter().map(OneOf::Left).collect(),
+                            })
+                            .collect(),
+                    )),
+                    ..Default::default()
+                }
+            } else {
+                WorkspaceEdit {
+                    changes: Some(
+                        changed
+                            .into_iter()
+                            .map(|file| (file.uri, file.edits))
+                            .collect(),
+                    ),
+                    ..Default::default()
+                }
+            }))
+        })
+        .await
+    }
+
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -879,7 +1054,125 @@ impl LanguageServer for Backend {
     }
 }
 
+/// A file a rename edits.
+struct RenamedFile {
+    path: PathBuf,
+    uri: Uri,
+    /// The version the edits apply to, when the file is open.
+    version: Option<i32>,
+    /// The edits, as the client takes them.
+    edits: Vec<TextEdit>,
+    /// The text with the edits applied.
+    text: String,
+}
+
+/// How long a rename waits for the check of the latest edit.
+const RENAME_WAIT: Duration = Duration::from_secs(20);
+
+/// A request the server understood and won't carry out, with the reason
+/// for the client to show.
+fn refusal(message: String) -> JsonRpcError {
+    JsonRpcError {
+        code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
+        message: message.into(),
+        data: None,
+    }
+}
+
+/// A diagnostic in `after` that `before` has no counterpart for: one more of
+/// its severity and code than before. Messages and ranges move with an
+/// edit, so they aren't compared.
+fn added_diagnostic<'a>(
+    before: impl Iterator<Item = &'a Diagnostic>,
+    after: impl Iterator<Item = &'a Diagnostic>,
+) -> Option<&'a Diagnostic> {
+    let kind = |d: &Diagnostic| format!("{:?} {:?}", d.severity, d.code);
+    let mut budget: AHashMap<String, usize> = AHashMap::new();
+    for diagnostic in before {
+        *budget.entry(kind(diagnostic)).or_insert(0) += 1;
+    }
+    after
+        .into_iter()
+        .find(|diagnostic| match budget.get_mut(&kind(diagnostic)) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                false
+            }
+            _ => true,
+        })
+}
+
 impl Backend {
+    /// The snapshot of a check of the text as it is now, waiting for a
+    /// check that is running. A rename edits by what the snapshot resolves,
+    /// so it needs one that parsed every file as it is.
+    async fn checked_snapshot(&self) -> Result<Arc<Snapshot>, String> {
+        let deadline = tokio::time::Instant::now() + RENAME_WAIT;
+        loop {
+            let generation = self.state.generation.load(Ordering::SeqCst);
+            if self.state.checked.load(Ordering::SeqCst) == generation {
+                let snapshot = self.snapshot();
+                if self.state.parse_failed.load(Ordering::SeqCst)
+                    || snapshot.generation != generation
+                {
+                    return Err(
+                        "Can't rename while the project has a syntax error. Fix it, then rename."
+                            .to_string(),
+                    );
+                }
+                return Ok(snapshot);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("The project is still being checked. Try again.".to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Check the project with a rename's edits applied. `Err` when the
+    /// project changed meanwhile, or the edits would add a problem: a name
+    /// the rename missed or captured shows up as one.
+    async fn check_renamed(
+        &self,
+        old: &str,
+        new: &str,
+        generation: u64,
+        after: Vec<(PathBuf, String)>,
+    ) -> Result<(), String> {
+        let _running = self.state.analysis.lock().await;
+        if self.state.generation.load(Ordering::SeqCst) != generation {
+            return Err("The project changed during the rename. Try again.".to_string());
+        }
+        let before: Vec<Diagnostic> = {
+            let published = self.state.published.lock().await;
+            published.diagnostics.values().flatten().cloned().collect()
+        };
+        let mut open: Vec<(PathBuf, String)> = read(&self.state.docs)
+            .iter()
+            .filter(|(uri, _)| is_hot(uri))
+            .filter_map(|(uri, doc)| Some((uri_path(uri)?, doc.text.clone())))
+            .filter(|(path, _)| !after.iter().any(|(changed, _)| changed == path))
+            .collect();
+        open.extend(after);
+        let input = analysis::Input {
+            workspace: self.workspace(),
+            open,
+        };
+        let output = tokio::task::spawn_blocking(move || analysis::run(input))
+            .await
+            .map_err(|e| format!("Checking the rename failed: {e}"))?;
+        match added_diagnostic(before.iter(), output.by_file.values().flatten()) {
+            Some(diagnostic) => Err(format!(
+                "`{old}` can't be renamed to `{new}`: the project would not check. {}",
+                diagnostic.message
+            )),
+            None if output.parse_failed => Err(format!(
+                "`{old}` can't be renamed to `{new}`: the project would not parse."
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Evaluate Hot code using a stateful REPL session
     pub async fn eval_code(&self, params: EvalParams) -> EvalResult {
         // Get or create the REPL session
@@ -1020,6 +1313,36 @@ mod tests {
         .await;
         assert!(result.unwrap_err().contains("index out of bounds"));
         assert_eq!(catch_panic(async { 7 }).await, Ok(7));
+    }
+
+    #[test]
+    fn a_rename_may_not_add_a_diagnostic() {
+        let diagnostic = |severity, code: &str, message: &str| Diagnostic {
+            severity: Some(severity),
+            code: Some(NumberOrString::String(code.to_string())),
+            message: message.to_string(),
+            ..Default::default()
+        };
+        let (error, warning) = (DiagnosticSeverity::ERROR, DiagnosticSeverity::WARNING);
+        let before = [
+            diagnostic(warning, "deprecated", "`old` is deprecated"),
+            diagnostic(error, "unresolved-variable", "no `a`"),
+        ];
+        // The same problems, reworded and reordered by the rename.
+        let same = [
+            diagnostic(error, "unresolved-variable", "no `b`"),
+            diagnostic(warning, "deprecated", "`new` is deprecated"),
+        ];
+        assert!(added_diagnostic(before.iter(), same.iter()).is_none());
+        assert!(added_diagnostic(before.iter(), [].iter()).is_none());
+        // One more of a kind, a new kind, and a warning that became an error.
+        let more = [same[0].clone(), same[0].clone(), same[1].clone()];
+        let added = added_diagnostic(before.iter(), more.iter()).unwrap();
+        assert_eq!(added.message, "no `b`");
+        let new_kind = [diagnostic(error, "named-argument", "no field `x`")];
+        assert!(added_diagnostic(before.iter(), new_kind.iter()).is_some());
+        let worse = [diagnostic(error, "deprecated", "`old` is deprecated")];
+        assert!(added_diagnostic(before.iter(), worse.iter()).is_some());
     }
 
     #[test]

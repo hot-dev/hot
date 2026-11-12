@@ -330,6 +330,11 @@ impl DocContext {
             .max_by_key(|l| l.start)
     }
 
+    /// Every local binding and parameter of the document.
+    pub fn locals(&self) -> &[Local] {
+        &self.locals
+    }
+
     /// The `%.name` at `offset` that names a parameter.
     pub fn arg_ref_at(&self, offset: usize) -> Option<&ArgRef> {
         self.arg_refs

@@ -828,21 +828,79 @@ pay fn (amount: Int): Int {
 }
 "#;
 
-/// The outline of a document, through the protocol.
+/// The edits of a rename, as `(file name, line, start column, end column,
+/// new text)`, sorted. Takes either form of workspace edit.
+fn edits_of(edit: &Value) -> Vec<(String, u64, u64, u64, String)> {
+    let mut out = Vec::new();
+    let mut push = |uri: &str, edits: &Value| {
+        let name = uri.rsplit('/').next().unwrap().to_string();
+        for e in edits.as_array().unwrap() {
+            assert_eq!(e["range"]["start"]["line"], e["range"]["end"]["line"]);
+            out.push((
+                name.clone(),
+                e["range"]["start"]["line"].as_u64().unwrap(),
+                e["range"]["start"]["character"].as_u64().unwrap(),
+                e["range"]["end"]["character"].as_u64().unwrap(),
+                e["newText"].as_str().unwrap().to_string(),
+            ));
+        }
+    };
+    if let Some(changes) = edit["documentChanges"].as_array() {
+        for change in changes {
+            push(
+                change["textDocument"]["uri"].as_str().unwrap(),
+                &change["edits"],
+            );
+        }
+    } else if let Some(changes) = edit["changes"].as_object() {
+        for (uri, edits) in changes {
+            push(uri, edits);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The line and columns of the first `needle` in `text`, as an edit of it
+/// to `new` in file `name` reads.
+fn edit_at(
+    name: &str,
+    text: &str,
+    needle: &str,
+    delta: u32,
+    old: &str,
+    new: &str,
+) -> (String, u64, u64, u64, String) {
+    let at = pos(text, needle, delta);
+    let start = at["character"].as_u64().unwrap();
+    (
+        name.to_string(),
+        at["line"].as_u64().unwrap(),
+        start,
+        start + utf16_len(old) as u64,
+        new.to_string(),
+    )
+}
+
+/// The outline of a document and renames, through the protocol.
 #[tokio::test(flavor = "multi_thread")]
-async fn outline() {
+async fn outline_and_rename() {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     write(&root, "hot.hot", HOT_HOT);
-    write(&root, "hot/src/app/shop.hot", SHOP);
+    let shop = write(&root, "hot/src/app/shop.hot", SHOP);
     let orders = write(&root, "hot/src/app/orders.hot", ORDERS);
 
     let (mut client, capabilities) = Client::start_with(
         &root,
-        json!({"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}}}),
+        json!({
+            "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}},
+            "workspace": {"workspaceEdit": {"documentChanges": true}},
+        }),
     )
     .await;
     assert_eq!(capabilities["documentSymbolProvider"], true);
+    assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
     let since = client.mark();
     client.open(&orders, ORDERS).await;
     let diagnostics = client.diagnostics(&orders, since, |_| true).await;
@@ -878,6 +936,164 @@ async fn outline() {
     assert_eq!(pay["range"]["start"], pos(ORDERS, "pay fn", 0));
     assert_eq!(pay["range"]["end"]["line"], 10);
     assert_eq!(namespace["range"]["end"], pay["range"]["end"]);
+
+    // Rename a function from a use in another file. The file that defines
+    // it isn't open.
+    let at_withdraw = pos(ORDERS, "withdraw(amount", 2);
+    let prepared = client
+        .at("textDocument/prepareRename", &orders, at_withdraw.clone())
+        .await;
+    assert_eq!(prepared["placeholder"], "withdraw");
+    assert_eq!(
+        prepared["range"]["start"],
+        pos(ORDERS, "withdraw(amount", 0)
+    );
+    let rename = |position: Value, new: &str| json!({"textDocument": {"uri": uri(&orders)}, "position": position, "newName": new});
+    let edit = client
+        .request("textDocument/rename", rename(at_withdraw.clone(), "debit"))
+        .await;
+    assert!(edit.get("error").is_none(), "{edit}");
+    assert_eq!(
+        edits_of(&edit),
+        [
+            edit_at(
+                "orders.hot",
+                ORDERS,
+                "withdraw(amount",
+                0,
+                "withdraw",
+                "debit"
+            ),
+            edit_at("shop.hot", SHOP, "withdraw fn", 0, "withdraw", "debit"),
+        ]
+    );
+    // An open document's edits name its version. A closed file has none.
+    for change in edit["documentChanges"].as_array().unwrap() {
+        let document = &change["textDocument"];
+        if document["uri"] == uri(&orders) {
+            assert_eq!(document["version"], 1);
+        } else {
+            assert!(document["version"].is_null(), "{document}");
+        }
+    }
+
+    // A parameter: its declaration, its uses and `%.amount` in the
+    // precondition.
+    let since = client.mark();
+    client.open(&shop, SHOP).await;
+    client.diagnostics(&shop, since, |_| true).await;
+    let at_amount = pos(SHOP, "min(amount", 4);
+    let edit = client
+        .request(
+            "textDocument/rename",
+            json!({"textDocument": {"uri": uri(&shop)}, "position": at_amount.clone(), "newName": "sum"}),
+        )
+        .await;
+    assert_eq!(
+        edits_of(&edit),
+        [
+            edit_at("shop.hot", SHOP, "amount: Int", 0, "amount", "sum"),
+            edit_at("shop.hot", SHOP, "%.amount", 2, "amount", "sum"),
+            edit_at("shop.hot", SHOP, "min(amount", 4, "amount", "sum"),
+        ]
+    );
+    let references = client
+        .at("textDocument/references", &shop, pos(SHOP, "%.amount", 2))
+        .await;
+    assert_eq!(references.as_array().unwrap().len(), 3, "{references}");
+    let hover = client.hover_text(&shop, pos(SHOP, "%.amount", 2)).await;
+    assert!(hover.contains("amount: Int"), "{hover}");
+
+    // Refused, with the reason: a name that is taken, text that is not a
+    // name, a field, an import of another name's definition.
+    let refused = |result: Value| -> String {
+        result["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("not refused: {result}"))
+            .to_string()
+    };
+    let at_start = pos(ORDERS, "start origin", 0);
+    let error = refused(
+        client
+            .request("textDocument/rename", rename(at_start.clone(), "add"))
+            .await,
+    );
+    assert!(error.contains("already used"), "{error}");
+    let error = refused(
+        client
+            .request("textDocument/rename", rename(at_start.clone(), "two words"))
+            .await,
+    );
+    assert!(error.contains("is not a name"), "{error}");
+    let error = refused(
+        client
+            .request("textDocument/rename", rename(at_withdraw, "origin"))
+            .await,
+    );
+    assert!(error.contains("already"), "{error}");
+    let error = refused(
+        client
+            .at(
+                "textDocument/prepareRename",
+                &orders,
+                pos(ORDERS, "start.x", 6),
+            )
+            .await,
+    );
+    assert!(error.contains("can't all be found"), "{error}");
+    let error = refused(
+        client
+            .at(
+                "textDocument/prepareRename",
+                &orders,
+                pos(ORDERS, "add(start", 0),
+            )
+            .await,
+    );
+    assert!(error.contains("outside this project"), "{error}");
+    // Nothing to rename where there is no name.
+    let nothing = client
+        .at(
+            "textDocument/prepareRename",
+            &orders,
+            pos(ORDERS, "fn (amount", 0),
+        )
+        .await;
+    assert!(nothing.is_null(), "{nothing}");
+    // A local renames in its own document.
+    let edit = client
+        .request("textDocument/rename", rename(at_start, "first"))
+        .await;
+    assert_eq!(
+        edits_of(&edit),
+        [
+            edit_at("orders.hot", ORDERS, "start origin", 0, "start", "first"),
+            edit_at("orders.hot", ORDERS, "start.x", 0, "start", "first"),
+        ]
+    );
+
+    // A rename waits for the check of the text as it is, and refuses text
+    // that doesn't parse.
+    let renamed = ORDERS.replace("start", "begin");
+    client.change(&orders, 2, &renamed).await;
+    let edit = client
+        .request(
+            "textDocument/rename",
+            rename(pos(&renamed, "begin origin", 0), "first"),
+        )
+        .await;
+    assert_eq!(edits_of(&edit).len(), 2, "{edit}");
+    let broken = format!("{renamed}\nbroken fn (a: Int {{\n");
+    client.change(&orders, 3, &broken).await;
+    let error = refused(
+        client
+            .request(
+                "textDocument/rename",
+                rename(pos(&broken, "begin origin", 0), "first"),
+            )
+            .await,
+    );
+    assert!(error.contains("syntax error"), "{error}");
 
     client.shutdown().await;
 }

@@ -1214,6 +1214,83 @@ impl Syntax {
                 })
     }
 
+    /// The variant or branch name at `offset`, where it is declared:
+    /// `Circle` in `Shape enum { Circle(Disc) }`, `gift` in `=> gift { ... }`.
+    pub fn label_at(&self, offset: usize) -> Option<&str> {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.label_at(offset);
+        }
+        let i = self.index_at(offset)?;
+        (self.is_variant_declaration(i) || self.is_branch_name(i))
+            .then(|| self.toks[i].ident())
+            .flatten()
+    }
+
+    /// Whether the name at `offset` is a whole entry of a map literal
+    /// (`{name, email}`), where it is the key and the value at once.
+    pub fn punned_at(&self, offset: usize) -> bool {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.punned_at(offset);
+        }
+        let Some(i) = self.index_at(offset) else {
+            return false;
+        };
+        let Some(brace) = self.parent[i] else {
+            return false;
+        };
+        let Some(close) = self.partner[brace] else {
+            return false;
+        };
+        if self.toks[i].ident().is_none() || !self.toks[brace].is(&TokenType::LeftBrace) {
+            return false;
+        }
+        let comma = |j: usize| self.parent[j] == Some(brace) && self.toks[j].is(&TokenType::Comma);
+        let after = self.after_newlines(i + 1);
+        self.before_newlines(i)
+            .is_some_and(|before| before == brace || comma(before))
+            && (after == close || comma(after))
+            // A map literal has a `,` in it. `{name}` is a block.
+            && (brace + 1..close).any(comma)
+    }
+
+    /// Whether the binding declared at `offset` is written directly in a
+    /// block whose result is keyed by its bindings' names: a `parallel`
+    /// block, or one declared `All`.
+    pub fn keys_a_result(&self, offset: usize) -> bool {
+        let scope = self.scope_at(offset);
+        if !std::ptr::eq(scope, self) {
+            return scope.keys_a_result(offset);
+        }
+        let Some(block) = self.index_at(offset).and_then(|i| self.parent[i]) else {
+            return false;
+        };
+        if !self.toks[block].is(&TokenType::LeftBrace) {
+            return false;
+        }
+        // What declares the block: a signature that it is the body of, or
+        // the rest of its line.
+        let signature = (0..block).rev().find(|&open| {
+            self.toks[open].is(&TokenType::LeftParen)
+                && self.partner[open].is_some_and(|close| {
+                    close < block
+                        && self.body_after(close, self.declares_parameters(open)) == Some(block)
+                })
+        });
+        let from = match signature {
+            Some(open) => open.saturating_sub(2),
+            None => (0..block)
+                .rev()
+                .find(|&j| self.toks[j].is_newline() && self.parent[j] == self.parent[block])
+                .map_or(0, |j| j + 1),
+        };
+        (from..block).any(|j| {
+            matches!(self.toks[j].kind, TokenType::Keyword(KeywordKind::Parallel))
+                || self.toks[j].ident() == Some("All")
+        })
+    }
+
     /// Whether the identifier at `i` names no value: a key, a variant where
     /// it is declared, a branch name.
     fn is_label(&self, i: usize) -> bool {
@@ -2163,6 +2240,28 @@ mod tests {
         );
         assert!(syntax.path_at(offset_of(text, "Circle(Circle)")).is_none());
         assert!(syntax.path_at(offset_of(text, "gift { gift }")).is_none());
+    }
+
+    #[test]
+    fn punned_entries_and_result_keys() {
+        let text = "::a ns\n\nf fn (name: Str, email: Str): Map {\n    one {name,}\n    block {name}\n    both {\n        name,\n        email\n    }\n    keyed {name: name, other: email}\n    data parallel {\n        user fetch(name)\n    }\n    vals: All<Vec> serial {\n        v 1\n    }\n    plain serial {\n        p 1\n    }\n    map([1], (x) {\n        inner x\n        inner\n    })\n}\n\ng fn parallel (id: Str)\n    : Map\n{\n    left fetch(id)\n}\n";
+        let syntax = Syntax::new(text);
+        let punned = |needle: &str, delta: usize| syntax.punned_at(offset_of(text, needle) + delta);
+        assert!(punned("{name,}", 1));
+        assert!(!punned("{name}", 1));
+        assert!(punned("name,\n        email", 0));
+        assert!(punned("email\n    }", 0));
+        assert!(!punned("name: name, other", 0));
+        assert!(!punned("name: name, other", 6));
+        assert!(!punned("fetch(name)", 6));
+        let keys = |needle: &str| syntax.keys_a_result(offset_of(text, needle));
+        assert!(keys("user fetch"));
+        assert!(keys("v 1"));
+        assert!(keys("left fetch"));
+        assert!(!keys("p 1"));
+        assert!(!keys("inner x"));
+        assert!(!keys("data parallel"));
+        assert!(!keys("one {name,}"));
     }
 
     #[test]
