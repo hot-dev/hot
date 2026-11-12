@@ -471,6 +471,64 @@ impl crate::val::ValBox for MovedOut {
     }
 }
 
+/// What a binding holds once a `LoadVar` has taken its value (see
+/// `VirtualMachine::take_variable`). The binding stays in its scope, so the
+/// name still shadows what it shadowed, and a read of it is an error: the
+/// plan found no later read, so one means the plan was wrong, and failing
+/// is better than handing on Null or an outer variable of the same name.
+#[derive(Debug, Clone)]
+struct MovedBinding;
+
+impl crate::val::ValBox for MovedBinding {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn crate::val::ValBox> {
+        Box::new(MovedBinding)
+    }
+    fn equals(&self, other: &dyn crate::val::ValBox) -> bool {
+        other.as_any().is::<MovedBinding>()
+    }
+    fn hash(&self, _state: &mut dyn std::hash::Hasher) {}
+    fn to_string(&self) -> String {
+        "<moved>".to_string()
+    }
+    fn compare(&self, _other: &dyn crate::val::ValBox) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn serialize_json(&self) -> Result<serde_json::Value, String> {
+        Err("a moved binding has no value".to_string())
+    }
+    fn type_name(&self) -> &'static str {
+        "MovedBinding"
+    }
+}
+
+/// Whether a binding's value was taken out of it.
+fn is_moved_binding(value: &Val) -> bool {
+    matches!(value, Val::Box(boxed) if boxed.as_any().is::<MovedBinding>())
+}
+
+/// Whether taking `value` out of its binding is worth it and safe: a Vec
+/// or a Map is what a writer copies while it is shared. A callable value
+/// stays, since a call through its name looks the binding up when it runs.
+fn is_takeable(value: &Val) -> bool {
+    match value {
+        Val::Vec(_) => true,
+        Val::Map(map) => !matches!(
+            crate::val::tagged_type_name(map),
+            Some("::hot::type/Fn" | "::hot::type/FunctionAlias")
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(debug_assertions)]
 fn moved_out() -> Val {
     Val::Box(Box::new(MovedOut))
@@ -1076,6 +1134,9 @@ pub struct VirtualMachine {
     /// Lazily computed written-register sets per FunctionId (for the
     /// re-entrant save/restore above).
     function_used_registers_cache: AHashMap<FunctionId, std::rc::Rc<[u32]>>,
+    /// The name of a binding that was read after its value was taken (see
+    /// `note_moved_read`), until the instruction that read it fails.
+    moved_read: std::cell::RefCell<Option<String>>,
     /// The registers re-entrant calls have set aside, innermost last. A call
     /// pushes its own on entry and takes them back on exit, so recursion
     /// reuses one buffer where each call used to allocate a vector.
@@ -1324,6 +1385,7 @@ impl VirtualMachine {
             meta_calls_read: Arc::new(AtomicBool::new(false)),
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
+            moved_read: std::cell::RefCell::new(None),
             saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
@@ -3445,7 +3507,11 @@ impl VirtualMachine {
                     name,
                     var_name
                 );
-                let value = self.lookup_variable(&name)?;
+                let value = if moves & crate::lang::moves::flag::VAR != 0 {
+                    self.take_variable(&name)?
+                } else {
+                    self.lookup_variable(&name)?
+                };
 
                 self.set_register(dest, value)?;
                 self.instruction_pointer += 1;
@@ -5649,6 +5715,10 @@ impl VirtualMachine {
             idx -= 1;
             let scope = &self.scope_stack[idx];
             if let Some(value) = scope.variables.get(name) {
+                if is_moved_binding(value) {
+                    self.note_moved_read(name);
+                    return None;
+                }
                 return Some(value.clone());
             }
             if scope.is_boundary {
@@ -5663,6 +5733,59 @@ impl VirtualMachine {
             }
         }
         None
+    }
+
+    /// Record a read of a binding whose value was taken (see
+    /// [`MovedBinding`]). The lookup that found it reports the name unbound;
+    /// the read and the calls around it then fail (`check_moved_read`).
+    fn note_moved_read(&self, name: &str) {
+        debug_assert!(
+            false,
+            "variable '{name}' was read after a LoadVar took its value"
+        );
+        if self.moved_read.borrow().is_none() {
+            *self.moved_read.borrow_mut() = Some(name.to_string());
+        }
+    }
+
+    /// Fail if a lookup read a moved binding. It stays failed until the
+    /// VM is reset: a caller that tolerates a failed lookup (a capture
+    /// that falls back to the namespace, a contained call) must not turn
+    /// the read into a wrong value further on.
+    fn check_moved_read(&self) -> VmResult<()> {
+        match self.moved_read.borrow().as_deref() {
+            None => Ok(()),
+            Some(name) => Err(VmError::runtime(format!(
+                "internal error: variable '{name}' was read after its value was moved"
+            ))),
+        }
+    }
+
+    /// Read `name` for the last time: the plan (`lang::moves`) marked this
+    /// `LoadVar` as the last read of a binding of the current call's frame.
+    /// A Vec or Map bound in one of this call's own scopes is moved out, so
+    /// the register it goes to is its only holder; anything else is read as
+    /// `lookup_variable` reads it.
+    fn take_variable(&mut self, name: &str) -> VmResult<Val> {
+        // Meta holds calls unevaluated, and one runs when its value is
+        // passed to a function, looking its names up in the frame of
+        // whoever passes it. Once a program has read meta, bindings stay.
+        if !self.meta_calls_read.load(Ordering::Relaxed) {
+            for scope in self.scope_stack.iter_mut().skip(1).rev() {
+                if let Some(value) = scope.variables.get_mut(name) {
+                    if is_takeable(value) {
+                        return Ok(std::mem::replace(value, Val::Box(Box::new(MovedBinding))));
+                    }
+                    break;
+                }
+                // The frame of the current call: what is below it is
+                // another call's, or the lambda's definer's.
+                if scope.call {
+                    break;
+                }
+            }
+        }
+        self.lookup_variable(name)
     }
 
     /// The live scope a lambda's frame link points at: where it was created,
@@ -5699,11 +5822,18 @@ impl VirtualMachine {
             .iter()
             .position(|scope| scope.call)
             .unwrap_or(opened_since.len())];
-        opened_since
+        match opened_since
             .iter()
             .rev()
-            .find_map(|scope| scope.variables.get(name).cloned())
-            .or_else(|| self.lookup_from(definer + 1, name))
+            .find_map(|scope| scope.variables.get(name))
+        {
+            Some(value) if is_moved_binding(value) => {
+                self.note_moved_read(name);
+                None
+            }
+            Some(value) => Some(value.clone()),
+            None => self.lookup_from(definer + 1, name),
+        }
     }
 
     /// A name's value in `namespace` or core, where no call's frame is in
@@ -7133,6 +7263,7 @@ impl VirtualMachine {
             // Strings are just strings - no automatic resolution to function references
             return Ok(val);
         }
+        self.check_moved_read()?;
 
         // Current namespace only (no cross-namespace scanning per project rules)
         let ns_val = self
@@ -7375,7 +7506,7 @@ impl VirtualMachine {
 
     /// [`Self::execute_compiled_user_function`] for a caller that gives its
     /// arguments up.
-    fn execute_compiled_user_function_given(
+    pub(crate) fn execute_compiled_user_function_given(
         &mut self,
         function_id: u32,
         args: Vec<Val>,
@@ -9893,7 +10024,11 @@ impl VirtualMachine {
                     }
                     Instruction::LoadVar { dest, var_name } => {
                         let name = self.get_constant_string(*var_name)?;
-                        let value = self.lookup_variable(&name)?;
+                        let value = if moves & crate::lang::moves::flag::VAR != 0 {
+                            self.take_variable(&name)?
+                        } else {
+                            self.lookup_variable(&name)?
+                        };
                         self.set_register(*dest, value)?;
                         last_result = self.get_register(*dest)?.clone();
                     }
@@ -9994,6 +10129,7 @@ impl VirtualMachine {
             self.current_namespace
         );
         body?;
+        self.check_moved_read()?;
 
         tracing::trace!(
             "VM: Lambda execution completed with result: {:?}",
@@ -11034,6 +11170,7 @@ impl VirtualMachine {
             };
             let result = result?;
             restored?;
+            self.check_moved_read()?;
 
             self.end_traced_call(call_id, &result);
 
@@ -12221,6 +12358,7 @@ impl VirtualMachine {
     /// Reset VM state for clean execution (useful between test runs)
     pub fn reset_state(&mut self) {
         self.constraint = None;
+        self.moved_read.borrow_mut().take();
         // Clear accumulated namespace variables (but keep core ones)
         self.namespace_variables.clear();
 

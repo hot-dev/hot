@@ -7,10 +7,11 @@
 //! shared and building a collection one element at a time was quadratic.
 //!
 //! A [`plan`] marks, for each instruction of one function or lambda body,
-//! the registers that instruction is the last to read. The interpreter
-//! moves such a value on instead of copying it. An unmarked operand is
-//! copied as before, so a plan only ever removes copies; an empty plan (or
-//! one whose length doesn't match its instructions) removes none.
+//! the values that instruction is the last to read: registers whose value
+//! nothing reads again, and variables whose binding nothing reads again. The
+//! interpreter hands such a value on instead of copying it. An unmarked
+//! operand is copied as before, so a plan only ever removes copies; an empty
+//! plan (or one whose length doesn't match its instructions) removes none.
 //!
 //! What the plan relies on:
 //!
@@ -28,9 +29,21 @@
 //!   branch, a scope), where the instructions run in order once a flow
 //!   nested in them has ended. A write between the branches of a flow is
 //!   not certain: the flow skips to its end once a branch has run.
+//! - A variable is read by name, and not only by the body's own
+//!   instructions: the lambdas, thunks and local functions created in the
+//!   body read its frame for as long as it is live, and a call through a
+//!   bare name calls a local of that name before any function. So every
+//!   string the body's instructions name counts as a read of the variable
+//!   of that name, and a name anything nested in the body can read is never
+//!   taken. Nor is a name the frame doesn't bind itself on every run of the
+//!   body (a capture, or a local bound in one branch): another run of the
+//!   same body can sit above this one and read such a name from this frame.
 
-use crate::lang::bytecode::{Instruction, RegisterId};
-use ahash::AHashMap;
+use crate::lang::bytecode::{
+    Constant, ConstantId, FunctionId, Instruction, LambdaInfo, RegisterId,
+};
+use crate::val::Val;
+use ahash::{AHashMap, AHashSet};
 
 /// The bits of one instruction's entry in a plan.
 pub mod flag {
@@ -44,6 +57,9 @@ pub mod flag {
     /// Every register of its operand range (a call's arguments, a Vec
     /// literal's elements) is dead after it.
     pub const RANGE: u8 = 1 << 3;
+    /// On a `LoadVar`: this is the last read of a binding of the frame the
+    /// body runs in, so the load may take the value out of the binding.
+    pub const VAR: u8 = 1 << 4;
 }
 
 /// The registers one instruction touches.
@@ -293,8 +309,228 @@ fn is_flow_boundary(instruction: &Instruction) -> bool {
     )
 }
 
+/// The string constant `id` names, if it is one.
+fn constant_name(constants: &[Constant], id: ConstantId) -> Option<&str> {
+    match constants.get(id as usize)? {
+        Constant::StringRef(name) | Constant::FunctionRef(name) | Constant::TypeRef(name) => {
+            Some(name)
+        }
+        Constant::VariantTypeRef(type_ref) => Some(type_ref.name.as_str()),
+        Constant::Val(Val::Str(name)) => Some(name),
+        Constant::Val(_) => None,
+    }
+}
+
+/// What the lambdas, thunks and function values among a body's constants
+/// can name, at any time while the body's frame is live.
+#[derive(Default)]
+struct Named<'a> {
+    /// Every name a nested body binds, captures or refers to.
+    names: AHashSet<&'a str>,
+    /// A constant holds a value whose names can't be listed: syntax kept
+    /// for evaluation at run time, which looks its variables up by name.
+    opaque: bool,
+}
+
+impl<'a> Named<'a> {
+    /// Add the names the code inside `value` can read. A string held as
+    /// data names nothing: only an instruction's own operand is looked up.
+    fn add_value(&mut self, value: &'a Val, constants: &'a [Constant], depth: usize) {
+        // Constants nest a few levels at most; anything deeper is treated
+        // as unlistable rather than walked.
+        if depth > 64 {
+            self.opaque = true;
+            return;
+        }
+        match value {
+            Val::Vec(items) => {
+                for item in items.iter() {
+                    self.add_value(item, constants, depth + 1);
+                }
+            }
+            Val::Map(entries) => {
+                for (key, item) in entries.iter() {
+                    self.add_value(key, constants, depth + 1);
+                    self.add_value(item, constants, depth + 1);
+                }
+            }
+            Val::Box(boxed) => {
+                let any = boxed.as_any();
+                if let Some(lambda) = any.downcast_ref::<LambdaInfo>() {
+                    self.add_body(lambda, constants, depth + 1);
+                } else if let Some(function) =
+                    any.downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+                {
+                    self.names.insert(function.name.as_str());
+                } else if any.downcast_ref::<crate::lang::refs::TypeRef>().is_none() {
+                    self.opaque = true;
+                }
+            }
+            Val::Str(_)
+            | Val::Int(_)
+            | Val::Dec(_)
+            | Val::Bool(_)
+            | Val::Byte(_)
+            | Val::Bytes(_)
+            | Val::Null => {}
+        }
+    }
+
+    /// Add every name a nested body can read: its parameters, captures and
+    /// each string its instructions refer to, to any depth.
+    fn add_body(&mut self, lambda: &'a LambdaInfo, constants: &'a [Constant], depth: usize) {
+        self.names
+            .extend(lambda.parameters.iter().map(String::as_str));
+        self.names
+            .extend(lambda.capture_vars.iter().map(String::as_str));
+        for (name, value) in &lambda.closure_env {
+            self.names.insert(name);
+            self.add_value(value, constants, depth + 1);
+        }
+        for instruction in &lambda.instructions {
+            for id in constant_operands(instruction).into_iter().flatten() {
+                self.add_constant(id, constants, depth + 1);
+            }
+        }
+    }
+
+    fn add_constant(&mut self, id: ConstantId, constants: &'a [Constant], depth: usize) {
+        match constants.get(id as usize) {
+            // An instruction's own string operand is a name it can look up
+            // (the variable a `LoadVar` reads is one), unlike a string held
+            // inside a collection.
+            Some(Constant::Val(value)) if !matches!(value, Val::Str(_)) => {
+                self.add_value(value, constants, depth)
+            }
+            Some(_) => {
+                if let Some(name) = constant_name(constants, id) {
+                    self.names.insert(name);
+                }
+            }
+            // A constant the pool doesn't hold can't be listed.
+            None => self.opaque = true,
+        }
+    }
+}
+
+/// The constant-pool operands of `instruction`.
+///
+/// Exhaustive for the same reason as [`operands`].
+fn constant_operands(instruction: &Instruction) -> [Option<ConstantId>; 3] {
+    use Instruction as I;
+    match instruction {
+        I::LoadConst { constant, .. } => [Some(*constant), None, None],
+        I::LoadFunctionRef { function_name, .. } => [Some(*function_name), None, None],
+        I::LoadTypeRef { type_ref, .. } => [Some(*type_ref), None, None],
+        I::BeginFlow { origin_name, .. } => [*origin_name, None, None],
+        I::CondBranchStart { branch_name, .. } | I::CondBranchEnd { branch_name, .. } => {
+            [Some(*branch_name), None, None]
+        }
+        I::DotAccess { property, .. } | I::DotSet { property, .. } => [Some(*property), None, None],
+        I::DotAccessOrDefault {
+            property,
+            default_value,
+            ..
+        } => [Some(*property), Some(*default_value), None],
+        I::ConstructTyped { type_info, .. } => [Some(*type_info), None, None],
+        I::LoadVar { var_name, .. }
+        | I::StoreVar { var_name, .. }
+        | I::LoadScoped { var_name, .. }
+        | I::StoreScoped { var_name, .. }
+        | I::DeferredVarExpr { var_name, .. }
+        | I::CaptureVar { var_name, .. } => [Some(*var_name), None, None],
+        I::LoadVarOrDefault {
+            var_name,
+            default_value,
+            ..
+        } => [Some(*var_name), Some(*default_value), None],
+        I::SetNamespace { namespace } => [Some(*namespace), None, None],
+        I::LoadGlobal {
+            namespace,
+            var_name,
+            ..
+        }
+        | I::StoreGlobal {
+            namespace,
+            var_name,
+            ..
+        } => [Some(*namespace), Some(*var_name), None],
+        I::RegisterLocalImplementation {
+            source_type,
+            target_type,
+            implementation_function_name,
+        } => [
+            Some(*source_type),
+            Some(*target_type),
+            Some(*implementation_function_name),
+        ],
+        I::RegisterLocalType {
+            type_name,
+            constructor_function_name,
+        } => [Some(*type_name), Some(*constructor_function_name), None],
+        I::CheckConstraint { spec, .. } => [Some(*spec), None, None],
+        I::CheckParam { var_name, spec, .. } => [Some(*var_name), Some(*spec), None],
+
+        I::Move { .. }
+        | I::EndFlow { .. }
+        | I::CondBranch { .. }
+        | I::Pipe { .. }
+        | I::DefineFunction { .. }
+        | I::Add { .. }
+        | I::Sub { .. }
+        | I::Mul { .. }
+        | I::Eq { .. }
+        | I::StrEndsWith { .. }
+        | I::StrStartsWith { .. }
+        | I::Gt { .. }
+        | I::Lt { .. }
+        | I::Call { .. }
+        | I::CallNative { .. }
+        | I::CallLambda { .. }
+        | I::CallWithSpread { .. }
+        | I::CallUserFunction { .. }
+        | I::TailCall { .. }
+        | I::TemplateInterpolate { .. }
+        | I::DynamicDotAccess { .. }
+        | I::DynamicDotSet { .. }
+        | I::VecAppend { .. }
+        | I::GetTypePath { .. }
+        | I::CallLibBuiltin { .. }
+        | I::Jump { .. }
+        | I::JumpIf { .. }
+        | I::JumpIfNot { .. }
+        | I::Return { .. }
+        | I::ExtractInnerVal { .. }
+        | I::IsType { .. }
+        | I::EnsureResult { .. }
+        | I::MakeVec { .. }
+        | I::VecPush { .. }
+        | I::MakeVecWithSpread { .. }
+        | I::SetElement { .. }
+        | I::MergeMaps { .. }
+        | I::EnterScope { .. }
+        | I::ExitScope
+        | I::ReturnIfErr { .. }
+        | I::BeginErrorCapture
+        | I::EndErrorCapture
+        | I::WrapOk { .. }
+        | I::ProvenArgs { .. } => [None, None, None],
+    }
+}
+
 /// The plan for one body: one entry of [`flag`] bits per instruction.
-pub fn plan(instructions: &[Instruction]) -> Vec<u8> {
+///
+/// `parameters` are the names the body's frame binds on entry, `constants`
+/// the pool its instructions index, and `is_local_function` says whether a
+/// function id is that of a lambda or of a function defined in another
+/// function's body, whose frame reads the names it doesn't bind from its
+/// caller's.
+pub fn plan(
+    instructions: &[Instruction],
+    parameters: &[String],
+    constants: &[Constant],
+    is_local_function: &dyn Fn(FunctionId) -> bool,
+) -> Vec<u8> {
     let mut flags = vec![0u8; instructions.len()];
     let Some(operands) = instructions
         .iter()
@@ -306,6 +542,16 @@ pub fn plan(instructions: &[Instruction]) -> Vec<u8> {
     let regions = Regions::of(instructions);
     plan_registers(instructions, &operands, regions.as_ref(), &mut flags);
     report_calls_keeping_arguments(instructions, &flags);
+    if let Some(regions) = &regions {
+        plan_variables(
+            instructions,
+            parameters,
+            constants,
+            is_local_function,
+            regions,
+            &mut flags,
+        );
+    }
     flags
 }
 
@@ -545,14 +791,141 @@ fn plan_registers(
     }
 }
 
+/// Mark the `LoadVar`s that are the last read of a binding of the body's
+/// own frame.
+fn plan_variables<'a>(
+    instructions: &'a [Instruction],
+    parameters: &[String],
+    constants: &'a [Constant],
+    is_local_function: &dyn Fn(FunctionId) -> bool,
+    regions: &Regions,
+    flags: &mut [u8],
+) {
+    use Instruction as I;
+
+    /// Where the body first binds a name, and whether every read of the
+    /// name since has been inside the region of that binding.
+    struct Binding {
+        region: usize,
+        covers_reads: bool,
+    }
+    let mut bindings: AHashMap<&str, Binding> = AHashMap::new();
+    // Names read before the body binds them: they are its captures, or its
+    // caller's or namespace's variables.
+    let mut read_unbound: AHashSet<&str> = AHashSet::new();
+    // The last instruction to name each string outside a binding.
+    let mut last_named: AHashMap<&str, usize> = AHashMap::new();
+    // Every string a nested body or a collection constant holds.
+    let mut nested = Named::default();
+    for (index, instruction) in instructions.iter().enumerate() {
+        match instruction {
+            // A parallel flow binds and reads its names when it ends, in
+            // other VMs; lookups by scope depth and function definitions
+            // read names this pass doesn't follow.
+            I::DeferredVarExpr { .. }
+            | I::LoadScoped { .. }
+            | I::StoreScoped { .. }
+            | I::CaptureVar { .. }
+            | I::DefineFunction { .. } => return,
+            // A function defined in another's body reads the names it
+            // doesn't bind from the frame of whoever called it.
+            I::CallUserFunction { function_id, .. } | I::TailCall { function_id, .. }
+                if is_local_function(*function_id) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+
+        let binds = match instruction {
+            I::StoreVar { var_name, .. } => Some(*var_name),
+            _ => None,
+        };
+        if let Some(id) = binds {
+            let Some(name) = constant_name(constants, id) else {
+                return;
+            };
+            if !read_unbound.contains(name) {
+                // A name bound in a scope or a branch is gone, or was never
+                // bound, outside it.
+                bindings.entry(name).or_insert_with(|| Binding {
+                    region: regions.of[index],
+                    covers_reads: true,
+                });
+            }
+            continue;
+        }
+
+        for id in constant_operands(instruction).into_iter().flatten() {
+            match constants.get(id as usize) {
+                // A collection or a nested body: whatever it names is read
+                // at a time this pass can't place.
+                Some(Constant::Val(value)) if !matches!(value, Val::Str(_)) => {
+                    nested.add_value(value, constants, 0);
+                }
+                Some(_) => {
+                    let Some(name) = constant_name(constants, id) else {
+                        continue;
+                    };
+                    last_named.insert(name, index);
+                    match bindings.get_mut(name) {
+                        Some(binding) => {
+                            binding.covers_reads &=
+                                regions.encloses(binding.region, regions.of[index]);
+                        }
+                        None => {
+                            read_unbound.insert(name);
+                        }
+                    }
+                }
+                None => return,
+            }
+        }
+        if nested.opaque {
+            return;
+        }
+    }
+    for (index, instruction) in instructions.iter().enumerate() {
+        let I::LoadVar { var_name, .. } = instruction else {
+            continue;
+        };
+        let Some(name) = constant_name(constants, *var_name) else {
+            continue;
+        };
+        let own = parameters.iter().any(|parameter| parameter == name)
+            || bindings
+                .get(name)
+                .is_some_and(|binding| binding.covers_reads);
+        if own && last_named.get(name) == Some(&index) && !nested.names.contains(name) {
+            flags[index] |= flag::VAR;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lang::bytecode::ConstantId;
+    use crate::lang::bytecode::ScopeType;
 
-    /// The plan of a body.
+    /// The plan of a body whose names don't matter.
     fn registers_only(instructions: &[Instruction]) -> Vec<u8> {
-        plan(instructions)
+        plan(instructions, &[], &[], &|_| false)
+    }
+
+    fn strings(names: &[&str]) -> Vec<Constant> {
+        names
+            .iter()
+            .map(|name| Constant::StringRef((*name).into()))
+            .collect()
+    }
+
+    fn plan_of(
+        instructions: &[Instruction],
+        parameters: &[&str],
+        constants: &[Constant],
+    ) -> Vec<u8> {
+        let parameters: Vec<String> = parameters.iter().map(|name| name.to_string()).collect();
+        plan(instructions, &parameters, constants, &|_| false)
     }
 
     fn load(dest: RegisterId, var_name: ConstantId) -> Instruction {
@@ -751,5 +1124,150 @@ mod tests {
     fn a_jump_empties_the_plan() {
         let body = [mov(1, 2), Instruction::Jump { offset: 0 }];
         assert_eq!(registers_only(&body), vec![0, 0]);
+    }
+
+    #[test]
+    fn the_last_read_of_a_parameter_takes_it() {
+        let constants = strings(&["acc", "x"]);
+        let body = [load(1, 0), load(2, 1), load(3, 0), load(4, 1)];
+        let plan = plan_of(&body, &["acc", "x"], &constants);
+        assert_eq!(plan[0] & flag::VAR, 0);
+        assert_eq!(plan[1] & flag::VAR, 0);
+        assert_eq!(plan[2] & flag::VAR, flag::VAR);
+        assert_eq!(plan[3] & flag::VAR, flag::VAR);
+    }
+
+    #[test]
+    fn a_name_the_frame_does_not_bind_is_never_taken() {
+        let constants = strings(&["outer"]);
+        let body = [load(1, 0)];
+        assert_eq!(plan_of(&body, &[], &constants)[0] & flag::VAR, 0);
+    }
+
+    #[test]
+    fn a_local_is_taken_only_when_its_binding_covers_every_read() {
+        let constants = strings(&["t", "u"]);
+        let store = |var_name, value| Instruction::StoreVar {
+            var_name,
+            value,
+            metadata: None,
+        };
+        // `t` is read before the body binds it, so the body may be reading
+        // a capture; `u` is bound first.
+        let body = [load(1, 0), store(0, 1), store(1, 1), load(2, 0), load(3, 1)];
+        let plan = plan_of(&body, &[], &constants);
+        assert_eq!(plan[3] & flag::VAR, 0);
+        assert_eq!(plan[4] & flag::VAR, flag::VAR);
+
+        // Bound in a scope, read outside it: the outer read is of another
+        // binding.
+        let body = [
+            Instruction::EnterScope {
+                scope_type: ScopeType::Flow,
+            },
+            store(1, 1),
+            Instruction::ExitScope,
+            load(3, 1),
+        ];
+        assert_eq!(plan_of(&body, &[], &constants)[3] & flag::VAR, 0);
+    }
+
+    #[test]
+    fn a_name_called_or_captured_later_is_not_taken() {
+        // A call through a bare name finds a local of that name first.
+        let constants = strings(&["count"]);
+        let body = [load(1, 0), constant(2, 0), call(3, 2, 1, 1)];
+        assert_eq!(plan_of(&body, &["count"], &constants)[0] & flag::VAR, 0);
+
+        // A lambda created in the body reads the frame by name.
+        let lambda = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![load(1, 0)],
+            register_count: 2,
+            capture_vars: vec!["acc".to_string()],
+            closure_env: Default::default(),
+            defining_namespace: String::new(),
+            is_lazy_param: false,
+            used_registers: vec![1],
+            moves: Vec::new(),
+            structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
+        };
+        let constants = vec![
+            Constant::StringRef("acc".into()),
+            Constant::Val(Val::Box(Box::new(lambda))),
+        ];
+        // Before or after the load, the lambda keeps the name live.
+        let body = [constant(2, 1), load(1, 0)];
+        assert_eq!(plan_of(&body, &["acc"], &constants)[1] & flag::VAR, 0);
+        let body = [load(1, 0), constant(2, 1)];
+        assert_eq!(plan_of(&body, &["acc"], &constants)[0] & flag::VAR, 0);
+    }
+
+    #[test]
+    fn a_name_a_nested_body_reads_without_capturing_is_not_taken() {
+        // As the compiler emits it: the name is a Str constant, and the
+        // lambda lists no captures, so it reads the frame when it runs.
+        let lambda = LambdaInfo {
+            parameters: vec![],
+            instructions: vec![load(1, 0)],
+            register_count: 2,
+            capture_vars: Vec::new(),
+            closure_env: Default::default(),
+            defining_namespace: String::new(),
+            is_lazy_param: false,
+            used_registers: vec![1],
+            moves: Vec::new(),
+            structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
+        };
+        let constants = vec![
+            Constant::Val(Val::from("xs")),
+            Constant::Val(Val::Box(Box::new(lambda))),
+            Constant::Val(Val::Int(1)),
+        ];
+        let store = Instruction::StoreVar {
+            var_name: 0,
+            value: 1,
+            metadata: None,
+        };
+        // The local is read, and only then is the lambda created.
+        let body = [constant(1, 2), store, load(2, 0), constant(3, 1)];
+        assert_eq!(plan_of(&body, &[], &constants)[2] & flag::VAR, 0);
+        // Without the lambda the same read takes the local.
+        assert_eq!(
+            plan_of(&body[..3], &[], &constants)[2] & flag::VAR,
+            flag::VAR
+        );
+
+        // A string inside a collection names nothing.
+        let constants = vec![
+            Constant::Val(Val::from("xs")),
+            Constant::Val(Val::vec(vec![Val::from("xs")])),
+            Constant::Val(Val::Int(1)),
+        ];
+        assert_eq!(plan_of(&body, &[], &constants)[2] & flag::VAR, flag::VAR);
+    }
+
+    #[test]
+    fn a_call_of_a_local_function_by_id_blocks_variable_takes() {
+        let constants = strings(&["acc"]);
+        let body = [
+            load(1, 0),
+            Instruction::CallUserFunction {
+                dest: 2,
+                function_id: 7,
+                args_start: 1,
+                args_count: 1,
+            },
+        ];
+        let parameters = vec!["acc".to_string()];
+        let local = plan(&body, &parameters, &constants, &|id| id == 7);
+        assert_eq!(local[0] & flag::VAR, 0);
+        assert_eq!(local[1] & flag::RANGE, flag::RANGE, "registers still move");
+        let top_level = plan(&body, &parameters, &constants, &|_| false);
+        assert_eq!(top_level[0] & flag::VAR, flag::VAR);
     }
 }

@@ -640,6 +640,50 @@ grown assoc(m, "b", 1)
         );
     }
 
+    /// Building a collection one element at a time writes it in place: the
+    /// last read of a variable moves its value out, a call gives its
+    /// arguments up and `reduce` gives its accumulator up, so each writer
+    /// is the only holder of what it writes. A copy per element is what
+    /// made these builds quadratic, so the number of copies must not grow
+    /// with the number of elements. (A writer reached through a function
+    /// still copies: the function's return register holds its last result.)
+    #[test]
+    fn building_a_collection_copies_it_a_fixed_number_of_times() {
+        let builders = [
+            (
+                "vec spread",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
+            ),
+            (
+                "concat",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { concat(acc, [x]) }, []) }",
+            ),
+            (
+                "local rebound to its own update",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (xs, x) {
+        longer [...xs, x]
+        longest [...longer, x]
+        longest
+    }, [])
+}"#,
+            ),
+        ];
+        for (name, body) in builders {
+            let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+            let small = interpreted_writes(&program(40));
+            let large = interpreted_writes(&program(440));
+            assert!(
+                large.1 <= small.1 + 2,
+                "{name}: copies grew with the collection, from {small:?} to {large:?}"
+            );
+            assert!(
+                large.0 >= small.0 + 400,
+                "{name}: writes in place did not grow with the collection, from {small:?} to {large:?}"
+            );
+        }
+    }
+
     /// A read costs the same whatever the size of the collection. One that
     /// scaled would take far longer on the large collection, so the margin
     /// leaves only that able to fail this. `bench-large-reads.hot` prints the

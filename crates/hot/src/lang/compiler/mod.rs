@@ -2726,7 +2726,7 @@ impl Compiler {
         self.local_names.truncate(saved_local_names);
 
         // Update the function info with the compiled instructions
-        let moves = self.plan_moves(&function_instructions);
+        let moves = self.plan_function_moves(actual_function_id, &function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(actual_function_id as usize) {
             func_info.register_count = self.next_register;
             func_info.moves = moves;
@@ -2880,7 +2880,7 @@ impl Compiler {
         self.local_names.truncate(saved_local_names);
 
         // Update the reserved slot with the compiled instructions
-        let moves = self.plan_moves(&function_instructions);
+        let moves = self.plan_function_moves(reserved_id, &function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
             func_info.register_count = self.next_register;
             func_info.moves = moves;
@@ -4903,7 +4903,7 @@ impl Compiler {
             // Pre-compute used registers
             let used_registers =
                 crate::lang::bytecode::LambdaInfo::compute_used_registers(&lambda_instructions);
-            let moves = self.plan_moves(&lambda_instructions);
+            let moves = self.plan_moves(&lambda_instructions, &[]);
 
             // Create the lambda info
             let lambda_info = crate::lang::bytecode::LambdaInfo {
@@ -5284,7 +5284,7 @@ impl Compiler {
         // Pre-compute used registers for efficient save/restore during lambda execution
         let used_registers =
             crate::lang::bytecode::LambdaInfo::compute_used_registers(&lambda_instructions);
-        let moves = self.plan_moves(&lambda_instructions);
+        let moves = self.plan_moves(&lambda_instructions, &parameters);
 
         let lambda_info = crate::lang::bytecode::LambdaInfo {
             parameters: parameters.clone(),
@@ -5412,7 +5412,7 @@ impl Compiler {
         // Pre-compute used registers for efficient save/restore
         let used_registers =
             crate::lang::bytecode::LambdaInfo::compute_used_registers(&thunk_instructions);
-        let moves = self.plan_moves(&thunk_instructions);
+        let moves = self.plan_moves(&thunk_instructions, &[]);
 
         // Create LambdaInfo structure (zero parameters = thunk)
         let thunk_info = crate::lang::bytecode::LambdaInfo {
@@ -5602,9 +5602,14 @@ impl Compiler {
     }
 
     /// What each instruction of a finished body may move instead of copy
-    /// (see `lang::moves`).
-    fn plan_moves(&self, instructions: &[Instruction]) -> Vec<u8> {
-        let moves = crate::lang::moves::plan(instructions);
+    /// (see `lang::moves`). `parameters` are the names its frame binds on
+    /// entry.
+    fn plan_moves(&self, instructions: &[Instruction], parameters: &[String]) -> Vec<u8> {
+        let local_functions = &self.program.local_functions;
+        let moves =
+            crate::lang::moves::plan(instructions, parameters, &self.program.constants, &|id| {
+                local_functions.contains(&id)
+            });
         // The compiler writes an argument register for one call, so a plan
         // moves every call's arguments. A call it leaves copying them
         // means a register is read where this compiler never read one.
@@ -5614,6 +5619,18 @@ impl Compiler {
             crate::lang::moves::calls_keeping_arguments(instructions, &moves)
         );
         moves
+    }
+
+    /// [`Self::plan_moves`] for the body of function `function_id`.
+    fn plan_function_moves(
+        &self,
+        function_id: FunctionId,
+        instructions: &[Instruction],
+    ) -> Vec<u8> {
+        match self.program.functions.get(function_id as usize) {
+            Some(function) => self.plan_moves(instructions, &function.param_names),
+            None => Vec::new(),
+        }
     }
 
     /// Check if a variable name is a known function (not a variable that needs capturing)

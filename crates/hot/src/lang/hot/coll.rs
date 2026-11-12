@@ -370,6 +370,69 @@ fn call_prepared_with_vm_multi_args(
     }
 }
 
+/// [`call_prepared_with_vm_multi_args`] for a caller that gives its
+/// arguments up, as `reduce` gives its accumulator: an interpreted callee
+/// binds them by moving, so a collection among them is then held by that
+/// binding alone and a writer the callee passes it to writes it in place.
+fn call_prepared_given(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    function: &PreparedFunction<'_>,
+    args: Vec<Val>,
+) -> Result<Val, String> {
+    use crate::lang::runtime::vm::{CallTarget, VirtualMachine};
+    let halted = |vm: &mut VirtualMachine, kind: &str, vm_error| {
+        vm.record_halt(&vm_error);
+        format!("{}: {}", kind, vm_error)
+    };
+    // Only a Result needs preparing for the callee's parameters.
+    let prepare = |vm: &mut VirtualMachine, target: CallTarget<'_>, args: Vec<Val>| {
+        if args.iter().any(VirtualMachine::is_result_shaped) {
+            vm.prepare_call_args(target, args)
+        } else {
+            Ok(args)
+        }
+    };
+    match function {
+        PreparedFunction::Named(name) => {
+            if let Some(HotResult::Ok(value)) =
+                crate::lang::runtime::vm::native_numeric_callback(name, &args)
+            {
+                return Ok(value);
+            }
+            if let Some(function_id) = vm.find_best_user_function_overload(name, &args) {
+                let args = prepare(vm, CallTarget::Function(function_id), args)
+                    .map_err(|vm_error| halted(vm, "Compiled function call failed", vm_error))?;
+                return vm
+                    .execute_compiled_user_function_given(function_id, args)
+                    .map_err(|vm_error| halted(vm, "Compiled function call failed", vm_error));
+            }
+
+            let args = prepare(vm, CallTarget::Native(name), args)
+                .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))?;
+            vm.execute_function_call_by_name(name, &args)
+                .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
+        }
+        PreparedFunction::CallableVal(function_val) => {
+            let args = prepare(vm, CallTarget::Value(function_val), args)
+                .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
+            match vm.try_jit_lambda_call(function_val, &args) {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {}
+                // A compiled callback that halted already ran: don't run it
+                // again in the interpreter.
+                Err(vm_error) => return Err(halted(vm, "Lambda execution failed", vm_error)),
+            }
+
+            vm.execute_lambda_args(function_val, args.into())
+                .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))
+        }
+        PreparedFunction::Invalid => Err(
+            "Invalid function type. Expected string function name, function reference, or lambda."
+                .to_string(),
+        ),
+    }
+}
+
 /// Helper function to call a function with VM context
 pub fn call_function_with_vm(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
@@ -1298,21 +1361,21 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             let mut accumulator = init_val.clone();
 
             for item in items.iter() {
-                let function_result = match call_prepared_with_vm_multi_args(
-                    vm,
-                    &function,
-                    &[accumulator.clone(), item.clone()],
-                )
-                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
-                {
-                    Ok(val) => val,
-                    Err(err) => {
-                        return HotResult::Err(Val::from(format!(
-                            "Reduce function call failed: {}",
-                            err
-                        )));
-                    }
-                };
+                // The accumulator is the reducer's to keep: nothing here
+                // holds it while the reducer runs.
+                let given = std::mem::replace(&mut accumulator, Val::Null);
+                let function_result =
+                    match call_prepared_given(vm, &function, vec![given, item.clone()])
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
+                        Ok(val) => val,
+                        Err(err) => {
+                            return HotResult::Err(Val::from(format!(
+                                "Reduce function call failed: {}",
+                                err
+                            )));
+                        }
+                    };
 
                 if is_reduced(&function_result) {
                     return HotResult::Ok(unwrap_reduced(function_result));
@@ -1329,12 +1392,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             for (key, value) in map.iter() {
                 let pair = Val::vec(vec![key.clone(), value.clone()]);
 
-                let function_result = match call_prepared_with_vm_multi_args(
-                    vm,
-                    &function,
-                    &[accumulator.clone(), pair],
-                )
-                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                let given = std::mem::replace(&mut accumulator, Val::Null);
+                let function_result = match call_prepared_given(vm, &function, vec![given, pair])
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
                     Ok(val) => val,
                     Err(err) => {
@@ -1389,21 +1449,19 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         break;
                     }
 
-                    let function_result = match call_prepared_with_vm_multi_args(
-                        vm,
-                        &function,
-                        &[accumulator.clone(), value],
-                    )
-                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
-                    {
-                        Ok(val) => val,
-                        Err(err) => {
-                            return HotResult::Err(Val::from(format!(
-                                "Reduce function call failed: {}",
-                                err
-                            )));
-                        }
-                    };
+                    let given = std::mem::replace(&mut accumulator, Val::Null);
+                    let function_result =
+                        match call_prepared_given(vm, &function, vec![given, value]).and_then(
+                            |val| apply_onerr_disposition(vm, val, OnErrDisposition::Force),
+                        ) {
+                            Ok(val) => val,
+                            Err(err) => {
+                                return HotResult::Err(Val::from(format!(
+                                    "Reduce function call failed: {}",
+                                    err
+                                )));
+                            }
+                        };
 
                     if is_reduced(&function_result) {
                         return HotResult::Ok(unwrap_reduced(function_result));
