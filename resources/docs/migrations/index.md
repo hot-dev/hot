@@ -36,6 +36,30 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.8 to 3.0.9 {#upgrading-from-3-0-8-to-3-0-9}
+
+**No migrations.** Replace the binaries and restart.
+
+**What to check in your code:** run `hot check` before you deploy.
+
+- **A function named like a core function.** If a namespace defines its own `add`, `get`, `length`, `send`, `if` or any other core name, a bare call of that name now always means your function. On 3.0.8 a call with an argument count your function doesn't declare, a spread call, or a call written above the definition could run the core function. Those calls are now `arity-mismatch` in `hot check`, or fail at run time with "Function '::ns/name' expects N arguments, got M". Call the core function by its path, such as `::hot::math/add(1, 2, 3)`, or rename yours. Other namespaces, imports and your own `core: true` functions are unchanged.
+- **A qualified annotation followed by a qualified call.** `x: ::a/T ::a/f(v)` now calls `f`. On 3.0.8 it bound `x` to `v` without calling anything.
+- **`type open` before a type that is not a literal union** is an error.
+- **`hot check` reports more true errors:** wrong-typed calls to a namespace function named like a core one, calls through an import under a core name, and field reads in a `match` default arm that the narrowed type doesn't have. Those programs compiled before and failed when run.
+
+**What to check in your webhooks:** an untyped map is treated as a response only when its `status` is an integer from 100 to 599. A handler that returned a map with some other `status` value, such as `{status: "ok"}`, now sends that map as the body. Return an `HttpResponse` to set a status.
+
+**What to check in your packages:** 38 packages have new patch versions. Three `openai` signatures changed: `delete-certificate` takes `{certificate-id: Str}`, `modify-certificate` takes `(certificate-id, request)`, and `DeleteResponseResponse` is `{id, object?, deleted?}`. `supabase` single-value filters are no longer quoted, `hot-ai` `compact-window` returns an Err where it halted, and `slack` GET calls now send a `false` value.
+
+**What to check in your deployment:**
+
+- Interpreted call-heavy code is about 3% slower. Collection builders are much faster. See the release notes.
+- `merge` no longer refuses a large left-hand map. Only the map being merged in counts against the expansion limits.
+- A task `timeout` below zero now clamps to 1 second, not 7 days.
+- `BoxQuota.tasks-remaining` is gone. Read `minutes-limit` and `compute-units-limit`, where `-1` means unlimited.
+- A self-host image built from v3.0.8 or earlier starts no box. Rebuild the host image if you run boxes.
+- In MCP tool schemas, `.` in `pattern` no longer matches `\r`, U+2028 or U+2029.
+
 ## Upgrading from Hot 3.0.7 to 3.0.8 {#upgrading-from-3-0-7-to-3-0-8}
 
 **Migrations 036 to 039.** Run `hot db migrate` with the 3.0.8 CLI. They add indexes on `event(env_id, event_time)` and `event(stream_id, event_time)` and a partial index on `email_queue` for emails being sent, then drop `idx_event_stream_id`, which the new stream index covers. On Postgres each runs outside a transaction with `CONCURRENTLY`, so event writes don't wait. On a large `event` table the first two can take a while. If one is interrupted, Postgres leaves an invalid index behind: drop it and run `hot db migrate` again.
