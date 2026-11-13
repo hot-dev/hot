@@ -607,6 +607,363 @@ grown assoc(m, "b", 1)
         assert_same_with_and_without_jit(src, &val!([1, 1, 2, 1, 2]));
     }
 
+    /// The collection writes `src` makes in the interpreter: how many were
+    /// in place, and how many items the others copied. Loading hot-std
+    /// makes some of its own, the same for every program, so compare two
+    /// programs rather than read one count.
+    fn interpreted_writes(src: &str) -> (usize, usize) {
+        writes_under(src, Some(val!({"jit": {"mode": "off"}})))
+    }
+
+    /// [`interpreted_writes`] under any configuration.
+    fn writes_under(src: &str, conf: Option<Val>) -> (usize, usize) {
+        let before = crate::val::write_stats::counts();
+        compile_and_run_with_std_conf(src, conf).expect("run");
+        let after = crate::val::write_stats::counts();
+        (after.0 - before.0, after.1 - before.1)
+    }
+
+    /// With the JIT on, compiled code still lends what it holds to the
+    /// writers it calls, so they copy. A call that is given a large
+    /// collection to write is therefore run by the interpreter, and a
+    /// compiled tail-call loop that carries one hands the rest of the loop
+    /// to it. Building 6,000 items must then copy no more than building
+    /// 2,000 does: both copy only while the collection is small enough for
+    /// compiled code to be the faster tier.
+    #[test]
+    fn a_large_collection_is_written_in_place_with_the_jit_on() {
+        let builders = [
+            (
+                "assoc",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { assoc(acc, x, x) }, {}) }",
+            ),
+            (
+                "vec spread",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
+            ),
+            (
+                "concat",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { concat(acc, [x]) }, []) }",
+            ),
+            (
+                "update",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { update(assoc(acc, x, x), "count", (c) { add(if(is-null(c), 0, c), 1) }) }, {})
+}"#,
+            ),
+            (
+                "a typed tail call carrying the map",
+                r#"step fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, step(add(i, 1), n, assoc(acc, i, i)))
+}
+run fn (n: Int): Map { step(0, n, {}) }"#,
+            ),
+            (
+                "a named reducer",
+                r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
+            ),
+            (
+                "merge",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { merge(acc, assoc({}, x, x)) }, {}) }",
+            ),
+            (
+                "a spread in one branch of a conditional",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(gte(x, 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a key written when it is first seen",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { if(is-null(get(acc, x)), assoc(acc, x, 1), acc) }, {})
+}"#,
+            ),
+            (
+                "a tail call carrying what a conditional made",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(gte(i, 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
+        ];
+        // Both builds copy while their collection is small, and about as
+        // much as each other. How much of that compiled code does varies a
+        // little from run to run, because the tests of this process share
+        // the hot-std functions they compile. A copy at every write of the
+        // 4,000 further items would be some sixteen million.
+        const RUN_TO_RUN: usize = 200_000;
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            for (name, body) in builders {
+                let label = format!("{name} under {conf:?}");
+                let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+                let small = writes_under(&program(2000), conf.clone());
+                let large = writes_under(&program(6000), conf.clone());
+                assert!(
+                    large.1 <= small.1 + RUN_TO_RUN,
+                    "{label}: the items copied grew with the collection, from {small:?} to {large:?}"
+                );
+                assert!(
+                    large.0 >= small.0 + 3900,
+                    "{label}: writes in place did not grow with the collection, from {small:?} to {large:?}"
+                );
+            }
+        }
+    }
+
+    /// A call gives its argument registers up, so a writer that receives
+    /// the result of another call is that value's only holder and writes it
+    /// in place. Only the first writer of a chain copies: it is handed a
+    /// literal, which the program's constants hold too.
+    #[test]
+    fn a_writer_writes_in_place_what_a_call_handed_it() {
+        let chain = |links: usize| {
+            let mut expression = "[0]".to_string();
+            for link in 1..=links {
+                expression = format!("concat({expression}, [{link}])");
+            }
+            format!("::t ns\nrun fn (): Vec {{ {expression} }}\nlength(run())")
+        };
+        let short = interpreted_writes(&chain(2));
+        let long = interpreted_writes(&chain(12));
+        assert_eq!(long.1, short.1, "no more is copied for a longer chain");
+        assert_eq!(long.0, short.0 + 10, "every further link writes in place");
+        assert_eq!(
+            compile_and_run_with_std_conf(&chain(12), None).expect("run"),
+            Val::Int(13)
+        );
+    }
+
+    /// With the JIT on, a builder runs compiled while its collection is
+    /// small, and is handed to the interpreter once copying the collection
+    /// at each write would cost more than interpreting does: from
+    /// `COPIED_PER_CALL` items for a builder that writes on every call.
+    /// Each side of that line: a build that stays under it is compiled
+    /// code's, which writes nothing in place, and one that crosses it is
+    /// written in place from there on.
+    #[test]
+    fn a_builder_is_interpreted_once_its_collection_is_large() {
+        let per_call = crate::lang::runtime::vm::COPIED_PER_CALL;
+        let builders = [
+            (
+                "reduce",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
+            ),
+            (
+                "a tail-call loop",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, [...acc, i]))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
+        ];
+        for (name, body) in builders {
+            let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+            let jit = || Some(val!({"jit": {"threshold": 1}}));
+            let small = writes_under(&program(per_call / 2), jit());
+            assert!(
+                small.0 < 8,
+                "{name}: a small build was written in place: {small:?}"
+            );
+            let large = writes_under(&program(4 * per_call), jit());
+            assert!(
+                (3 * per_call - 8..=3 * per_call + 8).contains(&large.0),
+                "{name}: a large build was not written in place from {per_call} items: {large:?}"
+            );
+        }
+    }
+
+    /// A callee that seldom writes the collection it is given stays
+    /// compiled far longer: here one write in sixteen calls, which leaves
+    /// compiled code only at sixteen times as many items, and this build
+    /// never gets there.
+    #[test]
+    fn a_builder_that_seldom_writes_stays_compiled() {
+        let builders = [
+            (
+                "reduce",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(eq(mod(x, 16), 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a tail-call loop",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(eq(mod(i, 16), 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
+        ];
+        for (name, body) in builders {
+            // 3,000 items: three times what a builder that writes on every
+            // call is interpreted from.
+            let src = format!("::t ns\n{body}\nlength(run(48000))");
+            let interpreted = interpreted_writes(&src);
+            assert!(interpreted.0 >= 2990, "{name}: interpreted, {interpreted:?}");
+            let compiled = writes_under(&src, Some(val!({"jit": {"threshold": 1}})));
+            assert!(compiled.0 < 8, "{name}: with the JIT on, {compiled:?}");
+        }
+    }
+
+    /// The same callee does go to the interpreter once its collection is
+    /// large for how often it writes. Writing on every other call, it is
+    /// compiled until the collection holds twice `COPIED_PER_CALL` items,
+    /// and written in place from there on.
+    #[test]
+    fn a_builder_that_seldom_writes_is_interpreted_later() {
+        let per_call = crate::lang::runtime::vm::COPIED_PER_CALL;
+        let builders = [
+            (
+                "reduce",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(eq(mod(x, 2), 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a tail-call loop",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(eq(mod(i, 2), 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
+        ];
+        for (name, body) in builders {
+            // 6 * per_call items, of which the last four are the
+            // interpreter's.
+            let src = format!("::t ns\n{body}\nlength(run({}))", 12 * per_call);
+            let compiled = writes_under(&src, Some(val!({"jit": {"threshold": 1}})));
+            assert!(
+                (4 * per_call - 8..=4 * per_call + 8).contains(&compiled.0),
+                "{name}: with the JIT on, {compiled:?}"
+            );
+        }
+    }
+
+    /// Building a collection one element at a time writes it in place: the
+    /// last read of a variable moves its value out, a call gives its
+    /// arguments up, `reduce` gives its accumulator up, and a function
+    /// returns by moving, so each writer is the only holder of what it
+    /// writes. A copy per element is what made these builds quadratic: the
+    /// items copied grew with the square of the size. So building eleven
+    /// times as much must copy next to nothing more.
+    #[test]
+    fn building_a_collection_copies_it_a_fixed_number_of_times() {
+        let builders = [
+            (
+                "vec spread",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
+            ),
+            (
+                "concat",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { concat(acc, [x]) }, []) }",
+            ),
+            (
+                "local rebound to its own update",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (xs, x) {
+        longer [...xs, x]
+        longest [...longer, x]
+        longest
+    }, [])
+}"#,
+            ),
+            (
+                "assoc",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { assoc(acc, x, x) }, {}) }",
+            ),
+            (
+                "assoc twice, after a read of the map",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { assoc(assoc(acc, "count", add(get(acc, "count", 0), 1)), x, x) }, {})
+}"#,
+            ),
+            (
+                "map spread",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { {...assoc(acc, x, x), newest: x} }, {})
+}"#,
+            ),
+            (
+                "merge",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { merge(acc, assoc({}, x, x)) }, {}) }",
+            ),
+            (
+                "update",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { update(assoc(acc, x, x), "count", (c) { add(if(is-null(c), 0, c), 1) }) }, {})
+}"#,
+            ),
+            (
+                "a typed tail call carrying the map",
+                r#"step fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, step(add(i, 1), n, assoc(acc, i, i)))
+}
+run fn (n: Int): Map { step(0, n, {}) }"#,
+            ),
+            (
+                "a function that takes the collection last",
+                r#"put fn (k: Int, v: Int, m: Map): Map { assoc(m, k, v) }
+run fn (n: Int): Map { reduce(range(n), (acc, x) { put(x, x, acc) }, {}) }"#,
+            ),
+            (
+                "locals in a function",
+                r#"step fn (xs: Vec, x: Int): Vec {
+    longer [...xs, x]
+    longest [...longer, x]
+    longest
+}
+run fn (n: Int): Vec { reduce(range(n), step, []) }"#,
+            ),
+            (
+                "a namespace function of a core function's name, called before it is defined",
+                r#"run fn (n: Int): Vec { reduce(range(n), (acc, x) { interleave(acc, x) }, []) }
+interleave fn (xs: Vec, x: Int): Vec { [...xs, x] }"#,
+            ),
+            (
+                "a namespace function of a core function's name",
+                r#"zipmap fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), (acc, x) { zipmap(acc, x) }, []) }"#,
+            ),
+            (
+                "a named reducer",
+                r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
+            ),
+            (
+                "a spread in one branch of a conditional",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(gte(x, 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a key written when it is first seen",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { if(is-null(get(acc, x)), assoc(acc, x, 1), acc) }, {})
+}"#,
+            ),
+            (
+                "a tail call carrying what a conditional made",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(gte(i, 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
+        ];
+        for (name, body) in builders {
+            let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+            let small = interpreted_writes(&program(40));
+            let large = interpreted_writes(&program(440));
+            assert!(
+                large.1 <= small.1 + 8,
+                "{name}: the items copied grew with the collection, from {small:?} to {large:?}"
+            );
+            assert!(
+                large.0 >= small.0 + 400,
+                "{name}: writes in place did not grow with the collection, from {small:?} to {large:?}"
+            );
+        }
+    }
+
     /// A read costs the same whatever the size of the collection. One that
     /// scaled would take far longer on the large collection, so the margin
     /// leaves only that able to fail this. `bench-large-reads.hot` prints the

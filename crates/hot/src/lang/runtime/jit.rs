@@ -673,6 +673,7 @@ struct JitHelperRefs {
     consume_err: FuncRef,
     owned_raw_arg: FuncRef,
     self_tail_owned_arg: FuncRef,
+    tail_loop_leaves: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -727,7 +728,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 49] {
+    fn scope_free(&self) -> [FuncRef; 50] {
         [
             self.poll_cancel,
             self.call_vm,
@@ -760,6 +761,7 @@ impl JitHelperRefs {
             self.consume_err,
             self.owned_raw_arg,
             self.self_tail_owned_arg,
+            self.tail_loop_leaves,
             self.promote_to_owned,
             self.make_vec,
             self.run_fused_pipeline,
@@ -1114,6 +1116,7 @@ fn synthetic_function_info_from_lambda<'p>(
         flow_type: None,
         instructions,
         register_count: lambda.register_count,
+        moves: Vec::new(),
         source: None,
     };
     Ok((function_info, program))
@@ -2566,6 +2569,10 @@ fn compile_with_return_kind(
         hot_jit_self_tail_owned_arg as *const u8,
     );
     builder.symbol(
+        "hot_jit_tail_loop_leaves",
+        hot_jit_tail_loop_leaves as *const u8,
+    );
+    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -3620,6 +3627,20 @@ unsafe extern "C" fn hot_jit_self_tail_owned_arg(
         }
     }
     unsafe { hot_jit_clone_owned_val(raw) }
+}
+
+/// A self tail call passes on, in `raw`, the collection its loop writes:
+/// whether the rest of the loop should be run by the interpreter (see
+/// `VirtualMachine::tail_loop_leaves`). Returns 1 if so, and the loop then
+/// makes the call through the VM. Borrows `raw`.
+unsafe extern "C" fn hot_jit_tail_loop_leaves(function_id: i64, raw: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if raw == 0 || vm_ptr.is_null() {
+        return 0;
+    }
+    let collection = unsafe { &*(raw as *const Val) };
+    let vm = unsafe { &mut *vm_ptr };
+    i64::from(vm.tail_loop_leaves(function_id as u32, collection))
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
@@ -5134,6 +5155,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_self_tail_owned_arg",
             &[types::I64, types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        tail_loop_leaves: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_tail_loop_leaves",
+            &[types::I64, types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -9504,6 +9533,17 @@ fn build_supported_body(
     if instructions.is_empty() {
         return Err("Cannot JIT empty function".to_string());
     }
+    // The parameter a tail-call loop of this function writes, if it writes
+    // one: the collection the loop asks about at each tail call.
+    let tail_writer = {
+        let written = crate::lang::moves::writer_parameters(
+            instructions,
+            &function_info.moves,
+            &function_info.param_names,
+            &program.constants,
+        );
+        (written != 0).then(|| written.trailing_zeros() as usize)
+    };
 
     let used_regs = collect_used_registers(instructions);
     let remap: AHashMap<u32, usize> = used_regs
@@ -10230,6 +10270,32 @@ fn build_supported_body(
                 let mut through_vm = None;
                 let mut halts = Vec::new();
                 let mut unboxed = AHashMap::new();
+                // A loop that writes a collection it carries asks, at each
+                // tail call, whether the interpreter is now the better tier
+                // for it. If so this call goes through the VM, which runs
+                // the rest of the loop and writes the collection in place.
+                // Not when calls are traced: the call through the VM would
+                // be one more call in the trace than the loop makes.
+                if let Some(position) = tail_writer
+                    && !ctx.call_scope.traces_flows()
+                    && position < usize::from(*args_count)
+                    && param_locals[position].1 == RawKind::OwnedVal
+                    && active_flows
+                        .last()
+                        .is_some_and(|flow| flow.result_reg.is_some())
+                {
+                    let raw = ctx.reg_value(builder, *args_start + position as u32)?;
+                    let callee = builder.ins().iconst(types::I64, i64::from(function_id));
+                    let call = builder
+                        .ins()
+                        .call(ctx.helper_refs.tail_loop_leaves, &[callee, raw]);
+                    let leaves = builder.inst_results(call)[0];
+                    let other_block = *through_vm.get_or_insert_with(|| builder.create_block());
+                    let stays = builder.create_block();
+                    builder.ins().brif(leaves, other_block, &[], stays, &[]);
+                    builder.switch_to_block(stays);
+                    builder.seal_block(stays);
+                }
                 for &idx in &owned_raws {
                     let param_kind = param_locals[idx].1;
                     let reg = *args_start + idx as u32;
@@ -13404,6 +13470,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(1)));
 
         let lambda = crate::lang::bytecode::LambdaInfo {
+            moves: Vec::new(),
             parameters: vec!["x".to_string()],
             instructions: vec![
                 Instruction::LoadVar {
@@ -13453,6 +13520,7 @@ mod tests {
         closure_env.insert("offset".to_string(), val!(10));
 
         let lambda = crate::lang::bytecode::LambdaInfo {
+            moves: Vec::new(),
             parameters: vec!["x".to_string()],
             instructions: vec![
                 Instruction::LoadVar {
@@ -13512,6 +13580,7 @@ mod tests {
         closure_env.insert("add".to_string(), add_ref.clone());
 
         let lambda = crate::lang::bytecode::LambdaInfo {
+            moves: Vec::new(),
             parameters: vec!["x".to_string()],
             instructions: vec![
                 Instruction::LoadVar {
@@ -13567,6 +13636,7 @@ mod tests {
             parameters: vec![],
             instructions: vec![Instruction::Return { value: 0 }],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -13595,6 +13665,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         let function = FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_one".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -13643,6 +13714,7 @@ mod tests {
         let x_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_one".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -13700,6 +13772,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         let function = FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_dec".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -13767,6 +13840,7 @@ mod tests {
             .push(Constant::StringRef("cond_default".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/classify".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -13921,6 +13995,7 @@ mod tests {
             .push(Constant::StringRef("cond_default".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/mixed".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14051,10 +14126,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/skips_branch".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -14164,6 +14241,7 @@ mod tests {
         program.constants.push(Constant::StringRef("_".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/match_value".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14310,6 +14388,7 @@ mod tests {
         program.constants.push(Constant::StringRef("_".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/match_type".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14422,6 +14501,7 @@ mod tests {
             .push(Constant::StringRef("cond_default".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/cond_all".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -14548,6 +14628,7 @@ mod tests {
         program.constants.push(Constant::StringRef("_".into()));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/match_all".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14672,6 +14753,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/echo_vec".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14713,6 +14795,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("right")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/vec_eq".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -14781,6 +14864,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(0)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/owned_truthy".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -14846,6 +14930,7 @@ mod tests {
         let value_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("value")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/dynamic-set".to_string(),
             namespace: "::test".to_string(),
             arity: 3,
@@ -14892,6 +14977,7 @@ mod tests {
         let value_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("value")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/static-property".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -14973,6 +15059,7 @@ mod tests {
             flow_type: None,
             instructions,
             register_count: if dynamic { 3 } else { 2 },
+            moves: Vec::new(),
             source: None,
         });
         program
@@ -14987,6 +15074,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("http-request")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::dep/target".to_string(),
             namespace: "::dep".to_string(),
             arity: 0,
@@ -15007,6 +15095,7 @@ mod tests {
             source: None,
         });
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::lib/call-alias".to_string(),
             namespace: "::lib".to_string(),
             arity: 0,
@@ -15083,6 +15172,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(1)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::hot::coll/call-predicate".to_string(),
             namespace: "::hot::coll".to_string(),
             arity: 1,
@@ -15127,6 +15217,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -15171,6 +15262,7 @@ mod tests {
         let x_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_one".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15217,6 +15309,7 @@ mod tests {
         let x_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/is_positive".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15278,6 +15371,7 @@ mod tests {
         let n_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("n")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_down".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15361,6 +15455,7 @@ mod tests {
         let acc_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("acc")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_tail".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -15446,6 +15541,7 @@ mod tests {
         let x_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add-one".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15524,6 +15620,7 @@ mod tests {
         let x_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add-one".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15619,10 +15716,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_three".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15693,10 +15792,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_dec_wrapper".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15745,6 +15846,7 @@ mod tests {
         let var_const = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/load-global".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -15785,6 +15887,7 @@ mod tests {
         let var_const = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("x")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/load-global".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -15832,6 +15935,7 @@ mod tests {
         let n_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("n")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_down_dec".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -15928,6 +16032,7 @@ mod tests {
         let acc_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("acc")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_tail_dec".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -16023,6 +16128,7 @@ mod tests {
 
         // fn#0: double(x) = x + x
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/double".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16054,6 +16160,7 @@ mod tests {
 
         // fn#1: main(x) = double(x)
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/main".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16099,6 +16206,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/double".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16129,6 +16237,7 @@ mod tests {
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/main".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16183,6 +16292,7 @@ mod tests {
         let acc_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("acc")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_tail".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -16283,6 +16393,7 @@ mod tests {
         let n_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("n")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sum_down".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16410,6 +16521,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["a".to_string()],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16431,6 +16543,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["b".to_string()],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16452,6 +16565,7 @@ mod tests {
 
         // Function 0: max(a, b)
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/max".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -16517,6 +16631,7 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
@@ -16570,6 +16685,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["n".to_string()],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16582,6 +16698,7 @@ mod tests {
 
         // "else" thunk: { add(fib(sub(n, 1)), fib(sub(n, 2))) }
         let else_thunk = LambdaInfo {
+            moves: Vec::new(),
             parameters: vec![],
             instructions: vec![
                 Instruction::LoadVar {
@@ -16658,6 +16775,7 @@ mod tests {
         // Wait, we need lte(n,1) as the pred. lte(n,1) = !gt(n,1).
         // Simpler: Lt(n, 2) means n < 2, which for Int is equivalent to n <= 1.
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/fib".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16714,6 +16832,7 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
@@ -16765,6 +16884,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16784,6 +16904,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16803,6 +16924,7 @@ mod tests {
             .push(Constant::Val(Val::Box(Box::new(else_thunk))));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/choose-role".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16849,6 +16971,7 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
@@ -16889,6 +17012,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16904,6 +17028,7 @@ mod tests {
             .push(Constant::Val(Val::Box(Box::new(lazy_arg))));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/calls-lazy-helper".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -16935,6 +17060,7 @@ mod tests {
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/lazy-helper".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -16981,6 +17107,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -16995,6 +17122,7 @@ mod tests {
             .constants
             .push(Constant::Val(Val::Box(Box::new(thunk))));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/returns-thunk".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17049,6 +17177,7 @@ mod tests {
                 Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec![],
             closure_env: AHashMap::new(),
             defining_namespace: "::test".to_string(),
@@ -17063,6 +17192,7 @@ mod tests {
             .constants
             .push(Constant::Val(Val::Box(Box::new(thunk))));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/vec-with-thunk".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17113,6 +17243,7 @@ mod tests {
             .constants
             .push(Constant::Val(val!({"kind": "owned"})));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/owned-return".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17154,6 +17285,7 @@ mod tests {
         let xs_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("xs")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/length-of".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17209,6 +17341,7 @@ mod tests {
             .constants
             .push(Constant::Val(val!("::hot::store/put")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/store-put-wrapper".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17253,6 +17386,7 @@ mod tests {
         assert!(err.contains("hotlib_policy"), "unexpected bailout: {err}");
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/calls-vm-aware-hotlib-wrapper".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17295,6 +17429,7 @@ mod tests {
             .constants
             .push(Constant::Val(val!("::hot::coll/reduce")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/reduce-wrapper".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17351,6 +17486,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("world")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/starts-with-hello".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17381,6 +17517,7 @@ mod tests {
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/starts-with-world".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -17442,10 +17579,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/div_by_zero".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17498,6 +17637,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_mixed".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17564,10 +17704,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/add_null".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17636,10 +17778,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/sub_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17698,10 +17842,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/mul_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17760,10 +17906,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/div_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17821,10 +17969,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/mod_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17883,10 +18033,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/eq_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -17945,10 +18097,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/ne_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18007,10 +18161,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/gt_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18069,10 +18225,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/gte_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18131,10 +18289,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/lt_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18193,10 +18353,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/lte_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18253,10 +18415,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/not_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18310,10 +18474,12 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/is_zero_test".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18377,6 +18543,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/dot_access".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18419,6 +18586,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("b")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/make_vec".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -18483,6 +18651,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("b")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/merge_maps".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -18523,6 +18692,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(99)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/set_element".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18571,6 +18741,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(42)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/vec_append".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18614,6 +18785,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/wrap-ok".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18655,6 +18827,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/capture-error".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18697,6 +18870,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("!")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/greet".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18753,6 +18927,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("key")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/dyn-access".to_string(),
             namespace: "::test".to_string(),
             arity: 2,
@@ -18798,6 +18973,7 @@ mod tests {
         let missing_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("Missing")));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/missing-variant".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18861,6 +19037,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(99)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/dot-set".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -18929,6 +19106,7 @@ mod tests {
             .constants
             .push(Constant::Val(val!({"created": true})));
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/deep-path-default".to_string(),
             namespace: "::test".to_string(),
             arity: 1,
@@ -19178,6 +19356,7 @@ mod tests {
         program.constants.push(Constant::Val(val!(42)));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/store-and-return".to_string(),
             namespace: "::test".to_string(),
             arity: 0,
@@ -19218,6 +19397,7 @@ mod tests {
         program.constants.push(Constant::Val(val!("x")));
 
         program.functions.push(FunctionInfo {
+            moves: Vec::new(),
             name: "::test/extract-inner".to_string(),
             namespace: "::test".to_string(),
             arity: 1,

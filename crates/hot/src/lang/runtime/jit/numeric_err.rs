@@ -662,6 +662,7 @@ mod tests {
             flow_type: None,
             instructions: vec![],
             register_count: 0,
+            moves: Vec::new(),
             source: None,
         });
         program

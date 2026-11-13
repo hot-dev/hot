@@ -1188,6 +1188,7 @@ mod tests {
 
         // Add a function with instructions covering all refactored variants
         let function = FunctionInfo {
+            moves: Vec::new(),
             name: "test-function".to_string(),
             namespace: "::test::module".to_string(),
             arity: 2,
@@ -1477,6 +1478,7 @@ mod tests {
             parameters: Vec::new(),
             instructions: vec![Instruction::Return { value: 0 }],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["captured".to_string()],
             closure_env: [("captured".to_string(), Val::Int(42))]
                 .into_iter()
@@ -1677,7 +1679,7 @@ mod tests {
         let bytes = program.serialize().expect("program must serialize");
         let hash = crate::hasher::HotHasher::hash_content(&bytes);
 
-        let expected = "c5ab2af9718bf681927106be484ad586a4c8d1862c54125f20b067150fe0645a";
+        let expected = "6f61ee18ef7ef2f0df727dc7a235a169844e6ce696528ca6ffecc257735c1765";
         assert_eq!(
             hash, expected,
             "postcard bytecode wire layout changed (got hash {hash}). If \

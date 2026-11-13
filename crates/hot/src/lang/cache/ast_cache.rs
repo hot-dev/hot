@@ -1727,6 +1727,7 @@ mod tests {
             parameters: vec!["value".to_string()],
             instructions: Vec::new(),
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: Vec::new(),
             closure_env: ahash::AHashMap::new(),
             defining_namespace: "::test".to_string(),

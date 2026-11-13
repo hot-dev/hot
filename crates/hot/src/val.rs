@@ -158,6 +158,108 @@ pub(crate) fn as_fields(val: &Val) -> &Val {
     typed_fields(val).unwrap_or(val)
 }
 
+/// Where the collection writes of this thread landed, for the tests that
+/// hold the VM to writing a collection in place when nothing else holds it.
+#[cfg(test)]
+pub(crate) mod write_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    }
+
+    /// The writes since the thread started: how many were in place, and
+    /// how many items the others copied. A write that copies a collection
+    /// each time it grows copies a number of items that grows with its
+    /// square; one that copies a fresh literal copies next to none.
+    pub(crate) fn counts() -> (usize, usize) {
+        COUNTS.with(Cell::get)
+    }
+
+    pub(super) fn note(in_place: bool, items: usize) {
+        COUNTS.with(|counts| {
+            let (kept, copied) = counts.get();
+            counts.set(if in_place {
+                (kept + 1, copied)
+            } else {
+                (kept, copied + items)
+            });
+        });
+    }
+}
+
+/// Collection storage whose writes `write_stats` counts.
+pub(crate) trait Stored {
+    /// How many items a copy of the storage copies.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn stored_items(&self) -> usize;
+}
+
+impl Stored for ValVec {
+    fn stored_items(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Stored for ValMap {
+    fn stored_items(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Stored for Vec<u8> {
+    fn stored_items(&self) -> usize {
+        self.len()
+    }
+}
+
+/// Count a write to `storage` that is about to happen (see `write_stats`):
+/// in place when this is its only holder. Nothing outside tests.
+#[inline(always)]
+pub(crate) fn note_write<T: Stored>(storage: &Arc<T>) {
+    #[cfg(test)]
+    write_stats::note(Arc::strong_count(storage) == 1, storage.stored_items());
+    #[cfg(not(test))]
+    let _ = storage;
+}
+
+/// `Arc::make_mut` for a collection's storage: the write is in place when
+/// nothing else holds it, and on a copy otherwise.
+#[inline(always)]
+pub(crate) fn make_mut<T: Clone + Stored>(storage: &mut Arc<T>) -> &mut T {
+    note_write(storage);
+    Arc::make_mut(storage)
+}
+
+/// The fields of `val` by value: a constructed value's `$val` map, and
+/// anything else as it is. When nothing else holds the constructed value,
+/// nothing else holds the fields returned either.
+pub(crate) fn into_fields(val: Val) -> Val {
+    match typed_fields(&val).cloned() {
+        Some(fields) => fields,
+        None => val,
+    }
+}
+
+/// Run `write` on the fields of the map `val`: the map itself, or the `$val`
+/// map of a constructed value, which keeps its type. The fields are written
+/// in place when nothing else holds them and on a copy otherwise
+/// (`Arc::make_mut`), so any other holder of the value keeps its contents.
+/// `None`, with `write` not run, when `val` isn't a map.
+pub(crate) fn with_fields_mut<R>(val: &mut Val, write: impl FnOnce(&mut ValMap) -> R) -> Option<R> {
+    let constructed = typed_fields(val).is_some();
+    let Val::Map(map) = val else {
+        return None;
+    };
+    if !constructed {
+        return Some(write(make_mut(map)));
+    }
+    match Arc::make_mut(map).get_mut(tagged_payload_key()) {
+        Some(Val::Map(fields)) => Some(write(make_mut(fields))),
+        _ => None,
+    }
+}
+
 /// How comparisons see a value: a value of a declared type over a scalar
 /// (`Money(80.0)` from `Money type Dec`) is the scalar it holds, and anything
 /// else is itself. The checker reads such a type as its scalar and it passes a
@@ -6465,6 +6567,7 @@ mod tests {
                 crate::lang::bytecode::Instruction::Return { value: 0 },
             ],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),
@@ -6507,6 +6610,7 @@ mod tests {
                 crate::lang::bytecode::Instruction::Return { value: 1 },
             ],
             register_count: 2,
+            moves: Vec::new(),
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),
@@ -6566,6 +6670,7 @@ mod tests {
             parameters: vec!["x".to_string()],
             instructions: vec![],
             register_count: 1,
+            moves: Vec::new(),
             capture_vars: vec!["value".to_string()],
             closure_env,
             defining_namespace: "::hot::test".to_string(),

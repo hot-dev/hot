@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 19, // Bumped for calls by qualified name to a namespace's function of a core name
+            CacheType::Bytecode => 21, // Bumped for move plans that take a value in each branch
             CacheType::Ast => 7, // Bumped for expression spreads in vector literals (Value::Spread)
         }
     }
