@@ -3795,6 +3795,18 @@ mod tests {
         }
     }
 
+    /// Since jsonschema 0.61, `.` in `pattern` matches no line terminator, as
+    /// in ECMA-262. 0.60 let it match `\r`, U+2028 and U+2029.
+    #[test]
+    fn test_json_schema_pattern_dot_matches_no_line_terminator() {
+        let schema = json!({"type": "string", "pattern": "^a.b$"});
+        assert!(validate_json_schema_instance(&schema, &json!("a-b"), "result").is_ok());
+        for text in ["a\nb", "a\rb", "a\u{2028}b", "a\u{2029}b"] {
+            let result = validate_json_schema_instance(&schema, &json!(text), "result");
+            assert!(result.is_err(), "{text:?}");
+        }
+    }
+
     #[test]
     fn test_input_required_result_validates_capabilities_and_preserves_meta() {
         let protocol = ProtocolContext {
