@@ -1116,6 +1116,86 @@ make-error(3)"#;
         }
     }
 
+    /// A lambda reads names in the frames it was created in, and so does a
+    /// local function it calls. Compiled code used a lambda that captures
+    /// nothing as a constant, with no link to those frames, so the local
+    /// function read the frames of whoever called the lambda: `helper`
+    /// below found `coll` in hot-std's `map`, whose own parameter has that
+    /// name, and returned 1. Each shape runs interpreted, compiled, and
+    /// compiled without pipeline fusion.
+    #[test]
+    fn a_lambda_made_by_compiled_code_reads_the_frames_it_was_made_in() {
+        let src = r#"::t ns
+through-map fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { helper(x) })
+}
+reads-a-local fn (n) {
+    base [n, n, n]
+    helper fn (x) { add(x, length(base)) }
+    map([1, 2], (x) { helper(x) })
+}
+two-deep fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { map([x], (y) { helper(y) }) })
+}
+through-reduce fn (coll, initial) {
+    helper fn (x) { add(length(coll), initial) }
+    reduce([1, 2], (acc, x) { add(acc, helper(x)) }, 0)
+}
+through-filter fn (coll, predicate) {
+    keep fn (x) { lt(x, add(length(coll), predicate)) }
+    filter([0, 1, 2, 3, 4], (x) { keep(x) })
+}
+a-pipeline fn (coll) {
+    helper fn (x) { add(x, length(coll)) }
+    [1, 2, 3] |> map((x) { helper(x) }) |> filter((x) { gt(helper(x), 6) })
+}
+passed-itself fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], helper)
+}
+uncaptured-local fn (n) {
+    xs [n]
+    late () { [...xs, 3] }
+    [late(), map([0], (x) { late() })]
+}
+run fn () {
+    [
+        through-map([1, 2]),
+        reads-a-local(7),
+        two-deep([1, 2, 3]),
+        through-reduce([1, 2], 10),
+        through-filter([1, 2], 1),
+        a-pipeline([1, 2]),
+        passed-itself([1, 2]),
+        uncaptured-local(9),
+    ]
+}
+run()
+run()"#;
+        let expected = val!([
+            [2],
+            [4, 5],
+            [[3]],
+            24,
+            [0, 1, 2],
+            [5],
+            [2],
+            [[9, 3], [[9, 3]]]
+        ]);
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+            Some(val!({"jit": {"threshold": 1, "hof": {"fusion": false}}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("{label} run failed: {e}"));
+            assert_eq!(out, expected, "{label}");
+        }
+    }
+
     fn strs(values: &[&str]) -> Val {
         Val::vec(values.iter().map(|s| Val::from(*s)).collect())
     }
