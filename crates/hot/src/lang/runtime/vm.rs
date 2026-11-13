@@ -557,6 +557,25 @@ fn given_collection_to_write(written: u64, args: &[Val]) -> bool {
     })
 }
 
+/// How many tail calls in a row must leave the collections a loop writes
+/// no larger before the loop may go on in compiled code.
+const SETTLED_TAIL_CALLS: u32 = 256;
+
+/// The items in the collections `args` hold in the parameters `written` (a
+/// bit per position).
+fn written_items(written: u64, args: &[Val]) -> usize {
+    args.iter()
+        .take(64)
+        .enumerate()
+        .filter(|(position, _)| written & (1 << position) != 0)
+        .map(|(_, arg)| match crate::val::as_fields(arg) {
+            Val::Vec(items) => items.len(),
+            Val::Map(entries) => entries.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
 #[cfg(debug_assertions)]
 fn moved_out() -> Val {
     Val::Box(Box::new(MovedOut))
@@ -10922,8 +10941,10 @@ impl VirtualMachine {
     /// function goes on to write, is interpreted: past a few dozen items
     /// that is the faster tier, and it is the one whose cost doesn't grow
     /// with the collection. A tail-call loop that carries such a parameter
-    /// is always interpreted: compiled, it would be a native loop that
-    /// never comes back to choose again as the collection grows.
+    /// starts out interpreted whatever it is given: compiled, it would be a
+    /// native loop that never comes back to choose again as the collection
+    /// grows. It goes on in compiled code once the collection has stopped
+    /// growing (see `SETTLED_TAIL_CALLS`).
     fn keeps_call_interpreted(&mut self, function_id: FunctionId, args: &CallArgs<'_>) -> bool {
         let (written, tail_loop) = self.writer_parameters_of(function_id);
         if written == 0 {
@@ -11239,6 +11260,10 @@ impl VirtualMachine {
                 // Parameters were already bound into the function scope above,
                 // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
+                // For a loop that carries a collection it writes: the most
+                // items the collection has held, and the tail calls since
+                // it last grew.
+                let mut growth: (usize, u32) = (0, 0);
                 // The registers the body writes, once a tail call needs
                 // them emptied.
                 let mut written: Option<std::rc::Rc<[u32]>> = None;
@@ -11328,10 +11353,30 @@ impl VirtualMachine {
                                 // switch to compiled code mid-loop once available.
                                 // Without this, a million-iteration tail loop counts
                                 // as ONE call and never compiles.
-                                if self.jit.config.is_enabled()
-                                    && !self.in_constraint_predicate()
-                                    && !self.writer_parameters_of(function_id).1
-                                {
+                                //
+                                // A loop that carries a collection it writes
+                                // stays interpreted while the collection
+                                // grows: compiled, it is a native loop that
+                                // copies the collection at every write and
+                                // never comes back to choose again. Once
+                                // the collection has stopped growing there
+                                // is nothing left for that to cost.
+                                let mut compiles =
+                                    self.jit.config.is_enabled() && !self.in_constraint_predicate();
+                                if compiles {
+                                    let (written, tail_loop) =
+                                        self.writer_parameters_of(function_id);
+                                    if tail_loop {
+                                        let items = written_items(written, &new_args);
+                                        if items > growth.0 {
+                                            growth = (items, 0);
+                                        } else {
+                                            growth.1 = growth.1.saturating_add(1);
+                                        }
+                                        compiles = growth.1 >= SETTLED_TAIL_CALLS;
+                                    }
+                                }
+                                if compiles {
                                     self.jit.record_call(function_id, &new_args);
                                     if self.jit.should_compile_now(function_id, &new_args)
                                         && !self.jit_blocked_by_overload_dispatch(function_id)

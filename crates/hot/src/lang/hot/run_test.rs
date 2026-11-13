@@ -667,6 +667,25 @@ run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
                 "merge",
                 "run fn (n: Int): Map { reduce(range(n), (acc, x) { merge(acc, assoc({}, x, x)) }, {}) }",
             ),
+            (
+                "a spread in one branch of a conditional",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(gte(x, 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a key written when it is first seen",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { if(is-null(get(acc, x)), assoc(acc, x, 1), acc) }, {})
+}"#,
+            ),
+            (
+                "a tail call carrying what a conditional made",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(gte(i, 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
+            ),
         ];
         // Compiled code copies while a collection is small, and how much of
         // that a run does varies: the tests of this process share the
@@ -713,6 +732,28 @@ run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
         assert_eq!(
             compile_and_run_with_std_conf(&chain(12), None).expect("run"),
             Val::Int(13)
+        );
+    }
+
+    /// A tail-call loop that carries a collection it writes is interpreted
+    /// while the collection grows, and goes on in compiled code once it has
+    /// stopped. This one grows for its first 100 calls and its last 100.
+    /// Interpreted, each of those writes is in place. With the JIT on the
+    /// last 100 are compiled code's, which doesn't write in place.
+    #[test]
+    fn a_tail_call_loop_is_compiled_once_its_collection_stops_growing() {
+        let src = r#"::t ns
+step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(lt(i, 100), [...acc, i], if(gte(i, 1900), [...acc, i], acc))))
+}
+length(step(0, 2000, []))"#;
+        // All but the first write, which copies the empty literal.
+        let interpreted = interpreted_writes(src);
+        assert_eq!(interpreted, (199, 0));
+        let compiled = writes_under(src, Some(val!({"jit": {"threshold": 1}})));
+        assert!(
+            (99..150).contains(&compiled.0),
+            "with the JIT on: {compiled:?}"
         );
     }
 
@@ -805,6 +846,25 @@ run fn (n: Int): Vec { reduce(range(n), (acc, x) { zipmap(acc, x) }, []) }"#,
                 "a named reducer",
                 r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
 run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
+            ),
+            (
+                "a spread in one branch of a conditional",
+                r#"run fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { if(gte(x, 0), [...acc, x], acc) }, [])
+}"#,
+            ),
+            (
+                "a key written when it is first seen",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { if(is-null(get(acc, x)), assoc(acc, x, 1), acc) }, {})
+}"#,
+            ),
+            (
+                "a tail call carrying what a conditional made",
+                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, step(add(i, 1), n, if(gte(i, 0), [...acc, i], acc)))
+}
+run fn (n: Int): Vec { step(0, n, []) }"#,
             ),
         ];
         for (name, body) in builders {

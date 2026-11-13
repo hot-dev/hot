@@ -40,7 +40,7 @@
 //!   same body can sit above this one and read such a name from this frame.
 
 use crate::lang::bytecode::{
-    Constant, ConstantId, FunctionId, Instruction, LambdaInfo, RegisterId,
+    Constant, ConstantId, FlowType, FunctionId, Instruction, LambdaInfo, RegisterId,
 };
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
@@ -674,6 +674,22 @@ struct Regions {
     /// reached whenever the one before it finished. Not so between the
     /// branches of a flow, which skips to its end once a branch has run.
     in_order: Vec<bool>,
+    /// What opened each region.
+    kind: Vec<Region>,
+}
+
+/// What a region of a body is.
+#[derive(Clone, Copy, PartialEq)]
+enum Region {
+    /// The body or a scope.
+    Block,
+    /// A flow that runs one of its branches and then skips to its end
+    /// (`cond`, `match`, an inlined `if`).
+    OneBranchFlow,
+    /// Any other flow.
+    Flow,
+    /// A branch of a flow.
+    Branch,
 }
 
 impl Regions {
@@ -685,6 +701,7 @@ impl Regions {
             of: Vec::with_capacity(instructions.len()),
             parent: vec![0],
             in_order: vec![true],
+            kind: vec![Region::Block],
         };
         // The open regions, each with the instruction that opened it.
         let mut open: Vec<(usize, &Instruction)> = Vec::new();
@@ -698,6 +715,15 @@ impl Regions {
                     regions
                         .in_order
                         .push(!matches!(instruction, I::BeginFlow { .. }));
+                    regions.kind.push(match instruction {
+                        I::BeginFlow {
+                            flow_type: FlowType::Cond | FlowType::Match,
+                            ..
+                        } => Region::OneBranchFlow,
+                        I::BeginFlow { .. } => Region::Flow,
+                        I::CondBranchStart { .. } => Region::Branch,
+                        _ => Region::Block,
+                    });
                     open.push((current, instruction));
                     current = regions.parent.len() - 1;
                 }
@@ -740,6 +766,30 @@ impl Regions {
             }
             inner = self.parent[inner];
         }
+    }
+
+    /// Whether the instruction at `later` can still run once the one at
+    /// `earlier`, which comes before it in the body, has. It can't when
+    /// `earlier` is in a branch of a flow that runs one branch and `later`
+    /// is elsewhere in that flow: in another branch, or in the test of
+    /// one. Having run a branch, such a flow skips to its end.
+    fn may_follow(&self, earlier: usize, later: usize) -> bool {
+        let target = self.of[later];
+        let mut inner = self.of[earlier];
+        if self.encloses(inner, target) {
+            return true;
+        }
+        // Climb to the innermost region that holds both. `inner` is then
+        // the region under it that holds `earlier` alone.
+        while inner != 0 {
+            let outer = self.parent[inner];
+            if self.encloses(outer, target) {
+                return !(self.kind[outer] == Region::OneBranchFlow
+                    && self.kind[inner] == Region::Branch);
+            }
+            inner = outer;
+        }
+        true
     }
 }
 
@@ -857,8 +907,8 @@ fn plan_variables<'a>(
     // Names read before the body binds them: they are its captures, or its
     // caller's or namespace's variables.
     let mut read_unbound: AHashSet<&str> = AHashSet::new();
-    // The last instruction to name each string outside a binding.
-    let mut last_named: AHashMap<&str, usize> = AHashMap::new();
+    // The instructions that name each string outside a binding, in order.
+    let mut named_at: AHashMap<&str, Vec<usize>> = AHashMap::new();
     // Every string a nested body or a collection constant holds.
     let mut nested = Named::default();
     for (index, instruction) in instructions.iter().enumerate() {
@@ -911,7 +961,7 @@ fn plan_variables<'a>(
                     let Some(name) = constant_name(constants, id) else {
                         continue;
                     };
-                    last_named.insert(name, index);
+                    named_at.entry(name).or_default().push(index);
                     match bindings.get_mut(name) {
                         Some(binding) => {
                             binding.covers_reads &=
@@ -940,10 +990,27 @@ fn plan_variables<'a>(
             || bindings
                 .get(name)
                 .is_some_and(|binding| binding.covers_reads);
-        if own && last_named.get(name) == Some(&index) && !nested.names.contains(name) {
+        if own
+            && !nested.names.contains(name)
+            && named_at
+                .get(name)
+                .is_some_and(|named| nothing_follows(regions, named, index))
+        {
             flags[index] |= flag::VAR;
         }
     }
+}
+
+/// How many later mentions of a name [`nothing_follows`] will rule out one
+/// by one. A read with more after it than this is not a last read.
+const LATER_MENTIONS: usize = 32;
+
+/// Whether none of the instructions `named` (those that name a string, in
+/// order) can run after the one at `index`: the ones after it in the body
+/// are all in branches that don't run once this one has.
+fn nothing_follows(regions: &Regions, named: &[usize], index: usize) -> bool {
+    let later = &named[named.partition_point(|at| *at <= index)..];
+    later.len() <= LATER_MENTIONS && later.iter().all(|at| !regions.may_follow(index, *at))
 }
 
 /// The core functions that write their first argument in place when
@@ -994,25 +1061,23 @@ fn plan_writers(
     flags: &mut [u8],
 ) {
     use Instruction as I;
-    // Where each variable gives its value up.
-    let mut taken_at: AHashMap<ConstantId, usize> = AHashMap::new();
+    // Where each variable gives its value up: one load on each path
+    // through the body, in order.
+    let mut taken_at: AHashMap<ConstantId, Vec<usize>> = AHashMap::new();
     for (index, instruction) in instructions.iter().enumerate() {
         if let I::LoadVar { var_name, .. } = instruction
             && flags[index] & flag::VAR != 0
         {
-            taken_at.insert(*var_name, index);
+            taken_at.entry(*var_name).or_default().push(index);
         }
     }
     for start in 0..instructions.len() {
         let I::LoadVar { dest, var_name } = &instructions[start] else {
             continue;
         };
-        let Some(&taken) = taken_at.get(var_name) else {
+        let Some(taken) = taken_at.get(var_name) else {
             continue;
         };
-        if taken < start {
-            continue;
-        }
         // The register that holds the value, or the argument Vec it is the
         // first item of.
         let mut held = *dest;
@@ -1093,8 +1158,10 @@ fn plan_writers(
             }
             break;
         }
-        // The variable must have given the value up before the write.
-        if written && taken < writer {
+        // The variable must have given the value up before the write: at
+        // this load or at one between it and the writer. No flow starts or
+        // ends between the two, so such a load is on the writer's path.
+        if written && taken.iter().any(|at| (start..writer).contains(at)) {
             flags[start] |= flag::WRITER;
         }
     }
@@ -1265,6 +1332,120 @@ mod tests {
         Instruction::CondBranchEnd {
             branch_name: 0,
             result,
+        }
+    }
+
+    #[test]
+    fn a_read_in_each_branch_of_a_conditional_is_a_last_read() {
+        // if(c, [...xs, 0], xs). Constant 0 names the branches.
+        let constants = strings(&["branch", "xs"]);
+        let body = [
+            cond_flow(),
+            constant(1, 0),
+            branch(1),
+            load(2, 1),
+            branch_end(2),
+            constant(3, 0),
+            branch(3),
+            load(4, 1),
+            branch_end(4),
+            Instruction::EndFlow { dest: 5 },
+        ];
+        let plan = plan_of(&body, &["xs"], &constants);
+        assert_eq!(plan[3] & flag::VAR, flag::VAR, "the first branch's read");
+        assert_eq!(plan[7] & flag::VAR, flag::VAR, "the second branch's read");
+
+        // A read after the flow follows whichever branch ran.
+        let mut read_after = body.to_vec();
+        read_after.push(load(6, 1));
+        let plan = plan_of(&read_after, &["xs"], &constants);
+        assert_eq!(plan[3] & flag::VAR, 0);
+        assert_eq!(plan[7] & flag::VAR, 0);
+        assert_eq!(plan[10] & flag::VAR, flag::VAR);
+
+        // A flow that runs every branch whose test holds runs both reads.
+        let mut every_branch = body.to_vec();
+        every_branch[0] = Instruction::BeginFlow {
+            flow_type: FlowType::CondAll,
+            result_modifier: crate::lang::bytecode::FlowResultModifier::One,
+            source: None,
+            origin_name: None,
+        };
+        let plan = plan_of(&every_branch, &["xs"], &constants);
+        assert_eq!(plan[3] & flag::VAR, 0);
+        assert_eq!(plan[7] & flag::VAR, flag::VAR);
+    }
+
+    #[test]
+    fn a_read_in_a_test_is_followed_by_the_branches() {
+        // cond { f(xs) => { xs } g(xs) => { 0 } }
+        let constants = strings(&["branch", "xs"]);
+        let body = [
+            cond_flow(),
+            load(1, 1),
+            branch(1),
+            load(2, 1),
+            branch_end(2),
+            load(3, 1),
+            branch(3),
+            constant(4, 0),
+            branch_end(4),
+            Instruction::EndFlow { dest: 5 },
+        ];
+        let plan = plan_of(&body, &["xs"], &constants);
+        assert_eq!(plan[1] & flag::VAR, 0, "the first test's read");
+        // Once the first branch has run, the flow skips the second test.
+        assert_eq!(plan[3] & flag::VAR, flag::VAR, "the first branch's read");
+        assert_eq!(plan[5] & flag::VAR, flag::VAR, "the second test's read");
+
+        // A conditional inside the test of a branch: the branch follows
+        // whichever of its branches ran.
+        let body = [
+            cond_flow(),
+            cond_flow(),
+            constant(1, 0),
+            branch(1),
+            load(2, 1),
+            branch_end(2),
+            Instruction::EndFlow { dest: 3 },
+            branch(3),
+            load(4, 1),
+            branch_end(4),
+            Instruction::EndFlow { dest: 5 },
+        ];
+        let plan = plan_of(&body, &["xs"], &constants);
+        assert_eq!(plan[4] & flag::VAR, 0);
+        assert_eq!(plan[8] & flag::VAR, flag::VAR);
+    }
+
+    #[test]
+    fn a_read_in_a_branch_inside_a_branch_is_a_last_read() {
+        // if(a, if(b, xs, xs), xs)
+        let constants = strings(&["branch", "xs"]);
+        let body = [
+            cond_flow(),
+            constant(1, 0),
+            branch(1),
+            cond_flow(),
+            constant(2, 0),
+            branch(2),
+            load(3, 1),
+            branch_end(3),
+            constant(4, 0),
+            branch(4),
+            load(5, 1),
+            branch_end(5),
+            Instruction::EndFlow { dest: 6 },
+            branch_end(6),
+            constant(7, 0),
+            branch(7),
+            load(8, 1),
+            branch_end(8),
+            Instruction::EndFlow { dest: 9 },
+        ];
+        let plan = plan_of(&body, &["xs"], &constants);
+        for read in [6, 10, 16] {
+            assert_eq!(plan[read] & flag::VAR, flag::VAR, "the read at {read}");
         }
     }
 

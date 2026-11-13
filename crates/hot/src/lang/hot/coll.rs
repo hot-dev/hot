@@ -370,14 +370,69 @@ fn call_prepared_with_vm_multi_args(
     }
 }
 
+/// The items compiled code may copy per call of a reducer, averaged over
+/// the calls between two writes, before the interpreter is the faster
+/// tier. Interpreting a call costs about as much more as copying this many
+/// (measured on a release build: some 3 µs a call against 4 ns an item).
+const COPIED_PER_CALL: usize = 512;
+
+/// How often the reducer of one `reduce` has been growing its accumulator.
+#[derive(Default)]
+struct Growth {
+    /// The most items the accumulator has held, once a call has been seen.
+    most: Option<usize>,
+    /// The calls from the write before last to the last one.
+    period: usize,
+    /// The calls since the accumulator last grew.
+    calls_since: usize,
+}
+
+impl Growth {
+    /// Note the accumulator the next call is given, and say whether the
+    /// reducer is better run as compiled code whatever it is given.
+    ///
+    /// A reducer that writes its accumulator is run by the interpreter
+    /// once the accumulator is large, so that it is written in place:
+    /// compiled code copies it. That is the right trade when every call
+    /// writes. A reducer that writes on one call in a hundred copies a
+    /// hundredth as much per call, while the interpreter is as much slower
+    /// on every one of them. So it stays compiled until the accumulator is
+    /// large enough for the copying, spread over the calls between two
+    /// writes, to cost more than interpreting those calls. Either way a
+    /// call costs no more than a fixed amount, however large the
+    /// accumulator grows.
+    fn settled(&mut self, accumulator: &Val) -> bool {
+        let items = match crate::val::as_fields(accumulator) {
+            Val::Vec(items) => items.len(),
+            Val::Map(entries) => entries.len(),
+            _ => 0,
+        };
+        match self.most {
+            Some(most) if items > most => {
+                self.most = Some(items);
+                self.period = self.calls_since + 1;
+                self.calls_since = 0;
+            }
+            Some(_) => self.calls_since = self.calls_since.saturating_add(1),
+            None => self.most = Some(items),
+        }
+        // A reducer that has gone longer than its last period without
+        // writing is writing less often than that.
+        let period = self.period.max(self.calls_since.saturating_add(1));
+        period > 1 && items < period.saturating_mul(COPIED_PER_CALL)
+    }
+}
+
 /// [`call_prepared_with_vm_multi_args`] for a caller that gives its
 /// arguments up, as `reduce` gives its accumulator: an interpreted callee
 /// binds them by moving, so a collection among them is then held by that
 /// binding alone and a writer the callee passes it to writes it in place.
+/// `settled` is [`Growth::settled`] for the accumulator among them.
 fn call_prepared_given(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function: &PreparedFunction<'_>,
     args: Vec<Val>,
+    settled: bool,
 ) -> Result<Val, String> {
     use crate::lang::runtime::vm::{CallTarget, VirtualMachine};
     let halted = |vm: &mut VirtualMachine, kind: &str, vm_error| {
@@ -417,7 +472,7 @@ fn call_prepared_given(
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
             // A large collection the callback will write goes to the
             // interpreter, which writes it in place.
-            if !vm.keeps_lambda_call_interpreted(function_val, &args) {
+            if settled || !vm.keeps_lambda_call_interpreted(function_val, &args) {
                 match vm.try_jit_lambda_call(function_val, &args) {
                     Ok(Some(result)) => return Ok(result),
                     Ok(None) => {}
@@ -1367,16 +1422,18 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     }
 
     let function = prepare_function(function_val);
+    let mut growth = Growth::default();
     match collection {
         Val::Vec(items) => {
             let mut accumulator = init_val.clone();
 
             for item in items.iter() {
+                let settled = growth.settled(&accumulator);
                 // The accumulator is the reducer's to keep: nothing here
                 // holds it while the reducer runs.
                 let given = std::mem::replace(&mut accumulator, Val::Null);
                 let function_result =
-                    match call_prepared_given(vm, &function, vec![given, item.clone()])
+                    match call_prepared_given(vm, &function, vec![given, item.clone()], settled)
                         .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                     {
                         Ok(val) => val,
@@ -1403,18 +1460,20 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             for (key, value) in map.iter() {
                 let pair = Val::vec(vec![key.clone(), value.clone()]);
 
+                let settled = growth.settled(&accumulator);
                 let given = std::mem::replace(&mut accumulator, Val::Null);
-                let function_result = match call_prepared_given(vm, &function, vec![given, pair])
-                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
-                {
-                    Ok(val) => val,
-                    Err(err) => {
-                        return HotResult::Err(Val::from(format!(
-                            "Reduce function call failed: {}",
-                            err
-                        )));
-                    }
-                };
+                let function_result =
+                    match call_prepared_given(vm, &function, vec![given, pair], settled)
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
+                        Ok(val) => val,
+                        Err(err) => {
+                            return HotResult::Err(Val::from(format!(
+                                "Reduce function call failed: {}",
+                                err
+                            )));
+                        }
+                    };
 
                 if is_reduced(&function_result) {
                     return HotResult::Ok(unwrap_reduced(function_result));
@@ -1460,11 +1519,13 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         break;
                     }
 
+                    let settled = growth.settled(&accumulator);
                     let given = std::mem::replace(&mut accumulator, Val::Null);
                     let function_result =
-                        match call_prepared_given(vm, &function, vec![given, value]).and_then(
-                            |val| apply_onerr_disposition(vm, val, OnErrDisposition::Force),
-                        ) {
+                        match call_prepared_given(vm, &function, vec![given, value], settled)
+                            .and_then(|val| {
+                                apply_onerr_disposition(vm, val, OnErrDisposition::Force)
+                            }) {
                             Ok(val) => val,
                             Err(err) => {
                                 return HotResult::Err(Val::from(format!(
@@ -4225,6 +4286,39 @@ mod tests {
         let shorter = written(delete_owned(vec![kept.clone(), Val::Int(-1)]));
         assert_eq!(shorter, val!([1]));
         assert_eq!(kept, val!([1, 2]));
+    }
+
+    #[test]
+    fn a_reducer_stays_compiled_while_its_writes_copy_little_per_call() {
+        let holding = |items: usize| Val::vec(vec![Val::Null; items]);
+
+        // One that writes on every call is never better compiled, whatever
+        // its accumulator holds: the caller goes by what each call is given.
+        let mut growth = Growth::default();
+        assert!((0..3000).all(|items| !growth.settled(&holding(items))));
+
+        // One that writes on every tenth call copies a tenth as much per
+        // call, so it stays compiled until the accumulator holds ten times
+        // as much.
+        let mut growth = Growth::default();
+        let mut compiled_until = 0;
+        for writes in 0..1000 {
+            let accumulator = holding(writes * 10);
+            for _ in 0..10 {
+                if growth.settled(&accumulator) {
+                    compiled_until = writes * 10;
+                }
+            }
+        }
+        assert_eq!(compiled_until, 10 * COPIED_PER_CALL - 10);
+
+        // One that stops writing goes back to compiled code, the sooner the
+        // smaller its accumulator.
+        let mut growth = Growth::default();
+        assert!((0..2000).all(|items| !growth.settled(&holding(items))));
+        let accumulator = holding(2000);
+        let idle = (1..).find(|_| growth.settled(&accumulator));
+        assert_eq!(idle, Some(2000 / COPIED_PER_CALL + 1));
     }
 
     #[test]

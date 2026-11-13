@@ -489,3 +489,118 @@ meta ["test"] fn () {
         recurse-as-a-value([3, 4])
     )
 }
+
+// A value read in the branches of a conditional is given up in whichever
+// branch runs. What follows is each way a branch, or what comes after the
+// conditional, can still need it.
+
+// Each branch reads `xs` for the last time on its own path.
+either-branch fn (xs: Vec, grow: Bool): Vec {
+    if(grow, [...xs, 0], xs)
+}
+
+// The test reads `xs` and then a branch does, more than once.
+test-then-branch fn (xs: Vec): Vec {
+    if(gt(length(xs), 2), [...xs, length(xs)], concat(xs, xs))
+}
+
+// `xs` is read again after the conditional, so no branch may take it.
+branch-then-after fn (xs: Vec, grow: Bool): Vec {
+    grown if(grow, [...xs, 0], xs)
+    [xs, grown]
+}
+
+// A conditional as an argument, with the same name on either side of it.
+beside-a-branch fn (xs: Vec, grow: Bool): Vec {
+    [length(xs), if(grow, [...xs, 0], xs), length(xs)]
+}
+
+// A conditional inside each branch of another.
+nested-branches fn (m: Map, a: Bool, b: Bool): Map {
+    if(a, if(b, assoc(m, "ab", 1), assoc(m, "a", 1)), if(b, assoc(m, "b", 1), m))
+}
+
+// The tests of the later branches read `m` when the earlier ones fail.
+later-tests fn (m: Map): Map {
+    cond {
+        is-empty(m) => { assoc(m, "was", "empty") }
+        eq(length(m), 1) => { assoc(m, "was", "one") }
+        gt(length(m), 3) => { m }
+        => { merge(m, {was: "some"}) }
+    }
+}
+
+// Every branch whose test holds runs, and each one needs `m`.
+all-branches fn (m: Map): Vec {
+    every: All<Vec> cond-all {
+        true => { assoc(m, "x", 1) }
+        gt(length(m), 0) => { assoc(m, "y", 2) }
+        true => { m }
+    }
+
+    every
+}
+
+// The arms of a match.
+match-arms fn (m: Map, pick: Str): Map {
+    match pick {
+        "put" => { assoc(m, "put", true) }
+        "drop" => { delete(m, "a") }
+        _ => { m }
+    }
+}
+
+// A tail call that passes on what a conditional made of the collection.
+keep-even fn (i: Int, n: Int, kept: Vec): Vec {
+    if(gte(i, n), kept, keep-even(add(i, 1), n, if(eq(mod(i, 2), 0), [...kept, i], kept)))
+}
+
+test-a-value-read-in-the-branches-of-a-conditional
+meta ["test"] fn () {
+    base [1, 2, 3]
+    assert-eq([1, 2, 3, 0], either-branch(base, true))
+    assert-eq([1, 2, 3], either-branch(base, false))
+    assert-eq([1, 2, 3, 3], test-then-branch(base))
+    assert-eq([1, 2, 1, 2], test-then-branch([1, 2]))
+    assert-eq([[1, 2, 3], [1, 2, 3, 0]], branch-then-after(base, true))
+    assert-eq([[1, 2, 3], [1, 2, 3]], branch-then-after(base, false))
+    assert-eq([3, [1, 2, 3, 0], 3], beside-a-branch(base, true))
+    assert-eq([3, [1, 2, 3], 3], beside-a-branch(base, false))
+    assert-eq([1, 2, 3], base)
+
+    m {a: 1}
+    assert-eq({a: 1, ab: 1}, nested-branches(m, true, true))
+    assert-eq({a: 1}, nested-branches({}, true, false))
+    assert-eq({a: 1, b: 1}, nested-branches(m, false, true))
+    assert-eq({a: 1}, nested-branches(m, false, false))
+    assert-eq({was: "empty"}, later-tests({}))
+    assert-eq({a: 1, was: "one"}, later-tests(m))
+    assert-eq({a: 1, b: 2, was: "some"}, later-tests({a: 1, b: 2}))
+    assert-eq({a: 1, b: 2, c: 3, d: 4}, later-tests({a: 1, b: 2, c: 3, d: 4}))
+    assert-eq([{a: 1, x: 1}, {a: 1, y: 2}, {a: 1}], all-branches(m))
+    assert-eq({a: 1, put: true}, match-arms(m, "put"))
+    assert-eq({}, match-arms(m, "drop"))
+    assert-eq({a: 1}, match-arms(m, "keep"))
+    assert-eq({a: 1}, m)
+}
+
+test-a-collection-built-through-a-conditional
+meta ["test"] fn () {
+    assert-eq([0, 2, 4, 6], keep-even(0, 8, []))
+    // Long enough to go on in compiled code where there is any.
+    assert-eq(1000, length(keep-even(0, 2000, [])))
+
+    evens reduce(range(10), (acc, x) { if(eq(mod(x, 2), 0), [...acc, x], acc) }, [])
+    assert-eq([0, 2, 4, 6, 8], evens)
+
+    counts reduce([1, 2, 1, 3, 1], (acc, x) {
+        if(is-null(get(acc, key(x))), assoc(acc, key(x), 1), update(acc, key(x), (c) { add(c, 1) }))
+    }, {})
+    assert-eq({k1: 3, k2: 1, k3: 1}, counts)
+
+    // The accumulator is kept by the caller as well.
+    kept [1, 2]
+    longer reduce([3, 4], (acc, x) { if(gt(x, 3), [...acc, x], acc) }, kept)
+    assert-eq([1, 2, 4], longer)
+    assert-eq([1, 2], kept)
+}
