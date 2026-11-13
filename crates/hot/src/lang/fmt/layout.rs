@@ -514,8 +514,8 @@ fn layout_type(scan: &Scan, type_kw: usize, close: usize, indent_spaces: usize) 
     let mut fields: Vec<(usize, usize, bool)> = Vec::new();
     let mut current: Option<(usize, usize)> = None;
     let mut depth = 0i32;
-    for index in open + 1..close {
-        let token_type = &scan.tokens[index].token_type;
+    for (index, token) in scan.tokens.iter().enumerate().take(close).skip(open + 1) {
+        let token_type = &token.token_type;
         if depth == 0 && *token_type == TokenType::Comma {
             let (first, last) = current.take()?;
             fields.push((first, last, true));

@@ -161,8 +161,7 @@ impl Syntax {
                         ..path.clone()
                     };
                     let mut member = 0;
-                    for t in first..=last {
-                        let tok = &self.toks[t];
+                    for (t, tok) in self.toks.iter().enumerate().take(last + 1).skip(first) {
                         if tok.segment().is_none() || tok.end > path.end {
                             continue;
                         }

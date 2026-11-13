@@ -72,12 +72,29 @@ fn hot_home_resources(home: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The `hot/pkg` folder of the checkout a binary was built in: the nearest
+/// folder above the binary that holds a `Cargo.toml` beside `hot/pkg`. This is
+/// how [`get_resources_path`] finds a checkout's `resources/`.
+///
+/// Cargo runs a crate's tests from that crate's directory, where `./hot/pkg`
+/// does not resolve, and since Rust 1.100 it keeps each test binary in its own
+/// `target/<profile>/build/<package>/<hash>/out/` folder, so nothing can be
+/// placed beside the test binaries ahead of the build.
+fn checkout_pkg_dir_for(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors().skip(1).find_map(|dir| {
+        let pkg = dir.join("hot").join("pkg");
+        (dir.join("Cargo.toml").is_file() && pkg.is_dir()).then_some(pkg)
+    })
+}
+
 /// Directories that hold hot.dev's bundled packages (hot-std and the others),
 /// in the order they're searched:
 /// 1. `$HOT_HOME/pkg`
 /// 2. `./hot/pkg`, for a checkout of this repository
 /// 3. The running binary's installation (see [`installation_resource_dirs`])
-/// 4. The macOS and Linux package locations
+/// 4. The checkout the running binary was built in (see
+///    [`checkout_pkg_dir_for`])
+/// 5. The macOS and Linux package locations
 ///
 /// Callers join a package name onto each and take the first that exists.
 pub fn bundled_pkg_dirs() -> Vec<PathBuf> {
@@ -86,11 +103,14 @@ pub fn bundled_pkg_dirs() -> Vec<PathBuf> {
         dirs.push(PathBuf::from(home).join("pkg"));
     }
     dirs.push(PathBuf::from("./hot/pkg"));
-    for dir in installation_resource_dirs()
+    let exe = std::env::current_exe().ok();
+    let installed = installation_resource_dirs()
         .into_iter()
-        .chain([MACOS_PACKAGE_RESOURCES, LINUX_PACKAGE_RESOURCES].map(PathBuf::from))
-    {
-        let pkg = dir.join("pkg");
+        .map(|dir| dir.join("pkg"));
+    let checkout = exe.as_deref().and_then(checkout_pkg_dir_for);
+    let packaged =
+        [MACOS_PACKAGE_RESOURCES, LINUX_PACKAGE_RESOURCES].map(|dir| Path::new(dir).join("pkg"));
+    for pkg in installed.chain(checkout).chain(packaged) {
         if !dirs.contains(&pkg) {
             dirs.push(pkg);
         }
@@ -445,6 +465,51 @@ mod tests {
         let dirs = installation_resource_dirs_for(&link);
         let share = share.canonicalize().unwrap();
         assert!(dirs.contains(&share), "{dirs:?} should contain {share:?}");
+    }
+
+    #[test]
+    fn a_binary_under_a_checkouts_target_dir_finds_the_checkouts_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(root.join("hot/pkg/hot-std")).unwrap();
+        // A member crate's manifest has no `hot/pkg` beside it.
+        std::fs::create_dir_all(root.join("crates/hot")).unwrap();
+        std::fs::write(root.join("crates/hot/Cargo.toml"), "").unwrap();
+        let pkg = root.join("hot").join("pkg");
+
+        // `cargo run`, and a test binary in Cargo's per-package build folder.
+        for exe in [
+            "target/debug/hot",
+            "target/debug/build/hot/8fcf1277973c60b4/out/hot-8fcf1277973c60b4",
+            "crates/hot/target/release/hot",
+        ] {
+            assert_eq!(
+                checkout_pkg_dir_for(&root.join(exe)),
+                Some(pkg.clone()),
+                "{exe}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_outside_a_checkout_has_no_checkout_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        // A `Cargo.toml` alone, or `hot/pkg` alone, is not a checkout.
+        std::fs::create_dir_all(root.join("project/bin")).unwrap();
+        std::fs::write(root.join("project/Cargo.toml"), "").unwrap();
+        std::fs::create_dir_all(root.join("other/hot/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("other/bin")).unwrap();
+
+        for exe in ["project/bin/hot", "other/bin/hot"] {
+            let found = checkout_pkg_dir_for(&root.join(exe));
+            // Only a checkout above the temporary folder itself could match.
+            assert!(
+                found.as_ref().is_none_or(|pkg| !pkg.starts_with(root)),
+                "{exe}: {found:?}"
+            );
+        }
     }
 
     #[test]
