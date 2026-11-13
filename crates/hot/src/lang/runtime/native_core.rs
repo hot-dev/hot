@@ -41,7 +41,7 @@ const FUSION_NAMES: &[&str] = &[
 /// Hot-std's own namespaces. A hot-std core function that shares a native
 /// name (such as `::hot::str/length`) is the native one or an alias of it.
 /// The `::hot::test::` namespaces are this repository's tests, not hot-std.
-fn is_hot_std_namespace(namespace: &str) -> bool {
+pub(crate) fn is_hot_std_namespace(namespace: &str) -> bool {
     namespace.starts_with("::hot::") && !namespace.starts_with("::hot::test::")
 }
 
@@ -75,9 +75,11 @@ impl NativeCoreShadows {
         }
         for (path, namespace) in &program.namespaces.namespaces {
             for native in NATIVE_CORE_NAMES {
-                // A function or type the namespace defines is called by id,
-                // never by bare name, from that namespace. A binding of a
-                // value (a var import, an alias, a lambda) is called by name.
+                // A function or type the namespace defines is called by id
+                // or by its qualified name, never by bare name, from that
+                // namespace (the compiler's `shadows_core_function`). A
+                // binding of a value (a var import, an alias, a lambda) is
+                // called by name.
                 let binds = namespace
                     .variables
                     .get(*native)

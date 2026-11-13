@@ -16,7 +16,7 @@ The most common way to distribute packages is via Git:
 2. **Users add the dependency** with git coordinates:
 
 ```hot
-deps: {
+hot.project.my-app.deps {
   "your-org/your-package": {
     "git": "git@github.com:your-org/hot-packages.git",
     "path": "packages/your-package",
@@ -47,7 +47,7 @@ hot-packages/
 Users reference individual packages via `path`:
 
 ```hot
-deps: {
+hot.project.my-app.deps {
   "your-org/package-a": {
     "git": "git@github.com:your-org/hot-packages.git",
     "path": "packages/package-a"
@@ -73,7 +73,7 @@ git push origin v1.0.0
 Users can pin to specific versions:
 
 ```hot
-deps: {
+hot.project.my-app.deps {
   "your-org/your-package": {
     "git": "...",
     "tag": "v1.0.0"
@@ -86,7 +86,7 @@ deps: {
 For bleeding edge, users can track a branch:
 
 ```hot
-deps: {
+hot.project.my-app.deps {
   "your-org/your-package": {
     "git": "...",
     "branch": "main"
@@ -157,7 +157,7 @@ MIT
 The Hot package registry at `pkg.hot.dev` hosts official Hot packages. Use exact version strings to specify dependencies:
 
 ```hot
-deps: {
+hot.project.my-app.deps {
   "hot.dev/stripe": "1.0.0"
 }
 ```

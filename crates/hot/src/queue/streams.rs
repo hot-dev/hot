@@ -2972,6 +2972,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             claimed_at,
             enqueued_at,
             queue_wait,
+            buffered: delivered_at.elapsed(),
             completed: false,
         }))
     }
@@ -3896,6 +3897,8 @@ where
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     queue_wait: Duration,
+    /// How long the entry sat in the prefetch buffer before this claim.
+    buffered: Duration,
     completed: bool,
 }
 
@@ -3912,6 +3915,7 @@ where
             redelivered: self.redelivered
                 || self.prior_deliveries > 0
                 || matches!(self.source, FetchSource::Pending),
+            buffered: Some(self.buffered),
         }
     }
 
@@ -4557,6 +4561,7 @@ mod tests {
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
+            buffered: Duration::ZERO,
             completed: false,
         };
 
@@ -4599,6 +4604,7 @@ mod tests {
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
+            buffered: Duration::ZERO,
             completed: false,
         };
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();

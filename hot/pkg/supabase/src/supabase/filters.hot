@@ -47,11 +47,23 @@ fn (val: Any): Str {
   encode(format-value(val))
 }
 
+// The value of a single-value filter. PostgREST reads everything after the
+// operator as the value, so a quote here would be matched literally. Only
+// list items (`in.(...)`) and `or`/`and` groups are quoted.
+plain-encoded-value
+meta {no-doc: true}
+fn cond (val: Any): Str {
+  is-null(val) => { "null" }
+  => { encode(val) }
+}
+
 filter
 meta {
     doc: """
     Build a filter for any PostgREST operator. Use it for operators without
-    a helper here. The column and value are URL-encoded.
+    a helper here. The column and value are URL-encoded. The value is sent
+    as it is, with no quoting: PostgREST takes the whole rest of the
+    parameter as the value.
 
     **Example**
 
@@ -61,7 +73,7 @@ meta {
     """
 }
 fn (col: Str, op: Str, val: Any): Str {
-  `${encode(col)}=${op}.${format-encoded-value(val)}`
+  `${encode(col)}=${op}.${plain-encoded-value(val)}`
 }
 
 eq
@@ -240,7 +252,7 @@ meta {
     **Example**
 
     ```hot
-    ::supabase::filters/cs("tags", "{a,b}")  // "tags=cs.%22%7Ba%2Cb%7D%22"
+    ::supabase::filters/cs("tags", "{a,b}")  // "tags=cs.%7Ba%2Cb%7D"
     ```
     """
 }
@@ -254,7 +266,7 @@ meta {
     **Example**
 
     ```hot
-    ::supabase::filters/cd("tags", "{a,b,c}")  // "tags=cd.%22%7Ba%2Cb%2Cc%7D%22"
+    ::supabase::filters/cd("tags", "{a,b,c}")  // "tags=cd.%7Ba%2Cb%2Cc%7D"
     ```
     """
 }
@@ -268,7 +280,7 @@ meta {
     **Example**
 
     ```hot
-    ::supabase::filters/ov("tags", "{a,b}")  // "tags=ov.%22%7Ba%2Cb%7D%22"
+    ::supabase::filters/ov("tags", "{a,b}")  // "tags=ov.%7Ba%2Cb%7D"
     ```
     """
 }
@@ -282,7 +294,7 @@ meta {
     **Example**
 
     ```hot
-    ::supabase::filters/fts("description", "hot language")  // "description=fts.%22hot%20language%22"
+    ::supabase::filters/fts("description", "hot language")  // "description=fts.hot%20language"
     ```
     """
 }

@@ -349,7 +349,7 @@ fn
   retrieves-single-contact-by-email(request, {})
 },
 (request: GETAudiencesAudienceIdContactsEmailRequest, opts: Map): GETAudiencesAudienceIdContactsEmailResponse {
-  response api-request("GET", `${::resend/BASE_URL}/audiences/${request.audience-id}/contacts/${request.email}`, {}, "", opts)
+  response api-request("GET", `${::resend/BASE_URL}${contact-email-path(request.audience-id, request.email)}`, {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { GETAudiencesAudienceIdContactsEmailResponse(response.body) }
@@ -359,7 +359,26 @@ fn
 
 PATCHAudiencesAudienceIdContactsEmailRequest type {
   email: Str,
-  audience-id: Str
+  audience-id: Str,
+  first_name: Str?,
+  last_name: Str?,
+  unsubscribed: Bool?
+}
+
+// The path of a contact addressed by email. The address is URL-encoded, so a
+// `+` or `/` in it stays part of the address.
+contact-email-path
+meta {no-doc: true}
+fn (audience-id: Str, email: Str): Str {
+  `/audiences/${audience-id}/contacts/${::hot::uri/encode(email)}`
+}
+
+// The JSON body of a contact update by email: the fields that can change,
+// without the email and audience id that go in the path.
+update-contact-body
+meta {no-doc: true}
+fn (request: PATCHAudiencesAudienceIdContactsEmailRequest): Map {
+  filter-vals({first_name: request.first_name, last_name: request.last_name, unsubscribed: request.unsubscribed}, is-some)
 }
 
 PATCHAudiencesAudienceIdContactsEmailResponse type {
@@ -371,13 +390,17 @@ PATCHAudiencesAudienceIdContactsEmailResponse type {
 update-single-contact-by-email
 meta {
     doc: """
-    Update a contact's details by their email address within a specific
-    audience.
+    Update a contact's `first_name`, `last_name` or `unsubscribed` by their
+    email address within a specific audience.
 
     **Example**
 
     ```hot
-    result ::resend::audiences/update-single-contact-by-email(::resend::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({email: "ada@example.com", audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf"}))
+    result ::resend::audiences/update-single-contact-by-email(::resend::audiences/PATCHAudiencesAudienceIdContactsEmailRequest({
+        email: "ada@example.com",
+        audience-id: "78261eea-8f8b-4381-83c6-79fa7120f1cf",
+        unsubscribed: true
+    }))
     result.id
     ```
     """
@@ -387,7 +410,7 @@ fn
   update-single-contact-by-email(request, {})
 },
 (request: PATCHAudiencesAudienceIdContactsEmailRequest, opts: Map): PATCHAudiencesAudienceIdContactsEmailResponse {
-  response api-request("PATCH", `${::resend/BASE_URL}/audiences/${request.audience-id}/contacts/${request.email}`, {}, "", opts)
+  response api-request("PATCH", `${::resend/BASE_URL}${contact-email-path(request.audience-id, request.email)}`, {}, update-contact-body(request), opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { PATCHAudiencesAudienceIdContactsEmailResponse(response.body) }
@@ -425,7 +448,7 @@ fn
   remove-existing-contact-by-email(request, {})
 },
 (request: DELETEAudiencesAudienceIdContactsEmailRequest, opts: Map): DELETEAudiencesAudienceIdContactsEmailResponse {
-  response api-request("DELETE", `${::resend/BASE_URL}/audiences/${request.audience-id}/contacts/${request.email}`, {}, "", opts)
+  response api-request("DELETE", `${::resend/BASE_URL}${contact-email-path(request.audience-id, request.email)}`, {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { DELETEAudiencesAudienceIdContactsEmailResponse(response.body) }

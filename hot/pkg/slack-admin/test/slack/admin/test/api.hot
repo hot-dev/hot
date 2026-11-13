@@ -243,3 +243,16 @@ meta ["test"] fn () {
     result ::analytics/file-result(ok-response({ok: false, error: "file_not_yet_available"}))
     assert-eq("file_not_yet_available", err-value(result).error)
 }
+
+// The analytics calls take the trailing `opts` every other call takes. A
+// blank token in opts is refused by the resolver, so nothing is sent.
+test-analytics-takes-per-call-opts
+meta ["test"] fn () {
+    request ::analytics/GetFileRequest({type: "member", date: "2026-10-31"})
+    file ::analytics/get-file(request, {token: ""})
+    assert(is-err(file), "get-file reads the token from opts")
+    assert(contains(Str(err-value(file)), "token"), Str(err-value(file)))
+    records ::analytics/get-records(request, {token: ""})
+    assert(is-err(records), "get-records passes opts on")
+    assert(contains(Str(err-value(records)), "token"), Str(err-value(records)))
+}

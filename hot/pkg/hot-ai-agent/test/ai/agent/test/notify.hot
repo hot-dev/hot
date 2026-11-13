@@ -157,3 +157,23 @@ fn () {
     assert-eq("body-4", first(limited).body)
     assert-eq("body-5", last(limited).body)
 }
+
+// Recipient ids may contain colons. One id being a prefix of another must not
+// leak, mark or delete the other recipient's notifications.
+test-recipient-ids-with-colons-stay-separate
+meta ["test"]
+fn () {
+    r build-rt()
+    channel ::notify/record-notification(r, {recipient-id: "channel:slack:T1", kind: "x", body: "for the channel"})
+    thread ::notify/record-notification(r, {recipient-id: "channel:slack:T1:thread", kind: "x", body: "for the thread"})
+
+    assert-eq(["for the channel"], map(::notify/list-notifications(r, "channel:slack:T1", null), %.body))
+    assert-eq(["for the thread"], map(::notify/list-notifications(r, "channel:slack:T1:thread", null), %.body))
+    assert-eq(1, ::notify/unread-count(r, "channel:slack:T1"))
+
+    assert(is-null(::notify/mark-read(r, "channel:slack:T1", thread.id)), "cannot mark another recipient's notification")
+    assert(not(::notify/forget-notification(r, "channel:slack:T1", thread.id)), "cannot delete another recipient's notification")
+    assert-eq(1, ::notify/unread-count(r, "channel:slack:T1:thread"))
+    assert(::notify/forget-notification(r, "channel:slack:T1", channel.id))
+    assert-eq(1, length(::notify/list-notifications(r, "channel:slack:T1:thread", null)))
+}

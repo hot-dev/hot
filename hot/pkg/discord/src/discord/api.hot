@@ -474,7 +474,9 @@ meta {
     doc: """
     The `Authorization` header for a call's `options`. With `auth: false`
     it's always `{}`: a `token` there is still checked and masked, but never
-    sent. An Err when `resolve` has no usable token.
+    sent. A `bearer` (a user's OAuth2 access token) is sent as
+    `Bearer <token>` in place of the bot token, for the routes that only
+    accept a user token. An Err when `resolve` has no usable token.
 
     **Example**
 
@@ -484,13 +486,25 @@ meta {
 
     // Token-in-path routes send no Authorization header
     ::discord::api/auth-headers({auth: false})
+
+    // A user's OAuth2 access token is sent as Bearer, and no bot token is read
+    ::discord::api/auth-headers({bearer: "user-access-token"})  // {Authorization: "Bearer user-access-token"}
     ```
     """
 }
 fn (options: Map): Map {
   has-token in("token", keys(options))
+  has-bearer in("bearer", keys(options))
   no-auth eq(get(options, "auth"), false)
   cond {
+    and(has-bearer, not(no-auth)) => {
+      bearer non-blank(get(options, "bearer"))
+      cond {
+        is-null(bearer) => { err("discord: bearer is in the call's opts but is blank or null. Pass a user's OAuth2 access token.") }
+        => { {Authorization: `Bearer ${::ctx/mark-secret(bearer)}`} }
+      }
+    }
+
     and(no-auth, not(has-token)) => { {} }
     => {
       resolved resolve(if(has-token, {token: get(options, "token")}, {}))
@@ -515,6 +529,7 @@ meta {
     - `reason`: audit-log reason, sent as `X-Audit-Log-Reason`
     - `auth`: `false` for webhook-token and interaction routes, which take no bot token
     - `token`: explicit bot token instead of `discord.bot.token`
+    - `bearer`: a user's OAuth2 access token, sent as `Bearer` instead of a bot token
     - `boundary`: fixed multipart boundary (tests)
 
     Returns an Err when the call has no usable bot token.
@@ -571,8 +586,9 @@ send
 meta {
     doc: """
     Build and send a call, then return `finish` of the response. `opts` is
-    the caller's per-call credentials. An Err from building or from the
-    transport comes back as is.
+    the caller's per-call credentials: `token` (a bot token) or `bearer` (a
+    user's OAuth2 access token). An Err from building or from the transport
+    comes back as is.
 
     **Example**
 
@@ -583,7 +599,8 @@ meta {
     """
 }
 fn (method: Str, path: Str, options: Map, opts: Map, finish: Fn): Any {
-  merged if(in("token", keys(opts)), {...options, token: get(opts, "token")}, options)
+  with-token if(in("token", keys(opts)), {...options, token: get(opts, "token")}, options)
+  merged if(in("bearer", keys(opts)), {...with-token, bearer: get(opts, "bearer")}, with-token)
   req build-request(method, path, merged)
   cond {
     is-err(req) => { req }

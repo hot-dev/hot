@@ -10,6 +10,7 @@ Declare your package's dependencies on other packages.
 
 Package dependencies use the same format as project dependencies:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "org/package-name": "1.0.0"
@@ -18,6 +19,7 @@ deps: {
 
 Or with a specification object for more control:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "org/package-name": { /* spec */ }
@@ -30,6 +32,7 @@ deps: {
 
 For published packages, use a version string. A version is always required—there is no "latest" resolution:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "hot.dev/anthropic": "1.0.0"
@@ -42,6 +45,7 @@ deps: {
 
 For packages in a monorepo that depend on each other, use local with git fallback:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "hot.dev/aws-core": {
@@ -60,6 +64,7 @@ This pattern:
 
 For external packages:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "other-org/their-package": {
@@ -82,6 +87,7 @@ When your package is used as a dependency:
 
 Your package `aws-s3` has this in its `pkg.hot`:
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "hot.dev/aws-core": {
@@ -96,7 +102,7 @@ deps: {
 
 ```hot
 // User's hot.hot
-deps: {
+hot.project.my-app.deps {
   "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" },
   "hot.dev/aws-core": { "local": "./hot/pkg/aws-core" }
 }
@@ -108,7 +114,7 @@ Result: Both use local paths (user's override for `aws-core`).
 
 ```hot
 // User's hot.hot
-deps: {
+hot.project.my-app.deps {
   "hot.dev/aws-s3": { "local": "./hot/pkg/aws-s3" }
 }
 ```
@@ -119,7 +125,7 @@ Result: `aws-s3` uses local, `aws-core` resolved via git fallback from `aws-s3`'
 
 ```hot
 // User's hot.hot
-deps: {
+hot.project.my-app.deps {
   "hot.dev/aws-s3": {
     "git": "git@github.com:hot-dev/hot.git",
     "path": "hot/pkg/aws-s3"
@@ -133,6 +139,7 @@ Result: `aws-s3` cloned from git, `aws-core` also resolved from git.
 
 ### 1. Use Version Strings for Published Packages
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "hot.dev/anthropic": "1.0.0",
@@ -142,6 +149,7 @@ deps: {
 
 ### 2. Use Local+Git for Monorepo Packages
 
+<!-- hot-check: fragment -->
 ```hot
 deps: {
   "hot.dev/sibling-package": {

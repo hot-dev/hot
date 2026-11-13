@@ -47,10 +47,14 @@ hot dev -d                        # Daemon mode (background)
 Set `hot.dev.open true` in your `hot.hot` to always open the browser on start.
 
 `hot dev`, `hot api`, `hot app`, `hot worker`, `hot task-worker` and
-`hot scheduler` also take `--queue.type` (`memory`, `sqlite`, `redis`),
-`--redis.uri` and `--serialization.type`. The last sets how queue messages are
-serialized: `json`, or `zstdjson` (compressed, the default when
+`hot scheduler` also take `-d, --daemon`, `--queue.type` (`memory`, `sqlite`,
+`redis`), `--redis.uri` and `--serialization.type`. The last sets how queue
+messages are serialized: `json`, or `zstdjson` (compressed, the default when
 `hot.serialization.type` is unset).
+
+`hot dev`, `hot api` and `hot app` take `--api.host`, `--api.port`,
+`--app.host` and `--app.port`. Each sets the `hot.api.*` or `hot.app.*` key of
+the same name.
 
 ### hot api
 
@@ -376,9 +380,13 @@ List available builds.
 > **Note:** This command connects to Hot Cloud by default. To list builds from your local database, pass `--local`. It reads the database in `hot.db.uri` directly, so no server needs to be running.
 
 ```bash
-hot builds              # List builds on Hot Cloud
-hot builds --local      # List builds from the local database
+hot builds                         # List builds on Hot Cloud
+hot builds --local                 # List builds from the local database
+hot builds --limit 50 --offset 50  # The second page of 50
 ```
+
+`--limit` is the number of builds to show (default: 20) and `--offset` the
+number to skip (default: 0).
 
 ### hot compile
 
@@ -404,6 +412,9 @@ hot deploy --local      # Deploy through the local database (local dev or self-h
 
 `hot build`, `hot compile` and `hot deploy` stop with an error when `-p` names
 a project `hot.hot` doesn't define.
+
+A `hot deploy` that builds from source runs the same secret-shape scan as
+`hot build`. `--allow-secret-shape` skips it.
 
 #### Required context variables
 
@@ -569,9 +580,18 @@ hot conf generate scheduler    # Generate Scheduler config
 hot conf generate -o hot.hot   # Write template to file
 ```
 
+`-o, --output` names the file to write. Without it, the template goes to
+stdout.
+
+`hot conf` shows the configuration a command would run with, so it takes the
+options of the service commands and of `hot test`: `-d, --daemon`,
+`--api.host`, `--api.port`, `--app.host`, `--app.port`, `--queue.type`,
+`--redis.uri`, `--serialization.type`, `--worker.threads`, `--test.capture`
+and `--integration`.
+
 Available templates:
 - **(default)** — Minimal configuration for local development (~25 lines)
-- **all** — Full configuration with all available options (~390 lines)
+- **all** — Full configuration with all available options (~470 lines)
 - **api** — API server configuration (for self-hosting)
 - **app** — App server configuration (for self-hosting)
 - **worker** — Worker configuration (for self-hosting)
@@ -593,7 +613,7 @@ hot db migrate --status          # Print the migration level as one JSON line; c
 hot db provision-store-indexes   # Create PostgreSQL vector indexes for stores
 hot db port-v1-to-v2             # Port a Hot 1.x SQLite database to Hot 2
 hot db redeploy                  # Redeploy the deployments another major version built
-hot db move-storage              # Move builds or files to another storage backend
+hot db move-storage --role file --to s3 --bucket acme-hot   # Move files or builds to another storage backend
 ```
 
 On PostgreSQL, `hot db migrate`, including `--status`, and

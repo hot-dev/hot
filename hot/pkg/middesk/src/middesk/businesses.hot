@@ -197,7 +197,9 @@ find-by-external-id
 meta {
     doc: """
     The business (list item) with this `external_id`, or null. Fetch the
-    full report with `get-business`.
+    full report with `get-business`. The match is checked here: an Err if
+    Middesk answers with a business that has another `external_id`, which
+    means it did not apply the filter.
 
     **Example**
 
@@ -215,10 +217,20 @@ fn
   page list-businesses({external_id: external-id, per_page: 1}, options)
   cond {
     is-err(page) => { page }
-    => {
-      data or(get(page, "data"), [])
-      if(is-empty(data), null, first(data))
-    }
+    => { match-external-id(or(get(page, "data"), []), external-id) }
+  }
+}
+
+// The item with this `external_id`. A page of other businesses means the
+// filter was not applied, so the answer is unknown, not "not found".
+match-external-id
+meta {no-doc: true}
+fn (data: Vec, external-id: Str): Map? {
+  hit find-first(data, (b) { eq(get(b, "external_id"), external-id) })
+  cond {
+    is-some(hit) => { hit }
+    is-empty(data) => { null }
+    => { err(`middesk: the external_id filter was not applied, so '${external-id}' cannot be looked up this way. List businesses and match external_id yourself.`) }
   }
 }
 

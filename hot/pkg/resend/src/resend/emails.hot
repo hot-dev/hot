@@ -164,24 +164,39 @@ fn
 }
 
 PATCHEmailsEmailIdRequest type {
-  email-id: Str
+  email-id: Str,
+  scheduled_at: Str?
 }
 
 PATCHEmailsEmailIdResponse type {
+    object: Str?,
+    id: Str?,
     scheduled_at: Str?
+}
+
+// The JSON body of an email update: the fields that can change, without the
+// id that goes in the path.
+update-email-body
+meta {no-doc: true}
+fn (request: PATCHEmailsEmailIdRequest): Map {
+  filter-vals({scheduled_at: request.scheduled_at}, is-some)
 }
 
 
 update-single-email
 meta {
     doc: """
-    Update a scheduled email. Only emails that have not yet been sent can be
-    updated.
+    Reschedule a scheduled email: `scheduled_at` is the new send time. Only
+    emails that have not yet been sent can be updated.
 
     **Example**
 
     ```hot
-    ::resend::emails/update-single-email(::resend::emails/PATCHEmailsEmailIdRequest({email-id: "4ef9a417-02e9-4d39-ad75-9611e0fcc33c"}))
+    updated ::resend::emails/update-single-email(::resend::emails/PATCHEmailsEmailIdRequest({
+        email-id: "4ef9a417-02e9-4d39-ad75-9611e0fcc33c",
+        scheduled_at: "2026-12-01T09:00:00Z"
+    }))
+    updated.id
     ```
     """
 }
@@ -190,7 +205,7 @@ fn
   update-single-email(request, {})
 },
 (request: PATCHEmailsEmailIdRequest, opts: Map): PATCHEmailsEmailIdResponse {
-  response api-request("PATCH", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, "", opts)
+  response api-request("PATCH", `${::resend/BASE_URL}/emails/${request.email-id}`, {}, update-email-body(request), opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { PATCHEmailsEmailIdResponse(response.body) }

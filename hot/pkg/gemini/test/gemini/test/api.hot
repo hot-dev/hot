@@ -244,3 +244,30 @@ test-resolve-marks-the-opts-credential-and-returns-it-unchanged
 meta ["test"] fn () {
     assert-eq("tenant-credential-a", ::api/resolve({api-key: "tenant-credential-a"}).api-key)
 }
+
+// ============================================================================
+// Cached content paths
+// ============================================================================
+
+// The URL a refused call was sent to.
+offline-url fn (call: Fn): Str {
+    result ::hot::internal::exec/contain(call)
+    Str(err-value(result))
+}
+
+// The API's resource name already carries the `cachedContents/` prefix.
+test-cached-content-path-takes-a-resource-name
+meta ["test"] fn () {
+    assert-eq("/v1/cachedContents/abc123", ::cached/cached-content-path("cachedContents/abc123"))
+    assert-eq("/v1/cachedContents/abc123", ::cached/cached-content-path("abc123"), "a bare id")
+}
+
+test-cached-content-calls-use-one-prefix
+meta ["test"] fn () {
+    name "cachedContents/abc123"
+    got ::cached/get(::cached/CachedContentsGetRequest({name: name}), OFFLINE)
+    assert(is-err(got))
+    assert(contains(offline-url(() { ::cached/get(::cached/CachedContentsGetRequest({name: name}), OFFLINE) }), "(http://127.0.0.1:1/v1/cachedContents/abc123)"), "get")
+    assert(contains(offline-url(() { ::cached/delete(::cached/CachedContentsDeleteRequest({name: name}), OFFLINE) }), "(http://127.0.0.1:1/v1/cachedContents/abc123)"), "delete")
+    assert(contains(offline-url(() { ::cached/update(name, "ttl", ::cached/CachedContentsUpdateRequest({ttl: "60s"}), OFFLINE) }), "(http://127.0.0.1:1/v1/cachedContents/abc123?updateMask=ttl)"), "update")
+}

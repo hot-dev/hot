@@ -60,6 +60,23 @@ apply(3, add(%, 1))   // 4
 A `lazy` parameter is the exception. It holds a deferred argument, so calling
 its name still calls the function.
 
+A function that a namespace defines under a core function's name takes that
+name for the whole namespace. Every bare call there reaches it: at any
+argument count, with a spread, in a pipe, as a value, above or below its
+definition. `hot check` checks those calls against it:
+
+```hot
+add fn (a: Str, b: Str): Str { `${a} and ${b}` }
+
+add("salt", "pepper")   // "salt and pepper"
+```
+
+Here `add(1, 2)` is a `type-mismatch`, since this `add` takes two `Str`. And
+`add(1, 2, 3)` is an `arity-mismatch`. It does not reach the core `add`. Call
+the core function by its path, `::hot::math/add(1, 2, 3)`, or give yours
+another name. A function imported under a core name works the same way.
+Other namespaces still reach the core `add`.
+
 ## Qualified Calls
 
 Call functions from other namespaces using the full path:
@@ -370,6 +387,7 @@ sum-acc fn cond (xs: Vec, acc: Int): Int {
 - Use `fn cond` for conditional functions, `fn parallel` for concurrent execution
 - Call with no space before `(`: `func(args)`
 - Parameters and local bindings shadow functions with the same name
+- A namespace's own or imported function shadows a core function of the same name
 - Overload by arity or type
 - Use lambdas `(x) { body }` for inline functions, or `%` for concise single-param lambdas
 - Mark parameters `lazy` to defer evaluation of their arguments

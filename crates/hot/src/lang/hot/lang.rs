@@ -492,6 +492,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     // IMPORTANT: `call` must ONLY invoke compiled Hot functions (user-defined).
     // Do NOT dispatch to hotlib here; `call-lib` handles that. This prevents
     // recursion where hot test runner code calls back into `call` via hotlib.
+    let arg_count = arg_vals.len();
     if let Some(function_id) =
         vm.find_best_user_function_overload(&resolved_function_name, &arg_vals)
     {
@@ -525,12 +526,19 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         };
     }
 
-    // Not found among compiled functions: instruct caller to use call-lib for hotlib
+    // A function of that name that takes another number of arguments, or
+    // nothing among compiled functions: instruct caller to use call-lib for
+    // hotlib
     vm.decrement_call_depth();
-    HotResult::Err(Val::from(format!(
-        "Function '{}' not found in compiled Hot functions. Use `call-lib` for hotlib functions.",
-        resolved_function_name
-    )))
+    let message = vm
+        .arity_mismatch_message(&resolved_function_name, arg_count)
+        .unwrap_or_else(|| {
+            format!(
+                "Function '{}' not found in compiled Hot functions. Use `call-lib` for hotlib functions.",
+                resolved_function_name
+            )
+        });
+    HotResult::Err(Val::from(message))
 }
 
 fn contain_success(value: Val) -> HotResult<Val> {
@@ -715,6 +723,7 @@ pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     };
 
     // Call the function and catch ANY error
+    let arg_count = arg_vals.len();
     if let Some(function_id) =
         vm.find_best_user_function_overload(&resolved_function_name, &arg_vals)
     {
@@ -724,13 +733,15 @@ pub fn contain(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
     }
 
     vm.decrement_call_depth();
-    contain_error(
-        vm,
-        format!(
-            "Function '{}' not found in compiled Hot functions",
-            resolved_function_name
-        ),
-    )
+    let message = vm
+        .arity_mismatch_message(&resolved_function_name, arg_count)
+        .unwrap_or_else(|| {
+            format!(
+                "Function '{}' not found in compiled Hot functions",
+                resolved_function_name
+            )
+        });
+    contain_error(vm, message)
 }
 
 /// VM-aware resolve function with proper namespace scoping (implements ::hot::lang/resolve)

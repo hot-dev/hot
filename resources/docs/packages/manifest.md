@@ -11,7 +11,7 @@ The `pkg.hot` file defines your package's metadata and dependencies.
 ```hot
 ::hot::pkg ns
 
-hot.pkg.<package-name> {
+hot.pkg.package-name {
   name: "package-name",
   version: "0.1.0",
   description: "Package description",

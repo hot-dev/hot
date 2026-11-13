@@ -2,7 +2,7 @@
 
 hot.pkg.slack-admin {
   name: "hot.dev/slack-admin",
-  version: "0.11.2",
+  version: "0.11.3",
   hot-min-version: "3.0.3",
   description: "Slack Admin API (admin.*) bindings for Hot on Enterprise organizations: conversations (bulk archive/delete/move, retention, sharing), workspaces, users and sessions, apps, emoji, invite requests, IDP groups, roles, information barriers, auth policies, analytics, workflows and functions, with ok:false error handling and cursor pagination.",
   author: "Hot Dev",
@@ -10,7 +10,7 @@ hot.pkg.slack-admin {
   license: "Apache-2.0",
   tags: ["messaging"],
   deps: {
-    "hot.dev/slack": "1.2.1"
+    "hot.dev/slack": "1.2.2"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

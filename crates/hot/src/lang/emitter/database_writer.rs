@@ -1742,7 +1742,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             (Some(timing.queue_wait_us), None)
         };
 
-        Some(serde_json::json!({
+        let mut info = serde_json::json!({
             "queue_timing": {
                 "backend": timing.backend.clone(),
                 "enqueued_at": timing.enqueued_at.map(|value| value.to_rfc3339()),
@@ -1754,7 +1754,52 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 "handler_dispatch_wait_us": handler_dispatch_wait_us,
                 "worker_preparation_us": worker_preparation_us,
             }
-        }))
+        });
+        Self::add_stage_timing(
+            &mut info["queue_timing"],
+            timing,
+            handler_dispatched_at,
+            start_time,
+        );
+        Some(info)
+    }
+
+    /// Split the two claim-to-start windows by stage, where the worker
+    /// stamped the points between them. `handler_dispatch_wait_us` is the
+    /// hand-off, hydrate and handler lookup; `worker_preparation_us` is the
+    /// handler's setup, its wait for a blocking slot and the VM's start.
+    fn add_stage_timing(
+        info: &mut serde_json::Value,
+        timing: &crate::lang::event::QueueExecutionTiming,
+        handler_dispatched_at: chrono::DateTime<chrono::Utc>,
+        start_time: chrono::DateTime<chrono::Utc>,
+    ) {
+        let between = |from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>| {
+            to.signed_duration_since(from)
+                .num_microseconds()
+                .unwrap_or(0)
+                .max(0)
+        };
+        let stages = &timing.stages;
+        if let Some(prefetch_wait_us) = stages.prefetch_wait_us {
+            info["prefetch_wait_us"] = prefetch_wait_us.into();
+        }
+        if let Some(executor_started_at) = stages.executor_started_at {
+            info["handoff_wait_us"] = between(timing.claimed_at, executor_started_at).into();
+            if let Some(hydrated_at) = stages.hydrated_at {
+                info["hydrate_us"] = between(executor_started_at, hydrated_at).into();
+                // For a second or later handler of one event this includes
+                // the handlers that ran before it, as the window it splits does.
+                info["handler_lookup_us"] = between(hydrated_at, handler_dispatched_at).into();
+            }
+        }
+        if let Some(vm_scheduled_at) = stages.vm_scheduled_at {
+            let slot_wait_us = stages.blocking_slot_wait_us.unwrap_or(0);
+            let setup_us = between(handler_dispatched_at, vm_scheduled_at);
+            info["handler_setup_us"] = (setup_us.saturating_sub(slot_wait_us as i64).max(0)).into();
+            info["blocking_slot_wait_us"] = slot_wait_us.into();
+            info["vm_start_us"] = between(vm_scheduled_at, start_time).into();
+        }
     }
 
     /// The `info` a run starts with: its queue timing, and `call_tracing:
@@ -3239,6 +3284,7 @@ mod tests {
             queue_wait_us: 7_000,
             redelivered: false,
             handler_dispatched_at: Some(claimed_at + chrono::Duration::milliseconds(3)),
+            stages: Default::default(),
         });
 
         let info = DatabaseWriter::queue_timing_info(
@@ -3250,6 +3296,44 @@ mod tests {
         assert_eq!(info["queue_timing"]["queue_wait_us"], 7_000);
         assert_eq!(info["queue_timing"]["handler_dispatch_wait_us"], 3_000);
         assert_eq!(info["queue_timing"]["worker_preparation_us"], 8_000);
+        // No stage was stamped, so none is reported.
+        assert!(info["queue_timing"].get("hydrate_us").is_none());
+        assert!(info["queue_timing"].get("vm_start_us").is_none());
+    }
+
+    #[test]
+    fn queue_timing_info_splits_the_claim_to_start_windows_by_stage() {
+        let claimed_at = chrono::Utc::now();
+        let at = |ms| claimed_at + chrono::Duration::milliseconds(ms);
+        let mut context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 4);
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: Some(at(-7)),
+            claimed_at,
+            queue_wait_us: 7_000,
+            redelivered: false,
+            handler_dispatched_at: Some(at(6)),
+            stages: crate::lang::event::QueueStageTiming {
+                prefetch_wait_us: Some(2_000),
+                executor_started_at: Some(at(1)),
+                hydrated_at: Some(at(4)),
+                blocking_slot_wait_us: Some(5_000),
+                vm_scheduled_at: Some(at(15)),
+            },
+        });
+
+        let info = DatabaseWriter::queue_timing_info(&context, at(16)).unwrap();
+        let timing = &info["queue_timing"];
+        assert_eq!(timing["prefetch_wait_us"], 2_000);
+        // The stages add up to the windows they split.
+        assert_eq!(timing["handoff_wait_us"], 1_000);
+        assert_eq!(timing["hydrate_us"], 3_000);
+        assert_eq!(timing["handler_lookup_us"], 2_000);
+        assert_eq!(timing["handler_dispatch_wait_us"], 6_000);
+        assert_eq!(timing["handler_setup_us"], 4_000);
+        assert_eq!(timing["blocking_slot_wait_us"], 5_000);
+        assert_eq!(timing["vm_start_us"], 1_000);
+        assert_eq!(timing["worker_preparation_us"], 10_000);
     }
 
     #[test]
@@ -3263,6 +3347,7 @@ mod tests {
             queue_wait_us: 20_000_000,
             redelivered: true,
             handler_dispatched_at: Some(claimed_at),
+            stages: Default::default(),
         });
 
         let info = DatabaseWriter::queue_timing_info(
@@ -3297,6 +3382,7 @@ mod tests {
             queue_wait_us: 1,
             redelivered: false,
             handler_dispatched_at: None,
+            stages: Default::default(),
         });
         let info = DatabaseWriter::run_start_info(&context, now).unwrap();
         assert_eq!(info["call_tracing"], false);
@@ -3350,6 +3436,7 @@ mod tests {
             queue_wait_us: 10,
             redelivered: false,
             handler_dispatched_at: Some(claimed_at),
+            stages: Default::default(),
         });
         DatabaseWriter::backfill_run_provenance(
             &db,

@@ -779,8 +779,8 @@ pub struct TypeChecker {
     variant_reads: AHashMap<String, Source>,
     /// Counts changes to the registries an annotation resolves against
     /// (`qualified_types`, `custom_constructors`, `core_types`,
-    /// `known_types`). Every write to one of them bumps it, which retires
-    /// `annotation_scratch`.
+    /// `known_types`, `type_imports`). Every write to one of them bumps it,
+    /// which retires `annotation_scratch`.
     registry_generation: u64,
     /// Annotations already parsed by [`Self::parse_type_annotation_pure`],
     /// with the checker that parses them.
@@ -792,7 +792,10 @@ pub struct TypeChecker {
 struct AnnotationScratch {
     generation: u64,
     checker: Box<TypeChecker>,
-    parsed: AHashMap<String, TypeExpr>,
+    /// The namespace `checker` is set to read annotations in.
+    namespace: Option<String>,
+    /// Namespace → annotation → what it resolves to there.
+    parsed: AHashMap<String, AHashMap<String, TypeExpr>>,
 }
 
 impl Default for TypeChecker {
@@ -1282,6 +1285,7 @@ impl TypeChecker {
                     .cloned();
                 match resolved {
                     Some(resolved) => {
+                        self.registry_generation += 1;
                         self.type_imports.insert(name.clone(), resolved);
                         false
                     }
@@ -1486,9 +1490,11 @@ impl TypeChecker {
                         return self.apply_annotation_constraint_pure(
                             self.infer_val_type(val),
                             var.type_annotation.as_deref(),
+                            ns_str,
+                            alias_map,
                         );
                     }
-                    self.parse_type_annotation_pure(annotation)
+                    self.parse_type_annotation_pure(annotation, ns_str, alias_map)
                 } else {
                     self.infer_val_type(val)
                 }
@@ -1502,14 +1508,14 @@ impl TypeChecker {
                         .map(|arg| {
                             arg.type_annotation
                                 .as_ref()
-                                .map(|s| self.parse_type_annotation_pure(s))
+                                .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                                 .unwrap_or(TypeExpr::Any)
                         })
                         .collect();
                     let ret = first
                         .return_type
                         .as_ref()
-                        .map(|s| self.parse_type_annotation_pure(s))
+                        .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                         .unwrap_or(TypeExpr::Any);
                     TypeExpr::Function(params, Box::new(ret))
                 } else {
@@ -1524,7 +1530,7 @@ impl TypeChecker {
                     .map(|arg| {
                         arg.type_annotation
                             .as_ref()
-                            .map(|s| self.parse_type_annotation_pure(s))
+                            .map(|s| self.parse_type_annotation_pure(s, ns_str, alias_map))
                             .unwrap_or(TypeExpr::Any)
                     })
                     .collect();
@@ -1594,7 +1600,12 @@ impl TypeChecker {
             }
             _ => TypeExpr::Any,
         };
-        self.apply_annotation_constraint_pure(inferred, var.type_annotation.as_deref())
+        self.apply_annotation_constraint_pure(
+            inferred,
+            var.type_annotation.as_deref(),
+            ns_str,
+            alias_map,
+        )
     }
 
     /// Resolve a `Ref::Ns` to a fully-qualified `::ns/var` key and look it up
@@ -1678,7 +1689,18 @@ impl TypeChecker {
     /// pre-pass where we don't want to mutate the checker. Falls through to
     /// the regular parser; we only call it for declared annotations, which
     /// are the simple cases the parser already handles deterministically.
-    fn parse_type_annotation_pure(&self, annotation: &str) -> TypeExpr {
+    ///
+    /// The annotation is read as `namespace` reads it, through that
+    /// namespace's `aliases`, own types and var imports. Read with no
+    /// namespace, `::m/Config` kept its alias and `Config` found no type of
+    /// its own, and the leftover name then stood for whichever `Config` the
+    /// program declared last.
+    fn parse_type_annotation_pure(
+        &self,
+        annotation: &str,
+        namespace: &str,
+        aliases: &AHashMap<String, String>,
+    ) -> TypeExpr {
         // Most annotations are a built-in name, which needs no registry.
         if let Some(builtin) = self.try_resolve_builtin_type(annotation.trim()) {
             return builtin;
@@ -1686,11 +1708,12 @@ impl TypeChecker {
 
         // The mutating path is only "mutating" because it might emit errors;
         // for the pre-pass we discard those by routing through a scratch
-        // checker. Its answer depends only on the annotation and the four
-        // registries copied here, so one scratch serves every annotation
-        // until a registry changes. (Building a checker and cloning the
-        // registries per annotation made the pre-pass cost annotations x
-        // types: most of the type check on a large project.)
+        // checker. Its answer depends only on the annotation, the namespace
+        // it is read in and the registries copied here, so one scratch
+        // serves every annotation until a registry changes. (Building a
+        // checker and cloning the registries per annotation made the
+        // pre-pass cost annotations x types: most of the type check on a
+        // large project.)
         let mut slot = self.annotation_scratch.borrow_mut();
         if slot
             .as_ref()
@@ -1701,21 +1724,36 @@ impl TypeChecker {
             checker.custom_constructors = self.custom_constructors.clone();
             checker.core_types = self.core_types.clone();
             checker.known_types = self.known_types.clone();
+            checker.type_imports = self.type_imports.clone();
+            checker.held_namespaces = self.held_namespaces.clone();
+            checker.declared_names = self.declared_names.clone();
             *slot = Some(AnnotationScratch {
                 generation: self.registry_generation,
                 checker,
+                namespace: None,
                 parsed: AHashMap::new(),
             });
         }
         let scratch = slot.as_mut().expect("scratch was just ensured");
-        if let Some(parsed) = scratch.parsed.get(annotation) {
+        if let Some(parsed) = scratch
+            .parsed
+            .get(namespace)
+            .and_then(|parsed| parsed.get(annotation))
+        {
             return parsed.clone();
+        }
+        if scratch.namespace.as_deref() != Some(namespace) {
+            scratch.checker.context.current_namespace = namespace.to_string();
+            scratch.checker.context.set_current_aliases(aliases.clone());
+            scratch.namespace = Some(namespace.to_string());
         }
         let parsed = scratch.checker.parse_type_annotation(annotation, None);
         // Only the type is wanted; drop whatever the parse reported.
         scratch.checker.errors = CompilerErrors::new();
         scratch
             .parsed
+            .entry(namespace.to_string())
+            .or_default()
             .insert(annotation.to_string(), parsed.clone());
         parsed
     }
@@ -3774,13 +3812,20 @@ impl TypeChecker {
                 self.check_arm_variants(match_expr.arms.iter());
                 // Walk each arm once; a nested match walked again per
                 // level would cost exponential time in the nesting depth.
-                let mut arm_types: Vec<TypeExpr> = match_expr
-                    .arms
+                let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
+                let held = self.arm_subject_types(
+                    subject_name.as_deref(),
+                    &arm_refs,
+                    !match_expr.match_all,
+                );
+                let mut arm_types: Vec<TypeExpr> = arm_refs
                     .iter()
-                    .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
+                    .zip(held)
+                    .map(|(arm, held)| {
+                        self.infer_match_arm_body(arm, subject_name.as_deref(), held)
+                    })
                     .collect();
                 if !match_expr.match_all {
-                    let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
                     let location = match_expr
                         .src
                         .as_ref()
@@ -4038,11 +4083,13 @@ impl TypeChecker {
         &self,
         actual: TypeExpr,
         annotation: Option<&str>,
+        namespace: &str,
+        aliases: &AHashMap<String, String>,
     ) -> TypeExpr {
         let Some(annotation) = annotation else {
             return actual;
         };
-        let constraint = self.parse_type_annotation_pure(annotation);
+        let constraint = self.parse_type_annotation_pure(annotation, namespace, aliases);
         if matches!(constraint, TypeExpr::Map(_, _)) {
             return constraint;
         }
@@ -4233,7 +4280,15 @@ impl TypeChecker {
     /// that using it as the payload is reported (`variant-as-payload`). A
     /// binding whose type the pattern doesn't tell is bound as `Any`, so it
     /// still shadows an outer name or a function of the same name.
-    fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
+    ///
+    /// `held` is what a union-typed subject holds inside this arm, as
+    /// [`Self::arm_subject_types`] works it out.
+    fn infer_match_arm_body(
+        &mut self,
+        arm: &MatchArm,
+        subject: Option<&str>,
+        held: Option<TypeExpr>,
+    ) -> TypeExpr {
         let (payload, matched) = match (&arm.type_name, &arm.variant) {
             (Some(type_name), Some(variant)) if arm.alternatives.is_empty() => {
                 let payload = self.variant_payload_type(type_name, variant);
@@ -4244,11 +4299,9 @@ impl TypeChecker {
                 };
                 (payload, matched)
             }
-            (Some(type_name), None) if arm.alternatives.is_empty() => {
-                let member = self.union_member_named(subject, type_name);
-                (member.clone(), member)
-            }
-            _ => (None, None),
+            // A type arm, or the default arm: the binding of a type arm
+            // holds the same value the matched name does.
+            _ => (held.clone().filter(|_| arm.type_name.is_some()), held),
         };
         let mut bindings: Vec<(&str, TypeExpr)> = Vec::new();
         if let (Some(name), Some(matched)) = (subject, matched) {
@@ -4589,28 +4642,175 @@ impl TypeChecker {
         }
     }
 
-    /// The member of a union-typed `match` subject that a type arm names
-    /// (`HttpError =>` on `Response | HttpError`), which the subject holds
-    /// inside that arm. Members are matched by short name, as exhaustiveness
-    /// matches them, so an imported or qualified arm name finds its type.
-    /// `None` when the subject is not a variable typed as a union, or not
-    /// exactly one member has that name.
-    fn union_member_named(&self, subject: Option<&str>, type_name: &str) -> Option<TypeExpr> {
-        let TypeExpr::Union(members) = self.context.get_variable_type(subject?)? else {
-            return None;
+    /// What a `match` subject typed as a union holds inside each of `arms`.
+    ///
+    /// A type arm holds the members it names: `HttpError =>` on
+    /// `Response | HttpError` the one, `Int | Dec =>` on `Int | Dec | Str`
+    /// the two. In a first-match `match` the default arm holds the members
+    /// no earlier arm takes whole, as a value of any other member never
+    /// reaches it. `None` for an arm that tells no more than the declared
+    /// type does: a variant or value arm, an arm naming no member, and
+    /// every arm when the subject is not a variable typed as a union.
+    fn arm_subject_types(
+        &self,
+        subject: Option<&str>,
+        arms: &[&MatchArm],
+        first_match: bool,
+    ) -> Vec<Option<TypeExpr>> {
+        let Some(members) = self.subject_union_members(subject) else {
+            return vec![None; arms.len()];
         };
+        let select = |chosen: &[bool]| -> Vec<TypeExpr> {
+            members
+                .iter()
+                .zip(chosen)
+                .filter(|(_, chosen)| **chosen)
+                .map(|(member, _)| member.clone())
+                .collect()
+        };
+        // Members no earlier arm has taken whole.
+        let mut left = vec![true; members.len()];
+        let mut held = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let is_default = arm.type_name.is_none()
+                && arm.variant.is_none()
+                && arm.value_literal.is_none()
+                && arm.alternatives.is_empty();
+            if is_default {
+                let rest = select(&left);
+                let tells = first_match && !rest.is_empty() && rest.len() < members.len();
+                held.push(tells.then(|| Self::union_with_null(rest)));
+                continue;
+            }
+            let mut taken = vec![false; members.len()];
+            let mut only_types = true;
+            for (type_name, variant, value_literal) in Self::arm_atoms(arm) {
+                match (type_name, variant, value_literal) {
+                    // A value arm takes the literal member it equals whole.
+                    (_, _, Some(literal)) => {
+                        only_types = false;
+                        let Value::Val(val, _) = literal.as_ref() else {
+                            continue;
+                        };
+                        for (member, taken) in members.iter().zip(&mut taken) {
+                            *taken |= match member {
+                                TypeExpr::Literal(lit) => Self::literal_equals_val(lit, val),
+                                TypeExpr::Null => matches!(val, Val::Null),
+                                _ => false,
+                            };
+                        }
+                    }
+                    (Some(type_name), None, None) => {
+                        if Self::short_type_name(type_name) == "Any" {
+                            only_types = false;
+                            taken.fill(true);
+                            continue;
+                        }
+                        for (member, taken) in members.iter().zip(&mut taken) {
+                            *taken |= Self::type_arm_takes(type_name, member, &members);
+                        }
+                    }
+                    // A variant arm takes part of its enum.
+                    _ => only_types = false,
+                }
+            }
+            let named = select(&taken);
+            held.push((only_types && !named.is_empty()).then(|| Self::union_with_null(named)));
+            for (left, taken) in left.iter_mut().zip(&taken) {
+                *left &= !taken;
+            }
+        }
+        held
+    }
+
+    /// The members of the type a `match` subject is declared or inferred
+    /// as: those of a union, `T?` standing for `T | Null`. `None` when the
+    /// subject is not a variable typed as a union, or a member may be any
+    /// value.
+    fn subject_union_members(&self, subject: Option<&str>) -> Option<Vec<TypeExpr>> {
+        fn collect(ty: &TypeExpr, members: &mut Vec<TypeExpr>) {
+            match ty {
+                TypeExpr::Union(parts) => parts.iter().for_each(|part| collect(part, members)),
+                TypeExpr::Optional(inner) => {
+                    collect(inner, members);
+                    collect(&TypeExpr::Null, members);
+                }
+                other => {
+                    if !members.contains(other) {
+                        members.push(other.clone());
+                    }
+                }
+            }
+        }
+        let declared = self.context.get_variable_type(subject?)?;
+        if !matches!(declared, TypeExpr::Union(_) | TypeExpr::Optional(_)) {
+            return None;
+        }
+        let mut members = Vec::new();
+        collect(declared, &mut members);
+        (members.len() > 1 && !members.contains(&TypeExpr::Any)).then_some(members)
+    }
+
+    /// Whether a type arm naming `type_name` takes every value of `member`,
+    /// one of the `members` of the subject's union, and no value of another
+    /// member. A built-in name takes the built-in member and its literals:
+    /// the runtime matches a type arm on the value's exact type, so `Int`
+    /// never takes a `Dec`, nor `Map` a typed record. Any other name takes
+    /// the declared type of that short name, as exhaustiveness matches
+    /// them, so an imported or qualified arm name finds its type. It takes
+    /// none when two members share the name.
+    fn type_arm_takes(type_name: &str, member: &TypeExpr, members: &[TypeExpr]) -> bool {
+        fn declared_name(member: &TypeExpr) -> Option<String> {
+            match member {
+                TypeExpr::Named(name)
+                | TypeExpr::Record {
+                    type_name: Some(name),
+                    ..
+                } => Some(TypeChecker::short_type_name(name)),
+                _ => None,
+            }
+        }
         let short = Self::short_type_name(type_name);
-        let mut named = members.iter().filter(|member| match member {
-            TypeExpr::Named(name)
+        let built_in = match member {
+            TypeExpr::Int | TypeExpr::Literal(LiteralType::Int(_)) => "Int",
+            TypeExpr::Dec | TypeExpr::Literal(LiteralType::Dec(_)) => "Dec",
+            TypeExpr::Str | TypeExpr::Literal(LiteralType::Str(_)) => "Str",
+            TypeExpr::Bool | TypeExpr::Literal(LiteralType::Bool(_)) => "Bool",
+            TypeExpr::Null | TypeExpr::Literal(LiteralType::Null) => "Null",
+            TypeExpr::Vec(_) => "Vec",
+            TypeExpr::Map(_, _)
             | TypeExpr::Record {
-                type_name: Some(name),
-                ..
-            } => Self::short_type_name(name) == short,
-            _ => false,
-        });
-        match (named.next(), named.next()) {
-            (Some(member), None) => Some(member.clone()),
-            _ => None,
+                type_name: None, ..
+            } => "Map",
+            TypeExpr::Bytes => "Bytes",
+            _ => {
+                return declared_name(member).is_some_and(|name| {
+                    name == short
+                        && members
+                            .iter()
+                            .filter(|other| declared_name(other).as_ref() == Some(&name))
+                            .count()
+                            == 1
+                });
+            }
+        };
+        short == built_in
+    }
+
+    /// One type for a value that may have any of `types`, with a `Null`
+    /// among other members read back as `T?`.
+    fn union_with_null(mut types: Vec<TypeExpr>) -> TypeExpr {
+        let before = types.len();
+        types.retain(|t| *t != TypeExpr::Null);
+        if types.is_empty() {
+            return TypeExpr::Null;
+        }
+        let had_null = types.len() < before;
+        let union = Self::union_of(types);
+        if had_null {
+            TypeExpr::Optional(Box::new(union))
+        } else {
+            union
         }
     }
 
@@ -5379,10 +5579,21 @@ impl TypeChecker {
         }
 
         if let Some(func_name) = function_name {
-            // Resolve a leading namespace alias if the call is written as `::alias/fn`.
+            // A bare name the namespace binds calls that binding, whatever
+            // core function shares the name. Otherwise resolve a leading
+            // namespace alias if the call is written as `::alias/fn`.
             // E.g. with `::ctx ::hot::ctx` declared, `::ctx/get` becomes `::hot::ctx/get`.
-            let resolved_name = self.resolve_aliased_function_name(&func_name);
+            let namespace_callee = self.namespace_callee(fn_call);
+            let bound_in_namespace = namespace_callee.is_some();
+            let resolved_name =
+                namespace_callee.or_else(|| self.resolve_aliased_function_name(&func_name));
             let lookup_name = resolved_name.as_deref().unwrap_or(&func_name);
+            // Diagnostics name a namespace's binding as the call wrote it.
+            let reported_name = if bound_in_namespace {
+                func_name.as_str()
+            } else {
+                lookup_name
+            };
 
             // Deprecation: if the callee was declared `meta { deprecated: ... }`,
             // emit a non-fatal warning at the call site. Surfaced by both
@@ -5401,7 +5612,7 @@ impl TypeChecker {
                         .as_ref()
                         .map(|s| self.source_to_error_location(s));
                     self.errors.add_warning(CompilerError::DeprecatedUsage {
-                        name: lookup_name.to_string(),
+                        name: reported_name.to_string(),
                         note,
                         location,
                     });
@@ -5449,42 +5660,21 @@ impl TypeChecker {
                 return t;
             }
 
-            // Try to find function signature:
-            // 1. First try the (possibly alias-resolved) name
-            // 2. Then try qualified name using current namespace (for local functions)
-            // 3. Finally try the core variable registry (auto-imported
+            // Try to find function signature, as the call resolves when run:
+            // 1. The function a name bound in this namespace names, and
+            //    nothing else: the binding shadows a core function of the
+            //    same name at every argument count, so a count it doesn't
+            //    declare is an arity error, not a call of the core function
+            // 2. The (possibly alias-resolved) qualified name
+            // 3. The built-in signature of a bare name that reaches
+            //    hot-std's core function
+            // 4. The core variable registry (auto-imported
             //    `meta {core: true}` functions defined in another namespace)
-            let signatures = self
-                .context
-                .get_function_signature(lookup_name)
-                .cloned()
-                .or_else(|| {
-                    let qualified_name =
-                        format!("{}/{}", self.context.current_namespace, lookup_name);
-                    self.context
-                        .get_function_signature(&qualified_name)
-                        .cloned()
-                })
-                .or_else(|| {
-                    // Auto-imported core functions: collect signatures from
-                    // every namespace that exports `lookup_name` as a core
-                    // function. The runtime dispatches dynamically across
-                    // these aliases (e.g. `length` lives in both
-                    // `::hot::coll` and `::hot::str`), so the type checker
-                    // accepts the call when ANY available signature matches.
-                    self.core_variables
-                        .get(lookup_name)
-                        .map(|qualifieds| {
-                            let mut combined = Vec::new();
-                            for qualified in qualifieds {
-                                if let Some(sigs) = self.context.get_function_signature(qualified) {
-                                    combined.extend(sigs.iter().cloned());
-                                }
-                            }
-                            combined
-                        })
-                        .filter(|s| !s.is_empty())
-                });
+            let signatures = if bound_in_namespace || lookup_name.starts_with("::") {
+                self.context.get_function_signature(lookup_name).cloned()
+            } else {
+                self.core_signatures(lookup_name)
+            };
 
             if let Some(signatures) = signatures {
                 // Infer each argument once. Every check below reuses these
@@ -5524,7 +5714,7 @@ impl TypeChecker {
                 self.validate_function_call_arguments(
                     fn_call,
                     &arg_types,
-                    lookup_name,
+                    reported_name,
                     &signatures,
                 );
 
@@ -5627,6 +5817,74 @@ impl TypeChecker {
         let arg_type = self.infer_value_type(arg);
         self.in_pipe_flow = saved_pipe;
         arg_type
+    }
+
+    /// The qualified name of what a call by bare name reaches when the
+    /// current namespace binds that name: its own function, or through its
+    /// var imports (`plus ::lib/add`) the function or type they name. The
+    /// binding is what the call runs, whatever it passes and wherever in
+    /// the namespace the binding is written, so a core function of the same
+    /// name has no say in it. `None` when the namespace declares no such
+    /// name.
+    fn namespace_callee(&self, fn_call: &FnCall) -> Option<String> {
+        let Value::Ref(Ref::Var(var_ref)) = &*fn_call.function else {
+            return None;
+        };
+        if var_ref.var.deep_path.is_some() {
+            return None;
+        }
+        let mut qualified = format!(
+            "{}/{}",
+            self.context.current_namespace,
+            var_ref.var.sym.name()
+        );
+        if !self.qualified_variables.contains_key(&qualified)
+            && self.context.get_function_signature(&qualified).is_none()
+        {
+            return None;
+        }
+        // The bound guards against an import cycle.
+        for _ in 0..16 {
+            match self.declared_functions.get(&qualified) {
+                Some(DeclaredFunction::Import(target)) => qualified.clone_from(target),
+                _ => break,
+            }
+        }
+        Some(qualified)
+    }
+
+    /// The signatures of the core function a bare `name` reaches: hot-std's
+    /// built-in one, else those of every namespace that exports `name` as
+    /// a core function. The runtime dispatches dynamically across these
+    /// aliases (e.g. `length` lives in both `::hot::coll` and
+    /// `::hot::str`), so the type checker accepts the call when ANY
+    /// available signature matches.
+    fn core_signatures(&self, name: &str) -> Option<Vec<FunctionSignature>> {
+        if !self.project_declares_core(name)
+            && let Some(built_in) = self.context.get_function_signature(name)
+        {
+            return Some(built_in.clone());
+        }
+        let qualifieds = self.core_variables.get(name)?;
+        let combined: Vec<FunctionSignature> = qualifieds
+            .iter()
+            .filter_map(|qualified| self.context.get_function_signature(qualified))
+            .flatten()
+            .cloned()
+            .collect();
+        (!combined.is_empty()).then_some(combined)
+    }
+
+    /// Whether a project declares a core function `name` of its own. Every
+    /// bare call then reaches that function rather than hot-std's (see
+    /// `NativeCoreShadows`), so hot-std's built-in signature doesn't apply.
+    fn project_declares_core(&self, name: &str) -> bool {
+        self.core_variables.get(name).is_some_and(|qualifieds| {
+            qualifieds.iter().any(|qualified| {
+                let namespace = qualified.rsplit_once('/').map_or("", |(ns, _)| ns);
+                !crate::lang::runtime::native_core::is_hot_std_namespace(namespace)
+            })
+        })
     }
 
     /// If `func_name` begins with a namespace alias declared in the current namespace
@@ -6915,8 +7173,12 @@ impl TypeChecker {
     /// parameter (the top of `match_subject_stack`) as the matched name.
     fn infer_flow_arm_bodies(&mut self, flow: &Flow) -> Vec<TypeExpr> {
         let subject = self.match_subject_stack.last().and_then(|s| s.name.clone());
-        Self::flow_arms(flow)
-            .map(|arm| self.infer_match_arm_body(arm, subject.as_deref()))
+        let arms: Vec<&MatchArm> = Self::flow_arms(flow).collect();
+        let first_match = matches!(flow.flow_type, FlowType::Match | FlowType::MatchShort);
+        let held = self.arm_subject_types(subject.as_deref(), &arms, first_match);
+        arms.into_iter()
+            .zip(held)
+            .map(|(arm, held)| self.infer_match_arm_body(arm, subject.as_deref(), held))
             .collect()
     }
 }

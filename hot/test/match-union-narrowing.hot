@@ -1,0 +1,147 @@
+// Regression: inside a type arm, a name typed as a union holds the member
+// the arm names, and in the default arm the members no earlier arm took.
+// `hot check` narrowed only declared types (`Response | HttpError`), so a
+// top-level `match` on `Int | Str` reported "expected Int, got Int | Str"
+// for a program that ran correctly. This file must check clean.
+::hot::test::match-union-narrowing ns
+meta ["test"]
+
+// Long names on purpose: `::hot::meta/get` on a local reads a top-level
+// variable of that name from any namespace, and `::hot::test::meta` reads
+// its locals `a` and `b`.
+
+u-int: Int | Str 5
+from-int match u-int {
+    Int => { add(u-int, 1) }
+    Str => { uppercase(u-int) }
+}
+
+u-str: Int | Str "five"
+from-str match u-str {
+    Int => { add(u-str, 1) }
+    Str => { uppercase(u-str) }
+}
+
+u-dec: Dec | Str 2.5
+from-dec match u-dec {
+    Dec => { floor(u-dec) }
+    Str => { uppercase(u-dec) }
+}
+
+u-bool: Bool | Str true
+from-bool match u-bool {
+    Bool => { not(u-bool) }
+    Str => { uppercase(u-bool) }
+}
+
+u-vec: Vec<Int> | Str [1, 2]
+from-vec match u-vec {
+    Vec => { length(u-vec) }
+    Str => { uppercase(u-vec) }
+}
+
+// A Map literal is known as its record, so take a call's Map.
+make-map fn (): Map<Str, Int> { {a: 1} }
+u-map: Map<Str, Int> | Str make-map()
+from-map match u-map {
+    Map => { keys(u-map) }
+    Str => { uppercase(u-map) }
+}
+
+u-null: Int? null
+from-null match u-null {
+    Null => { 0 }
+    Int => { add(u-null, 1) }
+}
+
+// More than two members: a union arm holds the members it names, and the
+// default arm the ones no earlier arm took.
+u-mixed: Int | Dec | Str | Bool 2.5
+from-union-arm match u-mixed {
+    Int | Dec => { add(u-mixed, 1) }
+    Str => { uppercase(u-mixed) }
+    Bool => { not(u-mixed) }
+}
+
+from-rest match u-mixed {
+    Str => { uppercase(u-mixed) }
+    Bool => { not(u-mixed) }
+    _ => { add(u-mixed, 1) }
+}
+
+u-opt: Int? 4
+from-rest-after-null match u-opt {
+    null => { 0 }
+    _ => { add(u-opt, 1) }
+}
+
+// Nested: each level narrows its own subject.
+outer: Int | Str | Bool "s"
+inner: Int | Str 2
+from-nested match outer {
+    Int => { add(outer, 1) }
+    _ => {
+        match outer {
+            Str => {
+                match inner {
+                    Int => { concat(outer, Str(add(inner, 1))) }
+                    Str => { concat(outer, inner) }
+                }
+            }
+
+            Bool => { not(outer) }
+        }
+    }
+}
+
+describe fn (x: Int | Str | Null): Any {
+    match x {
+        Int => { add(x, 1) }
+        Str => { uppercase(x) }
+        _ => { x }
+    }
+}
+
+describe-flow fn match (x: Int | Str | Null): Any {
+    Int => { add(x, 1) }
+    Str => { uppercase(x) }
+    _ => { x }
+}
+
+describe-bound fn (x: Int | Str): Any {
+    match x {
+        Int (number) => { add(number, 1) }
+        Str (text) => { uppercase(text) }
+    }
+}
+
+test-type-arms-narrow-built-in-members
+meta ["test"] fn () {
+    assert-eq(6, from-int, "Int arm")
+    assert-eq("FIVE", from-str, "Str arm")
+    assert-eq(2, from-dec, "Dec arm")
+    assert-eq(false, from-bool, "Bool arm")
+    assert-eq(2, from-vec, "Vec arm")
+    assert-eq(["a"], from-map, "Map arm")
+    assert-eq(0, from-null, "Null arm")
+}
+
+test-union-and-default-arms-hold-the-remaining-members
+meta ["test"] fn () {
+    assert-eq(3.5, from-union-arm, "union arm")
+    assert-eq(3.5, from-rest, "default arm after two type arms")
+    assert-eq(5, from-rest-after-null, "default arm after a null arm")
+    assert-eq("s3", from-nested, "nested matches")
+}
+
+test-function-level-matches-narrow-alike
+meta ["test"] fn () {
+    assert-eq(2, describe(1), "match in a body, Int")
+    assert-eq("A", describe("a"), "match in a body, Str")
+    assert-eq(null, describe(null), "match in a body, default arm")
+    assert-eq(2, describe-flow(1), "fn match, Int")
+    assert-eq("A", describe-flow("a"), "fn match, Str")
+    assert-eq(null, describe-flow(null), "fn match, default arm")
+    assert-eq(2, describe-bound(1), "arm binding, Int")
+    assert-eq("A", describe-bound("a"), "arm binding, Str")
+}

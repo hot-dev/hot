@@ -16,7 +16,7 @@ fn () {
     offset: 20
   }))
 
-  assert-eq("/rest/v1/users?select=id%2Cname%2Cposts%28title%29&email=eq.%22a%40b.com%22&order=created_at.desc&limit=10&offset=20", path)
+  assert-eq("/rest/v1/users?select=id%2Cname%2Cposts%28title%29&email=eq.a%40b.com&order=created_at.desc&limit=10&offset=20", path)
 }
 
 test-schema-headers
@@ -40,4 +40,17 @@ fn () {
   assert-eq(42, ::db/parse-count({"content-range": "0-9/42"}))
   assert(is-null(::db/parse-count({"content-range": "0-9/*"})), "wildcard total should be null")
   assert(is-null(::db/parse-count({})), "missing header should be null")
+}
+
+// `return: false` asks PostgREST for no rows back. Unset means rows come back.
+test-return-false-sends-return-minimal
+meta ["test"]
+fn () {
+  assert-eq("return=minimal", get(::db/insert-headers(::db/InsertRequest({table: "t", data: {}, return: false})), "Prefer"))
+  assert-eq("return=representation", get(::db/insert-headers(::db/InsertRequest({table: "t", data: {}, return: true})), "Prefer"))
+  assert-eq("return=representation", get(::db/insert-headers(::db/InsertRequest({table: "t", data: {}})), "Prefer"), "the default")
+  assert-eq("resolution=merge-duplicates, return=minimal", get(::db/upsert-headers(::db/UpsertRequest({table: "t", data: {}, return: false})), "Prefer"))
+  assert-eq("resolution=merge-duplicates, return=representation", get(::db/upsert-headers(::db/UpsertRequest({table: "t", data: {}})), "Prefer"))
+  assert-eq("return=minimal", get(::db/mutation-headers(false, null, null), "Prefer"))
+  assert-eq("return=representation", get(::db/mutation-headers(null, null, null), "Prefer"))
 }

@@ -9,7 +9,7 @@ Provider-specific code (Anthropic, OpenAI, xAI, Gemini) stays in the user's proj
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/hot-ai": "1.9.2"
+"hot.dev/hot-ai": "1.9.3"
 ```
 
 ## Namespaces

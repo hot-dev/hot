@@ -73,6 +73,34 @@ pub struct QueueExecutionTiming {
     /// Older serialized queue messages fall back to claimed_at.
     #[serde(default)]
     pub handler_dispatched_at: Option<DateTime<Utc>>,
+    /// Points inside the claim-to-start window, for splitting it by stage.
+    #[serde(default)]
+    pub stages: QueueStageTiming,
+}
+
+/// Where a delivery's time went between its claim and its run's start. Every
+/// field is optional: a stage the worker did not stamp is left out of the
+/// run's timing, and older serialized contexts read as all-empty.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueStageTiming {
+    /// The part of `queue_wait_us` spent in this worker's prefetch buffer
+    /// after the backend delivered the item (Redis only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefetch_wait_us: Option<u64>,
+    /// When an executor began processing the delivery: after the hand-off
+    /// from the claimer, the pickup check and any crash-quarantine wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_started_at: Option<DateTime<Utc>>,
+    /// When the event had been loaded from the database and admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydrated_at: Option<DateTime<Utc>>,
+    /// How long this handler waited for a blocking execution slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_slot_wait_us: Option<u64>,
+    /// When the handler's setup was complete and its code was handed to a VM
+    /// thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_scheduled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

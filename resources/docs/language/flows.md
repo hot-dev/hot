@@ -71,6 +71,7 @@ Use `parallel` when:
 
 Hot automatically analyzes dependencies and executes in "levels" - variables at the same level run concurrently, but levels execute in order:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Parallel with automatic dependency resolution
 enrich-user fn parallel (id: Str): All<Map> {
@@ -282,6 +283,27 @@ greet fn (name: Str?): Str {
   }
 }
 ```
+
+### Union Subjects
+
+When the matched name is typed as a union, `hot check` knows what it holds in
+each arm. Inside a type arm the name has the type the arm names. In the
+default arm it has the members that no earlier arm took:
+
+```hot
+describe fn (id: Int | Str | Null): Str {
+  match id {
+    Int => { `number ${add(id, 1)}` }   // id is an Int
+    Null => { "none" }
+    _ => { uppercase(id) }               // id is a Str
+  }
+}
+```
+
+This holds for built-in and declared types, at namespace level and inside
+functions, and for the first parameter of a `fn match`. A value arm such as
+`0 =>` takes one value, so the rest still includes its type. `match-all` runs
+every matching arm, so its default arm keeps the declared type.
 
 ### The Any Pattern
 
@@ -501,6 +523,7 @@ Flow result shape controls whether a flow returns its single produced value or
 all produced values. Use a plain type annotation for the single value case and
 `All<Vec>` / `All<Map>` when you want a collected result:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Single value (the default for serial, cond, match, and pipe)
 result: Int serial {
@@ -558,6 +581,7 @@ Each flow type has a sensible default:
 
 Override the default when you need different results:
 
+<!-- hot-check: assume ::api -->
 ```hot
 // Parallel defaults to All<Map>
 data parallel {

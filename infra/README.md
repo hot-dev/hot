@@ -1132,6 +1132,11 @@ project ([Real-account qualification](#real-account-qualification)).
   older helper against the new document means no expiry. On a scalable GCP
   installation, until the stack is applied, a release whose pointer already names the
   version stops with `Could not tell when the migrate pointer was last written`.
+- **Box tasks need a host image from this release.** An image built from v3.0.8 or
+  earlier starts no box. Its Kata configuration leaves guest SELinux on, which Kata
+  refuses on a host without SELinux, as Ubuntu is, and its containerd has no
+  `unpack_config` entry, so an image pulled with `registry-auth` fails to unpack. Code
+  tasks are not affected. Neither setting can be changed on a running host.
 - **State bootstrap.** Apply it again, with `github_repository_id` and
   `github_repository_owner_id`: on GCP before the next plan, since a plan needs
   the new read role, and on AWS before a workflow asks for a session over one

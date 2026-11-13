@@ -149,6 +149,21 @@ fn (file-id: Str, opts: Map): Str {
   ::box/url(`/files/${::box/encode-id(file-id)}/content`, download-params(opts))
 }
 
+// The opts a follow-up call for the same item needs: the credentials, and
+// `boxapi` so a shared-link item stays reachable.
+follow-up-opts
+meta {no-doc: true}
+fn (opts: Map): Map {
+  {...::box/creds(opts), ...filter-keys(opts, (k) { eq(k, "boxapi") })}
+}
+
+// The headers for one Range request of a chunked download.
+chunk-headers
+meta {no-doc: true}
+fn (start: Int, end: Int, opts: Map): Map {
+  {...::box/condition-headers(filter-keys(opts, (k) { eq(k, "boxapi") })), Range: range-header(start, end)}
+}
+
 to-content
 meta {no-doc: true}
 fn (file-id: Str, response: Map, source: Str, opts: Map): FileContent {
@@ -234,7 +249,7 @@ fn (full-url: Str, ranges: Vec, index: Int, acc: Bytes, opts: Map): Bytes {
     gte(index, length(ranges)) => { acc }
     => {
       r get(ranges, index)
-      response ::api/request("GET", full-url, {Range: range-header(first(r), last(r))}, "", ::box/creds(opts))
+      response ::api/request("GET", full-url, chunk-headers(first(r), last(r), opts), "", ::box/creds(opts))
       cond {
         is-err(response) => { response }
         // A server that ignores Range answers 200 with the whole body.
@@ -270,7 +285,7 @@ fn
 },
 (file-id: Str, opts: Map): FileContent {
   chunk or(get(opts, "chunk-size"), DEFAULT_DOWNLOAD_CHUNK)
-  meta-data ::files/get-file(file-id, {...::box/creds(opts), fields: "id,name,size"})
+  meta-data ::files/get-file(file-id, {...follow-up-opts(opts), fields: "id,name,size"})
   cond {
     is-err(meta-data) => { meta-data }
     => {
@@ -645,7 +660,7 @@ fn
   fmt if(::box/is-blank(format), "auto", format)
   original wants-original(fmt)
   hints if(original, null, TEXT_REP_HINT)
-  file ::files/get-file(file-id, filter-vals({...::box/creds(opts), fields: or(get(opts, "fields"), READ_FIELDS), rep-hints: hints}, is-some))
+  file ::files/get-file(file-id, filter-vals({...follow-up-opts(opts), fields: or(get(opts, "fields"), READ_FIELDS), rep-hints: hints}, is-some))
   cond {
     is-err(file) => { file }
     => { read-with-file(file-id, file, fmt, original, opts) }

@@ -48,6 +48,7 @@ Definitions are still Values—a `fn` definition produces a function Value, and 
 
 A Value can be a **reference** to a Var or namespace defined elsewhere:
 
+<!-- hot-check: assume ::myapp::users ::notifications::email -->
 ```hot
 // Namespace alias — binds a short name to an existing namespace
 ::http ::hot::http
@@ -165,6 +166,7 @@ max-users 1000
 
 Use the full path `::namespace/var-name` to reference Vars from other namespaces:
 
+<!-- hot-check: assume ::myapp::users -->
 ```hot
 // Reference a Var from another namespace
 role ::myapp::users/default-role
@@ -188,6 +190,7 @@ response ::http/get(api-url)
 
 Import individual Vars/functions into your namespace:
 
+<!-- hot-check: assume ::notifications::email -->
 ```hot
 ::myapp::handlers ns
 

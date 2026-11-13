@@ -325,7 +325,7 @@ meta {
     ver.version   // e.g. "24.2.7.2"
     ```
     """,
-    box: {min-size: "large"}
+    box: {min-size: "medium"}
 }
 fn (): Map {
     version(null)

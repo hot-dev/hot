@@ -13,6 +13,9 @@ hot.set.profile "local-dev"
 hot.set.project "{{PROJECT_NAME}}"
 hot.set.remote "hot-dev"
 
+// Minimum Hot version this project needs. An older `hot` stops with an error.
+// hot.min-version "3.0.0"
+
 // Local Development Profile
 // These values are used when running locally
 hot.profile.local-dev.user.email "{{USER_EMAIL}}"
@@ -30,6 +33,10 @@ hot.project.{{PROJECT_NAME}}.src.paths ["./hot/src"]
 hot.project.{{PROJECT_NAME}}.test.paths ["./hot/test"]
 hot.project.{{PROJECT_NAME}}.test.capture true
 hot.project.{{PROJECT_NAME}}.deps {}
+
+// Capture what tests print, for every project (per run: --test.capture).
+// A project's own test.capture, above, comes second. Default: true.
+// hot.test.capture true
 
 // Resource Configuration
 // Files under these paths are bundled with the build and exposed to Hot
@@ -69,6 +76,12 @@ hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
 hot.db.schema "hot"
 hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
 hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
+// PostgreSQL only: the schema owner's URI, for `hot db migrate` and index
+// provisioning. Services connect with db.uri, a restricted runtime login.
+// Give HOT_DB_MIGRATION_URI to migration jobs only.
+// hot.db.migration-uri "postgres://hot_owner:password@host:5432/hot"
+// PostgreSQL only: check at startup that the runtime login is restricted.
+// hot.db.rls.enforce true
 
 // Local dev call data retention (days). Set to -1 to disable cleanup.
 // Automatically trims call/trace data older than this in local development.
@@ -146,12 +159,20 @@ hot.log.target ::env/get("HOT_LOG_TARGET", "stdout")
 hot.log.dir ".hot/log"
 hot.log.rotation ::env/get("HOT_LOG_ROTATION", "daily")
 hot.log.retention Int(::env/get("HOT_LOG_RETENTION", "7"))
+// Format: "full", "simple", or "json" (one object per line).
+// Default: "full" for services, "simple" for CLI commands.
+// hot.log.format "full"
 
 // Redis Configuration
 // Used for queue and cache when enabled (default: unset — only needed
 // when queue.type is "redis")
 hot.redis.uri ::env/get("HOT_REDIS_URI", "redis://localhost:6379")
 hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
+// PEM certificates to trust for a rediss:// server, in place of the system's
+// roots. The certificates themselves, not a path (or HOT_REDIS_CA_CERT_FILE).
+// hot.redis.ca-cert ""
+// Auth: "password" (credentials in the URI) or "gcp-iam".
+// hot.redis.auth "password"
 
 // API Server Configuration
 hot.api.host Str(::env/get("HOT_API_HOST", "localhost"))
@@ -160,6 +181,8 @@ hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
 // Run time limits, in seconds: a webhook handler, and an MCP tools/call
 hot.webhook.timeout Int(::env/get("HOT_WEBHOOK_TIMEOUT", "30"))
 hot.mcp.timeout Int(::env/get("HOT_MCP_TIMEOUT", "60"))
+// Browser origins, besides the API's own, that may call the MCP endpoints.
+// hot.mcp.allowed-origins ["https://app.example.com"]
 
 // Open SSE subscriptions: per credential, per organization, per API server.
 // 0 turns a limit off. Mode "observe" logs a connection over the limit and
@@ -173,6 +196,17 @@ hot.api.sse-connection-limit-mode ::env/get("HOT_API_SSE_CONNECTION_LIMIT_MODE",
 hot.network.client-ip.trusted-proxy Bool(::env/get("HOT_NETWORK_CLIENT_IP_TRUSTED_PROXY", "false"))
 hot.network.client-ip.header ::env/get("HOT_NETWORK_CLIENT_IP_HEADER", "x-forwarded-for")
 hot.network.client-ip.trusted-proxies ::env/get("HOT_NETWORK_CLIENT_IP_TRUSTED_PROXIES", "")
+
+// Outbound Network Rules
+// Hot code can't reach private addresses unless these allow them.
+// allow-cidrs: private addresses or CIDR ranges code may reach.
+// allow-hosts: hostnames that may resolve to private addresses.
+// deny-cidrs: addresses code may never reach, whatever the allowlists say.
+// egress-proxy: send the HTTP(S) requests of Hot code through this proxy.
+// hot.network.allow-cidrs ["10.20.0.0/16"]
+// hot.network.allow-hosts ["api.corp.example", "*.svc.internal"]
+// hot.network.deny-cidrs ["10.20.9.0/24"]
+// hot.network.egress-proxy "http://proxy.internal:3128"
 
 // App Server Configuration
 hot.app.host Str(::env/get("HOT_APP_HOST", "localhost"))
@@ -201,6 +235,21 @@ hot.email.from ::env/get("HOT_EMAIL_FROM", "hi@notifications.hot.dev")
 hot.email.from-name ::env/get("HOT_EMAIL_FROM_NAME", "Hot Dev")
 hot.email.alerts.from ::env/get("HOT_EMAIL_ALERTS_FROM", "alerts@notifications.hot.dev")
 hot.email.alerts.from-name ::env/get("HOT_EMAIL_ALERTS_FROM_NAME", "Hot Alerts")
+// Provider for alert emails. Default: the value of email.provider.
+// hot.email.alerts.provider "smtp"
+// Delivery. Provider: "none" (default) or "smtp". With "smtp", host is
+// required. Security: "starttls" (default), "tls", or "none"; the port
+// follows it (587, 465, 25). Supply the password as
+// HOT_EMAIL_SMTP_PASSWORD_FILE rather than writing it here.
+// hot.email.provider "smtp"
+// hot.email.smtp.host "smtp.example.com"
+// hot.email.smtp.security "starttls"
+// hot.email.smtp.port 587
+// hot.email.smtp.username "hot@example.com"
+// hot.email.smtp.password ::env/get("HOT_EMAIL_SMTP_PASSWORD", "")
+// hot.email.smtp.timeout-seconds 30
+// PEM certificates to trust for the relay, in place of the system's roots.
+// hot.email.smtp.ca-cert ""
 
 // Stripe Configuration (when billing.enabled is true)
 hot.stripe.secret-key ::env/get("HOT_STRIPE_SECRET_KEY", "")
@@ -209,6 +258,8 @@ hot.stripe.webhook-secret ::env/get("HOT_STRIPE_WEBHOOK_SECRET", "")
 
 // Build Storage Type: "local", "s3", or "gcs"
 hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "local")
+// Directory for builds when build.storage.type is "local"
+// hot.build.storage.path ".hot/build"
 
 // AWS Build Configuration (for deploying builds to S3)
 hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
@@ -277,12 +328,17 @@ hot.check.raw false
 // Type-check test files during `hot check` (true by default; also
 // overridable per run with --with-tests)
 hot.check.with-tests true
+// Exit non-zero on warnings too (per run: --check.deny-warnings)
+// hot.check.deny-warnings false
 
 // Event Emitter Configuration
 // Type: "db" (database), "console" (stdout), or "none" (disabled)
 // Default when unset: "db" for runtime commands inside a project,
 // "none" otherwise (`hot test`/`hot check` always default to "none")
 hot.emitter.type ::env/get("HOT_EMITTER_TYPE", "db")
+// Function calls a run records with the "db" emitter. A run that makes more
+// keeps running and records no further calls. 0 records every call.
+// hot.emitter.max-calls-per-run 10000
 
 // Execution Engine Configuration
 hot.engine.isolation Bool(::env/get("HOT_ENGINE_ISOLATION", "false"))
@@ -345,8 +401,9 @@ hot.lsp.transport "stdio"
 
 // File Watcher Configuration
 hot.watch.debounce Int(::env/get("HOT_WATCH_DEBOUNCE", "200"))
-// Type-check test files during `hot watch` (false by default; also
-// overridable per run with --with-tests)
+// Watch the test directories too, so `hot watch` checks again when a test
+// file changes (false by default; also overridable per run with
+// --with-tests). Whether a check includes test files is check.with-tests.
 hot.watch.with-tests false
 
 // Worker Configuration
@@ -384,6 +441,13 @@ hot.task.shutdown-drain-seconds Int(::env/get("HOT_TASK_SHUTDOWN_DRAIN_SECONDS",
 hot.task.shutdown-container-timeout-seconds Int(::env/get("HOT_TASK_SHUTDOWN_CONTAINER_TIMEOUT_SECONDS", "30"))
 hot.task.reconcile-queued-after-seconds Int(::env/get("HOT_TASK_RECONCILE_QUEUED_AFTER_SECONDS", "60"))
 hot.task.reconcile-interval-seconds Int(::env/get("HOT_TASK_RECONCILE_INTERVAL_SECONDS", "30"))
+// Limits for a box that sets none of its own: memory, /tmp and disk in MB,
+// timeout in seconds, and CPU quota (50000 is half a CPU).
+// hot.task.box-default-memory-mb 512
+// hot.task.box-default-tmp-mb 500
+// hot.task.box-default-disk-mb 5120
+// hot.task.box-default-timeout-secs 60
+// hot.task.box-default-cpu-quota 50000
 
 // Box (Container) Configuration
 hot.box.enabled Bool(::env/get("HOT_BOX_ENABLED", "true"))
@@ -400,5 +464,13 @@ hot.daemon Bool(::env/get("HOT_DAEMON", "false"))
 hot.dev.open Bool(::env/get("HOT_DEV_OPEN", "false"))
 
 // Deployment Configuration
-// Auto-deploy on file changes during development
+// Deploy each live build `hot dev` creates
 hot.deploy.auto Bool(::env/get("HOT_DEPLOY_AUTO", "true"))
+// Block `hot deploy --local` when a required context variable is unset
+// (per run: --strict). Without it, an unset one is a warning.
+// hot.deploy.ctx.strict false
+
+// Decompression Limit
+// Most bytes ::hot::gzip/decode and ::hot::zip/read-entry may produce
+// (64 MiB). The streaming forms are not limited.
+// hot.compression.max-output-bytes 67108864

@@ -124,3 +124,21 @@ meta ["test"] fn () {
     assert(is-err(out), "it would be interpolated into the hostname")
     assert(not(contains(err-value(out), "evil.example")), "the value isn't echoed")
 }
+
+// A non-2xx answer is an Err, as it is for every other call.
+test-queue-failures-are-errs
+meta ["test"] fn () {
+    q "https://sqs.eu-west-1.amazonaws.com/1/q"
+    deleted ::queues/delete-queue(q, echo())
+    assert(is-err(deleted), "delete-queue returns an Err on a non-2xx")
+    assert-eq(418, err-value(deleted).status)
+    updated ::queues/set-queue-attributes(q, {VisibilityTimeout: "30"}, echo())
+    assert(is-err(updated), "set-queue-attributes returns an Err on a non-2xx")
+    assert-eq(418, err-value(updated).status)
+}
+
+test-extract-region-from-url
+meta ["test"] fn () {
+    assert-eq("eu-west-1", ::messages/extract-region-from-url("https://sqs.eu-west-1.amazonaws.com/1/q"))
+    assert-eq("us-east-2", ::messages/extract-region-from-url("https://us-east-2.queue.amazonaws.com/1/q"))
+}

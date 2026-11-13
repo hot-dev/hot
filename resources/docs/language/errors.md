@@ -329,6 +329,7 @@ does not control — arbitrary user callbacks, independent jobs — runs that
 work as a task. A halt inside the task never propagates to the caller; it
 surfaces as data on the awaited result:
 
+<!-- hot-check: assume ::myapp -->
 ```hot
 info ::hot::task/start(::myapp/risky-job, args)
 result ::hot::task/await(info.id)

@@ -167,6 +167,11 @@ The Docker client library logs at `info` at most, even at `debug` or `trace`: it
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `hot.queue.type` | Queue backend: `sqlite`, `memory`, `redis`, or `none` | `sqlite` in a project |
+| `hot.queue.event-orphan-idle-ms` | Milliseconds an event may sit with a worker that stopped responding before another worker takes it over | `60000` |
+| `hot.queue.task-orphan-idle-ms` | The same for a task and its task worker. With Redis it must be at least the task lease, or the task worker refuses to start | `120000` |
+| `hot.queue.infra-retry-backoff-ms` | Milliseconds a worker or task worker waits before it retries work that failed on the database or the queue | `1000` |
+| `hot.queue.metrics-enabled` | Record queue wait times | `true` |
+| `hot.queue.wait-target-p99-ms` | The 99th-percentile queue wait those metrics are measured against, in milliseconds | `1000` |
 
 The default `sqlite` backend is a durable local queue that works across Hot
 processes without another service. Hot owns its files, schema, tables, and indexes
@@ -283,6 +288,9 @@ is named from its key: `HOT_WORKER_RUN_TIMEOUT` sets `hot.worker.run-timeout`.
 | `hot.task.reconcile-queued-after-seconds` | A task still queued in the database after this long is put on the queue again | `60` |
 | `hot.task.reconcile-interval-seconds` | How often that check runs | `30` |
 | `hot.task.capacity-fairness` | Only `none` is implemented | `none` |
+| `hot.box.backend` | What runs box tasks: `docker` or `kata`. `kata` needs Linux and a `hot` built with the Kata backend | `docker` |
+| `hot.box.containerd.socket` | The containerd socket of the Kata backend. Docker ignores it | `/run/kata-containerd/containerd.sock` |
+| `hot.box.vmm` | The virtual machine monitor of the Kata backend: `qemu` or `firecracker` | `qemu` |
 
 ### Scheduler and Retries
 
@@ -296,6 +304,48 @@ is named from its key: `HOT_WORKER_RUN_TIMEOUT` sets `hot.worker.run-timeout`.
 | `hot.retry.max-attempts` | Most attempts a function's `retry` may ask for. A higher value is lowered to this | `10` |
 | `hot.retry.max-delay-ms` | Longest retry delay a function may ask for | `3600000` |
 | `hot.retry.default-delay-ms` | Retry delay when a function gives none | `1000` |
+
+### API and App
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.api.host` | Address the API server binds to. Also `--api.host` | `localhost` |
+| `hot.api.port` | Port the API server listens on. Also `--api.port` | `4681` |
+| `hot.app.host` | Address the app server binds to. Also `--app.host`. On any address but a local one, the app turns off its local development sign-in | `localhost` |
+| `hot.app.port` | Port the app server listens on. Also `--app.port` | `4680` |
+
+### Running Code
+
+Every process that runs Hot code reads these: the CLI, the worker and the
+task worker.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.engine.threads` | Threads the engine runs Hot code on. Also `--engine.threads` | `4` |
+| `hot.jit.mode` | `enabled` compiles often-called functions to native code. `disabled`, `off`, `false` or `0` turns that off. Also `--jit.mode` and `HOT_JIT` | `enabled` on supported platforms |
+| `hot.jit.threshold` | Calls before a function is compiled. Also `--jit.threshold` | `100` |
+| `hot.jit.hof.fusion` | Compile a pipeline of `map`, `filter` and the like as one loop. Also `--jit.hof.fusion` | `true` |
+| `hot.emitter.type` | Where calls and runs are recorded: `db`, `console` or `none`. Also `--emitter.type` | `db` in a project, `none` outside one |
+| `hot.value.format` | How `hot run`, `hot eval` and `hot repl` print values: `hot` or `json`. Also `--value.format` | `hot` |
+| `hot.blob.mode` | `service` moves large strings and bytes out of recorded calls, runs and events into blob storage, and records a reference. `disabled` records them whole | `service` in a project, `disabled` outside one |
+| `hot.blob.spill.threshold-bytes` | A value larger than this is moved to blob storage | `16384` in local development, `65536` when deployed |
+| `hot.blob.preview.max-bytes` | Bytes of a moved value kept beside its reference as a preview | `256` |
+
+### Command Defaults
+
+These set what a CLI command does when you don't pass the flag.
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.check.format` | Output of `hot check` and `hot watch`: `pretty`, `simple`, `json` or `json-min`. Also `--check.format` | `pretty` |
+| `hot.check.raw` | Leave out the "No issues found" line. Also `--check.raw` | `false` |
+| `hot.check.deny-warnings` | Exit non-zero on warnings too. Also `--check.deny-warnings` | `false` |
+| `hot.check.with-tests` | Check test files as well as sources, in `hot check` and `hot watch`. Also `--with-tests` | `true` |
+| `hot.watch.with-tests` | Make `hot watch` watch the test directories too, so a change to a test file starts a check. Also `--with-tests` | `false` |
+| `hot.watch.debounce` | Milliseconds `hot watch` waits after a change. Also `--watch.debounce` | `200` |
+| `hot.deploy.auto` | Deploy each live build that `hot dev` creates. Also `--deploy.auto` | `true` |
+| `hot.deploy.ctx.strict` | Make `hot deploy --local` stop when a required context variable is unset. Also `--strict` | `false` |
+| `hot.build.file.max-bytes` | Largest build the API accepts as an upload, in bytes. `hot build` and `hot deploy` check the bundle against it first | `104857600` |
 
 ### Database, App and Files
 
