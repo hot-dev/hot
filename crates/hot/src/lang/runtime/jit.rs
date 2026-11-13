@@ -2007,6 +2007,108 @@ fn calls_read_caller_locals(
     false
 }
 
+/// Whether a lambda that captures nothing can still read the frames it was
+/// created in when it runs, and so must be created with a link to them
+/// (`LambdaInfo::defining_frame`) rather than used as the constant it is.
+///
+/// It can when it, or a lambda it creates in turn, calls a function defined
+/// in another function's body (which reads the names it doesn't bind from
+/// the frames below it), or reads a name it neither binds nor captures that
+/// its definer may bind. `definer_nested` is whether the definer is itself
+/// a lambda or a local function, whose own definers' names reach here too.
+/// `definer_binds` says how the definer's body binds a name, if it does.
+///
+/// An `Err` when the lambda reads, without capturing it, a local the
+/// definer's compiled code keeps out of the VM's frames: the lambda could
+/// not find it there, so the definer is left to the interpreter.
+fn lambda_reads_definer_frame(
+    program: &BytecodeProgram,
+    lambda: &crate::lang::bytecode::LambdaInfo,
+    definer_nested: bool,
+    definer_binds: &dyn Fn(&str) -> Option<DefinerBinding>,
+) -> Result<bool, String> {
+    use crate::lang::bytecode::LambdaInfo;
+    // Each body with the names bound by it and by the bodies around it.
+    let mut bodies: Vec<(&LambdaInfo, Vec<&str>)> = vec![(lambda, Vec::new())];
+    let mut seen = 0usize;
+    while let Some((body, mut bound)) = bodies.pop() {
+        seen += 1;
+        if seen > 64 {
+            return Ok(true);
+        }
+        bound.extend(body.parameters.iter().map(String::as_str));
+        bound.extend(body.capture_vars.iter().map(String::as_str));
+        for inst in &body.instructions {
+            if let Instruction::StoreVar { var_name, .. } = inst
+                && let Ok(name) = constant_string(program, *var_name)
+            {
+                bound.push(name);
+            }
+        }
+        for inst in &body.instructions {
+            match inst {
+                Instruction::CallUserFunction { function_id, .. }
+                | Instruction::TailCall { function_id, .. }
+                    if program.local_functions.contains(function_id) =>
+                {
+                    return Ok(true);
+                }
+                Instruction::LoadVar { var_name, .. }
+                | Instruction::LoadVarOrDefault { var_name, .. }
+                | Instruction::LoadScoped { var_name, .. }
+                | Instruction::CaptureVar { var_name, .. } => {
+                    let Ok(name) = constant_string(program, *var_name) else {
+                        return Ok(true);
+                    };
+                    if bound.contains(&name) {
+                        continue;
+                    }
+                    match definer_binds(name) {
+                        Some(DefinerBinding::Local) => {
+                            return Err(format!(
+                                "JIT uncaptured read: a lambda reads '{name}', a local of the body that creates it, without capturing it"
+                            ));
+                        }
+                        Some(DefinerBinding::InFrame) => return Ok(true),
+                        None if definer_nested => return Ok(true),
+                        None => {}
+                    }
+                }
+                Instruction::LoadConst { constant, .. } => {
+                    match program.constants.get(*constant as usize) {
+                        Some(Constant::Val(Val::Box(boxed))) => {
+                            if let Some(nested) = boxed.as_any().downcast_ref::<LambdaInfo>() {
+                                bodies.push((nested, bound.clone()));
+                            }
+                        }
+                        // A call through a bare name calls a binding of
+                        // that name before any function.
+                        Some(Constant::Val(Val::Str(name)))
+                        | Some(Constant::StringRef(name))
+                        | Some(Constant::FunctionRef(name))
+                            if !bound.contains(&&**name) && definer_binds(name).is_some() =>
+                        {
+                            return Ok(true);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// How the body compiled code is made from binds a name.
+#[derive(Clone, Copy, PartialEq)]
+enum DefinerBinding {
+    /// A parameter or a capture: in the frame the VM holds for the call.
+    InFrame,
+    /// A local, which compiled code keeps in a register of its own.
+    Local,
+}
+
 /// Whether `instructions` bind the variable `name`.
 fn body_binds(program: &BytecodeProgram, instructions: &[Instruction], name: &str) -> bool {
     instructions.iter().any(|inst| {
@@ -4344,6 +4446,13 @@ unsafe extern "C" fn hot_jit_populate_closure(
         // The compiler's placeholders give way to what this creation
         // captures, as in the interpreter.
         captured.closure_env.clear();
+        // And, as in the interpreter, the lambda's calls look names up in
+        // the frames it was created in, not in those of whoever calls it:
+        // a local function it calls reads its definer's variables there.
+        let vm_ptr = get_jit_vm_ptr();
+        if !vm_ptr.is_null() {
+            captured.defining_frame = unsafe { &*vm_ptr }.current_frame_link();
+        }
         let n = count as usize;
         for i in 0..n {
             let name_raw = unsafe { *names_ptr.add(i) };
@@ -7991,18 +8100,38 @@ impl<'a> EmitCtx<'a> {
                             capture_values.push(owned);
                         }
 
-                        if capture_names.is_empty() {
+                        // A lambda that captures nothing and reads nothing
+                        // of the frames it is created in is the same value
+                        // every time. Any other is made here, with what it
+                        // captures and a link to this call's frame.
+                        let reads_frame = lambda_reads_definer_frame(
+                            self.program,
+                            &lambda_info,
+                            self.call_scope.local_function,
+                            &|name| {
+                                if body_binds(self.program, instructions, name) {
+                                    Some(DefinerBinding::Local)
+                                } else if self.locals.contains_key(name) {
+                                    Some(DefinerBinding::InFrame)
+                                } else {
+                                    None
+                                }
+                            },
+                        )?;
+                        if capture_names.is_empty() && !reads_frame {
                             (RawKind::OwnedVal, base_lambda)
                         } else {
                             let n = capture_names.len();
+                            // No captures: the helper reads neither array.
+                            let slot_bytes = (n.max(1) * 8) as u32;
                             let names_slot = builder.create_sized_stack_slot(StackSlotData::new(
                                 StackSlotKind::ExplicitSlot,
-                                (n * 8) as u32,
+                                slot_bytes,
                                 3,
                             ));
                             let values_slot = builder.create_sized_stack_slot(StackSlotData::new(
                                 StackSlotKind::ExplicitSlot,
-                                (n * 8) as u32,
+                                slot_bytes,
                                 3,
                             ));
                             for (i, (name_v, val_v)) in
