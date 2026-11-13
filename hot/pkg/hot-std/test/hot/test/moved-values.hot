@@ -604,3 +604,36 @@ meta ["test"] fn () {
     assert-eq([1, 2, 4], longer)
     assert-eq([1, 2], kept)
 }
+
+// With the JIT on, a builder starts out in compiled code and is handed to
+// the interpreter once its collection is large. Whatever tier writes an
+// item, the collection keeps every one, in order.
+count-up fn (i: Int, n: Int, acc: Vec): Vec {
+    if(gte(i, n), acc, count-up(add(i, 1), n, [...acc, i]))
+}
+
+index-up fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, index-up(add(i, 1), n, assoc(acc, key(i), i)))
+}
+
+test-a-large-collection-built-across-both-tiers
+meta ["test"] fn () {
+    assert-eq(range(3000), count-up(0, 3000, []))
+    assert-eq(range(3000), reduce(range(3000), (acc, x) { [...acc, x] }, []))
+
+    indexed index-up(0, 3000, {})
+    assert-eq(3000, length(indexed))
+    assert-eq(
+        [0, 1023, 1024, 1025, 2999],
+        [get(indexed, key(0)), get(indexed, key(1023)), get(indexed, key(1024)), get(indexed, key(1025)), get(indexed, key(2999))]
+    )
+
+    // Again, now that the builders are compiled from their first call.
+    assert-eq(range(3000), count-up(0, 3000, []))
+    assert-eq(3000, length(index-up(0, 3000, {})))
+
+    // One that writes on every other call crosses over twice as late.
+    kept keep-even(0, 6000, [])
+    assert-eq(3000, length(kept))
+    assert-eq([0, 2, 2046, 2048, 2050, 5998], [first(kept), get(kept, 1), get(kept, 1023), get(kept, 1024), get(kept, 1025), get(kept, 2999)])
+}

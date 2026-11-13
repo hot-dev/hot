@@ -673,6 +673,7 @@ struct JitHelperRefs {
     consume_err: FuncRef,
     owned_raw_arg: FuncRef,
     self_tail_owned_arg: FuncRef,
+    tail_loop_leaves: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -727,7 +728,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 49] {
+    fn scope_free(&self) -> [FuncRef; 50] {
         [
             self.poll_cancel,
             self.call_vm,
@@ -760,6 +761,7 @@ impl JitHelperRefs {
             self.consume_err,
             self.owned_raw_arg,
             self.self_tail_owned_arg,
+            self.tail_loop_leaves,
             self.promote_to_owned,
             self.make_vec,
             self.run_fused_pipeline,
@@ -2567,6 +2569,10 @@ fn compile_with_return_kind(
         hot_jit_self_tail_owned_arg as *const u8,
     );
     builder.symbol(
+        "hot_jit_tail_loop_leaves",
+        hot_jit_tail_loop_leaves as *const u8,
+    );
+    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -3621,6 +3627,20 @@ unsafe extern "C" fn hot_jit_self_tail_owned_arg(
         }
     }
     unsafe { hot_jit_clone_owned_val(raw) }
+}
+
+/// A self tail call passes on, in `raw`, the collection its loop writes:
+/// whether the rest of the loop should be run by the interpreter (see
+/// `VirtualMachine::tail_loop_leaves`). Returns 1 if so, and the loop then
+/// makes the call through the VM. Borrows `raw`.
+unsafe extern "C" fn hot_jit_tail_loop_leaves(function_id: i64, raw: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if raw == 0 || vm_ptr.is_null() {
+        return 0;
+    }
+    let collection = unsafe { &*(raw as *const Val) };
+    let vm = unsafe { &mut *vm_ptr };
+    i64::from(vm.tail_loop_leaves(function_id as u32, collection))
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
@@ -5135,6 +5155,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_self_tail_owned_arg",
             &[types::I64, types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        tail_loop_leaves: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_tail_loop_leaves",
+            &[types::I64, types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -9505,6 +9533,17 @@ fn build_supported_body(
     if instructions.is_empty() {
         return Err("Cannot JIT empty function".to_string());
     }
+    // The parameter a tail-call loop of this function writes, if it writes
+    // one: the collection the loop asks about at each tail call.
+    let tail_writer = {
+        let written = crate::lang::moves::writer_parameters(
+            instructions,
+            &function_info.moves,
+            &function_info.param_names,
+            &program.constants,
+        );
+        (written != 0).then(|| written.trailing_zeros() as usize)
+    };
 
     let used_regs = collect_used_registers(instructions);
     let remap: AHashMap<u32, usize> = used_regs
@@ -10231,6 +10270,32 @@ fn build_supported_body(
                 let mut through_vm = None;
                 let mut halts = Vec::new();
                 let mut unboxed = AHashMap::new();
+                // A loop that writes a collection it carries asks, at each
+                // tail call, whether the interpreter is now the better tier
+                // for it. If so this call goes through the VM, which runs
+                // the rest of the loop and writes the collection in place.
+                // Not when calls are traced: the call through the VM would
+                // be one more call in the trace than the loop makes.
+                if let Some(position) = tail_writer
+                    && !ctx.call_scope.traces_flows()
+                    && position < usize::from(*args_count)
+                    && param_locals[position].1 == RawKind::OwnedVal
+                    && active_flows
+                        .last()
+                        .is_some_and(|flow| flow.result_reg.is_some())
+                {
+                    let raw = ctx.reg_value(builder, *args_start + position as u32)?;
+                    let callee = builder.ins().iconst(types::I64, i64::from(function_id));
+                    let call = builder
+                        .ins()
+                        .call(ctx.helper_refs.tail_loop_leaves, &[callee, raw]);
+                    let leaves = builder.inst_results(call)[0];
+                    let other_block = *through_vm.get_or_insert_with(|| builder.create_block());
+                    let stays = builder.create_block();
+                    builder.ins().brif(leaves, other_block, &[], stays, &[]);
+                    builder.switch_to_block(stays);
+                    builder.seal_block(stays);
+                }
                 for &idx in &owned_raws {
                     let param_kind = param_locals[idx].1;
                     let reg = *args_start + idx as u32;

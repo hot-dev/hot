@@ -370,64 +370,13 @@ fn call_prepared_with_vm_multi_args(
     }
 }
 
-/// The items compiled code may copy per call of a reducer, averaged over
-/// the calls between two writes, before the interpreter is the faster
-/// tier. Interpreting a call costs about as much more as copying this many
-/// (measured on a release build: some 3 µs a call against 4 ns an item).
-const COPIED_PER_CALL: usize = 512;
-
-/// How often the reducer of one `reduce` has been growing its accumulator.
-#[derive(Default)]
-struct Growth {
-    /// The most items the accumulator has held, once a call has been seen.
-    most: Option<usize>,
-    /// The calls from the write before last to the last one.
-    period: usize,
-    /// The calls since the accumulator last grew.
-    calls_since: usize,
-}
-
-impl Growth {
-    /// Note the accumulator the next call is given, and say whether the
-    /// reducer is better run as compiled code whatever it is given.
-    ///
-    /// A reducer that writes its accumulator is run by the interpreter
-    /// once the accumulator is large, so that it is written in place:
-    /// compiled code copies it. That is the right trade when every call
-    /// writes. A reducer that writes on one call in a hundred copies a
-    /// hundredth as much per call, while the interpreter is as much slower
-    /// on every one of them. So it stays compiled until the accumulator is
-    /// large enough for the copying, spread over the calls between two
-    /// writes, to cost more than interpreting those calls. Either way a
-    /// call costs no more than a fixed amount, however large the
-    /// accumulator grows.
-    fn settled(&mut self, accumulator: &Val) -> bool {
-        let items = match crate::val::as_fields(accumulator) {
-            Val::Vec(items) => items.len(),
-            Val::Map(entries) => entries.len(),
-            _ => 0,
-        };
-        match self.most {
-            Some(most) if items > most => {
-                self.most = Some(items);
-                self.period = self.calls_since + 1;
-                self.calls_since = 0;
-            }
-            Some(_) => self.calls_since = self.calls_since.saturating_add(1),
-            None => self.most = Some(items),
-        }
-        // A reducer that has gone longer than its last period without
-        // writing is writing less often than that.
-        let period = self.period.max(self.calls_since.saturating_add(1));
-        period > 1 && items < period.saturating_mul(COPIED_PER_CALL)
-    }
-}
-
 /// [`call_prepared_with_vm_multi_args`] for a caller that gives its
 /// arguments up, as `reduce` gives its accumulator: an interpreted callee
 /// binds them by moving, so a collection among them is then held by that
 /// binding alone and a writer the callee passes it to writes it in place.
-/// `settled` is [`Growth::settled`] for the accumulator among them.
+/// `settled` says the accumulator among them has not been growing often
+/// enough for the interpreter to be the better tier for the callee (see
+/// [`crate::lang::runtime::vm::Growth::interpreter_wins`]).
 fn call_prepared_given(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function: &PreparedFunction<'_>,
@@ -1422,13 +1371,17 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     }
 
     let function = prepare_function(function_val);
-    let mut growth = Growth::default();
+    let mut growth = crate::lang::runtime::vm::Growth::default();
+    let settled = |growth: &mut crate::lang::runtime::vm::Growth, accumulator: &Val| {
+        use crate::lang::runtime::vm::{COPIED_PER_CALL, collection_items};
+        !growth.interpreter_wins(collection_items(accumulator), COPIED_PER_CALL)
+    };
     match collection {
         Val::Vec(items) => {
             let mut accumulator = init_val.clone();
 
             for item in items.iter() {
-                let settled = growth.settled(&accumulator);
+                let settled = settled(&mut growth, &accumulator);
                 // The accumulator is the reducer's to keep: nothing here
                 // holds it while the reducer runs.
                 let given = std::mem::replace(&mut accumulator, Val::Null);
@@ -1460,7 +1413,7 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             for (key, value) in map.iter() {
                 let pair = Val::vec(vec![key.clone(), value.clone()]);
 
-                let settled = growth.settled(&accumulator);
+                let settled = settled(&mut growth, &accumulator);
                 let given = std::mem::replace(&mut accumulator, Val::Null);
                 let function_result =
                     match call_prepared_given(vm, &function, vec![given, pair], settled)
@@ -1519,7 +1472,7 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         break;
                     }
 
-                    let settled = growth.settled(&accumulator);
+                    let settled = settled(&mut growth, &accumulator);
                     let given = std::mem::replace(&mut accumulator, Val::Null);
                     let function_result =
                         match call_prepared_given(vm, &function, vec![given, value], settled)
@@ -4289,36 +4242,39 @@ mod tests {
     }
 
     #[test]
-    fn a_reducer_stays_compiled_while_its_writes_copy_little_per_call() {
-        let holding = |items: usize| Val::vec(vec![Val::Null; items]);
+    fn the_interpreter_is_chosen_once_compiled_code_would_copy_too_much_per_call() {
+        use crate::lang::runtime::vm::{COPIED_PER_CALL, Growth};
+        let wins =
+            |growth: &mut Growth, items: usize| growth.interpreter_wins(items, COPIED_PER_CALL);
 
-        // One that writes on every call is never better compiled, whatever
-        // its accumulator holds: the caller goes by what each call is given.
+        // A callee that writes on every call: from COPIED_PER_CALL items.
         let mut growth = Growth::default();
-        assert!((0..3000).all(|items| !growth.settled(&holding(items))));
+        let chosen: Vec<bool> = (0..3000).map(|items| wins(&mut growth, items)).collect();
+        assert!(chosen[..COPIED_PER_CALL].iter().all(|chosen| !chosen));
+        assert!(chosen[COPIED_PER_CALL..].iter().all(|chosen| *chosen));
+
+        // When it then stops writing, compiled code is chosen again, the
+        // sooner the smaller the collection.
+        let idle = (1..).find(|_| !wins(&mut growth, 2999));
+        assert_eq!(idle, Some(2999 / COPIED_PER_CALL));
 
         // One that writes on every tenth call copies a tenth as much per
-        // call, so it stays compiled until the accumulator holds ten times
-        // as much.
+        // call: from ten times as many items.
         let mut growth = Growth::default();
         let mut compiled_until = 0;
-        for writes in 0..1000 {
-            let accumulator = holding(writes * 10);
+        for writes in 0..2000 {
             for _ in 0..10 {
-                if growth.settled(&accumulator) {
+                if !wins(&mut growth, writes * 10) {
                     compiled_until = writes * 10;
                 }
             }
         }
         assert_eq!(compiled_until, 10 * COPIED_PER_CALL - 10);
 
-        // One that stops writing goes back to compiled code, the sooner the
-        // smaller its accumulator.
+        // One whose collection is never seen to grow stays compiled,
+        // however large the collection.
         let mut growth = Growth::default();
-        assert!((0..2000).all(|items| !growth.settled(&holding(items))));
-        let accumulator = holding(2000);
-        let idle = (1..).find(|_| growth.settled(&accumulator));
-        assert_eq!(idle, Some(2000 / COPIED_PER_CALL + 1));
+        assert!((0..5000).all(|_| !wins(&mut growth, 1_000_000)));
     }
 
     #[test]

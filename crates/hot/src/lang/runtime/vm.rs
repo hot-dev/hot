@@ -529,51 +529,104 @@ fn is_takeable(value: &Val) -> bool {
     }
 }
 
-/// From this many items on, writing a Vec in place in the interpreter
-/// costs less than copying it in compiled code. Measured on reduce with a
-/// spread: level at 32 items, half the time at 125.
-const IN_PLACE_VEC_ITEMS: usize = 64;
-/// The same for a Map, measured on reduce with `assoc`: compiled code is
-/// still ahead at 125 entries and behind at 500.
-const IN_PLACE_MAP_ITEMS: usize = 256;
+/// The items compiled code may copy per call, averaged over the calls
+/// between two writes of a collection, before the interpreter is the better
+/// tier for whoever writes it. Compiled code lends what it holds to the
+/// writers it calls, so they copy the collection (some 4 ns an item on a
+/// release build). The interpreter writes it in place, and costs 2 to 3 µs
+/// more a call. The two meet at about 700 items per call; this is the
+/// margin over that.
+pub(crate) const COPIED_PER_CALL: usize = 1024;
 
-/// Whether `args` hold, in one of the parameters `written` (a bit per
-/// position), a collection that nothing else holds and that is large
-/// enough for writing it in place to pay for running interpreted.
-fn given_collection_to_write(written: u64, args: &[Val]) -> bool {
-    if written == 0 {
-        return false;
-    }
-    args.iter().take(64).enumerate().any(|(position, arg)| {
-        written & (1 << position) != 0
-            && match arg {
-                Val::Vec(items) => Arc::strong_count(items) == 1 && items.len() >= IN_PLACE_VEC_ITEMS,
-                Val::Map(entries) => {
-                    Arc::strong_count(entries) == 1
-                        && matches!(crate::val::as_fields(arg), Val::Map(fields) if fields.len() >= IN_PLACE_MAP_ITEMS)
-                }
-                _ => false,
-            }
-    })
+/// How many times one loop may leave compiled code for the interpreter.
+/// Each time nests a call, so there is an end to it.
+const TAIL_LOOP_LEAVES: u8 = 3;
+
+/// How often the collection a callee is given has been growing. It decides
+/// whether the callee runs compiled, as any callee does, or is run by the
+/// interpreter so that the collection is written in place.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Growth {
+    /// The most items the collection has held, once a call has been seen.
+    most: Option<usize>,
+    /// The calls from the growth before last to the last one, or 0 while
+    /// the collection has not been seen to grow.
+    period: usize,
+    /// The calls since it last grew.
+    calls_since: usize,
+    /// The times a compiled loop has left for the interpreter over it.
+    leaves: u8,
 }
 
-/// How many tail calls in a row must leave the collections a loop writes
-/// no larger before the loop may go on in compiled code.
-const SETTLED_TAIL_CALLS: u32 = 256;
+impl Growth {
+    /// Note the items the collection holds on the next call, and say
+    /// whether the interpreter is the better tier for that call: the
+    /// collection has been seen to grow, and at the rate it has been
+    /// growing compiled code would copy `per_call` items or more a call.
+    ///
+    /// A callee that writes on every call is better interpreted once the
+    /// collection holds `per_call` items. One that writes on one call in a
+    /// hundred copies a hundredth as much per call, so only once it holds a
+    /// hundred times as many. Until then, and whenever there is nothing to
+    /// go by, the callee runs compiled, as it would have anyway.
+    pub(crate) fn interpreter_wins(&mut self, items: usize, per_call: usize) -> bool {
+        match self.most {
+            Some(most) if items > most => {
+                self.most = Some(items);
+                self.period = self.calls_since + 1;
+                self.calls_since = 0;
+            }
+            Some(_) => self.calls_since = self.calls_since.saturating_add(1),
+            None => self.most = Some(items),
+        }
+        // A callee that has gone longer than its last period without
+        // writing is writing less often than that.
+        let period = self.period.max(self.calls_since.saturating_add(1));
+        self.period > 0 && items >= period.saturating_mul(per_call)
+    }
+}
 
-/// The items in the collections `args` hold in the parameters `written` (a
-/// bit per position).
-fn written_items(written: u64, args: &[Val]) -> usize {
+/// The items of a collection, or 0 for any other value. A constructed
+/// value counts as the two entries it is stored as: this is asked at every
+/// call, and looking inside one costs more than there is to gain.
+pub(crate) fn collection_items(value: &Val) -> usize {
+    match value {
+        Val::Vec(items) => items.len(),
+        Val::Map(entries) => entries.len(),
+        _ => 0,
+    }
+}
+
+/// Whether `value` is a collection that nothing else holds, so that a
+/// writer given it writes it in place.
+fn held_alone(value: &Val) -> bool {
+    match value {
+        Val::Vec(items) => Arc::strong_count(items) == 1,
+        Val::Map(entries) => Arc::strong_count(entries) == 1,
+        _ => false,
+    }
+}
+
+/// The items of the first collection `args` hold in one of the parameters
+/// `written` (a bit per position), if nothing else holds that collection.
+fn given_to_write(written: u64, args: &[Val]) -> Option<usize> {
     args.iter()
         .take(64)
         .enumerate()
-        .filter(|(position, _)| written & (1 << position) != 0)
-        .map(|(_, arg)| match crate::val::as_fields(arg) {
-            Val::Vec(items) => items.len(),
-            Val::Map(entries) => entries.len(),
-            _ => 0,
+        .find(|(position, arg)| written & (1 << position) != 0 && held_alone(arg))
+        .map(|(_, arg)| collection_items(arg))
+}
+
+/// The items of the first collection `args` hold in one of the parameters
+/// `written`, whoever else holds it.
+fn carried_to_write(written: u64, args: &[Val]) -> Option<usize> {
+    args.iter()
+        .take(64)
+        .enumerate()
+        .find(|(position, arg)| {
+            written & (1 << position) != 0 && matches!(arg, Val::Vec(_) | Val::Map(_))
         })
-        .sum()
+        .map(|(_, arg)| collection_items(arg))
 }
 
 #[cfg(debug_assertions)]
@@ -1188,6 +1241,17 @@ pub struct VirtualMachine {
     /// (`moves::writer_parameters`), and whether it carries one of them
     /// through a tail call to itself.
     writer_parameters_cache: AHashMap<FunctionId, (u64, bool)>,
+    /// For each function that writes a parameter: how the collections its
+    /// calls were given have been growing.
+    call_growth: AHashMap<FunctionId, Growth>,
+    /// How the collection of the compiled tail-call loop now running has
+    /// been growing.
+    tail_growth: Growth,
+    /// The loop a compiled tail call has just left for the interpreter,
+    /// until the VM starts the call that goes on with it.
+    tail_leaving: Option<(FunctionId, Growth)>,
+    /// What the interpreted call that goes on with such a loop starts from.
+    tail_inherited: Option<Growth>,
     /// The registers re-entrant calls have set aside, innermost last. A call
     /// pushes its own on entry and takes them back on exit, so recursion
     /// reuses one buffer where each call used to allocate a vector.
@@ -1438,6 +1502,10 @@ impl VirtualMachine {
             function_used_registers_cache: AHashMap::new(),
             moved_read: std::cell::RefCell::new(None),
             writer_parameters_cache: AHashMap::new(),
+            call_growth: AHashMap::new(),
+            tail_growth: Growth::default(),
+            tail_leaving: None,
+            tail_inherited: None,
             saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
@@ -10346,7 +10414,10 @@ impl VirtualMachine {
         } else {
             None
         };
+        // A tail-call loop this call starts has seen nothing yet.
+        let outer = std::mem::take(&mut self.tail_growth);
         let result = self.run_compiled_call(function_id, &compiled, args);
+        self.tail_growth = outer;
         if let Ok(value) = &result
             && call_id.is_some()
             && !self.has_failed()
@@ -10937,24 +11008,40 @@ impl VirtualMachine {
     /// is on. The interpreter writes a collection in place when the call is
     /// its only holder; compiled code lends its values to what it calls, so
     /// a writer it reaches copies the collection every time. So a call that
-    /// was given a large collection nothing else holds, in a parameter the
-    /// function goes on to write, is interpreted: past a few dozen items
-    /// that is the faster tier, and it is the one whose cost doesn't grow
-    /// with the collection. A tail-call loop that carries such a parameter
-    /// starts out interpreted whatever it is given: compiled, it would be a
-    /// native loop that never comes back to choose again as the collection
-    /// grows. It goes on in compiled code once the collection has stopped
-    /// growing (see `SETTLED_TAIL_CALLS`).
+    /// is given a collection nothing else holds, in a parameter the function
+    /// goes on to write, is interpreted once the copying would cost more
+    /// than interpreting does: see [`Growth::interpreter_wins`], here over
+    /// the calls of the function that were given such a collection.
+    ///
+    /// A tail-call loop is also interpreted when it is the rest of a loop
+    /// that compiled code has just left (see [`Self::tail_loop_leaves`]).
     fn keeps_call_interpreted(&mut self, function_id: FunctionId, args: &CallArgs<'_>) -> bool {
         let (written, tail_loop) = self.writer_parameters_of(function_id);
         if written == 0 {
             return false;
         }
-        tail_loop
-            || matches!(args, CallArgs::Given(given) if given_collection_to_write(written, given))
+        if tail_loop
+            && let Some((leaving, growth)) = self.tail_leaving.take()
+            && leaving == function_id
+        {
+            self.tail_inherited = Some(growth);
+            return true;
+        }
+        let CallArgs::Given(given) = args else {
+            return false;
+        };
+        match given_to_write(written, given) {
+            Some(items) if items >= COPIED_PER_CALL => self
+                .call_growth
+                .entry(function_id)
+                .or_default()
+                .interpreter_wins(items, COPIED_PER_CALL),
+            _ => false,
+        }
     }
 
-    /// [`Self::keeps_call_interpreted`] for a lambda given `args`.
+    /// [`Self::keeps_call_interpreted`] for a lambda given `args`, when
+    /// its caller has seen the collection among them grow often enough.
     pub(crate) fn keeps_lambda_call_interpreted(&self, lambda_val: &Val, args: &[Val]) -> bool {
         use crate::lang::moves::flag;
         let Val::Box(boxed) = lambda_val else {
@@ -10975,7 +11062,31 @@ impl VirtualMachine {
             &lambda.parameters,
             &self.program.constants,
         );
-        given_collection_to_write(written, args)
+        given_to_write(written, args).is_some_and(|items| items >= COPIED_PER_CALL)
+    }
+
+    /// Asked by a compiled tail-call loop at each tail call, of the
+    /// collection it passes on in the parameter it writes: whether the rest
+    /// of the loop should be run by the interpreter. It should once the
+    /// collection has grown to where copying it at each write costs more
+    /// than interpreting the calls between two writes (see
+    /// [`Growth::interpreter_wins`]). The loop then makes this tail call
+    /// through the VM, and [`Self::keeps_call_interpreted`] sees to it
+    /// that the VM interprets it.
+    pub(crate) fn tail_loop_leaves(&mut self, function_id: FunctionId, collection: &Val) -> bool {
+        let growth = &mut self.tail_growth;
+        // Every tail call counts towards how often the loop writes. The
+        // loop leaves on one that passes on a collection nothing else
+        // holds, which the interpreter can go on to write in place.
+        if !growth.interpreter_wins(collection_items(collection), COPIED_PER_CALL)
+            || growth.leaves >= TAIL_LOOP_LEAVES
+            || !held_alone(collection)
+        {
+            return false;
+        }
+        growth.leaves += 1;
+        self.tail_leaving = Some((function_id, growth.clone()));
+        true
     }
 
     /// Written-register set for a function body (lazily computed and cached).
@@ -11260,10 +11371,9 @@ impl VirtualMachine {
                 // Parameters were already bound into the function scope above,
                 // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
-                // For a loop that carries a collection it writes: the most
-                // items the collection has held, and the tail calls since
-                // it last grew.
-                let mut growth: (usize, u32) = (0, 0);
+                // For a loop that carries a collection it writes: how the
+                // collection has been growing.
+                let mut growth = self.tail_inherited.take().unwrap_or_default();
                 // The registers the body writes, once a tail call needs
                 // them emptied.
                 let mut written: Option<std::rc::Rc<[u32]>> = None;
@@ -11355,25 +11465,25 @@ impl VirtualMachine {
                                 // as ONE call and never compiles.
                                 //
                                 // A loop that carries a collection it writes
-                                // stays interpreted while the collection
-                                // grows: compiled, it is a native loop that
-                                // copies the collection at every write and
-                                // never comes back to choose again. Once
-                                // the collection has stopped growing there
-                                // is nothing left for that to cost.
+                                // stays interpreted while copying the
+                                // collection at each write would cost more
+                                // than interpreting does. It took twice as
+                                // much to leave compiled code for here, so
+                                // that a loop near the line stays put.
                                 let mut compiles =
                                     self.jit.config.is_enabled() && !self.in_constraint_predicate();
                                 if compiles {
                                     let (written, tail_loop) =
                                         self.writer_parameters_of(function_id);
-                                    if tail_loop {
-                                        let items = written_items(written, &new_args);
-                                        if items > growth.0 {
-                                            growth = (items, 0);
-                                        } else {
-                                            growth.1 = growth.1.saturating_add(1);
-                                        }
-                                        compiles = growth.1 >= SETTLED_TAIL_CALLS;
+                                    // The collection counts whoever holds
+                                    // it: the one a compiled loop has just
+                                    // passed on is still in that loop's
+                                    // registers until this one writes it.
+                                    if tail_loop
+                                        && let Some(items) = carried_to_write(written, &new_args)
+                                    {
+                                        compiles =
+                                            !growth.interpreter_wins(items, COPIED_PER_CALL / 2);
                                     }
                                 }
                                 if compiles {
@@ -11419,8 +11529,13 @@ impl VirtualMachine {
                                     ));
                                     let prev =
                                         super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+                                    // The compiled loop goes on from what
+                                    // this one has seen of the collection.
+                                    let outer =
+                                        std::mem::replace(&mut self.tail_growth, growth.clone());
                                     let call_result =
                                         self.jit.try_call_compiled(function_id, &new_args);
+                                    self.tail_growth = outer;
                                     super::jit::set_jit_vm_ptr(prev);
                                     if let Some(result) = call_result.map_err(|msg| {
                                         VmError::RuntimeError(
