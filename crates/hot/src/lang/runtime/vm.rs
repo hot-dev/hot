@@ -529,6 +529,34 @@ fn is_takeable(value: &Val) -> bool {
     }
 }
 
+/// From this many items on, writing a Vec in place in the interpreter
+/// costs less than copying it in compiled code. Measured on reduce with a
+/// spread: level at 32 items, half the time at 125.
+const IN_PLACE_VEC_ITEMS: usize = 64;
+/// The same for a Map, measured on reduce with `assoc`: compiled code is
+/// still ahead at 125 entries and behind at 500.
+const IN_PLACE_MAP_ITEMS: usize = 256;
+
+/// Whether `args` hold, in one of the parameters `written` (a bit per
+/// position), a collection that nothing else holds and that is large
+/// enough for writing it in place to pay for running interpreted.
+fn given_collection_to_write(written: u64, args: &[Val]) -> bool {
+    if written == 0 {
+        return false;
+    }
+    args.iter().take(64).enumerate().any(|(position, arg)| {
+        written & (1 << position) != 0
+            && match arg {
+                Val::Vec(items) => Arc::strong_count(items) == 1 && items.len() >= IN_PLACE_VEC_ITEMS,
+                Val::Map(entries) => {
+                    Arc::strong_count(entries) == 1
+                        && matches!(crate::val::as_fields(arg), Val::Map(fields) if fields.len() >= IN_PLACE_MAP_ITEMS)
+                }
+                _ => false,
+            }
+    })
+}
+
 #[cfg(debug_assertions)]
 fn moved_out() -> Val {
     Val::Box(Box::new(MovedOut))
@@ -1137,6 +1165,10 @@ pub struct VirtualMachine {
     /// The name of a binding that was read after its value was taken (see
     /// `note_moved_read`), until the instruction that read it fails.
     moved_read: std::cell::RefCell<Option<String>>,
+    /// For each function called so far: the parameters it writes in place
+    /// (`moves::writer_parameters`), and whether it carries one of them
+    /// through a tail call to itself.
+    writer_parameters_cache: AHashMap<FunctionId, (u64, bool)>,
     /// The registers re-entrant calls have set aside, innermost last. A call
     /// pushes its own on entry and takes them back on exit, so recursion
     /// reuses one buffer where each call used to allocate a vector.
@@ -1386,6 +1418,7 @@ impl VirtualMachine {
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             moved_read: std::cell::RefCell::new(None),
+            writer_parameters_cache: AHashMap::new(),
             saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
@@ -10849,6 +10882,81 @@ impl VirtualMachine {
         }
     }
 
+    /// The parameters `function_id` writes in place, a bit per position,
+    /// and whether it is a tail-call loop that carries one of them.
+    fn writer_parameters_of(&mut self, function_id: FunctionId) -> (u64, bool) {
+        if let Some(known) = self.writer_parameters_cache.get(&function_id) {
+            return *known;
+        }
+        let found = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|function| {
+                let written = crate::lang::moves::writer_parameters(
+                    &function.instructions,
+                    &function.moves,
+                    &function.param_names,
+                    &self.program.constants,
+                );
+                let tail_loop = written != 0
+                    && function.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction,
+                            Instruction::TailCall { function_id: callee, .. }
+                                if *callee == function_id
+                        )
+                    });
+                (written, tail_loop)
+            })
+            .unwrap_or((0, false));
+        self.writer_parameters_cache.insert(function_id, found);
+        found
+    }
+
+    /// Whether this call of `function_id` runs interpreted although the JIT
+    /// is on. The interpreter writes a collection in place when the call is
+    /// its only holder; compiled code lends its values to what it calls, so
+    /// a writer it reaches copies the collection every time. So a call that
+    /// was given a large collection nothing else holds, in a parameter the
+    /// function goes on to write, is interpreted: past a few dozen items
+    /// that is the faster tier, and it is the one whose cost doesn't grow
+    /// with the collection. A tail-call loop that carries such a parameter
+    /// is always interpreted: compiled, it would be a native loop that
+    /// never comes back to choose again as the collection grows.
+    fn keeps_call_interpreted(&mut self, function_id: FunctionId, args: &CallArgs<'_>) -> bool {
+        let (written, tail_loop) = self.writer_parameters_of(function_id);
+        if written == 0 {
+            return false;
+        }
+        tail_loop
+            || matches!(args, CallArgs::Given(given) if given_collection_to_write(written, given))
+    }
+
+    /// [`Self::keeps_call_interpreted`] for a lambda given `args`.
+    pub(crate) fn keeps_lambda_call_interpreted(&self, lambda_val: &Val, args: &[Val]) -> bool {
+        use crate::lang::moves::flag;
+        let Val::Box(boxed) = lambda_val else {
+            return false;
+        };
+        let Some(lambda) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        else {
+            return false;
+        };
+        if !lambda.moves.iter().any(|entry| entry & flag::WRITER != 0) {
+            return false;
+        }
+        let written = crate::lang::moves::writer_parameters(
+            &lambda.instructions,
+            &lambda.moves,
+            &lambda.parameters,
+            &self.program.constants,
+        );
+        given_collection_to_write(written, args)
+    }
+
     /// Written-register set for a function body (lazily computed and cached).
     /// The name of the function whose instructions ran last.
     fn current_debug_function_name(&self) -> Option<&str> {
@@ -10883,7 +10991,10 @@ impl VirtualMachine {
         mut args: CallArgs<'_>,
         registers_saved: bool,
     ) -> VmResult<Val> {
-        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
+        if self.jit.config.is_enabled()
+            && !self.in_constraint_predicate()
+            && !self.keeps_call_interpreted(function_id, &args)
+        {
             self.jit.record_call(function_id, args.as_slice());
 
             let was_halted = self.has_failed() || self.has_cancelled();
@@ -11217,7 +11328,10 @@ impl VirtualMachine {
                                 // switch to compiled code mid-loop once available.
                                 // Without this, a million-iteration tail loop counts
                                 // as ONE call and never compiles.
-                                if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
+                                if self.jit.config.is_enabled()
+                                    && !self.in_constraint_predicate()
+                                    && !self.writer_parameters_of(function_id).1
+                                {
                                     self.jit.record_call(function_id, &new_args);
                                     if self.jit.should_compile_now(function_id, &new_args)
                                         && !self.jit_blocked_by_overload_dispatch(function_id)

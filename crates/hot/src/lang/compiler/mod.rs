@@ -5668,11 +5668,25 @@ impl Compiler {
     /// (see `lang::moves`). `parameters` are the names its frame binds on
     /// entry.
     fn plan_moves(&self, instructions: &[Instruction], parameters: &[String]) -> Vec<u8> {
-        let local_functions = &self.program.local_functions;
-        let moves =
-            crate::lang::moves::plan(instructions, parameters, &self.program.constants, &|id| {
-                local_functions.contains(&id)
-            });
+        let program = &self.program;
+        let moves = crate::lang::moves::plan(
+            instructions,
+            parameters,
+            &program.constants,
+            &|id| program.local_functions.contains(&id),
+            // A function compiled before this one, whose plan is known.
+            &|id, position| {
+                program.functions.get(id as usize).is_some_and(|callee| {
+                    crate::lang::moves::writer_parameters(
+                        &callee.instructions,
+                        &callee.moves,
+                        &callee.param_names,
+                        &program.constants,
+                    ) & (1u64 << position.min(63))
+                        != 0
+                })
+            },
+        );
         // The compiler writes an argument register for one call, so a plan
         // moves every call's arguments. A call it leaves copying them
         // means a register is read where this compiler never read one.

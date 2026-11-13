@@ -612,10 +612,74 @@ grown assoc(m, "b", 1)
     /// makes some of its own, the same for every program, so compare two
     /// programs rather than read one count.
     fn interpreted_writes(src: &str) -> (usize, usize) {
+        writes_under(src, Some(val!({"jit": {"mode": "off"}})))
+    }
+
+    /// [`interpreted_writes`] under any configuration.
+    fn writes_under(src: &str, conf: Option<Val>) -> (usize, usize) {
         let before = crate::val::write_stats::counts();
-        compile_and_run_with_std_conf(src, Some(val!({"jit": {"mode": "off"}}))).expect("run");
+        compile_and_run_with_std_conf(src, conf).expect("run");
         let after = crate::val::write_stats::counts();
         (after.0 - before.0, after.1 - before.1)
+    }
+
+    /// With the JIT on, compiled code still lends what it holds to the
+    /// writers it calls, so they copy. A call that is given a large
+    /// collection to write is therefore run by the interpreter, and a
+    /// tail-call loop that carries one always is. Building 2,600 items
+    /// must then copy no more than building 600 does: both copy only while
+    /// the collection is small enough for compiled code to be the faster
+    /// tier.
+    #[test]
+    fn a_large_collection_is_written_in_place_with_the_jit_on() {
+        let builders = [
+            (
+                "assoc",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { assoc(acc, x, x) }, {}) }",
+            ),
+            (
+                "vec spread",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
+            ),
+            (
+                "concat",
+                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { concat(acc, [x]) }, []) }",
+            ),
+            (
+                "update",
+                r#"run fn (n: Int): Map {
+    reduce(range(n), (acc, x) { update(assoc(acc, x, x), "count", (c) { add(if(is-null(c), 0, c), 1) }) }, {})
+}"#,
+            ),
+            (
+                "a typed tail call carrying the map",
+                r#"step fn (i: Int, n: Int, acc: Map): Map {
+    if(gte(i, n), acc, step(add(i, 1), n, assoc(acc, i, i)))
+}
+run fn (n: Int): Map { step(0, n, {}) }"#,
+            ),
+            (
+                "a named reducer",
+                r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
+            ),
+        ];
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            for (name, body) in builders {
+                let label = format!("{name} under {conf:?}");
+                let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+                let small = writes_under(&program(600), conf.clone());
+                let large = writes_under(&program(2600), conf.clone());
+                assert!(
+                    large.1 <= small.1 + 16,
+                    "{label}: the items copied grew with the collection, from {small:?} to {large:?}"
+                );
+                assert!(
+                    large.0 >= small.0 + 1900,
+                    "{label}: writes in place did not grow with the collection, from {small:?} to {large:?}"
+                );
+            }
+        }
     }
 
     /// A call gives its argument registers up, so a writer that receives

@@ -60,6 +60,15 @@ pub mod flag {
     /// On a `LoadVar`: this is the last read of a binding of the frame the
     /// body runs in, so the load may take the value out of the binding.
     pub const VAR: u8 = 1 << 4;
+    /// On a `LoadVar`: the value it loads goes on, through moves alone, to
+    /// an instruction that writes it as its collection (a writer's first
+    /// argument, a leading spread, a deep-path write), and by then the
+    /// variable has given the value up (this load, or a later one before
+    /// the write, is its `VAR` load). A caller that gives such a parameter
+    /// a large collection nothing else holds is better served by the
+    /// interpreter, which writes it in place, than by compiled code, which
+    /// still copies it (see [`super::writer_parameters`]).
+    pub const WRITER: u8 = 1 << 5;
 }
 
 /// The registers one instruction touches.
@@ -120,6 +129,11 @@ impl Operands {
     fn keeps(mut self, positions: u8) -> Self {
         self.kept |= positions;
         self
+    }
+
+    /// Whether the instruction reads or writes `register` in any way.
+    fn mentions(&self, register: RegisterId) -> bool {
+        self.write == Some(register) || self.all_reads().any(|read| read == register)
     }
 
     /// Every register the instruction reads, the updated one included.
@@ -552,6 +566,7 @@ pub fn plan(
     parameters: &[String],
     constants: &[Constant],
     is_local_function: &dyn Fn(FunctionId) -> bool,
+    writes_parameter: &dyn Fn(FunctionId, usize) -> bool,
 ) -> Vec<u8> {
     let mut flags = vec![0u8; instructions.len()];
     let Some(operands) = instructions
@@ -571,6 +586,13 @@ pub fn plan(
             constants,
             is_local_function,
             regions,
+            &mut flags,
+        );
+        plan_writers(
+            instructions,
+            &operands,
+            constants,
+            writes_parameter,
             &mut flags,
         );
     }
@@ -924,6 +946,187 @@ fn plan_variables<'a>(
     }
 }
 
+/// The core functions that write their first argument in place when
+/// nothing else holds it (hot-std's own, or the native under each).
+fn writes_first_argument(callee: &str) -> bool {
+    let name = callee.strip_prefix("::hot::coll/").unwrap_or(callee);
+    matches!(
+        name,
+        "assoc" | "assoc-some" | "merge" | "delete" | "concat" | "update"
+    )
+}
+
+/// The name in `register` when instruction `before` runs, if a constant put
+/// it there: the callee of a call.
+fn loaded_name<'a>(
+    instructions: &[Instruction],
+    constants: &'a [Constant],
+    before: usize,
+    register: RegisterId,
+) -> Option<&'a str> {
+    let mut register = register;
+    for instruction in instructions[..before].iter().rev() {
+        match instruction {
+            Instruction::LoadConst { dest, constant } if *dest == register => {
+                return constant_name(constants, *constant);
+            }
+            Instruction::LoadFunctionRef {
+                dest,
+                function_name,
+            } if *dest == register => return constant_name(constants, *function_name),
+            Instruction::Move { dest, src } if *dest == register => register = *src,
+            other if operands(other).is_none_or(|ops| ops.write == Some(register)) => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Mark the loads whose value goes on to be written in place (see
+/// [`flag::WRITER`]).
+fn plan_writers(
+    instructions: &[Instruction],
+    operands: &[Operands],
+    constants: &[Constant],
+    writes_parameter: &dyn Fn(FunctionId, usize) -> bool,
+    flags: &mut [u8],
+) {
+    use Instruction as I;
+    // Where each variable gives its value up.
+    let mut taken_at: AHashMap<ConstantId, usize> = AHashMap::new();
+    for (index, instruction) in instructions.iter().enumerate() {
+        if let I::LoadVar { var_name, .. } = instruction
+            && flags[index] & flag::VAR != 0
+        {
+            taken_at.insert(*var_name, index);
+        }
+    }
+    for start in 0..instructions.len() {
+        let I::LoadVar { dest, var_name } = &instructions[start] else {
+            continue;
+        };
+        let Some(&taken) = taken_at.get(var_name) else {
+            continue;
+        };
+        if taken < start {
+            continue;
+        }
+        // The register that holds the value, or the argument Vec it is the
+        // first item of.
+        let mut held = *dest;
+        let mut in_arguments = false;
+        let mut written = false;
+        let mut writer = start;
+        for index in start + 1..instructions.len() {
+            writer = index;
+            let instruction = &instructions[index];
+            if is_flow_boundary(instruction) {
+                break;
+            }
+            let entry = flags[index];
+            match instruction {
+                I::Move { dest, src } if *src == held && entry & flag::FIRST != 0 => {
+                    held = *dest;
+                    continue;
+                }
+                I::MakeVec {
+                    dest,
+                    elements_start,
+                    ..
+                } if !in_arguments && *elements_start == held && entry & flag::RANGE != 0 => {
+                    held = *dest;
+                    in_arguments = true;
+                    continue;
+                }
+                I::MakeVecWithSpread {
+                    elements_start,
+                    spread_mask,
+                    ..
+                } if !in_arguments && *elements_start == held => {
+                    written = spread_mask & 1 == 1 && entry & flag::RANGE != 0;
+                }
+                I::MergeMaps { source, .. } if !in_arguments && *source == held => {
+                    written = entry & flag::FIRST != 0;
+                }
+                I::DotSet { object: target, .. }
+                | I::DynamicDotSet { object: target, .. }
+                | I::SetElement {
+                    collection: target, ..
+                }
+                | I::VecPush { vec: target, .. }
+                | I::VecAppend { vec: target, .. }
+                    if !in_arguments && *target == held =>
+                {
+                    written = true;
+                }
+                I::Call {
+                    function,
+                    args_start,
+                    ..
+                } if !in_arguments && *args_start == held => {
+                    written = entry & flag::RANGE != 0
+                        && loaded_name(instructions, constants, index, *function)
+                            .is_some_and(writes_first_argument);
+                }
+                I::CallUserFunction {
+                    function_id,
+                    args_start,
+                    args_count,
+                    ..
+                } if !in_arguments
+                    && held >= *args_start
+                    && held - *args_start < u32::from(*args_count) =>
+                {
+                    written = entry & flag::RANGE != 0
+                        && writes_parameter(*function_id, (held - *args_start) as usize);
+                }
+                I::CallLibBuiltin { function, args, .. } if in_arguments && *args == held => {
+                    written = entry & flag::SECOND != 0
+                        && loaded_name(instructions, constants, index, *function).is_some_and(
+                            |native| crate::lang::hot::coll::owning_writer(native).is_some(),
+                        );
+                }
+                _ if operands[index].mentions(held) => {}
+                _ => continue,
+            }
+            break;
+        }
+        // The variable must have given the value up before the write.
+        if written && taken < writer {
+            flags[start] |= flag::WRITER;
+        }
+    }
+}
+
+/// The parameters of a body, as a bit per position (the first 64), that a
+/// call of it goes on to write in place: see [`flag::WRITER`].
+pub fn writer_parameters(
+    instructions: &[Instruction],
+    plan: &[u8],
+    parameters: &[String],
+    constants: &[Constant],
+) -> u64 {
+    if plan.len() != instructions.len() {
+        return 0;
+    }
+    let mut written = 0u64;
+    for (instruction, entry) in instructions.iter().zip(plan) {
+        if entry & flag::WRITER == 0 {
+            continue;
+        }
+        if let Instruction::LoadVar { var_name, .. } = instruction
+            && let Some(name) = constant_name(constants, *var_name)
+            && let Some(position) = parameters.iter().position(|parameter| parameter == name)
+            && position < 64
+        {
+            written |= 1 << position;
+        }
+    }
+    written
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,7 +1134,7 @@ mod tests {
 
     /// The plan of a body whose names don't matter.
     fn registers_only(instructions: &[Instruction]) -> Vec<u8> {
-        plan(instructions, &[], &[], &|_| false)
+        plan(instructions, &[], &[], &|_| false, &|_, _| false)
     }
 
     fn strings(names: &[&str]) -> Vec<Constant> {
@@ -947,7 +1150,9 @@ mod tests {
         constants: &[Constant],
     ) -> Vec<u8> {
         let parameters: Vec<String> = parameters.iter().map(|name| name.to_string()).collect();
-        plan(instructions, &parameters, constants, &|_| false)
+        plan(instructions, &parameters, constants, &|_| false, &|_, _| {
+            false
+        })
     }
 
     fn load(dest: RegisterId, var_name: ConstantId) -> Instruction {
@@ -1305,10 +1510,85 @@ mod tests {
             },
         ];
         let parameters = vec!["acc".to_string()];
-        let local = plan(&body, &parameters, &constants, &|id| id == 7);
+        let local = plan(&body, &parameters, &constants, &|id| id == 7, &|_, _| false);
         assert_eq!(local[0] & flag::VAR, 0);
         assert_eq!(local[1] & flag::RANGE, flag::RANGE, "registers still move");
-        let top_level = plan(&body, &parameters, &constants, &|_| false);
+        let top_level = plan(&body, &parameters, &constants, &|_| false, &|_, _| false);
         assert_eq!(top_level[0] & flag::VAR, flag::VAR);
+    }
+
+    #[test]
+    fn a_parameter_moved_into_a_writer_is_marked() {
+        // (acc, x) { assoc(acc, x, x) }
+        let constants = strings(&["acc", "x", "assoc", "length"]);
+        let body = [
+            load(2, 0),
+            mov(1, 2),
+            load(3, 1),
+            mov(2, 3),
+            constant(9, 2),
+            call(0, 9, 1, 2),
+            Instruction::Return { value: 0 },
+        ];
+        let marks = plan_of(&body, &["acc", "x"], &constants);
+        assert_eq!(
+            marks[0] & (flag::VAR | flag::WRITER),
+            flag::VAR | flag::WRITER
+        );
+        assert_eq!(marks[2] & flag::WRITER, 0, "the key is not written");
+        assert_eq!(
+            writer_parameters(&body, &marks, &["acc".into(), "x".into()], &constants),
+            1
+        );
+
+        // length(acc) reads its argument: nothing is written.
+        let reader = [
+            load(2, 0),
+            mov(1, 2),
+            constant(9, 3),
+            call(0, 9, 1, 1),
+            Instruction::Return { value: 0 },
+        ];
+        let marks = plan_of(&reader, &["acc"], &constants);
+        assert_eq!(marks[0] & flag::VAR, flag::VAR);
+        assert_eq!(marks[0] & flag::WRITER, 0);
+
+        // [...acc, x]
+        let spread = [
+            load(2, 0),
+            mov(1, 2),
+            load(3, 1),
+            mov(2, 3),
+            Instruction::MakeVecWithSpread {
+                dest: 0,
+                elements_start: 1,
+                count: 2,
+                spread_mask: 1,
+            },
+            Instruction::Return { value: 0 },
+        ];
+        let marks = plan_of(&spread, &["acc", "x"], &constants);
+        assert_eq!(marks[0] & flag::WRITER, flag::WRITER);
+        assert_eq!(marks[2] & flag::WRITER, 0);
+
+        // A user function that writes the parameter it is handed.
+        let passed = [
+            load(2, 0),
+            mov(1, 2),
+            Instruction::CallUserFunction {
+                dest: 0,
+                function_id: 4,
+                args_start: 1,
+                args_count: 1,
+            },
+            Instruction::Return { value: 0 },
+        ];
+        let parameters = vec!["acc".to_string()];
+        let to_a_writer = plan(&passed, &parameters, &constants, &|_| false, &|id, at| {
+            id == 4 && at == 0
+        });
+        assert_eq!(to_a_writer[0] & flag::WRITER, flag::WRITER);
+        let to_a_reader = plan(&passed, &parameters, &constants, &|_| false, &|_, _| false);
+        assert_eq!(to_a_reader[0] & flag::WRITER, 0);
     }
 }
