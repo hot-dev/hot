@@ -30,7 +30,9 @@ meta {
 // Alpine base — tesseract-ocr installed at runtime via apk (~15MB, few seconds).
 // For extra languages, use a custom image with additional tesseract-ocr-data-* packages.
 DEFAULT_IMAGE "alpine:3.21"
-INSTALL_CMD "apk add --no-cache tesseract-ocr tesseract-ocr-data-eng"
+// apk's progress goes to stdout, which is where the OCR text and the version
+// are read from, so it is discarded. Its errors stay on stderr.
+INSTALL_CMD "apk add --no-cache tesseract-ocr tesseract-ocr-data-eng > /dev/null"
 
 // ============================================================================
 // Types

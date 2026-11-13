@@ -42,3 +42,16 @@ fn () {
     assert-eq(n, length(ids), "no concurrent registration is lost")
     assert-eq(n, length(distinct(ids)), "each session is registered once")
 }
+
+// Two errors from one place in the same second are both kept, as a fan-out
+// over sessions produces.
+test-record-error-keeps-same-second-errors
+meta ["test"]
+fn () {
+    rt ::runtime/create-runtime(`test-${Uuid()}`)
+    ::runtime/record-error(rt, "daily-recap", "first")
+    ::runtime/record-error(rt, "daily-recap", "second")
+    ::runtime/record-error(rt, "daily-recap", "third")
+    logged ::hot::store/list(rt.errors-store)
+    assert-eq(["first", "second", "third"], map(logged, (e) { e.value.msg }))
+}

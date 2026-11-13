@@ -2,7 +2,7 @@
 
 hot.pkg.cloudflare {
   name: "hot.dev/cloudflare",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "3.0.2",
   description: "Cloudflare API bindings for Hot. Zones and DNS, cache purge, Workers KV, Worker scripts and routes, R2 buckets, D1 queries, Pages deployments, and Turnstile verification, with pagination and readable errors.",
   author: "Hot Dev",

@@ -132,7 +132,7 @@ fn
   calls-info(request, {})
 },
 (request: CallsInfoRequest, opts: Map): CallsInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/calls.info?id=${request.id}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/calls.info`, {id: request.id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { CallsInfoResponse(response.body) }
@@ -310,7 +310,7 @@ fn
   rtm-connect(request, {})
 },
 (request: RtmConnectRequest, opts: Map): RtmConnectResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/rtm.connect?batch_presence_aware=${or(request.batch_presence_aware, "")}&presence_sub=${or(request.presence_sub, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/rtm.connect`, {batch_presence_aware: request.batch_presence_aware, presence_sub: request.presence_sub}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { RtmConnectResponse(response.body) }

@@ -138,6 +138,7 @@ Tasks move through these states:
 
 Use `::hot::task/start` to start a Hot function as a long-running task:
 
+<!-- hot-check: assume ::myapp -->
 ```hot
 ::task ::hot::task
 
@@ -148,11 +149,14 @@ info ::task/start(::myapp/background-sync)
 info ::task/start(::myapp/process-data, {url: "https://example.com"})
 
 // Start with options (timeout, retry)
-info ::task/start(::myapp/long-job, {input: data}, {
+info ::task/start(::myapp/long-job, {input: data}, ::task/TaskOptions({
   timeout: 3600000,
   retry: {attempts: 3, delay: 5000, backoff: "exponential"}
-})
+}))
 ```
+
+Build the options with `::task/TaskOptions`. `hot check` reports a type
+mismatch for a plain map that leaves out one of its fields.
 
 `timeout` is in milliseconds. Without one, a code task gets 30 minutes
 (1,800,000). A value below 1 second is raised to 1 second, and one above 7 days
@@ -237,6 +241,7 @@ A code task's arguments or result over 1 MB as JSON are stored in [blob storage]
 
 Cancel a queued or running task with `::hot::task/cancel`:
 
+<!-- hot-check: assume ::myapp -->
 ```hot
 ::task ::hot::task
 
@@ -254,6 +259,7 @@ For running tasks, a cancellation message is delivered to the task's `receive` c
 
 Code tasks can receive messages from other runs or tasks using `::hot::task/send` and `::hot::task/receive`:
 
+<!-- hot-check: assume ::myapp -->
 ```hot
 ::task ::hot::task
 

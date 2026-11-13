@@ -493,10 +493,10 @@ FineTuningJob type {
 }
 
 ListAssistantsRequest type {
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?
 }
 
 ListAssistantsResponse type {
@@ -528,7 +528,7 @@ fn
   list-assistants(request, {})
 },
 (request: ListAssistantsRequest, opts: Map): ListAssistantsResponse {
-  response api-request("GET", `/assistants?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/assistants`, {limit: request.limit, order: request.order, after: request.after, before: request.before}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListAssistantsResponse(response.body) }
@@ -537,8 +537,8 @@ fn
 }
 
 ListBatchesRequest type {
-  after: Str,
-  limit: Str
+  after: Str?,
+  limit: Str?
 }
 
 ListBatchesResponse type {
@@ -570,7 +570,7 @@ fn
   list-batch(request, {})
 },
 (request: ListBatchesRequest, opts: Map): ListBatchesResponse {
-  response api-request("GET", `/batches?after=${request.after}&limit=${request.limit}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/batches`, {after: request.after, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListBatchesResponse(response.body) }
@@ -579,11 +579,11 @@ fn
 }
 
 ListChatCompletionsRequest type {
-  model: Str,
-  metadata: Str,
-  after: Str,
-  limit: Str,
-  order: Str
+  model: Str?,
+  metadata: Str?,
+  after: Str?,
+  limit: Str?,
+  order: Str?
 }
 
 ListChatCompletionsResponse type {
@@ -619,7 +619,7 @@ fn
   list-chat-completions(request, {})
 },
 (request: ListChatCompletionsRequest, opts: Map): ListChatCompletionsResponse {
-  response api-request("GET", `/chat/completions?model=${request.model}&metadata=${request.metadata}&after=${request.after}&limit=${request.limit}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/chat/completions`, {model: request.model, metadata: request.metadata, after: request.after, limit: request.limit, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListChatCompletionsResponse(response.body) }
@@ -628,10 +628,10 @@ fn
 }
 
 ListEvalsRequest type {
-  after: Str,
-  limit: Str,
-  order: Str,
-  order-by: Str
+  after: Str?,
+  limit: Str?,
+  order: Str?,
+  order-by: Str?
 }
 
 ListEvalsResponse type {
@@ -662,7 +662,7 @@ fn
   list-evals(request, {})
 },
 (request: ListEvalsRequest, opts: Map): ListEvalsResponse {
-  response api-request("GET", `/evals?after=${request.after}&limit=${request.limit}&order=${request.order}&order_by=${request.order-by}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/evals`, {after: request.after, limit: request.limit, order: request.order, order_by: request.order-by}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListEvalsResponse(response.body) }
@@ -671,10 +671,10 @@ fn
 }
 
 ListFilesRequest type {
-  purpose: Str,
-  limit: Str,
-  order: Str,
-  after: Str
+  purpose: Str?,
+  limit: Str?,
+  order: Str?,
+  after: Str?
 }
 
 ListFilesResponse type {
@@ -705,7 +705,7 @@ fn
   list-files(request, {})
 },
 (request: ListFilesRequest, opts: Map): ListFilesResponse {
-  response api-request("GET", `/files?purpose=${request.purpose}&limit=${request.limit}&order=${request.order}&after=${request.after}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/files`, {purpose: request.purpose, limit: request.limit, order: request.order, after: request.after}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListFilesResponse(response.body) }
@@ -715,10 +715,10 @@ fn
 
 ListFineTuningCheckpointPermissionsRequest type {
   fine-tuned-model-checkpoint: Str,
-  project-id: Str,
-  after: Str,
-  limit: Str,
-  order: Str
+  project-id: Str?,
+  after: Str?,
+  limit: Str?,
+  order: Str?
 }
 
 ListFineTuningCheckpointPermissionsResponse type {
@@ -753,7 +753,7 @@ fn
   list-checkpoint-permissions(request, {})
 },
 (request: ListFineTuningCheckpointPermissionsRequest, opts: Map): ListFineTuningCheckpointPermissionsResponse {
-  response api-request("GET", `/fine_tuning/checkpoints/${request.fine-tuned-model-checkpoint}/permissions?project_id=${request.project-id}&after=${request.after}&limit=${request.limit}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/fine_tuning/checkpoints/${request.fine-tuned-model-checkpoint}/permissions`, {project_id: request.project-id, after: request.after, limit: request.limit, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListFineTuningCheckpointPermissionsResponse(response.body) }
@@ -762,9 +762,9 @@ fn
 }
 
 ListPaginatedFineTuningJobsRequest type {
-  after: Str,
-  limit: Str,
-  metadata: Str
+  after: Str?,
+  limit: Str?,
+  metadata: Str?
 }
 
 ListPaginatedFineTuningJobsResponse type {
@@ -794,7 +794,7 @@ fn
   list-finetuning-jobs(request, {})
 },
 (request: ListPaginatedFineTuningJobsRequest, opts: Map): ListPaginatedFineTuningJobsResponse {
-  response api-request("GET", `/fine_tuning/jobs?after=${request.after}&limit=${request.limit}&metadata=${request.metadata}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/fine_tuning/jobs`, {after: request.after, limit: request.limit, metadata: request.metadata}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListPaginatedFineTuningJobsResponse(response.body) }
@@ -804,8 +804,8 @@ fn
 
 ListFineTuningJobCheckpointsRequest type {
   fine-tuning-job-id: Str,
-  after: Str,
-  limit: Str
+  after: Str?,
+  limit: Str?
 }
 
 ListFineTuningJobCheckpointsResponse type {
@@ -840,7 +840,7 @@ fn
   list-finetuning-checkpoints(request, {})
 },
 (request: ListFineTuningJobCheckpointsRequest, opts: Map): ListFineTuningJobCheckpointsResponse {
-  response api-request("GET", `/fine_tuning/jobs/${request.fine-tuning-job-id}/checkpoints?after=${request.after}&limit=${request.limit}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/fine_tuning/jobs/${request.fine-tuning-job-id}/checkpoints`, {after: request.after, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListFineTuningJobCheckpointsResponse(response.body) }
@@ -850,8 +850,8 @@ fn
 
 ListFineTuningEventsRequest type {
   fine-tuning-job-id: Str,
-  after: Str,
-  limit: Str
+  after: Str?,
+  limit: Str?
 }
 
 ListFineTuningEventsResponse type {
@@ -883,7 +883,7 @@ fn
   list-finetuning-events(request, {})
 },
 (request: ListFineTuningEventsRequest, opts: Map): ListFineTuningEventsResponse {
-  response api-request("GET", `/fine_tuning/jobs/${request.fine-tuning-job-id}/events?after=${request.after}&limit=${request.limit}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/fine_tuning/jobs/${request.fine-tuning-job-id}/events`, {after: request.after, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListFineTuningEventsResponse(response.body) }
@@ -930,9 +930,9 @@ fn
 }
 
 ListOrganizationCertificatesRequest type {
-  limit: Str,
-  after: Str,
-  order: Str
+  limit: Str?,
+  after: Str?,
+  order: Str?
 }
 
 ListOrganizationCertificatesResponse type {
@@ -963,7 +963,7 @@ fn
   list-organization-certificates(request, {})
 },
 (request: ListOrganizationCertificatesRequest, opts: Map): ListOrganizationCertificatesResponse {
-  response api-request("GET", `/organization/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/certificates`, {limit: request.limit, after: request.after, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListOrganizationCertificatesResponse(response.body) }
@@ -973,9 +973,9 @@ fn
 
 ListProjectCertificatesRequest type {
   project-id: Str,
-  limit: Str,
-  after: Str,
-  order: Str
+  limit: Str?,
+  after: Str?,
+  order: Str?
 }
 
 ListProjectCertificatesResponse type {
@@ -1007,7 +1007,7 @@ fn
   list-project-certificates(request, {})
 },
 (request: ListProjectCertificatesRequest, opts: Map): ListProjectCertificatesResponse {
-  response api-request("GET", `/organization/projects/${request.project-id}/certificates?limit=${request.limit}&after=${request.after}&order=${request.order}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/organization/projects/${request.project-id}/certificates`, {limit: request.limit, after: request.after, order: request.order}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListProjectCertificatesResponse(response.body) }
@@ -1017,11 +1017,11 @@ fn
 
 ListInputItemsRequest type {
   response-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str,
-  include: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?,
+  include: Str?
 }
 
 ListInputItemsResponse type {
@@ -1057,7 +1057,7 @@ fn
   list-input-items(request, {})
 },
 (request: ListInputItemsRequest, opts: Map): ListInputItemsResponse {
-  response api-request("GET", `/responses/${request.response-id}/input_items?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include=${request.include}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/responses/${request.response-id}/input_items`, {limit: request.limit, order: request.order, after: request.after, before: request.before, include: request.include}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListInputItemsResponse(response.body) }
@@ -1067,11 +1067,11 @@ fn
 
 ListMessagesRequest type {
   thread-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str,
-  run-id: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?,
+  run-id: Str?
 }
 
 ListMessagesResponse type {
@@ -1106,7 +1106,7 @@ fn
   list-messages(request, {})
 },
 (request: ListMessagesRequest, opts: Map): ListMessagesResponse {
-  response api-request("GET", `/threads/${request.thread-id}/messages?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&run_id=${request.run-id}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/threads/${request.thread-id}/messages`, {limit: request.limit, order: request.order, after: request.after, before: request.before, run_id: request.run-id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListMessagesResponse(response.body) }
@@ -1116,10 +1116,10 @@ fn
 
 ListRunsRequest type {
   thread-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?
 }
 
 ListRunsResponse type {
@@ -1149,7 +1149,7 @@ fn
   list-runs(request, {})
 },
 (request: ListRunsRequest, opts: Map): ListRunsResponse {
-  response api-request("GET", `/threads/${request.thread-id}/runs?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/threads/${request.thread-id}/runs`, {limit: request.limit, order: request.order, after: request.after, before: request.before}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListRunsResponse(response.body) }
@@ -1160,11 +1160,11 @@ fn
 ListRunStepsRequest type {
   thread-id: Str,
   run-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str,
-  include: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?,
+  include: Str?
 }
 
 ListRunStepsResponse type {
@@ -1198,7 +1198,7 @@ fn
   list-run-steps(request, {})
 },
 (request: ListRunStepsRequest, opts: Map): ListRunStepsResponse {
-  response api-request("GET", `/threads/${request.thread-id}/runs/${request.run-id}/steps?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&include[]=${request.include}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/threads/${request.thread-id}/runs/${request.run-id}/steps`, {limit: request.limit, order: request.order, after: request.after, before: request.before, "include[]": request.include}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListRunStepsResponse(response.body) }
@@ -1207,10 +1207,10 @@ fn
 }
 
 ListVectorStoresRequest type {
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?
 }
 
 ListVectorStoresResponse type {
@@ -1241,7 +1241,7 @@ fn
   list-vector-stores(request, {})
 },
 (request: ListVectorStoresRequest, opts: Map): ListVectorStoresResponse {
-  response api-request("GET", `/vector_stores?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/vector_stores`, {limit: request.limit, order: request.order, after: request.after, before: request.before}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListVectorStoresResponse(response.body) }
@@ -1252,11 +1252,11 @@ fn
 ListFilesInVectorStoreBatchRequest type {
   vector-store-id: Str,
   batch-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str,
-  filter: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?,
+  filter: Str?
 }
 
 ListFilesInVectorStoreBatchResponse type {
@@ -1293,7 +1293,7 @@ fn
   list-vector-store-files-batch(request, {})
 },
 (request: ListFilesInVectorStoreBatchRequest, opts: Map): ListFilesInVectorStoreBatchResponse {
-  response api-request("GET", `/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/vector_stores/${request.vector-store-id}/file_batches/${request.batch-id}/files`, {limit: request.limit, order: request.order, after: request.after, before: request.before, filter: request.filter}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListFilesInVectorStoreBatchResponse(response.body) }
@@ -1303,11 +1303,11 @@ fn
 
 ListVectorStoreFilesRequest type {
   vector-store-id: Str,
-  limit: Str,
-  order: Str,
-  after: Str,
-  before: Str,
-  filter: Str
+  limit: Str?,
+  order: Str?,
+  after: Str?,
+  before: Str?,
+  filter: Str?
 }
 
 ListVectorStoreFilesResponse type {
@@ -1343,7 +1343,7 @@ fn
   list-vector-store-files(request, {})
 },
 (request: ListVectorStoreFilesRequest, opts: Map): ListVectorStoreFilesResponse {
-  response api-request("GET", `/vector_stores/${request.vector-store-id}/files?limit=${request.limit}&order=${request.order}&after=${request.after}&before=${request.before}&filter=${request.filter}`, {}, "", opts)
+  response api-request("GET", ::openai::api/with-query(`/vector_stores/${request.vector-store-id}/files`, {limit: request.limit, order: request.order, after: request.after, before: request.before, filter: request.filter}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { ListVectorStoreFilesResponse(response.body) }

@@ -230,7 +230,10 @@ fn (input: TurnInput): Str {
 user-prompt
 meta {
     doc: """
-    Compose the user prompt sent to the LLM (raw text + attachment block).
+    Compose the user prompt sent to the LLM: the raw text, then each
+    attachment's text in a tagged block (see
+    `::ai::agent::attachments/weave-into-prompt`). Attachments with no
+    readable text are listed by name.
 
     **Example**
 
@@ -243,19 +246,16 @@ meta {
         session: ::session/Session({id: "s1"}),
         sender: ::session/Identity({id: "u1", name: "Ada", meta: {}}),
         text: "Hello",
-        attachments: [::att/Attachment({name: "a.txt", type: "text/plain", size: 5})],
+        attachments: [::att/Attachment({name: "a.txt", type: "text/plain", size: 2, content-text: "hi"})],
         payload: {message_id: "m1"},
     })
-    ::chat-turn/user-prompt(input)  // "Hello\n\n\nAttachments:\n- a.txt (text/plain, 5B)"
+    ::chat-turn/user-prompt(input)  // "Hello\n\n<attachment name=\"a.txt\" type=\"text/plain\">\nhi\n</attachment>"
     ```
     """
 }
 fn (input: TurnInput): Str {
     atts or(input.attachments, [])
-    cond {
-        is-empty(atts) => { input.text }
-        => { concat(input.text, "\n\n", ::att/summarize(atts)) }
-    }
+    ::att/weave-into-prompt(input.text, atts)
 }
 
 persist-user-turn

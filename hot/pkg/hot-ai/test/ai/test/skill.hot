@@ -648,3 +648,20 @@ fn () {
     out apply-tool.fn("attachment-aware", {attachments: [{name: "fake.png"}, {name: "fake2.png"}]})
     assert-eq("attachment-count=1", out)
 }
+
+// The schema makes `ctx` optional, so a call that leaves it out must work.
+test-apply-skill-without-ctx
+meta ["test"]
+fn () {
+    skills ::skill/for-agent([customer-tone])
+    tools ::skill/builtins(skills)
+    call ::tool/ToolCall({id: "call_1", name: "apply_skill", input: {name: "::ai::test::skill/customer-tone"}})
+    result ::tool/dispatch(tools, call)
+    assert(not(result.is-error), Str(result.output))
+    assert-eq("Use a warm tone. Avoid jargon.", result.output)
+
+    resolver-tools ::skill/builtins-with-resolver(::skill/in-memory-resolver(skills))
+    from-resolver ::tool/dispatch(resolver-tools, call)
+    assert(not(from-resolver.is-error), Str(from-resolver.output))
+    assert-eq("Use a warm tone. Avoid jargon.", from-resolver.output)
+}

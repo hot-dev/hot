@@ -1,0 +1,28 @@
+// Regression: a qualified type annotation ends at its name. In
+// `port: ::net/Port ::net/parse(raw)` the parser read the value's path as
+// more of the type (`::net/Port::net/parse`), so the binding held `(raw)`
+// and the function was never called. `hot check` reported nothing.
+::hot::test::qualified-annotations ns
+meta ["test"]
+
+::here ::hot::test::qualified-annotations
+
+Port type {
+    number: Int
+}
+
+called: ::hot::type/Int ::hot::math/abs(-7)
+constructed: ::hot::test::qualified-annotations/Port ::hot::test::qualified-annotations/Port({number: 80})
+aliased: ::here/Port ::here/Port({number: 443})
+optional: ::hot::type/Int? ::hot::math/abs(-9)
+
+test-qualified-annotation-before-a-qualified-value
+meta ["test"] fn () {
+    assert-eq(7, called, "the call runs")
+    assert(is-type(constructed, Port), "the constructor runs")
+    assert-eq(80, constructed.number, "the constructed value")
+    assert(is-type(aliased, Port), "through a namespace alias")
+    assert-eq(9, optional, "an optional annotation")
+    local: ::hot::type/Int ::hot::math/abs(-7)
+    assert-eq(7, local, "in a body")
+}

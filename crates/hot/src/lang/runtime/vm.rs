@@ -5543,7 +5543,7 @@ impl VirtualMachine {
     }
 
     /// The frames a lambda created now is defined in.
-    fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
+    pub(crate) fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
         let innermost = self.scope_stack.len().checked_sub(1)?;
         let boundary = self
             .scope_stack
@@ -6694,11 +6694,11 @@ impl VirtualMachine {
                 }
             }
 
-            // Fully qualified name not found
-            return Err(VmError::runtime(format!(
-                "Fully qualified function '{}' not found in function registry or hotlib",
-                function_name
-            )));
+            // Nothing of that name takes this many arguments, or nothing
+            // has that name.
+            return Err(VmError::runtime(
+                self.no_function_message(function_name, args.len()),
+            ));
         }
 
         // 2. UNQUALIFIED NAMES - Check in specified order
@@ -8754,6 +8754,22 @@ impl VirtualMachine {
     /// Why a call reached nothing: the function takes another number of
     /// arguments, as a spread or a function value can pass, or doesn't exist.
     fn no_function_message(&self, qualified_name: &str, arity: usize) -> String {
+        self.arity_mismatch_message(qualified_name, arity)
+            .unwrap_or_else(|| {
+                format!(
+                    "Qualified function '{qualified_name}' not found in compiled functions or hotlib functions"
+                )
+            })
+    }
+
+    /// What to say of a call that passes `arity` arguments to
+    /// `qualified_name` when functions of that name exist and none takes
+    /// that many. `None` when no function has the name.
+    pub(crate) fn arity_mismatch_message(
+        &self,
+        qualified_name: &str,
+        arity: usize,
+    ) -> Option<String> {
         let mut counts: Vec<String> = self
             .program
             .functions
@@ -8766,16 +8782,12 @@ impl VirtualMachine {
             .collect();
         counts.sort();
         counts.dedup();
-        if counts.is_empty() {
-            format!(
-                "Qualified function '{qualified_name}' not found in compiled functions or hotlib functions"
-            )
-        } else {
+        (!counts.is_empty()).then(|| {
             format!(
                 "Function '{qualified_name}' expects {} arguments, got {arity}",
                 counts.join(" or ")
             )
-        }
+        })
     }
 
     /// Execute the call-lib built-in function with lazy argument handling

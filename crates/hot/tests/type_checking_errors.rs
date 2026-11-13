@@ -948,6 +948,282 @@ mod type_checking_tests {
         );
     }
 
+    // A type arm narrows a built-in member of a union as it does a declared
+    // one. Top-level code reports every mismatch, so each use below was a
+    // false error while the name kept its whole union inside the arm.
+    #[test]
+    fn test_type_arm_narrows_built_in_union_members() {
+        let source = r#"
+            ::test ns
+
+            i: Int | Str 5
+            from-int match i {
+                Int => { add(i, 1) }
+                Str => { uppercase(i) }
+            }
+
+            d: Dec | Str 2.5
+            from-dec match d {
+                Dec => { round(d) }
+                Str => { uppercase(d) }
+            }
+
+            b: Bool | Str true
+            from-bool match b {
+                Bool => { needs-bool(b) }
+                Str => { uppercase(b) }
+            }
+
+            v: Vec<Int> | Str [1, 2]
+            from-vec match v {
+                Vec => { needs-vec(v) }
+                Str => { uppercase(v) }
+            }
+
+            // A Map literal is known as its record, so take a call's Map.
+            m: Map<Str, Int> | Str make-map()
+            from-map match m {
+                Map => { needs-map(m) }
+                Str => { uppercase(m) }
+            }
+
+            y: Bytes | Str "raw"
+            from-bytes match y {
+                Bytes => { needs-bytes(y) }
+                Str => { uppercase(y) }
+            }
+
+            n: Int | Null 4
+            from-null match n {
+                Null => { 0 }
+                Int => { needs-int(n) }
+            }
+
+            o: Int? 4
+            from-optional match o {
+                Int => { needs-int(o) }
+                Null => { 0 }
+            }
+
+            make-map fn (): Map<Str, Int> { {a: 1} }
+            needs-int fn (x: Int): Int { x }
+            needs-bool fn (x: Bool): Bool { x }
+            needs-vec fn (x: Vec<Int>): Vec<Int> { x }
+            needs-map fn (x: Map<Str, Int>): Map<Str, Int> { x }
+            needs-bytes fn (x: Bytes): Bytes { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+    }
+
+    // Each arm holds its own member, and nothing wider or narrower: a use
+    // that only another member allows is still an error.
+    #[test]
+    fn test_type_arm_reports_a_use_its_member_does_not_allow() {
+        let source = r#"
+            ::test ns
+
+            i: Int | Str 5
+            swapped match i {
+                Int => { uppercase(i) }
+                Str => { add(i, 1) }
+            }
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].contains("'uppercase'") && errors[0].contains("got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].contains("'add'") && errors[1].contains("got Str"),
+            "{errors:?}"
+        );
+
+        // An arm naming no member of the union tells nothing, so the name
+        // keeps its declared type there.
+        let unrelated = r#"
+            ::test ns
+
+            i: Int | Str 5
+            never match i {
+                Dec => { add(i, 1) }
+                _ => { 0 }
+            }
+        "#;
+        let errors = call_errors(unrelated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Int | Str"), "{errors:?}");
+    }
+
+    // With more than two members, a union arm holds the members it names
+    // and the default arm the ones no earlier arm took.
+    #[test]
+    fn test_union_and_default_arms_hold_the_remaining_members() {
+        let source = r#"
+            ::test ns
+
+            w: Int | Dec | Str | Bool 2.5
+
+            three-arms match w {
+                Int => { needs-int(w) }
+                Dec => { round(w) }
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+            }
+
+            union-arm match w {
+                Int | Dec => { add(w, 1) }
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+            }
+
+            rest-is-numbers match w {
+                Str => { uppercase(w) }
+                Bool => { needs-bool(w) }
+                _ => { add(w, 1) }
+            }
+
+            rest-is-one match w {
+                Int | Dec => { add(w, 1) }
+                Bool => { needs-bool(w) }
+                _ => { uppercase(w) }
+            }
+
+            o: Int? 4
+            rest-after-null match o {
+                null => { 0 }
+                _ => { needs-int(o) }
+            }
+
+            level: "low" | "high" | Int "low"
+            rest-after-values match level {
+                "low" | "high" => { 0 }
+                _ => { needs-int(level) }
+            }
+
+            needs-int fn (x: Int): Int { x }
+            needs-bool fn (x: Bool): Bool { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        // The default arm still holds every member left, so a use only one
+        // of them allows is an error.
+        let too_narrow = r#"
+            ::test ns
+
+            w: Int | Dec | Str 2.5
+            rest match w {
+                Int => { 0 }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(too_narrow);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Dec | Str"), "{errors:?}");
+
+        // A value arm takes one value, not its type: the rest keeps `Int`.
+        let value_arm = r#"
+            ::test ns
+
+            w: Int | Str 5
+            rest match w {
+                0 => { 0 }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(value_arm);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("got Int | Str"), "{errors:?}");
+
+        // `match-all` runs every arm that matches, so its default arm
+        // tells nothing about the arms before it.
+        let match_all = r#"
+            ::test ns
+
+            w: Int | Str 5
+            every match-all w {
+                Int => { add(w, 1) }
+                _ => { uppercase(w) }
+            }
+        "#;
+        let errors = call_errors(match_all);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("'uppercase'") && errors[0].contains("got Int | Str"),
+            "{errors:?}"
+        );
+    }
+
+    // A nested match, a match in a function body and a `fn match` narrow
+    // as a top-level match does. A body reports a mismatch only when a
+    // literal proves it, so the wrong uses here pass a literal.
+    #[test]
+    fn test_nested_and_function_level_matches_narrow_alike() {
+        let source = r#"
+            ::test ns
+
+            outer: Int | Str | Bool 5
+            inner: Dec | Str 2.5
+            nested match outer {
+                Int => {
+                    match inner {
+                        Dec => { add(outer, round(inner)) }
+                        Str => { concat(inner, Str(outer)) }
+                    }
+                }
+                _ => {
+                    match outer {
+                        Str => { uppercase(outer) }
+                        Bool => { needs-bool(outer) }
+                    }
+                }
+            }
+
+            in-body fn (x: Int | Str): Any {
+                match x {
+                    Int => { add(x, 1) }
+                    Str => { uppercase(x) }
+                }
+            }
+
+            as-flow fn match (x: Int | Str | Null): Any {
+                Int => { add(x, 1) }
+                Str => { uppercase(x) }
+                _ => { x }
+            }
+
+            bound fn (x: Int | Str): Any {
+                match x {
+                    Int (n) => { add(n, 1) }
+                    Str (s) => { uppercase(s) }
+                }
+            }
+
+            needs-bool fn (x: Bool): Bool { x }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        // Inside the arms of an outer match the inner one still reports.
+        let wrong = r#"
+            ::test ns
+
+            outer: Int | Str | Bool 5
+            nested match outer {
+                Int => { 0 }
+                _ => {
+                    match outer {
+                        Str => { add(outer, 1) }
+                        Bool => { uppercase(outer) }
+                    }
+                }
+            }
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors[0].contains("got Str"), "{errors:?}");
+        assert!(errors[1].contains("got Bool"), "{errors:?}");
+    }
+
     // A pipe stage takes the piped value as its first argument, so its arity
     // counts one more. A call written inside the stage's arguments is not
     // piped and counts only its own.
@@ -1132,6 +1408,80 @@ mod type_checking_tests {
             .collect()
     }
 
+    /// The unknown-field warnings of `files` compiled in the order given.
+    fn unknown_fields_of(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        let (errors, warnings) = compile_files(files);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+        unknown_fields(&warnings)
+    }
+
+    // A top-level annotation means what its own namespace reads it as,
+    // wherever the variable is used from. Two namespaces each declare a
+    // `Config`; which one the program loads last must not matter.
+    #[test]
+    fn test_annotations_resolve_in_their_namespace_in_any_file_order() {
+        let models = (
+            "models.hot",
+            "::cor::models::v1 ns\nConfig type { port: Int }\n",
+        );
+        let other = ("other.hot", "::cor::other ns\nConfig type { host: Str }\n");
+        // Through a namespace alias, a var import of the type, and the
+        // namespace's own type of that name.
+        let aliased = (
+            "x.hot",
+            "::cor::x ns\n::m ::cor::models::v1\ncfg: ::m/Config ::m/Config({port: 80})\n",
+        );
+        let imported = (
+            "x.hot",
+            "::cor::x ns\nConfig ::cor::models::v1/Config\ncfg: Config Config({port: 80})\n",
+        );
+        let own = (
+            "x.hot",
+            "::cor::x ns\nConfig type { port: Int }\ncfg: Config Config({port: 80})\n",
+        );
+        // Through an alias again, with the value a plain call.
+        let called = (
+            "x.hot",
+            "::cor::x ns\n::m ::cor::models::v1\nmake fn (): ::m/Config { ::m/Config({port: 80}) }\ncfg: ::m/Config make()\n",
+        );
+        let reads = (
+            "y.hot",
+            "::cor::y ns\nc ::cor::x/cfg\np c.port\nread-port fn (): Int { c.port }\n",
+        );
+        let misreads = ("y.hot", "::cor::y ns\nc ::cor::x/cfg\nh c.host\n");
+
+        for declares in [aliased, imported, own, called] {
+            for order in [
+                [models, other, declares, reads],
+                [other, models, declares, reads],
+                [declares, reads, models, other],
+                [reads, declares, other, models],
+            ] {
+                assert_eq!(
+                    unknown_fields_of(&order),
+                    Vec::<(String, String)>::new(),
+                    "`port` is a field of the `Config` that `{}` names, in the order {:?}",
+                    declares.1,
+                    order.map(|(path, _)| path)
+                );
+            }
+            // The other namespace's `Config` has `host`. This one doesn't,
+            // in either order.
+            for order in [
+                [models, other, declares, misreads],
+                [other, models, declares, misreads],
+            ] {
+                assert_eq!(
+                    unknown_fields_of(&order),
+                    vec![("Config".to_string(), "host".to_string())],
+                    "`host` is no field of the `Config` that `{}` names, in the order {:?}",
+                    declares.1,
+                    order.map(|(path, _)| path)
+                );
+            }
+        }
+    }
+
     fn duplicate_core_names(warnings: &[CompilerError]) -> Vec<(String, String, String)> {
         warnings
             .iter()
@@ -1313,6 +1663,305 @@ mod type_checking_tests {
             "A Str parameter doesn't take `capture`'s result. Got: {:?}",
             errors
         );
+    }
+
+    /// The type mismatches and arity mismatches a source reports, as text.
+    fn call_errors(source: &str) -> Vec<String> {
+        compile_and_get_type_errors(source)
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    CompilerError::TypeMismatch { .. } | CompilerError::ArityMismatch { .. }
+                )
+            })
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    // A name a namespace binds is what its calls run, whatever core function
+    // shares the name: checked against the namespace's own function in a
+    // direct call, a pipe, as a value and from inside a body.
+    #[test]
+    fn test_namespace_function_named_like_a_core_one_is_checked_as_itself() {
+        let source = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { `${a}+${b}` }
+            sub fn (a: Str): Str { a }
+            concat fn (a: Int): Int { a }
+            is-int fn (a: Int, b: Int): Bool { true }
+            assert-eq fn (a: Int): Int { a }
+            if fn (a: Int): Int { a }
+            mul fn (a: Str, b: Str): Str { a }
+            length fn (a: Int): Int { a }
+
+            direct-add add("x", "y")
+            direct-sub sub("x")
+            direct-concat concat(5)
+            direct-is-int is-int(1, 2)
+            direct-assert-eq assert-eq(7)
+            direct-if if(9)
+            direct-mul mul("x", "y")
+            direct-length length(3)
+            piped "p" |> add("q")
+            piped-sub "p" |> sub()
+            as-value map(["a", "b"], sub)
+            in-literal {total: add("x", "y")}
+
+            in-body fn (): Str {
+                first add("x", "y")
+                second "p" |> add("q")
+                held add
+                held("x", "y")
+            }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+    }
+
+    // At an argument count the namespace's function declares, it is the
+    // only one checked against: a call it refuses is an error even where
+    // the core function would take it.
+    #[test]
+    fn test_namespace_function_named_like_a_core_one_still_reports() {
+        let source = r#"
+            ::test ns
+
+            add fn (a: Str, b: Str): Str { a }
+
+            wrong-type add(1, "y")
+            wrong-both add(1, 2)
+            wrong-pipe "p" |> add(2)
+
+            in-body fn (): Str { add("x", 2) }
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 5, "{errors:?}");
+        assert!(
+            errors[0].contains("'add' argument 1: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].contains("'add' argument 1: expected Str, got Int")
+                && errors[2].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[3].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[4].contains("'add' argument 2: expected Str, got Int"),
+            "{errors:?}"
+        );
+    }
+
+    // A function a namespace defines takes its name for the whole namespace,
+    // at every argument count and wherever it is written. A count it doesn't
+    // declare is an arity error, not a call of the core function.
+    #[test]
+    fn test_namespace_function_shadows_the_core_one_at_every_count() {
+        let source = r#"
+            ::test ns
+
+            before fn (): Any { uppercase("x") }
+
+            add fn (a: Str, b: Str): Str { a }
+            sub fn (a: Str): Str { a }
+            if fn (a: Int): Int { a }
+            mul fn (a: Str, b: Str): Str { a }
+            length fn (a: Int, b: Int): Int { a }
+            uppercase fn (a: Int, b: Int): Int { a }
+
+            three add(1, 2, 3)
+            two sub(5, 3)
+            core-if if(true, 1, 2)
+            core-mul mul(2, 3, 4)
+            piped 1 |> add(2, 3)
+            one length("abc")
+
+            in-body fn (): Any { add(1, 2, 3) }
+        "#;
+        let errors = call_errors(source);
+        let expected = [
+            "'uppercase' expects 2 arguments, but 1 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+            "'sub' expects 1 arguments, but 2 were provided",
+            "'if' expects 1 arguments, but 3 were provided",
+            "'mul' expects 2 arguments, but 3 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+            "'length' expects 2 arguments, but 1 were provided",
+            "'add' expects 2 arguments, but 3 were provided",
+        ];
+        assert_eq!(errors.len(), expected.len(), "{errors:?}");
+        for (error, expected) in errors.iter().zip(expected) {
+            assert!(error.contains(expected), "{expected}: {errors:?}");
+        }
+    }
+
+    // The core function stays reachable by its path. A rest parameter and a
+    // spread reach the namespace's function at any count, so they are
+    // checked against it alone.
+    #[test]
+    fn test_shadowed_core_function_is_reached_by_its_path() {
+        let source = r#"
+            ::test ns
+            ::m ::hot::math
+
+            add fn (a: Str, b: Str): Str { a }
+            concat fn (...parts: Int): Int { 0 }
+
+            by-path ::hot::math/add(1, 2, 3)
+            by-alias ::m/add(1, 2)
+            strs ["a", "b"]
+            spread add(...strs)
+            none concat()
+            many concat(1, 2, 3)
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        let wrong = r#"
+            ::test ns
+
+            concat fn (...parts: Int): Int { 0 }
+
+            strs concat("a", "b")
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.contains("'concat' argument") && e.contains("expected Int, got Str")),
+            "Checked against the namespace's `concat`, not the core one. Got: {errors:?}"
+        );
+    }
+
+    // A namespace split across files is one namespace: a function one file
+    // defines shadows the core function in the other, whichever loads first.
+    #[test]
+    fn test_shadowing_spans_the_files_of_a_namespace() {
+        let defines = (
+            "defines.hot",
+            "::split ns\nadd fn (a: Str, b: Str): Str { a }\n",
+        );
+        let calls = (
+            "calls.hot",
+            "::split ns\nsum add(1, 2, 3)\njoined add(\"x\", \"y\")\n",
+        );
+        for order in [[defines, calls], [calls, defines]] {
+            let errors: Vec<String> = compile_files_and_get_errors(&order)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(
+                errors[0].contains("'add' expects 2 arguments, but 3 were provided"),
+                "{errors:?}"
+            );
+        }
+    }
+
+    // Where no namespace binds the name, a bare call still reaches the
+    // core function and its built-in signature.
+    #[test]
+    fn test_core_function_is_checked_where_nothing_shadows_it() {
+        let source = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+
+            ::test ns
+            sum: Int add(1, 2)
+            wrong add("x", "y")
+            few sub()
+        "#;
+        let errors = call_errors(source);
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].contains("expected Int, got Str"), "{errors:?}");
+        assert!(errors[1].contains("expected Int, got Str"), "{errors:?}");
+        assert!(
+            errors[2].contains("'sub' expects at least 1 arguments"),
+            "{errors:?}"
+        );
+    }
+
+    // From another namespace the function is reached by its path, through a
+    // namespace alias, or through a var import under any name, the name of
+    // a core function included.
+    #[test]
+    fn test_imported_function_named_like_a_core_one_is_checked_as_itself() {
+        let source = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+            length fn (a: Int): Int { a }
+
+            ::test ns
+            ::l ::lib
+            plus ::lib/add
+            add ::l/add
+            length ::lib/length
+
+            by-path ::lib/add("x", "y")
+            by-alias ::l/add("x", "y")
+            by-import plus("x", "y")
+            by-core-name add("x", "y")
+            piped "x" |> add("y")
+            other-core-name length(3)
+            as-value map(["a"], add(%, "b"))
+
+            in-body fn (): Str {
+                first add("x", "y")
+                second "x" |> add("y")
+                third length(3)
+                plus("x", "y")
+            }
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
+
+        let wrong = r#"
+            ::lib ns
+            add fn (a: Str, b: Str): Str { a }
+
+            ::test ns
+            ::l ::lib
+            plus ::lib/add
+            add ::l/add
+
+            by-alias ::l/add(1, 2)
+            by-import plus("x")
+            by-core-name add(1, 2)
+            by-core-arity add("x", "y", "z")
+
+            in-body fn (): Str { add("x", 2) }
+        "#;
+        let errors = call_errors(wrong);
+        assert_eq!(errors.len(), 7, "{errors:?}");
+        assert!(
+            errors.iter().all(|e| !e.contains("expected Int")),
+            "No call is checked against core `add`. Got: {errors:?}"
+        );
+        assert!(
+            errors[2].contains("'plus' expects 2 arguments, but 1 were provided"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[5].contains("'add' expects 2 arguments, but 3 were provided"),
+            "{errors:?}"
+        );
+    }
+
+    // A core function a project declares is the one every bare call
+    // reaches, so hot-std's built-in signature for the name steps aside.
+    #[test]
+    fn test_project_core_function_named_like_a_built_in_is_checked_as_itself() {
+        let source = r#"
+            ::lib ns
+            concat meta {core: true} fn (a: Int): Int { a }
+
+            ::test ns
+            one concat(5)
+        "#;
+        assert_eq!(call_errors(source), Vec::<String>::new());
     }
 
     fn mismatches(source: &str) -> Vec<String> {

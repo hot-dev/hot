@@ -351,8 +351,9 @@ fn
   }
 }
 
-// No parameters required for this request
-DeleteCertificateRequest type Map
+DeleteCertificateRequest type {
+  certificate-id: Str
+}
 
 DeleteCertificateResponse type {
     object: Any,
@@ -369,8 +370,10 @@ meta {
     **Example**
 
     ```hot
-    // The request path is not filled in from the request yet, so no certificate id can be passed.
-    result ::openai::delete/delete-certificate(::openai::delete/DeleteCertificateRequest({}))
+    result ::openai::delete/delete-certificate(::openai::delete/DeleteCertificateRequest({
+      certificate-id: "cert_abc123"
+    }))
+    result.id
     ```
     """
 }
@@ -379,7 +382,7 @@ fn
   delete-certificate(request, {})
 },
 (request: DeleteCertificateRequest, opts: Map): DeleteCertificateResponse {
-  response api-request("DELETE", "/organization/certificates/{certificate_id}", {}, "", opts)
+  response api-request("DELETE", `/organization/certificates/${request.certificate-id}`, {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { DeleteCertificateResponse(response.body) }
@@ -392,10 +395,9 @@ DeleteResponseRequest type {
 }
 
 DeleteResponseResponse type {
-    code: Str?,
-    message: Str,
-    param: Str?,
-    type: Str
+    id: Str,
+    object: Str?,
+    deleted: Bool?
 }
 
 

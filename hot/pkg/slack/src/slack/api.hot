@@ -23,6 +23,46 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+query-pairs
+meta {no-doc: true}
+fn (key: Str, value: Any): Vec<Str> {
+  cond {
+    is-null(value) => { [] }
+    // Slack takes a list as comma-separated values, and anything structured as JSON.
+    and(is-vec(value), all(value, (item) { or(is-str(item), is-int(item)) })) => {
+      query-pairs(key, join(map(value, (item) { `${item}` }), ","))
+    }
+
+    or(is-vec(value), is-map(value)) => { query-pairs(key, to-json(value)) }
+    => {
+      text `${value}`
+      if(is-empty(text), [], [`${key}=${::hot::uri/encode(text)}`])
+    }
+  }
+}
+
+with-query
+meta {
+    doc: """
+    Add query parameters to a URL (pure). Values are URL-encoded. A null or
+    empty value is left out, a Vec of strings or numbers is comma-separated,
+    and any other Vec or Map is sent as JSON.
+
+    **Example**
+
+    ```hot
+    ::slack::api/with-query("https://slack.com/api/users.list", {limit: 20, cursor: null})
+    // "https://slack.com/api/users.list?limit=20"
+    ::slack::api/with-query("https://slack.com/api/search.messages", {query: "in:#general a&b"})
+    // "https://slack.com/api/search.messages?query=in%3A%23general%20a%26b"
+    ```
+    """
+}
+fn (path: Str, params: Map): Str {
+  pairs reduce(keys(params), (acc, k) { concat(acc, query-pairs(Str(k), get(params, k))) }, [])
+  if(is-empty(pairs), path, `${path}?${join(pairs, "&")}`)
+}
+
 sanitize-url
 meta {
     doc: """

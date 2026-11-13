@@ -214,9 +214,11 @@ meta {
 }
 fn (changes: Any): Vec {
   items if(is-vec(changes), changes, changes.changes)
-  live filter(items, (c) { and(not(is-removal(c)), is-map(c.file), ne(c.changeType, "drive")) })
-  latest reduce(live, (acc, c) { assoc(acc, c.fileId, c.file) }, {})
-  map(vals(latest), ::drive/to-doc-file)
+  // Keep the last word on each file: a later removal drops an earlier change.
+  decisive filter(items, (c) { and(ne(c.changeType, "drive"), or(is-removal(c), is-map(c.file))) })
+  latest reduce(decisive, (acc, c) { assoc(acc, c.fileId, c) }, {})
+  live filter(vals(latest), (c) { not(is-removal(c)) })
+  map(live, (c) { ::drive/to-doc-file(c.file) })
 }
 
 removed-file-ids

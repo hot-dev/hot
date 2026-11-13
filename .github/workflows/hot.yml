@@ -81,6 +81,19 @@ jobs:
       - name: Package pins match the repo versions
         run: python3 scripts/check-pkg-pins.py
 
+      # The docs' internal links, anchors and navigation; and what the demo
+      # pages say about hot-demos, against scripts/demo-doc-pins.json (the
+      # nightly workflow checks that file against hot-demos itself). The CLI
+      # and configuration references are checked by Rust tests in hot_cli
+      # (cli_docs.rs, conf_docs.rs), and the docs' ```hot blocks by the Hot
+      # static checks below.
+      - name: Docs links, anchors and demo pins
+        run: |
+          python3 scripts/test-check-doc-links.py
+          python3 scripts/check-doc-links.py
+          python3 scripts/test-check-demo-doc-pins.py
+          python3 scripts/check-demo-doc-pins.py
+
       # Unit tests for the self-host bundle renderer. The container checks
       # skip here; the nightly workflow runs them against real images. The
       # workflow tests run here because the release workflow's green-CI gate
@@ -117,7 +130,8 @@ jobs:
       # `hot-static-checks.sh check` runs the default project check, the package
       # aggregate check, `hot fmt --check` over all Hot source, validates
       # {{snippet:...}} references, compiles bundled Hot-language skill
-      # examples/tests, and checks the ```hot blocks in the AI docs.
+      # examples/tests, and checks the ```hot blocks in the AI docs and in
+      # resources/docs.
       - name: Hot static checks
         run: ./scripts/hot-static-checks.sh check
 

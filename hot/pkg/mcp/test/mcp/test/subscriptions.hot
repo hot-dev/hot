@@ -64,3 +64,25 @@ fn () {
   )
   assert(is-err(outcome), "unadvertised notifications must be rejected")
 }
+
+// A legacy session is refused before any request. The URL is one that
+// refuses connections, so a request that was sent anyway would name it.
+test-listen-refuses-a-legacy-session
+meta ["test"]
+fn () {
+  session ::types/Session({
+    url: "http://127.0.0.1:1/mcp",
+    session-id: null,
+    protocol-version: "2025-06-18",
+    server-info: ::types/ServerInfo({name: "server", version: "1"}),
+    server-capabilities: ::types/ServerCapabilities({tools: {listChanged: true}}),
+    headers: {},
+    era: "legacy"
+  })
+  outcome ::hot::internal::exec/contain(
+    ::subscriptions/listen,
+    [session, ::types/SubscriptionFilter({tools-list-changed: true})]
+  )
+  assert(is-err(outcome), "a legacy session is rejected")
+  assert-eq("subscriptions/listen requires MCP 2026-07-28", Str(err-value(outcome)))
+}

@@ -276,3 +276,12 @@ meta ["test"] fn () {
     row ::decode/decode-text-row(cols, payload)
     assert-eq(Dec("18446744073709551615"), row.id, "text-protocol overflow decodes as Dec")
 }
+
+// `execute` reports the statement's first word as `command`.
+test-command-word-ends-at-any-whitespace
+meta ["test"] fn () {
+    assert-eq("UPDATE", ::mysql/command-word("UPDATE\n  t SET x = 1"))
+    assert-eq("INSERT", ::mysql/command-word("  insert\tinto t values (1)"))
+    assert-eq("SELECT", ::mysql/command-word("select 1"))
+    assert-eq("", ::mysql/command-word("  "))
+}

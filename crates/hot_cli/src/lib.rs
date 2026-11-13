@@ -1,5 +1,7 @@
 mod build_info;
 mod cli;
+#[cfg(test)]
+mod cli_docs;
 mod command;
 mod conf;
 mod profile;

@@ -2005,6 +2005,10 @@ pub(crate) fn apply_command_specific_defaults(mut conf: Val, command: &Option<Co
 }
 
 #[cfg(test)]
+#[path = "conf_docs.rs"]
+mod conf_docs;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hot::val;

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# check-doc-hot-blocks.sh - `hot check` every ```hot block in the AI docs
+# check-doc-hot-blocks.sh - `hot check` every ```hot block in the docs
 #
 # Usage:
 #   ./scripts/check-doc-hot-blocks.sh [--show-stubs] [FILE.md|DIR ...]
 #
 # With no arguments, checks resources/ai/AGENTS.md and every .md file under
-# resources/ai/skills. Set HOT_BIN to a built `hot` binary to skip building.
-# --show-stubs prints, for every block, the names the check filled in.
+# resources/ai/skills and resources/docs. Set HOT_BIN to a built `hot` binary
+# to skip building. --show-stubs prints, for every block, what the check
+# filled in.
 #
 # Each block is checked as its own project, against this checkout's hot-std
 # and the AI packages. The docs illustrate with helpers they never define
@@ -22,19 +23,38 @@
 #   - an unresolved namespace alias, such as `::http`, is declared when
 #     exactly one known namespace ends that way, so the function it names
 #     must still exist;
+#   - a namespace of another package in hot/pkg, such as `::slack::messaging`,
+#     loads that package, so the names the block takes from it must exist;
 #   - a required context value gets a placeholder.
 # Any other diagnostic, warnings included, fails the check, and a failing
 # block's report lists what was filled in.
 #
-# A block that is not meant to compile, such as a list of signatures, is
-# skipped when the line before its fence is:
+# A marker on the line before a block's fence changes how it is checked.
+# Markers are the only opt-outs, and `git grep 'hot-check:'` lists them all:
+#
+#   <!-- hot-check: assume ::db ::myapp -->
+#     The block calls namespaces that stand for the reader's own code. The
+#     check declares the names the block takes from them and checks the rest
+#     of the block as usual. A namespace of hot-std or of a package in
+#     hot/pkg can't be assumed, and a namespace the block never uses can't
+#     be listed.
+#
+#   <!-- hot-check: fragment -->
+#     The block is the inside of a map literal, such as the `deps:` field of
+#     a package manifest. It is checked wrapped in `{ ... }`.
+#
 #   <!-- hot-check: skip -->
+#     The block is not meant to compile: a list of signatures, a syntax
+#     outline, or an example of a mistake. Any other `hot-check:` text is an
+#     error, so a misspelled marker can't pass as a skip.
+#
 # Skipped blocks are still swept: each `name fn (params): Type` signature
 # line must name a function that exists with that many parameters, in the
 # namespace of the nearest `::hot::...` heading (or a core function when the
 # heading names none). Every `::ns/name` reference in a skipped block, and in
 # the docs' inline code, must resolve when `::ns` is a namespace this check
-# knows (a prose line that says "removed" is left out). A bullet such as
+# knows (a prose line that says "removed" is left out, and so is a name in
+# RECORD_TAGS, which the runtime writes into records). A bullet such as
 # "- `::hot::run` — `info`, `is-inline-run`" lists names that must exist in
 # that namespace.
 
@@ -54,7 +74,7 @@ import sys
 import tempfile
 
 repo_root = pathlib.Path.cwd()
-SKIP_MARKER = "<!-- hot-check: skip -->"
+MARKER = re.compile(r"^<!--\s*hot-check:\s*(.*?)\s*-->$")
 FENCE_OPEN = re.compile(r"^ {0,3}```hot\s*$")
 FENCE_ANY = re.compile(r"^ {0,3}```")
 FENCE_CLOSE = re.compile(r"^ {0,3}```\s*$")
@@ -89,6 +109,9 @@ PACKAGES = {
     "hot.dev/hot-ai-agent": "hot/pkg/hot-ai-agent",
     "hot.dev/anthropic": "hot/pkg/anthropic",
 }
+# Type names the runtime writes into a recorded value. The docs name them,
+# and no hot-std namespace declares them.
+RECORD_TAGS = {"::hot::blob/Omitted", "::hot::blob/BlobRef"}
 MAX_ROUNDS = 6
 
 
@@ -98,7 +121,7 @@ def parse_args(argv):
 
 
 def doc_files(args):
-    targets = args or ["resources/ai/AGENTS.md", "resources/ai/skills"]
+    targets = args or ["resources/ai/AGENTS.md", "resources/ai/skills", "resources/docs"]
     files = []
     for target in targets:
         path = repo_root / target
@@ -110,10 +133,47 @@ def previous_line(lines, index):
     return next((l.strip() for l in reversed(lines[:index]) if l.strip()), "")
 
 
-def extract_blocks(md_path, skipped=False):
-    """Yield (fence line number, body lines) for each ```hot block.
+class Marker:
+    """The `hot-check:` marker before a fence: its kind and what it assumes."""
 
-    With skipped=True, yield only the blocks marked to be skipped."""
+    def __init__(self, text):
+        words = text.split()
+        self.kind = words[0] if words else ""
+        self.namespaces = words[1:] if self.kind == "assume" else []
+        self.error = None
+        if self.kind not in ("skip", "fragment", "assume") or (
+            self.kind != "assume" and len(words) > 1
+        ):
+            self.error = f"unknown marker `hot-check: {text}` (use skip, fragment, or assume ::ns)"
+        elif self.kind == "assume" and not self.namespaces:
+            self.error = "`hot-check: assume` names no namespace"
+        else:
+            for ns in self.namespaces:
+                if not re.fullmatch(NS_PATH, ns):
+                    self.error = f"`hot-check: assume` takes namespaces, not `{ns}`"
+                elif ns == "::hot" or ns.startswith("::hot::") or ns in NAMESPACES:
+                    self.error = f"`{ns}` is a real namespace and can't be assumed"
+                elif ns in PACKAGE_NAMESPACES:
+                    self.error = (
+                        f"`{ns}` belongs to {PACKAGE_NAMESPACES[ns][0]}, which the check loads;"
+                        " it can't be assumed"
+                    )
+
+
+def marker_before(lines, index):
+    """The marker on the line before the fence at `index`, if any."""
+    m = MARKER.match(previous_line(lines, index))
+    return Marker(m.group(1)) if m else None
+
+
+def is_skipped(lines, index):
+    marker = marker_before(lines, index)
+    return marker is not None and marker.kind == "skip" and marker.error is None
+
+
+def extract_blocks(md_path):
+    """Yield (fence line number, body lines, marker) for each ```hot block
+    that is not marked to be skipped."""
     lines = md_path.read_text().split("\n")
     i = 0
     while i < len(lines):
@@ -124,23 +184,50 @@ def extract_blocks(md_path, skipped=False):
             # end of a block template string.
             while end < len(lines) and not FENCE_CLOSE.match(lines[end]):
                 end += 1
-            if (previous_line(lines, start) == SKIP_MARKER) == skipped:
-                yield start + 1, lines[start + 1 : end]
+            if not is_skipped(lines, start):
+                yield start + 1, lines[start + 1 : end], marker_before(lines, start)
             i = end
         i += 1
+
+
+def declared_namespaces(root):
+    found = set()
+    for path in (repo_root / root / "src").rglob("*.hot"):
+        first = next((l for l in path.read_text().splitlines() if l.strip()), "")
+        if m := NS_DECL.match(first):
+            found.add(m.group(1))
+    return found
 
 
 def known_namespaces():
     found = set()
     for root in ["hot/pkg/hot-std", *PACKAGES.values()]:
-        for path in (repo_root / root / "src").rglob("*.hot"):
-            first = next((l for l in path.read_text().splitlines() if l.strip()), "")
-            if m := NS_DECL.match(first):
-                found.add(m.group(1))
+        found |= declared_namespaces(root)
+    return found
+
+
+def package_namespaces():
+    """Namespace -> (package name, path) for the other packages in hot/pkg.
+
+    A block that names one of these namespaces gets that package as a
+    dependency. They are kept out of NAMESPACES so that they don't change
+    which alias, such as `::http`, has exactly one target."""
+    found = {}
+    loaded = {"hot/pkg/hot-std", *PACKAGES.values()}
+    for manifest in sorted((repo_root / "hot/pkg").glob("*/pkg.hot")):
+        root = str(manifest.parent.relative_to(repo_root))
+        if root in loaded:
+            continue
+        name = re.search(r'^\s*name:\s*"([^"]+)"', manifest.read_text(), re.MULTILINE)
+        if not name:
+            continue
+        for ns in declared_namespaces(root):
+            found.setdefault(ns, (name.group(1), root))
     return found
 
 
 NAMESPACES = known_namespaces()
+PACKAGE_NAMESPACES = package_namespaces()
 
 
 def alias_target(alias):
@@ -165,17 +252,52 @@ def declared_names(body):
 
 
 class Block:
-    def __init__(self, index, md_path, fence_line, body):
+    def __init__(self, index, md_path, fence_line, body, marker=None):
         self.index = index
         self.md_path = md_path
         self.fence_line = fence_line
+        self.marker = marker
         self.body = [ELIDED_BODY.sub("{ elided }", line) for line in body]
+        # Lines the check puts before the body, which diagnostics count.
+        self.lead = 0
+        if marker and marker.kind == "fragment":
+            self.body = ["fragment {", *self.body, "}"]
+            self.lead = 1
         self.declares_ns = any(NS_DECL.match(line) for line in self.body)
         self.declared = declared_names(self.body)
         self.stubs = set()
         self.type_stubs = set()
         self.aliases = {}
         self.ctx_keys = set()
+        self.packages = {}
+        self.assumed = self.assumed_names()
+
+    def assumed_names(self):
+        """Namespace -> the names the block takes from it, for each namespace
+        its marker assumes. A block's own alias for one counts as a use."""
+        assumed = {ns: set() for ns in (self.marker.namespaces if self.marker else [])}
+        aliases = {}
+        for line in self.body:
+            code = line.split("//", 1)[0]
+            if m := ALIAS_DECL.match(code):
+                aliases[m.group(1)] = m.group(2)
+                continue
+            for ref in NS_REF.finditer(code):
+                ns = aliases.get(ref.group(1), ref.group(1))
+                if ns in assumed:
+                    assumed[ns].add(ref.group(2))
+        return assumed
+
+    def marker_failures(self):
+        if not self.marker:
+            return []
+        if self.marker.error:
+            return [f"{self.where}: {self.marker.error}"]
+        return [
+            f"{self.where}: `hot-check: assume {ns}`, but the block takes nothing from `{ns}`"
+            for ns, names in self.assumed.items()
+            if not names
+        ]
 
     @property
     def where(self):
@@ -190,8 +312,12 @@ class Block:
             parts.append("types " + ", ".join(sorted(self.type_stubs)))
         if self.aliases:
             parts.append("aliases " + ", ".join(f"{a} {ns}" for a, ns in sorted(self.aliases.items())))
+        if self.packages:
+            parts.append("packages " + ", ".join(sorted(self.packages)))
         if self.ctx_keys:
             parts.append("context " + ", ".join(sorted(self.ctx_keys)))
+        for ns, names in sorted(self.assumed.items()):
+            parts.append(f"assumed {ns}/" + ", ".join(sorted(names)))
         return "; ".join(parts)
 
     def render(self):
@@ -219,11 +345,17 @@ class Block:
         if code == "missing-context" and (m := MISSING_CTX.search(message)):
             new, found = self.ctx_keys, m.group(1)
         elif code == "unresolved-variable" and (m := UNRESOLVED_ALIAS.search(message)):
-            target = alias_target(m.group(1))
-            if target is None or m.group(1) in self.aliases:
-                return False
-            self.aliases[m.group(1)] = target
-            return True
+            ns = m.group(1)
+            # An alias the docs leave out, such as `::box` for `::hot::box`,
+            # comes before a package's namespace of the same name.
+            if (target := alias_target(ns)) and ns not in self.aliases:
+                self.aliases[ns] = target
+                return True
+            if ns in PACKAGE_NAMESPACES and PACKAGE_NAMESPACES[ns][0] not in self.packages:
+                name, root = PACKAGE_NAMESPACES[ns]
+                self.packages[name] = root
+                return True
+            return False
         elif code == "unresolved-variable" and (m := UNRESOLVED_NAME.search(message)):
             new, found = self.stubs, m.group(1)
         elif code == "unresolved-type" and (m := UNRESOLVED_TYPE.search(message)):
@@ -240,9 +372,21 @@ class Block:
 
     def check(self, hot_bin, hot_home, workdir):
         """Return the block's remaining failures as printable lines."""
+        if failures := self.marker_failures():
+            return failures
         project = workdir / f"block-{self.index}-{self.md_path.stem}-{self.fence_line}"
-        write_project(project)
+        # A file for each assumed namespace, declaring what the block uses.
+        assumed_files = {
+            f"assumed-{i}.hot": f"{ns} ns\n\n"
+            + "".join(
+                f"{name} type Any\n" if name[0].isupper() else f"{name}: Any null\n"
+                for name in sorted(names)
+            )
+            for i, (ns, names) in enumerate(sorted(self.assumed.items()))
+        }
+        write_project(project, assumed_files)
         for _ in range(MAX_ROUNDS):
+            write_conf(project, self.packages)
             text, origin = self.render()
             (project / "src" / "block.hot").write_text(text)
             entries = "".join(f'  "{key}": "PLACEHOLDER",\n' for key in sorted(self.ctx_keys))
@@ -257,7 +401,7 @@ class Block:
         for d in diagnostics:
             line = d["range"]["start"]["line"] if d.get("file") else None
             body_line = origin[line] if line is not None and line < len(origin) else None
-            md_line = self.fence_line + 1 + (body_line or 0)
+            md_line = self.fence_line + 1 + max((body_line or 0) - self.lead, 0)
             text = summarize(d["message"]) or d["code"]
             failure = f"{self.md_path.relative_to(repo_root)}:{md_line}: {text}"
             if failure not in failures:
@@ -267,8 +411,7 @@ class Block:
         return failures
 
 
-def write_project(project, files=None):
-    (project / "src").mkdir(parents=True)
+def write_conf(project, packages=None):
     (project / "hot.hot").write_text(
         "::hot::conf ns\n\n"
         'hot.set.project "doc"\n'
@@ -276,10 +419,15 @@ def write_project(project, files=None):
         "hot.project.doc.deps {\n"
         + "".join(
             f'    "{name}": {{ "local": "{repo_root / path}" }},\n'
-            for name, path in PACKAGES.items()
+            for name, path in {**PACKAGES, **(packages or {})}.items()
         )
         + "}\n"
     )
+
+
+def write_project(project, files=None):
+    (project / "src").mkdir(parents=True)
+    write_conf(project)
     for name, text in (files or {}).items():
         (project / "src" / name).write_text(text)
 
@@ -375,6 +523,8 @@ class Sweep:
         return alias_target(ns)
 
     def reference(self, ns, name, aliases, where, arity=None):
+        if f"{ns}/{name}" in RECORD_TAGS:
+            return
         target = self.resolve(ns, aliases)
         if target is None:
             # A namespace this check doesn't load (user code, other packages)
@@ -397,7 +547,7 @@ class Sweep:
             if FENCE_ANY.match(line):
                 if not in_fence:
                     in_fence = True
-                    skipped = bool(FENCE_OPEN.match(line)) and previous_line(lines, number - 1) == SKIP_MARKER
+                    skipped = bool(FENCE_OPEN.match(line)) and is_skipped(lines, number - 1)
                     aliases = {}
                 elif FENCE_CLOSE.match(line):
                     in_fence = False
@@ -482,11 +632,11 @@ def main():
     show_stubs, targets = parse_args(sys.argv[1:])
     files = doc_files(targets)
     blocks = [
-        Block(index, md_path, fence_line, body)
-        for index, (md_path, fence_line, body) in enumerate(
-            (md_path, fence_line, body)
+        Block(index, md_path, fence_line, body, marker)
+        for index, (md_path, fence_line, body, marker) in enumerate(
+            (md_path, fence_line, body, marker)
             for md_path in files
-            for fence_line, body in extract_blocks(md_path)
+            for fence_line, body, marker in extract_blocks(md_path)
         )
     ]
     sweep = Sweep()

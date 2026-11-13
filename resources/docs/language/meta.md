@@ -112,6 +112,7 @@ Run tests with `hot test`.
 
 The `on-event` field registers a function as an event handler:
 
+<!-- hot-check: assume ::email -->
 ```hot
 send-welcome-email
 meta {on-event: "user:created"}
@@ -130,6 +131,7 @@ When a `user:created` event is sent, this handler runs automatically.
 
 The `schedule` field runs functions on a schedule:
 
+<!-- hot-check: assume ::db ::monitoring ::reports -->
 ```hot
 cleanup-old-sessions
 meta {schedule: "@daily"}

@@ -80,7 +80,7 @@ fn
   apps-permissions-request(request, {})
 },
 (request: AppsPermissionsRequestRequest, opts: Map): AppsPermissionsRequestResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.request?scopes=${request.scopes}&trigger_id=${request.trigger_id}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/apps.permissions.request`, {scopes: request.scopes, trigger_id: request.trigger_id}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { AppsPermissionsRequestResponse(response.body) }
@@ -122,7 +122,7 @@ fn
   apps-permissions-resources-list(request, {})
 },
 (request: AppsPermissionsResourcesListRequest, opts: Map): AppsPermissionsResourcesListResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/apps.permissions.resources.list?cursor=${or(request.cursor, "")}&limit=${or(request.limit, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/apps.permissions.resources.list`, {cursor: request.cursor, limit: request.limit}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { AppsPermissionsResourcesListResponse(response.body) }
@@ -203,7 +203,7 @@ fn
 },
 (request: AppsUninstallRequest, opts: Map): AppsUninstallResponse {
   ::hot::ctx/mark-secret(request.client_secret)
-  response api-request("GET", `${::slack::core/BASE_URL}/apps.uninstall?client_id=${request.client_id}&client_secret=${request.client_secret}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/apps.uninstall`, {client_id: request.client_id, client_secret: request.client_secret}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { AppsUninstallResponse(response.body) }
@@ -294,7 +294,7 @@ fn
   bots-info(request, {})
 },
 (request: BotsInfoRequest, opts: Map): BotsInfoResponse {
-  response api-request("GET", `${::slack::core/BASE_URL}/bots.info?bot=${or(request.bot, "")}`, {}, "", opts)
+  response api-request("GET", ::slack::api/with-query(`${::slack::core/BASE_URL}/bots.info`, {bot: request.bot}), {}, "", opts)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { BotsInfoResponse(response.body) }

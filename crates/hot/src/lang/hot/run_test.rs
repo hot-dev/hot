@@ -1116,6 +1116,86 @@ make-error(3)"#;
         }
     }
 
+    /// A lambda reads names in the frames it was created in, and so does a
+    /// local function it calls. Compiled code used a lambda that captures
+    /// nothing as a constant, with no link to those frames, so the local
+    /// function read the frames of whoever called the lambda: `helper`
+    /// below found `coll` in hot-std's `map`, whose own parameter has that
+    /// name, and returned 1. Each shape runs interpreted, compiled, and
+    /// compiled without pipeline fusion.
+    #[test]
+    fn a_lambda_made_by_compiled_code_reads_the_frames_it_was_made_in() {
+        let src = r#"::t ns
+through-map fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { helper(x) })
+}
+reads-a-local fn (n) {
+    base [n, n, n]
+    helper fn (x) { add(x, length(base)) }
+    map([1, 2], (x) { helper(x) })
+}
+two-deep fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { map([x], (y) { helper(y) }) })
+}
+through-reduce fn (coll, initial) {
+    helper fn (x) { add(length(coll), initial) }
+    reduce([1, 2], (acc, x) { add(acc, helper(x)) }, 0)
+}
+through-filter fn (coll, predicate) {
+    keep fn (x) { lt(x, add(length(coll), predicate)) }
+    filter([0, 1, 2, 3, 4], (x) { keep(x) })
+}
+a-pipeline fn (coll) {
+    helper fn (x) { add(x, length(coll)) }
+    [1, 2, 3] |> map((x) { helper(x) }) |> filter((x) { gt(helper(x), 6) })
+}
+passed-itself fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], helper)
+}
+uncaptured-local fn (n) {
+    xs [n]
+    late () { [...xs, 3] }
+    [late(), map([0], (x) { late() })]
+}
+run fn () {
+    [
+        through-map([1, 2]),
+        reads-a-local(7),
+        two-deep([1, 2, 3]),
+        through-reduce([1, 2], 10),
+        through-filter([1, 2], 1),
+        a-pipeline([1, 2]),
+        passed-itself([1, 2]),
+        uncaptured-local(9),
+    ]
+}
+run()
+run()"#;
+        let expected = val!([
+            [2],
+            [4, 5],
+            [[3]],
+            24,
+            [0, 1, 2],
+            [5],
+            [2],
+            [[9, 3], [[9, 3]]]
+        ]);
+        for conf in [
+            Some(val!({"jit": {"mode": "off"}})),
+            Some(val!({"jit": {"threshold": 1}})),
+            Some(val!({"jit": {"threshold": 1, "hof": {"fusion": false}}})),
+        ] {
+            let label = format!("{conf:?}");
+            let out = compile_and_run_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("{label} run failed: {e}"));
+            assert_eq!(out, expected, "{label}");
+        }
+    }
+
     fn strs(values: &[&str]) -> Val {
         Val::vec(values.iter().map(|s| Val::from(*s)).collect())
     }
@@ -2551,6 +2631,110 @@ assert-eq fn (a: Str?, b: Str?): Any { "function" }
                 Val::from("value"),
                 Val::from("field"),
                 Val::from("function"),
+            ]),
+        );
+    }
+
+    /// A function a namespace defines under a core function's name is what
+    /// a bare call there reaches, whatever the call passes and wherever the
+    /// function is written. A call the compiler couldn't bind to it (a
+    /// spread, arguments for a rest parameter, a function defined further
+    /// down) went by the bare name, which the runtime looks up core-first:
+    /// it ran the core function when the arguments suited its direct path,
+    /// and `if`, `and` and `or` were compiled inline.
+    #[test]
+    fn a_namespace_function_shadows_a_core_one_in_every_position() {
+        let src = r#"::t ns
+before fn (): Vec {
+    [add(1, 2), 1 |> add(2), length([1, 2, 3]), if(true, 1, 2), and(true, 5)]
+}
+add fn (a: Any, b: Any): Str { "add" }
+length fn (v: Any): Str { "length" }
+if fn (...args: Any): Str { "if" }
+and fn (...args: Any): Str { "and" }
+mul fn (...xs: Any): Str { `mul ${::hot::coll/length(xs)}` }
+pair [1, 2]
+after fn (): Vec {
+    [
+        add(1, 2), add(...pair), mul(2, 3, 4), 2 |> mul(3, 4), mul(...pair),
+        map([pair], (p) { add(...p) }), `${mul(1, 2, 3)}`, reduce(pair, add, 0),
+        if(true, 1, 2), and(true, 5)
+    ]
+}
+[before(), after(), ::hot::math/add(1, 2, 3), ::hot::bool/if(true, 1, 2)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                strs(&["add", "add", "length", "if", "and"]),
+                Val::vec(vec![
+                    Val::from("add"),
+                    Val::from("add"),
+                    Val::from("mul 3"),
+                    Val::from("mul 3"),
+                    Val::from("mul 2"),
+                    strs(&["add"]),
+                    Val::from("mul 3"),
+                    Val::from("add"),
+                    Val::from("if"),
+                    Val::from("and"),
+                ]),
+                Val::Int(6),
+                Val::Int(1),
+            ]),
+        );
+    }
+
+    /// The name is the namespace's function at every argument count, so a
+    /// count it doesn't declare is an arity error that says so, never a call
+    /// of the core function: from a spread, whose count only the run knows,
+    /// and from a call of the function as a value. `call` and `apply` give
+    /// the error as an Err, which `Str` consumes here.
+    #[test]
+    fn a_count_a_namespace_function_does_not_declare_is_an_arity_error() {
+        for call in [
+            "sub(...pair)",
+            "map([pair], (p) { sub(...p) })",
+            "`${sub(...pair)}`",
+            "reduce(pair, sub, 10)",
+            "apply(pair, sub)",
+            "call(sub, pair)",
+        ] {
+            let src = format!(
+                "::t ns\nsub fn (a: Any): Str {{ \"sub\" }},\n\
+                 (a: Any, b: Any, c: Any): Str {{ \"sub\" }}\npair [1, 2]\nStr({call})"
+            );
+            for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+                let label = if conf.is_some() { "jit" } else { "interpreter" };
+                let error = compile_and_run_with_std_conf(&src, conf)
+                    .expect_err("no `sub` takes two arguments");
+                assert!(
+                    error.contains("Function '::t/sub' expects 1 or 3 arguments, got 2"),
+                    "{label} error for `{call}`: {error}"
+                );
+            }
+        }
+    }
+
+    /// What full shadowing leaves alone: another namespace still reaches the
+    /// core function, a var import is its target, and a project's own core
+    /// function replaces hot-std's for every bare call.
+    #[test]
+    fn shadowing_a_core_function_stays_in_the_namespace_that_defines_it() {
+        let src = r#"::lib ns
+add fn (a: Any, b: Any): Str { "lib" }
+concat meta {core: true} fn (a: Any): Str { "core" }
+
+::other ns
+others [add(1, 2, 3), add(1, 2), concat(5)]
+
+::user ns
+add ::lib/add
+[add(1, 2), ::other/others]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::vec(vec![
+                Val::from("lib"),
+                Val::vec(vec![Val::Int(6), Val::Int(3), Val::from("core")]),
             ]),
         );
     }

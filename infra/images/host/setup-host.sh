@@ -218,6 +218,9 @@ valid_entropy_sources = ["/dev/urandom", "/dev/random", ""]
 shared_fs = "virtio-fs"
 virtio_fs_daemon = "/opt/kata/libexec/virtiofsd"
 disable_selinux = false
+# Kata leaves guest SELinux on unless this is set, and then refuses to create a
+# container on a host without SELinux, which Ubuntu is: no box would start.
+disable_guest_selinux = true
 firmware = ""
 firmware_volume = ""
 
@@ -268,6 +271,13 @@ disabled_plugins = ["io.containerd.grpc.v1.cri"]
     base_image_size = "30GB"
     discard_blocks = true
     fs_type = "ext4"
+  # A box with registry-auth pulls its image through the Transfer service, which
+  # unpacks only into the platform and snapshotter pairs listed here. Without
+  # this entry every private image fails to pull.
+  [plugins."io.containerd.transfer.v1.local"]
+    [[plugins."io.containerd.transfer.v1.local".unpack_config]]
+      platform = "linux/amd64"
+      snapshotter = "devmapper"
 CONTAINERD
 
 log "Persisting kernel modules and sysctls"

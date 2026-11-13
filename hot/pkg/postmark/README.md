@@ -7,7 +7,7 @@ Postmark API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/postmark": "1.2.2"
+"hot.dev/postmark": "1.2.3"
 ```
 
 ## Configuration

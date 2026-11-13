@@ -335,7 +335,7 @@ templated fn (x: Int): Any { `one-arg=${::l/two(x)}` }
         assert!(
             results[0]
                 .as_ref()
-                .is_err_and(|message| message.contains("not found")),
+                .is_err_and(|message| message.contains("expects 2 arguments, got 1")),
             "{function}: {results:?}"
         );
     }

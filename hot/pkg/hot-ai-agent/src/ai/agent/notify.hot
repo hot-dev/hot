@@ -160,6 +160,20 @@ fn (raw: Map): Notification {
     })
 }
 
+
+// True when a stored entry belongs to `recipient-id`. The key prefix alone is
+// not enough: ids may contain colons, so `channel:slack:T1` is also a prefix
+// of the keys of `channel:slack:T1:thread`. The stored value names the
+// recipient exactly.
+is-for-recipient
+meta {no-doc: true}
+fn (entry: Map, recipient-id: Str): Bool {
+    and(
+        starts-with(Str(entry.key), `${recipient-id}:`),
+        eq(Str(or(get(entry.value, "recipient-id"), "")), recipient-id),
+    )
+}
+
 list-notifications
 meta {
     doc: """
@@ -187,9 +201,8 @@ fn (rt: AgentRuntime, recipient-id: Str, opts: Map?): Vec<Notification> {
     kind-filter get(o, "kind", null)
     limit       get(o, "limit", null)
 
-    prefix `${recipient-id}:`
     entries ::store/list(rt.notify-store)
-    matching filter(entries, (e) { starts-with(Str(e.key), prefix) })
+    matching filter(entries, (e) { is-for-recipient(e, recipient-id) })
     notifs map(matching, (e) { hydrate(e.value) })
     by-kind cond {
         is-null(kind-filter) => { notifs }
@@ -246,11 +259,10 @@ meta {
     """
 }
 fn (rt: AgentRuntime, recipient-id: Str, id: Str): Notification? {
-    prefix `${recipient-id}:`
     entries ::store/list(rt.notify-store)
     hit find-first(entries, (e) {
         and(
-            starts-with(Str(e.key), prefix),
+            is-for-recipient(e, recipient-id),
             eq(Str(or(get(e.value, "id"), "")), id),
         )
     })
@@ -306,11 +318,10 @@ meta {
     """
 }
 fn (rt: AgentRuntime, recipient-id: Str, id: Str): Bool {
-    prefix `${recipient-id}:`
     entries ::store/list(rt.notify-store)
     hit find-first(entries, (e) {
         and(
-            starts-with(Str(e.key), prefix),
+            is-for-recipient(e, recipient-id),
             eq(Str(or(get(e.value, "id"), "")), id),
         )
     })

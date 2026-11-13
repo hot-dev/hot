@@ -7710,16 +7710,25 @@ impl Parser {
         parts.push("::".to_string());
 
         // Parse the full qualified name: hot::time/Instant (keywords allowed in paths)
+        let mut named = false;
         loop {
             let part = self.expect_identifier_or_keyword()?;
             parts.push(part);
 
+            // The name after the `/` ends the path. A `::` that follows
+            // starts something else: in `port: ::net/Port ::net/parse(raw)`
+            // it is the value, which reading on would fold into the type
+            // (`::net/Port::net/parse`), leaving `(raw)` as the value.
+            if named {
+                break;
+            }
             if self.check(&TokenType::DoubleColon) {
                 self.next(); // consume "::"
                 parts.push("::".to_string());
             } else if self.check(&TokenType::Slash) {
                 self.next(); // consume "/"
                 parts.push("/".to_string());
+                named = true;
             } else {
                 // No more parts
                 break;

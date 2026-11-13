@@ -2,7 +2,7 @@
 
 hot.pkg.ransomware-live {
   name: "hot.dev/ransomware-live",
-  version: "0.1.2",
+  version: "0.1.3",
   hot-min-version: "3.0.2",
   description: "The ransomware.live metadata API for Hot: recent claimed victims, victims by group, country or keyword, and ransomware groups. Free v2 API or PRO key.",
   author: "Hot Dev",
