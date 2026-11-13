@@ -1290,9 +1290,14 @@ pub fn merge(args: &[Val]) -> HotResult<Val> {
 
 /// [`merge`] on arguments it owns: the left map is written in place when
 /// nothing else holds it.
+///
+/// The merge walks the right map and reaches into the left one only at the
+/// keys the right one has, so the right map's shape bounds the work and is
+/// the one measured. Measuring the left one too would read all of a map on
+/// every merge into it, which is what writing it in place avoids.
 pub fn merge_owned(mut args: Vec<Val>) -> HotResult<Val> {
     validate_args!("::hot::coll/merge", &args, 2);
-    crate::validate_expansion!("deep merge", &args);
+    crate::validate_expansion!("deep merge", &args[1..2]);
 
     match (
         crate::val::as_fields(&args[0]),
@@ -4220,6 +4225,31 @@ mod tests {
         let shorter = written(delete_owned(vec![kept.clone(), Val::Int(-1)]));
         assert_eq!(shorter, val!([1]));
         assert_eq!(kept, val!([1, 2]));
+    }
+
+    #[test]
+    fn merge_measures_the_map_merged_in_and_not_the_one_written() {
+        let depth = crate::lang::runtime::limits::MAX_VALUE_DEPTH + 10;
+        let nested = || {
+            (0..depth).fold(val!({}), |inner, _| {
+                Val::map(indexmap::IndexMap::from([(Val::from("k"), inner)]))
+            })
+        };
+        // The merge would walk all of the right map.
+        match merge_owned(vec![val!({"a": 1}), nested()]) {
+            HotResult::Err(error) => assert!(error.to_string().contains("nesting depth")),
+            HotResult::Ok(_) => panic!("merged a map nested past the limit"),
+        }
+        // It reaches the left one at "a" alone.
+        let merged = written(merge_owned(vec![nested(), val!({"a": 1})]));
+        assert_eq!(
+            get(&[merged.clone(), Val::from("a")]),
+            HotResult::Ok(Val::Int(1))
+        );
+        assert!(matches!(
+            crate::val::as_fields(&merged),
+            Val::Map(entries) if entries.len() == 2
+        ));
     }
 
     #[test]

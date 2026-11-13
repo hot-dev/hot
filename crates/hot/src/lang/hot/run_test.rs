@@ -663,7 +663,18 @@ run fn (n: Int): Map { step(0, n, {}) }"#,
                 r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
 run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
             ),
+            (
+                "merge",
+                "run fn (n: Int): Map { reduce(range(n), (acc, x) { merge(acc, assoc({}, x, x)) }, {}) }",
+            ),
         ];
+        // Compiled code copies while a collection is small, and how much of
+        // that a run does varies: the tests of this process share the
+        // functions of hot-std they compile. This is more than every writer
+        // of a builder copies before its collection is large enough to be
+        // written in place. A copy at every write of the 2,000 further
+        // items would be some three million.
+        const WHILE_SMALL: usize = 200_000;
         for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
             for (name, body) in builders {
                 let label = format!("{name} under {conf:?}");
@@ -671,7 +682,7 @@ run fn (n: Int): Vec { reduce(range(n), push, []) }"#,
                 let small = writes_under(&program(600), conf.clone());
                 let large = writes_under(&program(2600), conf.clone());
                 assert!(
-                    large.1 <= small.1 + 16,
+                    large.1 <= small.1 + WHILE_SMALL,
                     "{label}: the items copied grew with the collection, from {small:?} to {large:?}"
                 );
                 assert!(
