@@ -414,9 +414,12 @@ fn documented_defaults_are_the_defaults() {
             continue;
         }
         checked += 1;
-        // A relative directory is resolved against where Hot runs.
-        let resolved = actual.starts_with('/')
-            && actual.ends_with(&format!("/{}", documented.trim_start_matches("./")));
+        // A relative directory is resolved against where Hot runs. On
+        // Windows that gives `D:\dir\.hot/log`, so compare with `/` only.
+        let resolved = std::path::Path::new(&actual).is_absolute()
+            && actual
+                .replace('\\', "/")
+                .ends_with(&format!("/{}", documented.trim_start_matches("./")));
         if &actual != documented && !resolved {
             problems.push(format!(
                 "{page}:{line}: `hot.{key}` defaults to `{actual}`, not `{documented}`"
