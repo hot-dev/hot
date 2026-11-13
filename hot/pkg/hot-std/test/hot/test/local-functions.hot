@@ -1,0 +1,70 @@
+::hot::test::local-functions ns
+meta ["test"]
+
+// A function defined in another function's body reads that body's
+// variables, however it is reached: called directly, through a lambda, or
+// through a lambda passed to a function that has parameters of the same
+// names (`coll`, `func`, `predicate`, `reducer`, `initial` are hot-std's).
+
+through-map fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { helper(x) })
+}
+
+reads-a-local fn (n) {
+    base [n, n, n]
+    helper fn (x) { add(x, length(base)) }
+    map([1, 2], (x) { helper(x) })
+}
+
+two-deep fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], (x) { map([x], (y) { helper(y) }) })
+}
+
+through-reduce fn (coll, initial) {
+    helper fn (x) { add(length(coll), initial) }
+    reduce([1, 2], (acc, x) { add(acc, helper(x)) }, 0)
+}
+
+through-filter fn (coll, predicate) {
+    keep fn (x) { lt(x, add(length(coll), predicate)) }
+    filter([0, 1, 2, 3, 4], (x) { keep(x) })
+}
+
+in-a-pipe fn (coll) {
+    helper fn (x) { length(coll) }
+    [1] |> map((x) { helper(x) })
+}
+
+a-pipeline fn (coll) {
+    helper fn (x) { add(x, length(coll)) }
+    [1, 2, 3] |> map((x) { helper(x) }) |> filter((x) { gt(helper(x), 6) })
+}
+
+passed-itself fn (coll) {
+    helper fn (x) { length(coll) }
+    map([1], helper)
+}
+
+a-lambda-reading-a-spread fn (n) {
+    xs [n]
+    late () { [...xs, 3] }
+    [late(), map([0], (x) { late() })]
+}
+
+test-a-local-function-reads-its-definers-variables
+meta ["test"] fn () {
+    // Twice each: a second call runs what the first one compiled.
+    for-each([1, 2], (round) {
+        assert-eq([2], through-map([1, 2]))
+        assert-eq([4, 5], reads-a-local(7))
+        assert-eq([[3]], two-deep([1, 2, 3]))
+        assert-eq(24, through-reduce([1, 2], 10))
+        assert-eq([0, 1, 2], through-filter([1, 2], 1))
+        assert-eq([2], in-a-pipe([1, 2]))
+        assert-eq([5], a-pipeline([1, 2]))
+        assert-eq([2], passed-itself([1, 2]))
+        assert-eq([[9, 3], [[9, 3]]], a-lambda-reading-a-spread(9))
+    })
+}

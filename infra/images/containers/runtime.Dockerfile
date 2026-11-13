@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ARG RUSTUP_VERSION=1.28.2
 ARG RUSTUP_SHA256=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
-ARG RUST_VERSION=1.99.1
+ARG RUST_VERSION=1.100.0
 RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
         "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
     && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum --check - \
@@ -36,8 +36,8 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # The app's stylesheet is generated at build time; CI pins the same release.
-ARG TAILWIND_VERSION=v4.3.0
-ARG TAILWIND_SHA256=73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400
+ARG TAILWIND_VERSION=v4.3.5
+ARG TAILWIND_SHA256=e47695cee3f0d90623a91f3939b08bdee610eb5ad99340adff9d4145b284d6cc
 RUN curl -fsSL -o /usr/local/bin/tailwindcss \
         "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
     && echo "${TAILWIND_SHA256}  /usr/local/bin/tailwindcss" | sha256sum --check - \

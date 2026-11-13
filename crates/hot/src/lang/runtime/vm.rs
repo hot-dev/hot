@@ -5907,7 +5907,7 @@ impl VirtualMachine {
     }
 
     /// The frames a lambda created now is defined in.
-    fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
+    pub(crate) fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
         let innermost = self.scope_stack.len().checked_sub(1)?;
         let boundary = self
             .scope_stack
