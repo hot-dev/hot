@@ -717,6 +717,16 @@ run fn (n: Int): Map { reduce(range(n), (acc, x) { put(x, x, acc) }, {}) }"#,
 run fn (n: Int): Vec { reduce(range(n), step, []) }"#,
             ),
             (
+                "a namespace function of a core function's name, called before it is defined",
+                r#"run fn (n: Int): Vec { reduce(range(n), (acc, x) { interleave(acc, x) }, []) }
+interleave fn (xs: Vec, x: Int): Vec { [...xs, x] }"#,
+            ),
+            (
+                "a namespace function of a core function's name",
+                r#"zipmap fn (xs: Vec, x: Int): Vec { [...xs, x] }
+run fn (n: Int): Vec { reduce(range(n), (acc, x) { zipmap(acc, x) }, []) }"#,
+            ),
+            (
                 "a named reducer",
                 r#"push fn (xs: Vec, x: Int): Vec { [...xs, x] }
 run fn (n: Int): Vec { reduce(range(n), push, []) }"#,

@@ -7492,9 +7492,10 @@ impl VirtualMachine {
     /// arguments up. A bare name that reaches a compiled function or a
     /// lambda binds them by moving: through the value the name is bound to
     /// (a core function's name is bound to its qualified name), or through
-    /// the dispatch cache. Every other resolution goes through the full
-    /// lookup, which this never reorders: a binding of the name is still
-    /// called before any function.
+    /// the dispatch cache. So does a qualified name that is a compiled
+    /// function's. Every other resolution goes through the full lookup,
+    /// which this never reorders: a binding of the name is still called
+    /// before any function.
     fn unified_function_lookup_given(
         &mut self,
         function_name: &str,
@@ -7523,6 +7524,43 @@ impl VirtualMachine {
                     }
                 }
             }
+        }
+        // A qualified name that is a compiled function's: the full lookup's
+        // first resolution, with its choice of overload and its cache entry.
+        if function_name.starts_with("::")
+            && let Some(&function_id) = self.function_mapping.get(function_name)
+        {
+            let fits = self
+                .program
+                .functions
+                .get(function_id as usize)
+                .is_some_and(|info| info.is_variadic || info.arity as usize == args.len());
+            let function_id = if fits {
+                function_id
+            } else {
+                self.find_best_function_overload(function_name, &args)
+                    .unwrap_or(function_id)
+            };
+            let function_id = self
+                .overload_for_args(function_id, &args)
+                .unwrap_or(function_id);
+            let cache_key = Self::dispatch_cache_key(function_name, &args);
+            self.dispatch_cache.insert(cache_key, function_id);
+            return self.execute_compiled_user_function_given(function_id, args);
+        }
+        // Its second: the name with this call's argument count, which is
+        // how a function with more than one is registered.
+        if function_name.starts_with("::")
+            && let Some(&function_id) =
+                self.function_mapping
+                    .get(&format!("{}/{}", function_name, args.len()))
+        {
+            let function_id = self
+                .overload_for_args(function_id, &args)
+                .unwrap_or(function_id);
+            let cache_key = Self::dispatch_cache_key(function_name, &args);
+            self.dispatch_cache.insert(cache_key, function_id);
+            return self.execute_compiled_user_function_given(function_id, args);
         }
         self.unified_function_lookup(function_name, &args)
     }

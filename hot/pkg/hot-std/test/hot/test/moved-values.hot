@@ -63,6 +63,29 @@ fails-at fn (acc: Map, x: Int): Map {
     if(eq(x, 3), err("stop at 3"), assoc(acc, key(x), x))
 }
 
+// A namespace's own function of a core function's name: a call of it is
+// compiled to call this function, by its qualified name where the call
+// can't be bound when it is compiled.
+interleave fn (xs: Vec, x: Int): Vec { [...xs, x] }
+
+calls-before-its-definition fn (n: Int): Vec {
+    reduce(range(n), (acc, x) { zipmap(acc, x) }, [])
+}
+
+zipmap fn (xs: Vec, x: Int): Vec { [...xs, x] }
+
+test-a-namespace-function-of-a-core-name-gives-its-arguments-up
+meta ["test"] fn () {
+    kept [9]
+    assert-eq([9, 1], interleave(kept, 1))
+    assert-eq([9, 2], interleave(kept, 2))
+    assert-eq([9], kept)
+    assert-eq(range(300), reduce(range(300), (acc, x) { interleave(acc, x) }, []))
+    assert-eq(range(300), calls-before-its-definition(300))
+    assert-eq([9, 7], zipmap(kept, 7))
+    assert-eq([9], kept)
+}
+
 test-a-collection-read-after-a-writer-is-unchanged
 meta ["test"] fn () {
     m {a: 1}
