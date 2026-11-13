@@ -104,6 +104,19 @@ jobs:
           cache-rust-targets: "false"
           ci-tuning: "true"
 
+      # Cargo 1.100 passes rustc one -L per dependency (its new build
+      # directory layout), so the command that compiles the `hot` crate's
+      # tests is about 59,000 characters, past Windows' limit of 32,767.
+      # Cargo falls back to an argfile when it starts rustc itself. sccache
+      # starts rustc with the arguments written out and fails with
+      # "The filename or extension is too long. (os error 206)". Run rustc
+      # without the wrapper here until sccache passes a long command through
+      # an argfile. An empty RUSTC_WRAPPER means no wrapper.
+      - name: Run rustc without sccache (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+
       # The ort crate downloads ONNX Runtime binaries at build time; cache
       # them like release.yml does.
       - name: Cache ORT downloads (macOS)
