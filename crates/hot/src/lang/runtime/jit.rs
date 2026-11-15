@@ -3997,8 +3997,9 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
         }
     };
     // The arguments go to the callee as they are: those the code gave up
-    // (`HELPER_VAL_KIND_OWNED_TAKE`) are then the callee's alone.
-    match vm.execute_compiled_user_function_owned(function_id, args) {
+    // (`HELPER_VAL_KIND_OWNED_TAKE`) are then the callee's alone. They are
+    // coerced already.
+    match vm.execute_coerced_user_function_owned(function_id, args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
@@ -5001,12 +5002,19 @@ unsafe fn hot_jit_call_vm_by_name_body(
             Err(err) => vm_error_to_owned_val(err, error_capture),
         },
         Val::Box(b) => {
-            if let Some(lambda) = b
-                .as_any()
+            if b.as_any()
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                .is_some()
             {
-                let lambda_val = Val::Box(Box::new(lambda.clone()));
-                match vm.execute_lambda(&lambda_val, &args) {
+                // The lambda's compiled code when it has some, with the
+                // arguments as they are; else the interpreter. The handle
+                // the code holds keeps the lambda alive across the call.
+                let args = match vm.try_jit_lambda_call_given(name_val, args, None) {
+                    Ok(Ok(result)) => return new_owned_val(result),
+                    Ok(Err(args)) => args,
+                    Err(err) => return vm_error_to_owned_val(err, error_capture),
+                };
+                match vm.execute_lambda_args(name_val, args.into()) {
                     Ok(result) => new_owned_val(result),
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }

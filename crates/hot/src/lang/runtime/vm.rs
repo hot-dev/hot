@@ -1338,10 +1338,14 @@ fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
 /// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
 /// in the type checker counts them.
 fn is_primitive_param_type(param_type: &str) -> bool {
-    // The usual annotation is a bare built-in name: this runs for every
+    // The usual annotation is a built-in name, bare or qualified as
+    // `lookup_typed_param_signature` qualifies it: this runs for every
     // argument of every checked call, so those skip the parsing below.
+    let name = param_type
+        .strip_prefix("::hot::type/")
+        .unwrap_or(param_type);
     if matches!(
-        param_type,
+        name,
         "Str" | "Int" | "Dec" | "Bool" | "Any" | "Vec" | "Map" | "Bytes" | "Byte" | "Null"
     ) {
         return true;
@@ -6998,6 +7002,15 @@ impl VirtualMachine {
         // Compute cache key early (cheap hash), but don't check until after lexical scope.
         let cache_key = Self::dispatch_cache_key(function_name, args);
 
+        // A qualified name has no binding to shadow it and resolves the same
+        // way each time, so the dispatch cache answers it first: no string
+        // keys built or probed for a function value called again and again.
+        if function_name.starts_with("::")
+            && let Some(&cached_fn_id) = self.dispatch_cache.get(&cache_key)
+        {
+            return self.execute_compiled_user_function(cached_fn_id, args);
+        }
+
         // No special cases - let everything go through unified resolution
         // Vec, Map, etc. are core variables that contain type constructor functions
 
@@ -7677,6 +7690,15 @@ impl VirtualMachine {
                 }
             }
         }
+        // A qualified name the dispatch cache knows (see
+        // `unified_function_lookup`).
+        if function_name.starts_with("::")
+            && let Some(&cached_fn_id) = self
+                .dispatch_cache
+                .get(&Self::dispatch_cache_key(function_name, &args))
+        {
+            return self.execute_compiled_user_function_given(cached_fn_id, args);
+        }
         // A qualified name that is a compiled function's: the full lookup's
         // first resolution, with its choice of overload and its cache entry.
         if function_name.starts_with("::")
@@ -8204,17 +8226,14 @@ impl VirtualMachine {
         self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args).into())
     }
 
-    /// [`Self::execute_compiled_user_function`] with arguments the caller
-    /// gives up, as compiled code gives up registers nothing reads again.
-    pub(crate) fn execute_compiled_user_function_owned(
+    /// Run `function_id` on arguments the caller has already coerced
+    /// (`coerce_call_args`) and gives up: coercing them again would find
+    /// nothing to change.
+    pub(crate) fn execute_coerced_user_function_owned(
         &mut self,
         function_id: u32,
         args: Vec<Val>,
     ) -> VmResult<Val> {
-        let args = match self.coerce_args_of_value_call(function_id, &args)? {
-            Some(coerced) => coerced,
-            None => args,
-        };
         self.execute_user_function(function_id, CallArgs::Given(args))
     }
 

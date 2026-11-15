@@ -783,6 +783,24 @@ run fn (n: Int): Vec { step(0, n, []) }"#,
         }
     }
 
+    /// A function held in a parameter is called by its value: a named
+    /// function through the dispatch cache, a closure by its compiled code.
+    /// An implicit arrow on the way in still applies, once.
+    #[test]
+    fn functions_called_through_parameters_run_right_compiled_or_not() {
+        let src = r#"::t ns
+Meters type { m: Int }
+Meters -> Int fn (x: Meters): Int { x.m }
+twice fn (f: Fn, x: Int): Int { f(f(x)) }
+inc fn (x: Int): Int { add(x, 1) }
+times fn (k: Int): Fn { (x) { mul(x, k) } }
+total fn (n: Int): Int {
+    reduce(range(n), (acc, i) { add(acc, twice(inc, i), twice(times(2), i)) }, 0)
+}
+[total(200), twice(inc, Meters({m: 5}))]"#;
+        assert_same_with_and_without_jit(src, &val!([99900, 7]));
+    }
+
     /// A map literal builds at its full size in one step (`MakeMap`), in the
     /// interpreter and in compiled code alike: keys in the literal's order,
     /// values computed in that order, nested literals built the same way.
