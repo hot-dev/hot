@@ -498,73 +498,66 @@ pub async fn deactivate_ref(db: &DatabasePool, blob_ref_id: Uuid) -> Result<u64,
     }
 }
 
-/// Deactivate observability refs created before a cutoff for the given
-/// source kinds. Used by retention cleanup (e.g. call retention) to release
-/// blob refs when their source rows age out. Never pass `store_value` or
-/// `manual` kinds here: durable user data is exempt from time-based GC.
-pub async fn deactivate_refs_older_than(
+/// One batch of [`deactivate_call_refs_older_than`] on PostgreSQL: `$1` now,
+/// `$2` the org, `$3` the cutoff, `$4` the batch size. Public so the plan
+/// tests check this statement and not a copy.
+#[doc(hidden)]
+pub const DEACTIVATE_CALL_REFS_BATCH_PG: &str = "UPDATE blob_ref SET active = false, deactivated_at = $1 \
+     WHERE blob_ref_id IN ( \
+         SELECT blob_ref_id FROM blob_ref \
+         WHERE org_id = $2 AND created_at < $3 AND active = true \
+         AND source_kind IN ('call_args', 'call_return', 'call_flow') \
+         LIMIT $4)";
+
+/// Deactivate `org_id`'s refs to spilled call payloads (`call_args`,
+/// `call_return`, `call_flow`) created before `cutoff`, `batch_size` at a
+/// time, so blob GC reclaims the payloads of calls retention deleted.
+/// Returns the refs deactivated.
+///
+/// Each batch is its own short statement, served by the partial index
+/// `blob_ref_call_active_idx`, so a backlog of millions of refs drains
+/// without reaching the statement timeout. The kinds are SQL literals
+/// matching that index's predicate: the planner can't prove a bound
+/// parameter implies it, and would scan the table instead.
+pub async fn deactivate_call_refs_older_than(
     db: &DatabasePool,
-    org_id: Option<Uuid>,
-    source_kinds: &[&str],
+    org_id: Uuid,
     cutoff: DateTime<Utc>,
+    batch_size: i64,
 ) -> Result<u64, BlobDbError> {
-    if source_kinds.is_empty() {
-        return Ok(0);
-    }
-    let now = Utc::now();
-    match db {
-        DatabasePool::Postgres(pool) => {
-            let kind_params: Vec<String> = (0..source_kinds.len())
-                .map(|i| format!("${}", i + 3))
-                .collect();
-            let org_clause = if org_id.is_some() {
-                format!("AND org_id = ${}", source_kinds.len() + 3)
-            } else {
-                String::new()
-            };
-            let query = format!(
-                "UPDATE blob_ref SET active = false, deactivated_at = $1 \
-                 WHERE active = true AND created_at < $2 \
-                 AND source_kind IN ({}) {}",
-                kind_params.join(", "),
-                org_clause
-            );
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
+    let mut total = 0;
+    loop {
+        let now = Utc::now();
+        let deactivated = match db {
+            DatabasePool::Postgres(pool) => sqlx::query(DEACTIVATE_CALL_REFS_BATCH_PG)
                 .bind(now)
-                .bind(cutoff);
-            for kind in source_kinds {
-                q = q.bind(*kind);
-            }
-            if let Some(org_id) = org_id {
-                q = q.bind(org_id);
-            }
-            Ok(q.execute(pool).await?.rows_affected())
-        }
-        DatabasePool::Sqlite(pool) => {
-            let kind_params: Vec<&str> = source_kinds.iter().map(|_| "?").collect();
-            let org_clause = if org_id.is_some() {
-                "AND org_id = ?"
-            } else {
-                ""
-            };
-            let query = format!(
+                .bind(org_id)
+                .bind(cutoff)
+                .bind(batch_size)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+            DatabasePool::Sqlite(pool) => sqlx::query(
                 "UPDATE blob_ref SET active = 0, deactivated_at = ? \
-                 WHERE active = 1 AND created_at < ? \
-                 AND source_kind IN ({}) {}",
-                kind_params.join(", "),
-                org_clause
-            );
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
-                .bind(now)
-                .bind(cutoff);
-            for kind in source_kinds {
-                q = q.bind(*kind);
-            }
-            if let Some(org_id) = org_id {
-                q = q.bind(org_id);
-            }
-            Ok(q.execute(pool).await?.rows_affected())
+                 WHERE blob_ref_id IN ( \
+                     SELECT blob_ref_id FROM blob_ref \
+                     WHERE org_id = ? AND created_at < ? AND active = 1 \
+                     AND source_kind IN ('call_args', 'call_return', 'call_flow') \
+                     LIMIT ?)",
+            )
+            .bind(now)
+            .bind(org_id)
+            .bind(cutoff)
+            .bind(batch_size)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+        };
+        total += deactivated;
+        if deactivated < batch_size as u64 {
+            return Ok(total);
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

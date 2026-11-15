@@ -72,6 +72,8 @@ async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn 
     for grant in [
         format!("GRANT USAGE ON SCHEMA hot TO {role}"),
         format!("GRANT SELECT ON ALL TABLES IN SCHEMA hot TO {role}"),
+        // EXPLAIN of an UPDATE needs the privilege to run it.
+        format!("GRANT UPDATE ON hot.blob_ref TO {role}"),
     ] {
         admin.execute(sqlx::AssertSqlSafe(grant)).await?;
     }
@@ -206,6 +208,37 @@ async fn hot_path_statements_keep_their_plans_under_rls() -> Result<(), Box<dyn 
     assert!(
         verification_plan.contains("Index Cond: (email_lower ="),
         "{verification_plan}"
+    );
+    // Call retention deactivates payload refs a batch at a time through the
+    // partial index, even with a generic plan, which can't use an index whose
+    // predicate it would have to prove from bound parameters. A table scan
+    // here is what timed out on a backlog of millions of refs.
+    let blob_gc = ScopedPgPool::new(raw.clone()).with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::BlobGc,
+        org_id: None,
+    });
+    // EXPLAIN plans bound parameters as constants; a prepared statement's
+    // generic plan keeps them as parameters.
+    let mut tx = blob_gc.begin().await?;
+    (&mut *tx)
+        .execute(sqlx::AssertSqlSafe(format!(
+            "SET LOCAL plan_cache_mode = force_generic_plan; \
+             PREPARE call_refs_batch(timestamptz, uuid, timestamptz, bigint) AS {}",
+            db::blob::DEACTIVATE_CALL_REFS_BATCH_PG
+        )))
+        .await?;
+    let lines: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN EXECUTE call_refs_batch(now(), gen_random_uuid(), now(), 10000)",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    (&mut *tx).execute("DEALLOCATE call_refs_batch").await?;
+    tx.rollback().await?;
+    let call_refs_plan = lines.join("\n");
+    assert!(
+        call_refs_plan.contains("blob_ref_call_active_idx")
+            && call_refs_plan.contains("Index Cond: ((org_id = $2) AND (created_at < $3))"),
+        "{call_refs_plan}"
     );
     raw.close().await;
     admin.close().await;

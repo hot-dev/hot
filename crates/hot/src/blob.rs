@@ -1998,18 +1998,28 @@ mod tests {
     async fn test_retention_deactivates_call_refs_but_not_manual() {
         let (store, scope, _tmp) = test_store().await;
 
-        let call_val = store
-            .spill_large_val(
-                val!({"d": Val::bytes(large_bytes(21, 2048))}),
-                scope,
-                SpillSource::CallArgs,
-                Some("c-ret"),
-            )
-            .await
-            .unwrap();
-        let call_ref = BlobRefVal::from_val(&call_val.get("d").unwrap())
-            .unwrap()
-            .unwrap();
+        // One ref of each call kind, deactivated one per batch below, so the
+        // batches have to continue until the last one comes up short.
+        let mut call_objects = Vec::new();
+        for (seed, source) in [
+            (21, SpillSource::CallArgs),
+            (23, SpillSource::CallReturn),
+            (24, SpillSource::CallFlow),
+        ] {
+            let val = store
+                .spill_large_val(
+                    val!({"d": Val::bytes(large_bytes(seed, 2048))}),
+                    scope,
+                    source,
+                    Some(&format!("c-ret-{seed}")),
+                )
+                .await
+                .unwrap();
+            let blob_ref = BlobRefVal::from_val(&val.get("d").unwrap())
+                .unwrap()
+                .unwrap();
+            call_objects.push(blob_ref.object_id);
+        }
         let manual_val = store
             .spill_large_val(
                 val!({"d": Val::bytes(large_bytes(22, 2048))}),
@@ -2023,41 +2033,41 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Retention cutoff in the future covers both refs, but only call_*
-        // kinds are passed, so the manual ref must stay active.
+        // Other orgs' refs are untouched.
         let cutoff = chrono::Utc::now() + chrono::Duration::hours(1);
-        let deactivated = blob_db::deactivate_refs_older_than(
-            store.db(),
-            Some(scope.org_id),
-            &["call_args", "call_return", "call_flow"],
-            cutoff,
-        )
-        .await
-        .unwrap();
-        assert_eq!(deactivated, 1);
-        assert_eq!(
-            blob_db::count_active_refs(store.db(), call_ref.object_id)
+        let other_org_deactivated =
+            blob_db::deactivate_call_refs_older_than(store.db(), Uuid::now_v7(), cutoff, 1)
                 .await
-                .unwrap(),
-            0
-        );
+                .unwrap();
+        assert_eq!(other_org_deactivated, 0);
+
+        // Refs newer than the cutoff stay active.
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        let too_new = blob_db::deactivate_call_refs_older_than(store.db(), scope.org_id, past, 1)
+            .await
+            .unwrap();
+        assert_eq!(too_new, 0);
+
+        // A cutoff in the future covers every ref, but only call kinds go.
+        let deactivated =
+            blob_db::deactivate_call_refs_older_than(store.db(), scope.org_id, cutoff, 1)
+                .await
+                .unwrap();
+        assert_eq!(deactivated, 3);
+        for object_id in call_objects {
+            assert_eq!(
+                blob_db::count_active_refs(store.db(), object_id)
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
         assert_eq!(
             blob_db::count_active_refs(store.db(), manual_ref.object_id)
                 .await
                 .unwrap(),
             1
         );
-
-        // Other orgs' refs are untouched when scoped by org.
-        let other_org_deactivated = blob_db::deactivate_refs_older_than(
-            store.db(),
-            Some(Uuid::now_v7()),
-            &["manual"],
-            cutoff,
-        )
-        .await
-        .unwrap();
-        assert_eq!(other_org_deactivated, 0);
     }
 
     #[tokio::test]

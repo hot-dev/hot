@@ -475,6 +475,47 @@ impl Call {
         Ok(total_deleted)
     }
 
+    /// Call retention for local development: delete every call older than
+    /// `days`, then deactivate each org's refs to their spilled payloads so
+    /// blob GC reclaims them (see [`super::blob::deactivate_call_refs_older_than`]).
+    /// Deleting calls alone leaves the payloads referenced for good. Sets the
+    /// scope each step needs, so `db` may be unscoped.
+    pub async fn apply_local_retention(
+        db: &DatabasePool,
+        days: i32,
+        batch_size: i64,
+    ) -> Result<CallRetention, DatabaseError> {
+        let retention = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Retention,
+            org_id: None,
+        });
+        let calls = Self::delete_older_than(&retention, days, batch_size).await?;
+        let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        let org_ids: Vec<Uuid> = match &retention {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT org_id FROM hot.org")
+                    .fetch_all(pool)
+                    .await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT org_id FROM org")
+                    .fetch_all(pool)
+                    .await?
+            }
+        };
+        let gc = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::BlobGc,
+            org_id: None,
+        });
+        let mut blob_refs = 0;
+        for org_id in org_ids {
+            blob_refs +=
+                super::blob::deactivate_call_refs_older_than(&gc, org_id, cutoff, batch_size)
+                    .await?;
+        }
+        Ok(CallRetention { calls, blob_refs })
+    }
+
     /// Delete the call traces in `scope` within `env_id`, `batch_size` at a
     /// time, and deactivate the blob refs that hold their spilled payloads so
     /// blob GC reclaims the objects. Each batch deletes its calls and
@@ -709,6 +750,15 @@ pub enum CallPurgeScope {
     Run(Uuid),
 }
 
+/// What [`Call::apply_local_retention`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallRetention {
+    /// Calls deleted.
+    pub calls: i64,
+    /// Blob refs to spilled call payloads deactivated.
+    pub blob_refs: u64,
+}
+
 /// What a purge removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CallPurge {
@@ -851,6 +901,52 @@ mod tests {
         .await
         .unwrap();
         (call_id, blob_ref.blob_ref_id)
+    }
+
+    #[tokio::test]
+    async fn sqlite_local_retention_releases_expired_call_payloads() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        let month_ago = Utc::now() - chrono::Duration::days(30);
+        let mut old_refs = Vec::new();
+        for _ in 0..2 {
+            let (call_id, blob_ref) =
+                insert_traced_call(&db, data.org_id, data.env_id, data.run_id).await;
+            sqlx::query("UPDATE call SET start_time=? WHERE call_id=?")
+                .bind(month_ago)
+                .bind(call_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE blob_ref SET created_at=? WHERE blob_ref_id=?")
+                .bind(month_ago)
+                .bind(blob_ref)
+                .execute(pool)
+                .await
+                .unwrap();
+            old_refs.push(blob_ref);
+        }
+        let (kept_call, kept_ref) =
+            insert_traced_call(&db, data.org_id, data.env_id, data.run_id).await;
+
+        // A batch of one, so both the deletes and the deactivations continue
+        // past their first batch.
+        assert_eq!(
+            Call::apply_local_retention(&db, 7, 1).await.unwrap(),
+            CallRetention {
+                calls: 2,
+                blob_refs: 2
+            }
+        );
+        for blob_ref in old_refs {
+            assert!(!ref_is_active(&db, blob_ref).await);
+        }
+        assert!(ref_is_active(&db, kept_ref).await);
+        assert_eq!(calls_in_run(&db, data.run_id).await, 1);
+        Call::get_call(&db, &kept_call).await.unwrap();
     }
 
     /// A purge that finished, having removed `calls` and `blob_refs`.

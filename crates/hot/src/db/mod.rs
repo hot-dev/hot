@@ -312,6 +312,8 @@ pub enum DatabaseError {
     Subscription(#[from] PlanError),
     #[error("Run error: {0}")]
     Run(#[from] run::RunError),
+    #[error("Blob error: {0}")]
+    Blob(#[from] blob::BlobDbError),
 }
 
 #[derive(Debug, Clone)]
@@ -1083,6 +1085,7 @@ const CONCURRENT_INDEXES: &[&str] = &[
     "event_env_event_time_idx",
     "event_stream_event_time_idx",
     "email_queue_sending_idx",
+    "blob_ref_call_active_idx",
 ];
 /// Taken around every migrator's work, and only ever polled for.
 const MIGRATOR_LOCK: i64 = 0x484f_545f_4d49_4752;
