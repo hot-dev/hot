@@ -4197,6 +4197,25 @@ impl VirtualMachine {
                 self.instruction_pointer += 1;
             }
 
+            Instruction::MakeMap {
+                dest,
+                entries_start,
+                count,
+            } => {
+                let dest = *dest;
+                let count = *count as usize;
+                let entries = self.consume_registers(*entries_start, 2 * count, moves)?;
+                let mut map =
+                    crate::val::ValIndexMap::with_capacity_and_hasher(count, Default::default());
+                let mut entries = entries.into_iter();
+                while let (Some(key), Some(value)) = (entries.next(), entries.next()) {
+                    key.check_shape("map key").map_err(VmError::runtime)?;
+                    map.insert(key, value);
+                }
+                self.set_register(dest, Val::map(map))?;
+                self.instruction_pointer += 1;
+            }
+
             Instruction::VecPush { vec, value } => {
                 let vec = *vec;
                 let value = *value;
@@ -12764,6 +12783,7 @@ impl VirtualMachine {
             | Instruction::IsType { dest, .. }
             | Instruction::EnsureResult { dest, .. }
             | Instruction::MakeVec { dest, .. }
+            | Instruction::MakeMap { dest, .. }
             | Instruction::MakeVecWithSpread { dest, .. }
             | Instruction::MergeMaps { dest, .. }
             | Instruction::LoadVar { dest, .. }

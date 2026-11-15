@@ -285,6 +285,11 @@ pub fn operands(instruction: &Instruction) -> Option<Operands> {
             count,
             ..
         } => Operands::range(*elements_start, u32::from(*count)).writes(*dest),
+        I::MakeMap {
+            dest,
+            entries_start,
+            count,
+        } => Operands::range(*entries_start, 2 * u32::from(*count)).writes(*dest),
 
         // In-place writes: the target keeps its value.
         I::VecPush { vec, value } | I::VecAppend { vec, value } => {
@@ -540,6 +545,7 @@ fn constant_operands(instruction: &Instruction) -> [Option<ConstantId>; 3] {
         | I::IsType { .. }
         | I::EnsureResult { .. }
         | I::MakeVec { .. }
+        | I::MakeMap { .. }
         | I::VecPush { .. }
         | I::MakeVecWithSpread { .. }
         | I::SetElement { .. }

@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 21, // Bumped for move plans that take a value in each branch
+            CacheType::Bytecode => 22, // Bumped for MakeMap (map literals at their full size)
             CacheType::Ast => 7, // Bumped for expression spreads in vector literals (Value::Spread)
         }
     }

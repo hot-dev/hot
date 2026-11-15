@@ -783,6 +783,31 @@ run fn (n: Int): Vec { step(0, n, []) }"#,
         }
     }
 
+    /// A map literal builds at its full size in one step (`MakeMap`), in the
+    /// interpreter and in compiled code alike: keys in the literal's order,
+    /// values computed in that order, nested literals built the same way.
+    #[test]
+    fn map_literals_keep_their_order_and_values_compiled_or_not() {
+        let src = r#"::t ns
+record fn (i: Int): Map {
+    {z: i, a: add(i, 1), m: {inner: [i, mul(i, 2)], "quoted key": `n${i}`}, b: null}
+}
+rs map(range(150), (i) { record(i) })
+last rs[149]
+[length(rs), keys(last), last.a, last.m.inner, get(last.m, "quoted key"), to-json(rs[3])]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([
+                150,
+                ["z", "a", "m", "b"],
+                150,
+                [149, 298],
+                "n149",
+                r#"{"z":3,"a":4,"m":{"inner":[3,6],"quoted key":"n3"},"b":null}"#
+            ]),
+        );
+    }
+
     /// A loop keeps the compiled code its callback ran by for its later
     /// items. An item the code doesn't fit, here a Str among Ints, goes the
     /// long way, and the items after it are right again. Each loop keeps its

@@ -382,6 +382,16 @@ pub enum Instruction {
         count: u16,
     },
 
+    /// Create a map from `count` entries in consecutive registers, a key
+    /// then its value: a map literal's entries, inserted in order at the
+    /// map's full size. A later key replaces an earlier one's value where it
+    /// stands.
+    MakeMap {
+        dest: RegisterId,
+        entries_start: RegisterId,
+        count: u16,
+    },
+
     /// Push a value onto a vector (modifies vec in place)
     VecPush { vec: RegisterId, value: RegisterId },
 
@@ -832,6 +842,7 @@ impl LambdaInfo {
                 | Instruction::ConstructTyped { dest, .. }
                 // Collection operations
                 | Instruction::MakeVec { dest, .. }
+                | Instruction::MakeMap { dest, .. }
                 | Instruction::MakeVecWithSpread { dest, .. }
                 | Instruction::MergeMaps { dest, .. }
                 // Variable operations
@@ -1487,6 +1498,17 @@ impl fmt::Display for Instruction {
                 dest,
                 elements_start,
                 elements_start + *count as u32
+            ),
+            Instruction::MakeMap {
+                dest,
+                entries_start,
+                count,
+            } => write!(
+                f,
+                "MAKE_MAP r{}, r{}..{}",
+                dest,
+                entries_start,
+                entries_start + 2 * *count as u32
             ),
             Instruction::VecPush { vec, value } => {
                 write!(f, "VEC_PUSH r{}, r{}", vec, value)

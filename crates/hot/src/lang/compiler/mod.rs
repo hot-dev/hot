@@ -6811,12 +6811,102 @@ impl Compiler {
 
     /// Compile a MapWithSpread value: start with an empty map, merge spreads and
     /// assoc base entries in insertion order.
+    /// Compile the value of a map literal's entry into a register: an
+    /// expression, a call, a literal holding either, or a constant.
+    fn compile_map_entry_value(&mut self, value: &Val) -> Result<RegisterId, String> {
+        if let Val::Box(b) = value {
+            if let Some(ast_node) = b.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                return self.compile_value(&ast_node.0);
+            }
+            if let Some(fn_call) = b.as_any().downcast_ref::<crate::lang::ast::FnCall>() {
+                return self.compile_function_call(fn_call);
+            }
+        } else if Self::val_contains_boxed_nodes(value) {
+            let val_reg = self.allocate_register();
+            self.compile_literal_value(value, val_reg)?;
+            return Ok(val_reg);
+        }
+        let val_reg = self.allocate_register();
+        let val_constant = self.program.add_constant(Constant::Val(value.clone()));
+        self.emit_instruction(Instruction::LoadConst {
+            dest: val_reg,
+            constant: val_constant,
+        });
+        Ok(val_reg)
+    }
+
+    /// Whether a map literal of `entries` builds with one `MakeMap`.
+    fn builds_with_make_map(entries: &ValIndexMap) -> bool {
+        !entries.is_empty() && entries.len() <= usize::from(u16::MAX)
+    }
+
+    /// Build the map literal `entries` in `dest_reg`, which the caller
+    /// allocated first: each key and value compiled in order, as the
+    /// literal reads, then moved into consecutive registers for one
+    /// `MakeMap`, which builds the map at its full size.
+    fn compile_map_entries(
+        &mut self,
+        dest_reg: RegisterId,
+        entries: &ValIndexMap,
+    ) -> Result<(), String> {
+        let count = u16::try_from(entries.len())
+            .map_err(|_| format!("Map literal has too many entries: {}", entries.len()))?;
+        let mut regs = Vec::with_capacity(2 * entries.len());
+        for (key, value) in entries.iter() {
+            let key_reg = self.allocate_register();
+            let key_constant = self.program.add_constant(Constant::Val(key.clone()));
+            self.emit_instruction(Instruction::LoadConst {
+                dest: key_reg,
+                constant: key_constant,
+            });
+            regs.push(key_reg);
+            regs.push(self.compile_map_entry_value(value)?);
+        }
+        // Moving each register down to its place, in order, overwrites only
+        // registers already read when every one is at or above its place;
+        // otherwise the entries go to registers of their own.
+        let first = regs[0];
+        let in_order = regs
+            .iter()
+            .enumerate()
+            .all(|(i, &reg)| reg >= first + i as RegisterId);
+        let entries_start = if in_order {
+            first
+        } else {
+            let start = self.allocate_register();
+            for _ in 1..regs.len() {
+                self.allocate_register();
+            }
+            start
+        };
+        for (i, &reg) in regs.iter().enumerate() {
+            let target = entries_start + i as RegisterId;
+            if reg != target {
+                self.emit_instruction(Instruction::Move {
+                    dest: target,
+                    src: reg,
+                });
+            }
+        }
+        self.emit_instruction(Instruction::MakeMap {
+            dest: dest_reg,
+            entries_start,
+            count,
+        });
+        Ok(())
+    }
+
     fn compile_map_with_spread(
         &mut self,
         base_entries: &ValIndexMap,
         spread_entries: &[(usize, Value)],
     ) -> Result<RegisterId, String> {
         let dest_reg = self.allocate_register();
+
+        if spread_entries.is_empty() && Self::builds_with_make_map(base_entries) {
+            self.compile_map_entries(dest_reg, base_entries)?;
+            return Ok(dest_reg);
+        }
 
         // Start with an empty map
         let empty_map_constant = self.program.add_constant(Constant::Val(Val::map_empty()));
@@ -7182,6 +7272,9 @@ impl Compiler {
                 // Recursively check if the map contains any boxed AstNodes or FnCalls
                 let has_boxed_nodes = map.values().any(Self::val_contains_boxed_nodes);
 
+                if has_boxed_nodes && Self::builds_with_make_map(map) {
+                    return self.compile_map_entries(dest_reg, map);
+                }
                 if has_boxed_nodes {
                     // This map has boxed AST nodes - compile dynamically
                     tracing::trace!(

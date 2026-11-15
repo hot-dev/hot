@@ -673,6 +673,7 @@ struct JitHelperRefs {
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
+    make_map: FuncRef,
     run_fused_pipeline: FuncRef,
     take_owned_int: FuncRef,
     call_lib: FuncRef,
@@ -725,7 +726,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 49] {
+    fn scope_free(&self) -> [FuncRef; 50] {
         [
             self.poll_cancel,
             self.call_vm,
@@ -760,6 +761,7 @@ impl JitHelperRefs {
             self.tail_loop_leaves,
             self.promote_to_owned,
             self.make_vec,
+            self.make_map,
             self.run_fused_pipeline,
             self.take_owned_int,
             self.merge_maps,
@@ -2668,6 +2670,7 @@ fn compile_with_return_kind(
         hot_jit_promote_to_owned as *const u8,
     );
     builder.symbol("hot_jit_make_vec", hot_jit_make_vec as *const u8);
+    builder.symbol("hot_jit_make_map", hot_jit_make_map as *const u8);
     builder.symbol(
         "hot_jit_run_fused_pipeline",
         hot_jit_run_fused_pipeline as *const u8,
@@ -3333,7 +3336,7 @@ const HELPER_VAL_KIND_OWNED: i64 = 5;
 /// A `TypeTag` or `StringConst` token, for `hot_jit_eq_value` only.
 const HELPER_VAL_KIND_TYPE_TOKEN: i64 = 6;
 /// An `OwnedVal` handle the helper takes over, for `hot_jit_make_vec` only:
-/// the code gives up a register nothing reads again (see `MakeVec`).
+/// the code gives up a register nothing reads again (see `MakeVec`, `MakeMap`).
 const HELPER_VAL_KIND_OWNED_TAKE: i64 = 7;
 
 unsafe extern "C" fn hot_jit_copy_dec(src: *const D256, dst: *mut D256) {
@@ -4021,6 +4024,27 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
         elements.push(unsafe { decode_helper_val(kind, raw) });
     }
     new_owned_val(Val::vec(elements))
+}
+
+/// JIT helper: build a map literal from `entries` (key, value) pairs encoded
+/// at `args_ptr` as for [`hot_jit_make_vec`], two per entry, at its full
+/// size. A key that can't be one is the map's Err, as `hot_jit_set_element`
+/// makes it.
+unsafe extern "C" fn hot_jit_make_map(args_ptr: *const i64, entries: i64) -> i64 {
+    let count = entries as usize;
+    let mut map = crate::val::ValIndexMap::with_capacity_and_hasher(count, Default::default());
+    for i in 0..count {
+        let read = |slot: usize| unsafe {
+            decode_helper_val(*args_ptr.add(slot * 2), *args_ptr.add(slot * 2 + 1))
+        };
+        let key = read(i * 2);
+        let value = read(i * 2 + 1);
+        if let Err(error) = key.check_shape("map key") {
+            return new_owned_val(Val::err(Val::from(error)));
+        }
+        map.insert(key, value);
+    }
+    new_owned_val(Val::map(map))
 }
 
 /// JIT helper: run the fused pipeline `plan` over its source, encoded at
@@ -5339,6 +5363,14 @@ fn declare_jit_helpers(
             &[ptr_ty, types::I64],
             &[types::I64],
         )?,
+        make_map: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_make_map",
+            &[ptr_ty, types::I64],
+            &[types::I64],
+        )?,
         run_fused_pipeline: declare_helper_func(
             module,
             func,
@@ -6288,6 +6320,16 @@ fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTr
                     regs.insert(*elements_start + i);
                 }
             }
+            Instruction::MakeMap {
+                dest,
+                entries_start,
+                count,
+            } => {
+                regs.insert(*dest);
+                for i in 0..(2 * *count as u32) {
+                    regs.insert(*entries_start + i);
+                }
+            }
             Instruction::CallLibBuiltin {
                 dest,
                 function,
@@ -6823,6 +6865,7 @@ fn prescan_return_kind(
                 }
             }
             Instruction::MakeVec { dest, .. }
+            | Instruction::MakeMap { dest, .. }
             | Instruction::CallLibBuiltin { dest, .. }
             | Instruction::DotAccess { dest, .. }
             | Instruction::TemplateInterpolate { dest, .. }
@@ -7042,6 +7085,7 @@ fn prescan_thunk_return_kind(
                 }
             }
             Instruction::MakeVec { dest, .. }
+            | Instruction::MakeMap { dest, .. }
             | Instruction::CallLibBuiltin { dest, .. }
             | Instruction::DotAccess { dest, .. }
             | Instruction::MergeMaps { dest, .. }
@@ -8910,6 +8954,54 @@ impl<'a> EmitCtx<'a> {
                 let call = builder
                     .ins()
                     .call(self.helper_refs.make_vec, &[args_ptr, count_val]);
+                let result = builder.inst_results(call)[0];
+                for reg in taken {
+                    self.clear_register(builder, reg)?;
+                }
+                self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
+                self.jump_to_next(builder, ip)?;
+                Ok(EmitResult::Handled)
+            }
+            Instruction::MakeMap {
+                dest,
+                entries_start,
+                count,
+            } => {
+                let slots = 2 * *count as usize;
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (slots.max(1) * 2 * 8) as u32,
+                    3,
+                ));
+                // Keys and values nothing reads again go into the map as
+                // they are, as `MakeVec` takes its elements.
+                let range_dead = self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0;
+                let mut taken = Vec::new();
+                for i in 0..slots {
+                    let reg = entries_start + i as u32;
+                    let (mut tag, raw) = encode_helper_val_operand(
+                        builder,
+                        &self.remap,
+                        &self.registers,
+                        &self.register_kinds,
+                        reg,
+                    )?;
+                    if range_dead && self.owns_register(reg) {
+                        tag = builder.ins().iconst(types::I64, HELPER_VAL_KIND_OWNED_TAKE);
+                        taken.push(reg);
+                    }
+                    builder
+                        .ins()
+                        .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
+                    builder
+                        .ins()
+                        .stack_store(types::I64, raw, slot, (i * 2 * 8 + 8) as i32);
+                }
+                let args_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
+                let count_val = builder.ins().iconst(types::I64, i64::from(*count));
+                let call = builder
+                    .ins()
+                    .call(self.helper_refs.make_map, &[args_ptr, count_val]);
                 let result = builder.inst_results(call)[0];
                 for reg in taken {
                     self.clear_register(builder, reg)?;
@@ -11336,6 +11428,7 @@ fn single_dest_register(inst: &Instruction) -> Option<u32> {
         | Instruction::CallNative { dest, .. }
         | Instruction::CallWithSpread { dest, .. }
         | Instruction::MakeVec { dest, .. }
+        | Instruction::MakeMap { dest, .. }
         | Instruction::MakeVecWithSpread { dest, .. }
         | Instruction::DotAccess { dest, .. }
         | Instruction::DynamicDotAccess { dest, .. }
