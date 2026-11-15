@@ -783,6 +783,24 @@ run fn (n: Int): Vec { step(0, n, []) }"#,
         }
     }
 
+    /// A loop keeps the compiled code its callback ran by for its later
+    /// items. An item the code doesn't fit, here a Str among Ints, goes the
+    /// long way, and the items after it are right again. Each loop keeps its
+    /// own: a second call of `scaled` captures another `k`.
+    #[test]
+    fn a_loop_runs_its_callback_right_when_its_items_change_type() {
+        let src = r#"::t ns
+bump fn (xs: Vec): Vec { map(xs, (x) { if(is-str(x), length(x), add(x, 1)) }) }
+scaled fn (xs: Vec, k: Int): Int { reduce(xs, (acc, x) { add(acc, mul(x, k)) }, 0) }
+r bump(concat(range(200), ["ab", "cde"], range(3)))
+[length(r), r[0], r[199], r[200], r[201], r[202], r[204],
+ scaled(range(300), 1), scaled(range(300), 10)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([205, 1, 200, 2, 3, 1, 3, 44850, 448500]),
+        );
+    }
+
     /// A call gives its argument registers up, so a writer that receives
     /// the result of another call is that value's only holder and writes it
     /// in place. Only the first writer of a chain copies: it is handed a

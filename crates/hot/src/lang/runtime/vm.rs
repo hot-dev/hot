@@ -377,6 +377,18 @@ pub(crate) enum CallTarget<'a> {
 /// A call's arguments: lent by a caller that keeps them, or given up by one
 /// that doesn't. A callee binds a given argument by moving it, so the
 /// binding is the only holder of a value its caller has no other use for.
+/// The compiled code a loop's callback ran by on an earlier call, which the
+/// loop keeps (`PreparedFunction::CallableVal`) for its later calls: they
+/// skip the lookup, which hashes the lambda's code, and go straight to the
+/// code when their arguments fit it.
+pub(crate) struct CompiledLambdaEntry {
+    compiled: Arc<crate::lang::runtime::jit::JitCompiledFunction>,
+    captures: Vec<Val>,
+}
+
+/// Where a loop keeps its callback's [`CompiledLambdaEntry`].
+pub(crate) type LambdaCallCache = std::cell::RefCell<Option<CompiledLambdaEntry>>;
+
 pub(crate) enum CallArgs<'a> {
     Lent(&'a [Val]),
     Given(Vec<Val>),
@@ -7973,10 +7985,10 @@ impl VirtualMachine {
     /// The short name of `function_id` when it is hot-std's core function
     /// and has a direct path (see [`Self::core_fast_path`]).
     fn core_fast_name(&mut self, function_id: FunctionId) -> Option<&'static str> {
-        const FAST: [&str; 23] = [
+        const FAST: [&str; 24] = [
             "not", "is-zero", "is-empty", "length", "first", "rest", "range", "get", "concat",
             "add", "sub", "mul", "div", "mod", "pow", "min", "max", "eq", "ne", "lt", "gt", "lte",
-            "gte",
+            "gte", "assoc",
         ];
         if let Some(known) = self.core_fast_names.get(&function_id) {
             return *known;
@@ -8012,6 +8024,28 @@ impl VirtualMachine {
             return None;
         }
         self.core_fast_path(short, args, false)
+    }
+
+    /// [`Self::core_call_from_compiled`] for hot-std's `assoc`, with
+    /// arguments compiled code gives up. hot-std's `assoc` checks that its
+    /// first argument is a Map and calls the native; for a plain Map this
+    /// calls the native directly, which gets the Map as it is and writes it
+    /// in place when nothing else holds it. Other arguments come back, for
+    /// hot-std's function.
+    pub(crate) fn owned_core_call_from_compiled(
+        &mut self,
+        function_id: FunctionId,
+        args: Vec<Val>,
+    ) -> Result<VmResult<Val>, Vec<Val>> {
+        let plain_map = |value: &Val| matches!(value, Val::Map(map) if crate::val::tagged_type_name(map).is_none());
+        if args.len() != 3
+            || !plain_map(&args[0])
+            || args.iter().any(Self::is_result_shaped)
+            || self.core_fast_name(function_id) != Some("assoc")
+        {
+            return Err(args);
+        }
+        Ok(self.execute_call_lib_owned("::hot::coll/assoc", args))
     }
 
     /// Execute a function call by name (helper for variable function calls)
@@ -10580,7 +10614,7 @@ impl VirtualMachine {
 
     pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
         Ok(self
-            .try_jit_lambda_call_given(lambda_val, args.to_vec())?
+            .try_jit_lambda_call_given(lambda_val, args.to_vec(), None)?
             .ok())
     }
 
@@ -10590,10 +10624,15 @@ impl VirtualMachine {
     /// the compiled code's alone, and a writer it hands it to on its last
     /// read writes it in place. `Ok(Err(args))` hands the arguments back for
     /// the interpreter when there is no compiled code to run.
-    pub fn try_jit_lambda_call_given(
+    ///
+    /// A loop that calls the same lambda for each item passes its `cache`:
+    /// once a call has found compiled code, the loop's later calls whose
+    /// arguments fit it go straight to it (see [`CompiledLambdaEntry`]).
+    pub(crate) fn try_jit_lambda_call_given(
         &mut self,
         lambda_val: &Val,
         args: Vec<Val>,
+        cache: Option<&LambdaCallCache>,
     ) -> VmResult<Result<Val, Vec<Val>>> {
         self.poll_execution_cancelled()?;
         // A `where` predicate stays on the interpreter, where every
@@ -10613,6 +10652,30 @@ impl VirtualMachine {
         if lambda_info.is_lazy_param {
             return Ok(Err(args));
         }
+
+        // The code an earlier call of this loop ran by, when these
+        // arguments fit it as theirs did.
+        let mut args = args;
+        if let Some(cache) = cache
+            && args.len() == lambda_info.parameters.len()
+        {
+            let found = cache.borrow().as_ref().map(|entry| {
+                let mut effective = Vec::with_capacity(entry.captures.len() + args.len());
+                effective.extend_from_slice(&entry.captures);
+                (Arc::clone(&entry.compiled), entry.captures.len(), effective)
+            });
+            if let Some((compiled, captures_len, mut effective)) = found {
+                effective.append(&mut args);
+                if compiled.matches_args(&effective) && compiled.can_start() {
+                    return self
+                        .run_compiled_lambda(lambda_info, &compiled, captures_len, effective)
+                        .map(Ok);
+                }
+                args = effective.split_off(captures_len);
+                *cache.borrow_mut() = None;
+            }
+        }
+
         // Counted before anything is built for the call: a lambda far from
         // compiling, or one that can't be, costs a lookup here and no more.
         let Some(prior_calls) = self.jit.admit_lambda_call(lambda_info) else {
@@ -10665,6 +10728,29 @@ impl VirtualMachine {
             crate::lang::runtime::jit::increment_lambda_fallback_count();
             return give_back(normalized_args, original);
         }
+        // Only the compiled call's arguments hold the values from here.
+        drop(normalized_args);
+        drop(original);
+        let captures_len = captures.len();
+        if let Some(cache) = cache {
+            *cache.borrow_mut() = Some(CompiledLambdaEntry {
+                compiled: Arc::clone(&compiled),
+                captures,
+            });
+        }
+        self.run_compiled_lambda(lambda_info, &compiled, captures_len, effective_args)
+            .map(Ok)
+    }
+
+    /// Run `compiled`, a lambda's code, on `effective_args`: its captures,
+    /// then its parameters, which it gets as they are.
+    fn run_compiled_lambda(
+        &mut self,
+        lambda_info: &crate::lang::bytecode::LambdaInfo,
+        compiled: &crate::lang::runtime::jit::JitCompiledFunction,
+        captures_len: usize,
+        effective_args: Vec<Val>,
+    ) -> VmResult<Val> {
         let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = if compiled.needs_vm_scope() {
@@ -10678,16 +10764,19 @@ impl VirtualMachine {
             // names up reads it (see `moves::taken_parameters`), and the
             // frame would hold the value the code means to write in place.
             let saved_scope_depth = self.scope_stack.len();
-            let mut frame_args = normalized_args;
-            for (idx, value) in frame_args.iter_mut().enumerate() {
-                if compiled.takes_param(captures.len() + idx) {
-                    *value = Val::Null;
-                }
-            }
+            let frame_args: Vec<Val> = effective_args[captures_len..]
+                .iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if compiled.takes_param(captures_len + idx) {
+                        Val::Null
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
             let mut frame = LexicalScope::call_frame(&lambda_info.parameters, &frame_args, false);
             drop(frame_args);
-            drop(original);
-            drop(captures);
             frame.link = lambda_info.defining_frame;
             for (name, value) in &lambda_info.closure_env {
                 frame
@@ -10697,24 +10786,20 @@ impl VirtualMachine {
             }
             self.scope_stack.push(frame);
             let result =
-                crate::lang::runtime::jit::call_compiled_lambda_owned(&compiled, effective_args);
+                crate::lang::runtime::jit::call_compiled_lambda_owned(compiled, effective_args);
             self.scope_stack.truncate(saved_scope_depth);
             self.current_namespace = saved_namespace;
             result
         } else {
             // Code that never looks up a name or runs other Hot code needs
-            // neither the call's frame nor its namespace. Only the compiled
-            // call's arguments hold the values from here.
-            drop(normalized_args);
-            drop(original);
-            drop(captures);
-            crate::lang::runtime::jit::call_compiled_lambda_owned(&compiled, effective_args)
+            // neither the call's frame nor its namespace.
+            crate::lang::runtime::jit::call_compiled_lambda_owned(compiled, effective_args)
         };
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
         self.propagate_jit_halt(was_halted)?;
-        Ok(Ok(result))
+        Ok(result)
     }
 
     /// Depth- and stack-guarded entry point for user-function execution.

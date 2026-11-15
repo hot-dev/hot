@@ -3961,6 +3961,17 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
     }
 
     let error_capture = vm.error_capture_active;
+    // A core writer, by the direct path that hands it what the code gave up.
+    let args = match vm.owned_core_call_from_compiled(function_id as u32, args) {
+        Ok(result) => {
+            vm.pending_proven = None;
+            return match result {
+                Ok(result) => new_owned_val(result),
+                Err(err) => vm_error_to_owned_val(err, error_capture),
+            };
+        }
+        Err(args) => args,
+    };
     // A core function, by the interpreter's direct path for these
     // arguments when it has one.
     if let Some(result) = vm.core_call_from_compiled(function_id as u32, &args) {

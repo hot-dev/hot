@@ -151,7 +151,8 @@ fn build_int_range(start: i64, end: i64, step: i64) -> Option<Vec<Val>> {
 
 pub(crate) enum PreparedFunction<'a> {
     Named(&'a str),
-    CallableVal(&'a Val),
+    /// A lambda, and the compiled code an earlier call ran it by.
+    CallableVal(&'a Val, crate::lang::runtime::vm::LambdaCallCache),
     Invalid,
 }
 
@@ -274,7 +275,7 @@ pub(crate) fn prepare_function(function_val: &Val) -> PreparedFunction<'_> {
                     .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                     .is_some() =>
             {
-                PreparedFunction::CallableVal(cur)
+                PreparedFunction::CallableVal(cur, Default::default())
             }
             Val::Box(boxed) => {
                 if let Some(fr) = boxed
@@ -349,16 +350,17 @@ fn call_prepared_with_vm_multi_args(
             vm.execute_function_call_by_name(name, &args)
                 .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
         }
-        PreparedFunction::CallableVal(function_val) => {
+        PreparedFunction::CallableVal(function_val, cache) => {
             let args = prepare_callback_args(vm, CallTarget::Value(function_val), args)
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
-            match vm.try_jit_lambda_call(function_val, &args) {
-                Ok(Some(result)) => return Ok(result),
-                Ok(None) => {}
-                // A compiled callback that halted already ran: don't run it
-                // again in the interpreter.
-                Err(vm_error) => return Err(halted(vm, "Lambda execution failed", vm_error)),
-            }
+            let args =
+                match vm.try_jit_lambda_call_given(function_val, args.into_owned(), Some(cache)) {
+                    Ok(Ok(result)) => return Ok(result),
+                    Ok(Err(args)) => args,
+                    // A compiled callback that halted already ran: don't run it
+                    // again in the interpreter.
+                    Err(vm_error) => return Err(halted(vm, "Lambda execution failed", vm_error)),
+                };
 
             vm.execute_lambda(function_val, &args)
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))
@@ -416,7 +418,7 @@ fn call_prepared_given(
             vm.execute_function_call_by_name(name, &args)
                 .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
         }
-        PreparedFunction::CallableVal(function_val) => {
+        PreparedFunction::CallableVal(function_val, cache) => {
             let mut args = prepare(vm, CallTarget::Value(function_val), args)
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
             // A large collection the callback will write goes to the
@@ -424,7 +426,7 @@ fn call_prepared_given(
             if settled || !vm.keeps_lambda_call_interpreted(function_val, &args) {
                 // Compiled code gets the arguments as they are too, so it
                 // writes in place what the interpreter would.
-                match vm.try_jit_lambda_call_given(function_val, args) {
+                match vm.try_jit_lambda_call_given(function_val, args, Some(cache)) {
                     Ok(Ok(result)) => return Ok(result),
                     Ok(Err(back)) => args = back,
                     // A compiled callback that halted already ran: don't
