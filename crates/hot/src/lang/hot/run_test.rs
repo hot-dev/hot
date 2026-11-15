@@ -623,13 +623,10 @@ grown assoc(m, "b", 1)
         (after.0 - before.0, after.1 - before.1)
     }
 
-    /// With the JIT on, compiled code still lends what it holds to the
-    /// writers it calls, so they copy. A call that is given a large
-    /// collection to write is therefore run by the interpreter, and a
-    /// compiled tail-call loop that carries one hands the rest of the loop
-    /// to it. Building 6,000 items must then copy no more than building
-    /// 2,000 does: both copy only while the collection is small enough for
-    /// compiled code to be the faster tier.
+    /// With the JIT on, compiled code hands a collection it holds alone to
+    /// the writer it calls on its last read, as the interpreter does, so the
+    /// writer writes it in place. Building 6,000 items must then copy no
+    /// more than building 2,000 does.
     #[test]
     fn a_large_collection_is_written_in_place_with_the_jit_on() {
         let builders = [
@@ -867,108 +864,48 @@ r bump(concat(range(200), ["ab", "cde"], range(3)))
         );
     }
 
-    /// With the JIT on, a builder runs compiled while its collection is
-    /// small, and is handed to the interpreter once copying the collection
-    /// at each write would cost more than interpreting does: from
-    /// `COPIED_PER_CALL` items for a builder that writes on every call.
-    /// Each side of that line: a build that stays under it is compiled
-    /// code's, which writes nothing in place, and one that crosses it is
-    /// written in place from there on.
+    /// With the JIT on, compiled code writes a collection it is given in
+    /// place, as the interpreter does, at every size and however seldom it
+    /// writes: builders through `reduce` and through a tail-call loop, writing
+    /// on every call, on every other call, and on one call in sixteen. Every
+    /// write is in place, and the items copied don't grow with the build.
     #[test]
-    fn a_builder_is_interpreted_once_its_collection_is_large() {
-        let per_call = crate::lang::runtime::vm::COPIED_PER_CALL;
-        let builders = [
-            (
-                "reduce",
-                "run fn (n: Int): Vec { reduce(range(n), (acc, x) { [...acc, x] }, []) }",
-            ),
-            (
-                "a tail-call loop",
-                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
-    if(gte(i, n), acc, step(add(i, 1), n, [...acc, i]))
-}
-run fn (n: Int): Vec { step(0, n, []) }"#,
-            ),
-        ];
-        for (name, body) in builders {
-            let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
-            let jit = || Some(val!({"jit": {"threshold": 1}}));
-            let small = writes_under(&program(per_call / 2), jit());
-            assert!(
-                small.0 < 8,
-                "{name}: a small build was written in place: {small:?}"
-            );
-            let large = writes_under(&program(4 * per_call), jit());
-            assert!(
-                (3 * per_call - 8..=3 * per_call + 8).contains(&large.0),
-                "{name}: a large build was not written in place from {per_call} items: {large:?}"
-            );
-        }
-    }
-
-    /// A callee that seldom writes the collection it is given stays
-    /// compiled far longer: here one write in sixteen calls, which leaves
-    /// compiled code only at sixteen times as many items, and this build
-    /// never gets there.
-    #[test]
-    fn a_builder_that_seldom_writes_stays_compiled() {
-        let builders = [
-            (
-                "reduce",
-                r#"run fn (n: Int): Vec {
-    reduce(range(n), (acc, x) { if(eq(mod(x, 16), 0), [...acc, x], acc) }, [])
-}"#,
-            ),
-            (
-                "a tail-call loop",
-                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
-    if(gte(i, n), acc, step(add(i, 1), n, if(eq(mod(i, 16), 0), [...acc, i], acc)))
-}
-run fn (n: Int): Vec { step(0, n, []) }"#,
-            ),
-        ];
-        for (name, body) in builders {
-            // 3,000 items: three times what a builder that writes on every
-            // call is interpreted from.
-            let src = format!("::t ns\n{body}\nlength(run(48000))");
-            let interpreted = interpreted_writes(&src);
-            assert!(interpreted.0 >= 2990, "{name}: interpreted, {interpreted:?}");
-            let compiled = writes_under(&src, Some(val!({"jit": {"threshold": 1}})));
-            assert!(compiled.0 < 8, "{name}: with the JIT on, {compiled:?}");
-        }
-    }
-
-    /// The same callee does go to the interpreter once its collection is
-    /// large for how often it writes. Writing on every other call, it is
-    /// compiled until the collection holds twice `COPIED_PER_CALL` items,
-    /// and written in place from there on.
-    #[test]
-    fn a_builder_that_seldom_writes_is_interpreted_later() {
-        let per_call = crate::lang::runtime::vm::COPIED_PER_CALL;
-        let builders = [
-            (
-                "reduce",
-                r#"run fn (n: Int): Vec {
-    reduce(range(n), (acc, x) { if(eq(mod(x, 2), 0), [...acc, x], acc) }, [])
-}"#,
-            ),
-            (
-                "a tail-call loop",
-                r#"step fn (i: Int, n: Int, acc: Vec): Vec {
-    if(gte(i, n), acc, step(add(i, 1), n, if(eq(mod(i, 2), 0), [...acc, i], acc)))
-}
-run fn (n: Int): Vec { step(0, n, []) }"#,
-            ),
-        ];
-        for (name, body) in builders {
-            // 6 * per_call items, of which the last four are the
-            // interpreter's.
-            let src = format!("::t ns\n{body}\nlength(run({}))", 12 * per_call);
-            let compiled = writes_under(&src, Some(val!({"jit": {"threshold": 1}})));
-            assert!(
-                (4 * per_call - 8..=4 * per_call + 8).contains(&compiled.0),
-                "{name}: with the JIT on, {compiled:?}"
-            );
+    fn compiled_builders_write_in_place_at_every_size() {
+        for every in [1, 2, 16] {
+            let builders = [
+                (
+                    "reduce",
+                    format!(
+                        r#"run fn (n: Int): Vec {{
+    reduce(range(n), (acc, x) {{ if(eq(mod(x, {every}), 0), [...acc, x], acc) }}, [])
+}}"#
+                    ),
+                ),
+                (
+                    "a tail-call loop",
+                    format!(
+                        r#"step fn (i: Int, n: Int, acc: Vec): Vec {{
+    if(gte(i, n), acc, step(add(i, 1), n, if(eq(mod(i, {every}), 0), [...acc, i], acc)))
+}}
+run fn (n: Int): Vec {{ step(0, n, []) }}"#
+                    ),
+                ),
+            ];
+            for (name, body) in &builders {
+                let label = format!("{name} writing one call in {every}");
+                let program = |n: usize| format!("::t ns\n{body}\nlength(run({n}))");
+                let jit = || Some(val!({"jit": {"threshold": 1}}));
+                let small = writes_under(&program(512 * every), jit());
+                let large = writes_under(&program(4096 * every), jit());
+                assert!(
+                    large.0 >= small.0 + 3584 - 8,
+                    "{label}: the further writes were not in place, from {small:?} to {large:?}"
+                );
+                assert!(
+                    large.1 <= small.1 + 1000,
+                    "{label}: the items copied grew with the build, from {small:?} to {large:?}"
+                );
+            }
         }
     }
 

@@ -669,7 +669,6 @@ struct JitHelperRefs {
     consume_err: FuncRef,
     owned_raw_arg: FuncRef,
     self_tail_owned_arg: FuncRef,
-    tail_loop_leaves: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -726,7 +725,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 50] {
+    fn scope_free(&self) -> [FuncRef; 49] {
         [
             self.poll_cancel,
             self.call_vm,
@@ -758,7 +757,6 @@ impl JitHelperRefs {
             self.consume_err,
             self.owned_raw_arg,
             self.self_tail_owned_arg,
-            self.tail_loop_leaves,
             self.promote_to_owned,
             self.make_vec,
             self.make_map,
@@ -2658,10 +2656,6 @@ fn compile_with_return_kind(
         hot_jit_self_tail_owned_arg as *const u8,
     );
     builder.symbol(
-        "hot_jit_tail_loop_leaves",
-        hot_jit_tail_loop_leaves as *const u8,
-    );
-    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -3734,20 +3728,6 @@ unsafe extern "C" fn hot_jit_self_tail_owned_arg(
     unsafe { hot_jit_clone_owned_val(raw) }
 }
 
-/// A self tail call passes on, in `raw`, the collection its loop writes:
-/// whether the rest of the loop should be run by the interpreter (see
-/// `VirtualMachine::tail_loop_leaves`). Returns 1 if so, and the loop then
-/// makes the call through the VM. Borrows `raw`.
-unsafe extern "C" fn hot_jit_tail_loop_leaves(function_id: i64, raw: i64) -> i64 {
-    let vm_ptr = get_jit_vm_ptr();
-    if raw == 0 || vm_ptr.is_null() {
-        return 0;
-    }
-    let collection = unsafe { &*(raw as *const Val) };
-    let vm = unsafe { &mut *vm_ptr };
-    i64::from(vm.tail_loop_leaves(function_id as u32, collection))
-}
-
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
     if owned_trace_enabled() {
         eprintln!("DROP {raw:#x} from {:#x}", owned_trace_caller());
@@ -4778,6 +4758,13 @@ unsafe extern "C" fn hot_jit_make_vec_with_spread(
         let val = unsafe { decode_helper_val(kind, raw) };
         if (mask >> i) & 1 == 1 {
             match val {
+                // A leading spread (`[...items, x]`) keeps its own storage
+                // when nothing else holds it, as in the interpreter: the
+                // code gave its register up (`HELPER_VAL_KIND_OWNED_TAKE`).
+                Val::Vec(inner) if elements.is_empty() => {
+                    crate::val::note_write(&inner);
+                    elements = Arc::unwrap_or_clone(inner).into_inner();
+                }
                 Val::Vec(inner) => elements.extend(Arc::unwrap_or_clone(inner)),
                 Val::Null => {}
                 other => elements.push(other),
@@ -4997,7 +4984,9 @@ unsafe fn hot_jit_call_vm_by_name_body(
     };
 
     match name_val {
-        Val::Str(s) => match vm.execute_function_call_by_name(s.as_ref(), &args) {
+        // A name, called as an interpreted call calls it, with the arguments
+        // as they are: those the code gave up are the callee's alone.
+        Val::Str(_) => match vm.call_function_val_owned(name_val.clone(), args) {
             Ok(result) => new_owned_val(result),
             Err(err) => vm_error_to_owned_val(err, error_capture),
         },
@@ -5018,15 +5007,16 @@ unsafe fn hot_jit_call_vm_by_name_body(
                     Ok(result) => new_owned_val(result),
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }
-            } else if let Some(function_ref) =
-                b.as_any()
-                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+            } else if b
+                .as_any()
+                .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+                .is_some()
             {
                 // Enum-variant constructors (e.g. ::hot::type/Result.Err from
                 // the err() wrapper) and other by-name targets reach compiled
                 // code as FunctionRef boxes; dispatch by name exactly like the
                 // interpreter does.
-                match vm.execute_function_call_by_name(&function_ref.name, &args) {
+                match vm.call_function_val_owned(name_val.clone(), args) {
                     Ok(result) => new_owned_val(result),
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }
@@ -5337,14 +5327,6 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_self_tail_owned_arg",
             &[types::I64, types::I64, types::I64, types::I64],
-            &[types::I64],
-        )?,
-        tail_loop_leaves: declare_helper_func(
-            module,
-            func,
-            ptr_ty,
-            "hot_jit_tail_loop_leaves",
-            &[types::I64, types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -7304,9 +7286,11 @@ impl<'a> EmitCtx<'a> {
 
     /// Build arg pairs buffer and emit a call_vm_by_name trampoline invocation
     /// for functions not found in program.functions (builtins like Vec, Str, etc.).
+    #[allow(clippy::too_many_arguments)]
     fn emit_vm_callback_by_name(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
+        ip: Option<usize>,
         dest: u32,
         fn_name: &str,
         args_start: u32,
@@ -7319,15 +7303,32 @@ impl<'a> EmitCtx<'a> {
             (count * 2 * 8) as u32,
             3,
         ));
+        // Arguments nothing reads after the call go to the callee as they
+        // are (see `emit_vm_callback`).
+        let range_dead =
+            ip.is_some_and(|ip| self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0);
+        let mut taken = Vec::new();
         for i in 0..count {
             let reg = args_start + i as u32;
             let kind = self.register_kind(reg)?;
             let raw = self.reg_value(builder, reg)?;
             let (eff_kind, eff_raw) =
                 resolve_trampoline_arg(self.program, instructions, reg, kind, raw, builder);
-            let kind_val = builder
-                .ins()
-                .iconst(types::I64, helper_value_kind(eff_kind));
+            let give = range_dead
+                && kind == RawKind::OwnedVal
+                && eff_kind == RawKind::OwnedVal
+                && self.owns_register(reg);
+            if give {
+                taken.push(reg);
+            }
+            let kind_val = builder.ins().iconst(
+                types::I64,
+                if give {
+                    HELPER_VAL_KIND_OWNED_TAKE
+                } else {
+                    helper_value_kind(eff_kind)
+                },
+            );
             builder
                 .ins()
                 .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
@@ -7349,15 +7350,20 @@ impl<'a> EmitCtx<'a> {
             &[name_ptr, args_buf_ptr, count_val],
         );
         let result_handle = builder.inst_results(call)[0];
+        for reg in taken {
+            self.clear_register(builder, reg)?;
+        }
         let halt_block = emit_halt_check(builder, result_handle);
         self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
         Ok(Some(halt_block))
     }
 
     /// Like emit_vm_callback_by_name but takes a runtime OwnedVal pointer for the function name.
+    #[allow(clippy::too_many_arguments)]
     fn emit_vm_callback_by_name_raw(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
+        ip: Option<usize>,
         dest: u32,
         fn_name_ptr: cranelift_codegen::ir::Value,
         args_start: u32,
@@ -7370,15 +7376,32 @@ impl<'a> EmitCtx<'a> {
             (count * 2 * 8) as u32,
             3,
         ));
+        // Arguments nothing reads after the call go to the callee as they
+        // are (see `emit_vm_callback`).
+        let range_dead =
+            ip.is_some_and(|ip| self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0);
+        let mut taken = Vec::new();
         for i in 0..count {
             let reg = args_start + i as u32;
             let kind = self.register_kind(reg)?;
             let raw = self.reg_value(builder, reg)?;
             let (eff_kind, eff_raw) =
                 resolve_trampoline_arg(self.program, instructions, reg, kind, raw, builder);
-            let kind_val = builder
-                .ins()
-                .iconst(types::I64, helper_value_kind(eff_kind));
+            let give = range_dead
+                && kind == RawKind::OwnedVal
+                && eff_kind == RawKind::OwnedVal
+                && self.owns_register(reg);
+            if give {
+                taken.push(reg);
+            }
+            let kind_val = builder.ins().iconst(
+                types::I64,
+                if give {
+                    HELPER_VAL_KIND_OWNED_TAKE
+                } else {
+                    helper_value_kind(eff_kind)
+                },
+            );
             builder
                 .ins()
                 .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
@@ -7396,6 +7419,9 @@ impl<'a> EmitCtx<'a> {
             &[fn_name_ptr, args_buf_ptr, count_val],
         );
         let result_handle = builder.inst_results(call)[0];
+        for reg in taken {
+            self.clear_register(builder, reg)?;
+        }
         let halt_block = emit_halt_check(builder, result_handle);
         self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
         Ok(Some(halt_block))
@@ -7617,6 +7643,7 @@ impl<'a> EmitCtx<'a> {
                 let (fn_owned, fn_temp) = self.owned_operand(builder, fn_reg)?;
                 let halt_block = self.emit_vm_callback_by_name_raw(
                     builder,
+                    Some(ip),
                     dest,
                     fn_owned,
                     args_start,
@@ -7643,6 +7670,7 @@ impl<'a> EmitCtx<'a> {
             let function = builder.use_var(var);
             let halt_block = self.emit_vm_callback_by_name_raw(
                 builder,
+                Some(ip),
                 dest,
                 function,
                 args_start,
@@ -7681,6 +7709,7 @@ impl<'a> EmitCtx<'a> {
         if known_core_call(&fn_name).is_some_and(|core| core.runs_natively_at(args_count)) {
             let halt_block = self.emit_vm_callback_by_name(
                 builder,
+                Some(ip),
                 dest,
                 &fn_name,
                 args_start,
@@ -7782,6 +7811,7 @@ impl<'a> EmitCtx<'a> {
         } else {
             self.emit_vm_callback_by_name(
                 builder,
+                Some(ip),
                 dest,
                 &fn_name,
                 args_start,
@@ -9559,14 +9589,30 @@ impl<'a> EmitCtx<'a> {
                     (n * 2 * 8) as u32,
                     3,
                 ));
+                // Elements nothing reads again go to the helper as they are,
+                // so a leading spread held alone keeps its storage.
+                let range_dead = self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0;
+                let mut taken = Vec::new();
                 for i in 0..n {
                     let reg = *elements_start + i as u32;
                     let kind = self.register_kind(reg)?;
                     let raw = self.reg_value(builder, reg)?;
                     let (eff_kind, eff_raw) = normalize_for_trampoline(builder, kind, raw);
-                    let kind_val = builder
-                        .ins()
-                        .iconst(types::I64, helper_value_kind(eff_kind));
+                    let give = range_dead
+                        && kind == RawKind::OwnedVal
+                        && eff_kind == RawKind::OwnedVal
+                        && self.owns_register(reg);
+                    if give {
+                        taken.push(reg);
+                    }
+                    let kind_val = builder.ins().iconst(
+                        types::I64,
+                        if give {
+                            HELPER_VAL_KIND_OWNED_TAKE
+                        } else {
+                            helper_value_kind(eff_kind)
+                        },
+                    );
                     builder
                         .ins()
                         .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
@@ -9589,6 +9635,9 @@ impl<'a> EmitCtx<'a> {
                     &[args_buf, count_val, mask_val],
                 );
                 let result = builder.inst_results(call)[0];
+                for reg in taken {
+                    self.clear_register(builder, reg)?;
+                }
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -9895,18 +9944,6 @@ fn build_supported_body(
     if instructions.is_empty() {
         return Err("Cannot JIT empty function".to_string());
     }
-    // The parameter a tail-call loop of this function writes, if it writes
-    // one: the collection the loop asks about at each tail call.
-    let tail_writer = {
-        let written = crate::lang::moves::writer_parameters(
-            instructions,
-            &function_info.moves,
-            &function_info.param_names,
-            &program.constants,
-        );
-        (written != 0).then(|| written.trailing_zeros() as usize)
-    };
-
     let used_regs = collect_used_registers(instructions);
     let remap: AHashMap<u32, usize> = used_regs
         .iter()
@@ -10636,32 +10673,6 @@ fn build_supported_body(
                 let mut through_vm = None;
                 let mut halts = Vec::new();
                 let mut unboxed = AHashMap::new();
-                // A loop that writes a collection it carries asks, at each
-                // tail call, whether the interpreter is now the better tier
-                // for it. If so this call goes through the VM, which runs
-                // the rest of the loop and writes the collection in place.
-                // Not when calls are traced: the call through the VM would
-                // be one more call in the trace than the loop makes.
-                if let Some(position) = tail_writer
-                    && !ctx.call_scope.traces_flows()
-                    && position < usize::from(*args_count)
-                    && param_locals[position].1 == RawKind::OwnedVal
-                    && active_flows
-                        .last()
-                        .is_some_and(|flow| flow.result_reg.is_some())
-                {
-                    let raw = ctx.reg_value(builder, *args_start + position as u32)?;
-                    let callee = builder.ins().iconst(types::I64, i64::from(function_id));
-                    let call = builder
-                        .ins()
-                        .call(ctx.helper_refs.tail_loop_leaves, &[callee, raw]);
-                    let leaves = builder.inst_results(call)[0];
-                    let other_block = *through_vm.get_or_insert_with(|| builder.create_block());
-                    let stays = builder.create_block();
-                    builder.ins().brif(leaves, other_block, &[], stays, &[]);
-                    builder.switch_to_block(stays);
-                    builder.seal_block(stays);
-                }
                 for &idx in &owned_raws {
                     let param_kind = param_locals[idx].1;
                     let reg = *args_start + idx as u32;
