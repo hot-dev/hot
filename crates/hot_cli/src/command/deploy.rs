@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn explicit_profile_never_uses_ad_hoc_database_fallback() {
         assert!(!is_ad_hoc_default_db(
-            &hot::val!({"profile":{"set":"missing"}})
+            &hot::val!({"set":{"profile":"missing"}})
         ));
         assert!(!is_ad_hoc_default_db(
             &hot::val!({"db":{"uri":"postgres://localhost/example"}})

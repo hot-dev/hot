@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod discover;
 pub mod incremental;
+pub mod literal_conf;
 pub mod pipeline;
 
 use crate::lang::bytecode::BytecodeProgram;

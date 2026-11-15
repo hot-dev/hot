@@ -542,106 +542,6 @@ fn is_takeable(value: &Val) -> bool {
     }
 }
 
-/// The items compiled code may copy per call, averaged over the calls
-/// between two writes of a collection, before the interpreter is the better
-/// tier for whoever writes it. Compiled code lends what it holds to the
-/// writers it calls, so they copy the collection (some 4 ns an item on a
-/// release build). The interpreter writes it in place, and costs 2 to 3 µs
-/// more a call. The two meet at about 700 items per call; this is the
-/// margin over that.
-pub(crate) const COPIED_PER_CALL: usize = 1024;
-
-/// How many times one loop may leave compiled code for the interpreter.
-/// Each time nests a call, so there is an end to it.
-const TAIL_LOOP_LEAVES: u8 = 3;
-
-/// How often the collection a callee is given has been growing. It decides
-/// whether the callee runs compiled, as any callee does, or is run by the
-/// interpreter so that the collection is written in place.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct Growth {
-    /// The most items the collection has held, once a call has been seen.
-    most: Option<usize>,
-    /// The calls from the growth before last to the last one, or 0 while
-    /// the collection has not been seen to grow.
-    period: usize,
-    /// The calls since it last grew.
-    calls_since: usize,
-    /// The times a compiled loop has left for the interpreter over it.
-    leaves: u8,
-}
-
-impl Growth {
-    /// Note the items the collection holds on the next call, and say
-    /// whether the interpreter is the better tier for that call: the
-    /// collection has been seen to grow, and at the rate it has been
-    /// growing compiled code would copy `per_call` items or more a call.
-    ///
-    /// A callee that writes on every call is better interpreted once the
-    /// collection holds `per_call` items. One that writes on one call in a
-    /// hundred copies a hundredth as much per call, so only once it holds a
-    /// hundred times as many. Until then, and whenever there is nothing to
-    /// go by, the callee runs compiled, as it would have anyway.
-    pub(crate) fn interpreter_wins(&mut self, items: usize, per_call: usize) -> bool {
-        match self.most {
-            Some(most) if items > most => {
-                self.most = Some(items);
-                self.period = self.calls_since + 1;
-                self.calls_since = 0;
-            }
-            Some(_) => self.calls_since = self.calls_since.saturating_add(1),
-            None => self.most = Some(items),
-        }
-        // A callee that has gone longer than its last period without
-        // writing is writing less often than that.
-        let period = self.period.max(self.calls_since.saturating_add(1));
-        self.period > 0 && items >= period.saturating_mul(per_call)
-    }
-}
-
-/// The items of a collection, or 0 for any other value. A constructed
-/// value counts as the two entries it is stored as: this is asked at every
-/// call, and looking inside one costs more than there is to gain.
-pub(crate) fn collection_items(value: &Val) -> usize {
-    match value {
-        Val::Vec(items) => items.len(),
-        Val::Map(entries) => entries.len(),
-        _ => 0,
-    }
-}
-
-/// Whether `value` is a collection that nothing else holds, so that a
-/// writer given it writes it in place.
-fn held_alone(value: &Val) -> bool {
-    match value {
-        Val::Vec(items) => Arc::strong_count(items) == 1,
-        Val::Map(entries) => Arc::strong_count(entries) == 1,
-        _ => false,
-    }
-}
-
-/// The items of the first collection `args` hold in one of the parameters
-/// `written` (a bit per position), if nothing else holds that collection.
-fn given_to_write(written: u64, args: &[Val]) -> Option<usize> {
-    args.iter()
-        .take(64)
-        .enumerate()
-        .find(|(position, arg)| written & (1 << position) != 0 && held_alone(arg))
-        .map(|(_, arg)| collection_items(arg))
-}
-
-/// The items of the first collection `args` hold in one of the parameters
-/// `written`, whoever else holds it.
-fn carried_to_write(written: u64, args: &[Val]) -> Option<usize> {
-    args.iter()
-        .take(64)
-        .enumerate()
-        .find(|(position, arg)| {
-            written & (1 << position) != 0 && matches!(arg, Val::Vec(_) | Val::Map(_))
-        })
-        .map(|(_, arg)| collection_items(arg))
-}
-
 #[cfg(debug_assertions)]
 fn moved_out() -> Val {
     Val::Box(Box::new(MovedOut))
@@ -656,15 +556,21 @@ fn moved_out() -> Val {
 /// Source of `LexicalScope::frame_id`.
 static NEXT_FRAME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// A map keyed by names from the program (variables, local types): aHash
+/// with fixed keys, which costs nothing to set up. A frame builds three of
+/// these per call, and std's hasher read a thread-local seed for each.
+/// The keys come from the program's own source, not from outside input.
+pub(crate) type NameMap<K, V> = IndexMap<K, V, std::hash::BuildHasherDefault<ahash::AHasher>>;
+
 /// Lexical scope for proper variable resolution
 #[derive(Debug, Clone)]
 pub struct LexicalScope {
     /// Variables in this scope (ordered by insertion)
-    variables: IndexMap<String, Val>,
+    variables: NameMap<String, Val>,
     /// Local type constructors in this scope: type_name -> constructor_function_name
-    local_types: IndexMap<String, String>,
+    local_types: NameMap<String, String>,
     /// Local type implementations in this scope: (source_type, target_type) -> implementation_function_name
-    local_implementations: IndexMap<(String, String), String>,
+    local_implementations: NameMap<(String, String), String>,
     /// The frame of a call to a top-level function. A name lookup that
     /// reaches it goes on to the namespace, never into the caller's frames.
     /// Frames of lambdas and of functions defined in another function's body
@@ -795,9 +701,9 @@ struct ParallelFlowContext {
 impl LexicalScope {
     pub fn new(scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
         Self {
-            variables: IndexMap::new(),
-            local_types: IndexMap::new(),
-            local_implementations: IndexMap::new(),
+            variables: NameMap::default(),
+            local_types: NameMap::default(),
+            local_implementations: NameMap::default(),
             is_boundary: false,
             frame_id: NEXT_FRAME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             link: None,
@@ -811,6 +717,7 @@ impl LexicalScope {
     fn call_frame(param_names: &[String], args: &[Val], is_boundary: bool) -> Self {
         let mut frame = Self::new(ScopeType::Function, None);
         frame.is_boundary = is_boundary;
+        frame.variables.reserve(param_names.len());
         for (idx, name) in param_names.iter().enumerate() {
             frame
                 .variables
@@ -1250,21 +1157,6 @@ pub struct VirtualMachine {
     /// The name of a binding that was read after its value was taken (see
     /// `note_moved_read`), until the instruction that read it fails.
     moved_read: std::cell::RefCell<Option<String>>,
-    /// For each function called so far: the parameters it writes in place
-    /// (`moves::writer_parameters`), and whether it carries one of them
-    /// through a tail call to itself.
-    writer_parameters_cache: AHashMap<FunctionId, (u64, bool)>,
-    /// For each function that writes a parameter: how the collections its
-    /// calls were given have been growing.
-    call_growth: AHashMap<FunctionId, Growth>,
-    /// How the collection of the compiled tail-call loop now running has
-    /// been growing.
-    tail_growth: Growth,
-    /// The loop a compiled tail call has just left for the interpreter,
-    /// until the VM starts the call that goes on with it.
-    tail_leaving: Option<(FunctionId, Growth)>,
-    /// What the interpreted call that goes on with such a loop starts from.
-    tail_inherited: Option<Growth>,
     /// The registers re-entrant calls have set aside, innermost last. A call
     /// pushes its own on entry and takes them back on exit, so recursion
     /// reuses one buffer where each call used to allocate a vector.
@@ -1335,13 +1227,63 @@ fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
     }
 }
 
+/// Append `piece` to a template literal's text, bounding the text up front
+/// with checked arithmetic, so a single template can't drive an unbounded
+/// String allocation (which would call the allocator and potentially abort
+/// on OOM).
+fn push_template_piece(
+    result: &mut String,
+    piece: &str,
+    max_template_bytes: usize,
+) -> VmResult<()> {
+    let projected_len = result
+        .len()
+        .checked_add(piece.len())
+        .ok_or_else(|| VmError::runtime("Template literal length overflows usize".to_string()))?;
+    if projected_len > max_template_bytes {
+        return Err(VmError::runtime(format!(
+            "Template literal too large: would produce {} bytes (limit {}). \
+             Raise HOT_MAX_STRING_BYTES if this is intentional.",
+            projected_len, max_template_bytes
+        )));
+    }
+    crate::lang::runtime::limits::try_reserve_string("template literal", result, piece.len())
+        .map_err(|e| VmError::runtime(e.to_string()))?;
+    result.push_str(piece);
+    Ok(())
+}
+
+/// The decimal digits of `n`, as `n.to_string()` writes them, in `buf`
+/// rather than a String of their own.
+pub(crate) fn int_digits(n: i64, buf: &mut [u8; 20]) -> &str {
+    let mut magnitude = n.unsigned_abs();
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        at -= 1;
+        buf[at] = b'-';
+    }
+    std::str::from_utf8(&buf[at..]).expect("ASCII digits")
+}
+
 /// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
 /// in the type checker counts them.
 fn is_primitive_param_type(param_type: &str) -> bool {
-    // The usual annotation is a bare built-in name: this runs for every
+    // The usual annotation is a built-in name, bare or qualified as
+    // `lookup_typed_param_signature` qualifies it: this runs for every
     // argument of every checked call, so those skip the parsing below.
+    let name = param_type
+        .strip_prefix("::hot::type/")
+        .unwrap_or(param_type);
     if matches!(
-        param_type,
+        name,
         "Str" | "Int" | "Dec" | "Bool" | "Any" | "Vec" | "Map" | "Bytes" | "Byte" | "Null"
     ) {
         return true;
@@ -1514,11 +1456,6 @@ impl VirtualMachine {
             function_active_depth: vec![0; function_count],
             function_used_registers_cache: AHashMap::new(),
             moved_read: std::cell::RefCell::new(None),
-            writer_parameters_cache: AHashMap::new(),
-            call_growth: AHashMap::new(),
-            tail_growth: Growth::default(),
-            tail_leaving: None,
-            tail_inherited: None,
             saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
@@ -4197,6 +4134,25 @@ impl VirtualMachine {
                 self.instruction_pointer += 1;
             }
 
+            Instruction::MakeMap {
+                dest,
+                entries_start,
+                count,
+            } => {
+                let dest = *dest;
+                let count = *count as usize;
+                let entries = self.consume_registers(*entries_start, 2 * count, moves)?;
+                let mut map =
+                    crate::val::ValIndexMap::with_capacity_and_hasher(count, Default::default());
+                let mut entries = entries.into_iter();
+                while let (Some(key), Some(value)) = (entries.next(), entries.next()) {
+                    key.check_shape("map key").map_err(VmError::runtime)?;
+                    map.insert(key, value);
+                }
+                self.set_register(dest, Val::map(map))?;
+                self.instruction_pointer += 1;
+            }
+
             Instruction::VecPush { vec, value } => {
                 let vec = *vec;
                 let value = *value;
@@ -6396,6 +6352,22 @@ impl VirtualMachine {
         let mut result = String::new();
         let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
         for part_val in parts {
+            // A Str is itself and an Int its digits, whatever type
+            // implementations exist (those are for typed values): they go
+            // into the text directly, with no conversion or copy between.
+            match part_val {
+                Val::Str(s) => {
+                    push_template_piece(&mut result, s, max_template_bytes)?;
+                    continue;
+                }
+                Val::Int(i) => {
+                    let mut digits = [0u8; 20];
+                    let piece = int_digits(*i, &mut digits);
+                    push_template_piece(&mut result, piece, max_template_bytes)?;
+                    continue;
+                }
+                _ => {}
+            }
             // A Str part is copied as it is; the length check below bounds it.
             if !matches!(part_val, Val::Str(_)) {
                 part_val
@@ -6431,31 +6403,10 @@ impl VirtualMachine {
                     self.unwrap_result_if_ok(&Val::err(error))?
                 }
             };
-            let string_repr: String = match converted {
-                Val::Str(s) => (*s).to_owned(),
-                other => other.to_string(),
-            };
-            // Bound the produced template length up-front using checked
-            // arithmetic so a single template can't drive an unbounded
-            // String allocation (which would call the allocator and
-            // potentially abort on OOM).
-            let projected_len = result.len().checked_add(string_repr.len()).ok_or_else(|| {
-                VmError::runtime("Template literal length overflows usize".to_string())
-            })?;
-            if projected_len > max_template_bytes {
-                return Err(VmError::runtime(format!(
-                    "Template literal too large: would produce {} bytes (limit {}). \
-                     Raise HOT_MAX_STRING_BYTES if this is intentional.",
-                    projected_len, max_template_bytes
-                )));
+            match converted {
+                Val::Str(s) => push_template_piece(&mut result, &s, max_template_bytes)?,
+                other => push_template_piece(&mut result, &other.to_string(), max_template_bytes)?,
             }
-            crate::lang::runtime::limits::try_reserve_string(
-                "template literal",
-                &mut result,
-                string_repr.len(),
-            )
-            .map_err(|e| VmError::runtime(e.to_string()))?;
-            result.push_str(&string_repr);
         }
         Ok(result)
     }
@@ -6979,6 +6930,15 @@ impl VirtualMachine {
         // Compute cache key early (cheap hash), but don't check until after lexical scope.
         let cache_key = Self::dispatch_cache_key(function_name, args);
 
+        // A qualified name has no binding to shadow it and resolves the same
+        // way each time, so the dispatch cache answers it first: no string
+        // keys built or probed for a function value called again and again.
+        if function_name.starts_with("::")
+            && let Some(&cached_fn_id) = self.dispatch_cache.get(&cache_key)
+        {
+            return self.execute_compiled_user_function(cached_fn_id, args);
+        }
+
         // No special cases - let everything go through unified resolution
         // Vec, Map, etc. are core variables that contain type constructor functions
 
@@ -7453,11 +7413,7 @@ impl VirtualMachine {
     // Removed try_resolve_varref_marker - strings are just strings, no automatic resolution
 
     /// Execute a function call with proper Hot semantics
-    fn execute_function_call(
-        &mut self,
-        function_register: u32,
-        mut args: Vec<Val>,
-    ) -> VmResult<Val> {
+    fn execute_function_call(&mut self, function_register: u32, args: Vec<Val>) -> VmResult<Val> {
         // Inspect without stringifying so lambdas and refs are preserved
         let mut function_val = self.get_register(function_register as RegisterId)?.clone();
 
@@ -7482,7 +7438,18 @@ impl VirtualMachine {
         {
             function_val = target.clone();
         }
+        self.call_function_val_owned(function_val, args)
+    }
 
+    /// Call `function_val`, a lambda, a function's name or a FunctionRef,
+    /// with arguments the caller gives up, as an interpreted call does:
+    /// [`Self::execute_function_call`] once it has read the function, and
+    /// compiled code calling a function by its name or through a value.
+    pub(crate) fn call_function_val_owned(
+        &mut self,
+        function_val: Val,
+        mut args: Vec<Val>,
+    ) -> VmResult<Val> {
         // Determine if this is a dispatch function without stringifying lambdas
         let is_dispatch_function = match &function_val {
             Val::Str(name) => &**name == "call-lib" || &**name == "call",
@@ -7520,11 +7487,7 @@ impl VirtualMachine {
             self.function_call_depth += 1;
         }
 
-        tracing::trace!(
-            "VM: Function call - register {} contains: {:?}",
-            function_register,
-            function_val
-        );
+        tracing::trace!("VM: Function call - function: {:?}", function_val);
 
         // Directly execute lambdas without converting to names
         if let Val::Box(b) = &function_val
@@ -7657,6 +7620,15 @@ impl VirtualMachine {
                     }
                 }
             }
+        }
+        // A qualified name the dispatch cache knows (see
+        // `unified_function_lookup`).
+        if function_name.starts_with("::")
+            && let Some(&cached_fn_id) = self
+                .dispatch_cache
+                .get(&Self::dispatch_cache_key(function_name, &args))
+        {
+            return self.execute_compiled_user_function_given(cached_fn_id, args);
         }
         // A qualified name that is a compiled function's: the full lookup's
         // first resolution, with its choice of overload and its cache entry.
@@ -7986,10 +7958,10 @@ impl VirtualMachine {
     /// The short name of `function_id` when it is hot-std's core function
     /// and has a direct path (see [`Self::core_fast_path`]).
     fn core_fast_name(&mut self, function_id: FunctionId) -> Option<&'static str> {
-        const FAST: [&str; 24] = [
+        const FAST: [&str; 26] = [
             "not", "is-zero", "is-empty", "length", "first", "rest", "range", "get", "concat",
             "add", "sub", "mul", "div", "mod", "pow", "min", "max", "eq", "ne", "lt", "gt", "lte",
-            "gte", "assoc",
+            "gte", "assoc", "merge", "delete",
         ];
         if let Some(known) = self.core_fast_names.get(&function_id) {
             return *known;
@@ -8027,10 +7999,11 @@ impl VirtualMachine {
         self.core_fast_path(short, args, false)
     }
 
-    /// [`Self::core_call_from_compiled`] for hot-std's `assoc`, with
-    /// arguments compiled code gives up. hot-std's `assoc` checks that its
-    /// first argument is a Map and calls the native; for a plain Map this
-    /// calls the native directly, which gets the Map as it is and writes it
+    /// [`Self::core_call_from_compiled`] for hot-std's writers (`assoc`,
+    /// `concat`, `merge`, `delete`), with arguments compiled code gives up.
+    /// Each of their overloads for these argument types checks its
+    /// parameters and calls its native; for plain Maps and Vecs this calls
+    /// the native directly, which gets the collection as it is and writes it
     /// in place when nothing else holds it. Other arguments come back, for
     /// hot-std's function.
     pub(crate) fn owned_core_call_from_compiled(
@@ -8039,14 +8012,25 @@ impl VirtualMachine {
         args: Vec<Val>,
     ) -> Result<VmResult<Val>, Vec<Val>> {
         let plain_map = |value: &Val| matches!(value, Val::Map(map) if crate::val::tagged_type_name(map).is_none());
-        if args.len() != 3
-            || !plain_map(&args[0])
-            || args.iter().any(Self::is_result_shaped)
-            || self.core_fast_name(function_id) != Some("assoc")
-        {
+        let is_vec = |value: &Val| matches!(value, Val::Vec(_));
+        let native = match (self.core_fast_name(function_id), args.as_slice()) {
+            (Some("assoc"), [map, _, _]) if plain_map(map) => "::hot::coll/assoc",
+            (Some("concat"), [a, b, rest @ ..])
+                if is_vec(a) && is_vec(b) && rest.iter().all(is_vec) =>
+            {
+                "::hot::coll/concat"
+            }
+            (Some("merge"), [a, b]) if plain_map(a) && plain_map(b) => "::hot::coll/merge",
+            (Some("delete"), [coll, Val::Str(_) | Val::Int(_)]) if plain_map(coll) => {
+                "::hot::coll/delete"
+            }
+            (Some("delete"), [Val::Vec(_), Val::Int(_)]) => "::hot::coll/delete",
+            _ => return Err(args),
+        };
+        if args.iter().any(Self::is_result_shaped) {
             return Err(args);
         }
-        Ok(self.execute_call_lib_owned("::hot::coll/assoc", args))
+        Ok(self.execute_call_lib_owned(native, args))
     }
 
     /// Execute a function call by name (helper for variable function calls)
@@ -8185,17 +8169,14 @@ impl VirtualMachine {
         self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args).into())
     }
 
-    /// [`Self::execute_compiled_user_function`] with arguments the caller
-    /// gives up, as compiled code gives up registers nothing reads again.
-    pub(crate) fn execute_compiled_user_function_owned(
+    /// Run `function_id` on arguments the caller has already coerced
+    /// (`coerce_call_args`) and gives up: coercing them again would find
+    /// nothing to change.
+    pub(crate) fn execute_coerced_user_function_owned(
         &mut self,
         function_id: u32,
         args: Vec<Val>,
     ) -> VmResult<Val> {
-        let args = match self.coerce_args_of_value_call(function_id, &args)? {
-            Some(coerced) => coerced,
-            None => args,
-        };
         self.execute_user_function(function_id, CallArgs::Given(args))
     }
 
@@ -10471,8 +10452,6 @@ impl VirtualMachine {
         } else {
             None
         };
-        // A tail-call loop this call starts has seen nothing yet.
-        let outer = std::mem::take(&mut self.tail_growth);
         let result = match std::mem::replace(args, CallArgs::Lent(&[])) {
             CallArgs::Given(given) => self.run_compiled_call_owned(function_id, &compiled, given),
             lent => {
@@ -10480,7 +10459,6 @@ impl VirtualMachine {
                 self.run_compiled_call(function_id, &compiled, args.as_slice())
             }
         };
-        self.tail_growth = outer;
         if let Ok(value) = &result
             && call_id.is_some()
             && !self.has_failed()
@@ -11193,123 +11171,6 @@ impl VirtualMachine {
         }
     }
 
-    /// The parameters `function_id` writes in place, a bit per position,
-    /// and whether it is a tail-call loop that carries one of them.
-    fn writer_parameters_of(&mut self, function_id: FunctionId) -> (u64, bool) {
-        if let Some(known) = self.writer_parameters_cache.get(&function_id) {
-            return *known;
-        }
-        let found = self
-            .program
-            .functions
-            .get(function_id as usize)
-            .map(|function| {
-                let written = crate::lang::moves::writer_parameters(
-                    &function.instructions,
-                    &function.moves,
-                    &function.param_names,
-                    &self.program.constants,
-                );
-                let tail_loop = written != 0
-                    && function.instructions.iter().any(|instruction| {
-                        matches!(
-                            instruction,
-                            Instruction::TailCall { function_id: callee, .. }
-                                if *callee == function_id
-                        )
-                    });
-                (written, tail_loop)
-            })
-            .unwrap_or((0, false));
-        self.writer_parameters_cache.insert(function_id, found);
-        found
-    }
-
-    /// Whether this call of `function_id` runs interpreted although the JIT
-    /// is on. The interpreter writes a collection in place when the call is
-    /// its only holder; compiled code lends its values to what it calls, so
-    /// a writer it reaches copies the collection every time. So a call that
-    /// is given a collection nothing else holds, in a parameter the function
-    /// goes on to write, is interpreted once the copying would cost more
-    /// than interpreting does: see [`Growth::interpreter_wins`], here over
-    /// the calls of the function that were given such a collection.
-    ///
-    /// A tail-call loop is also interpreted when it is the rest of a loop
-    /// that compiled code has just left (see [`Self::tail_loop_leaves`]).
-    fn keeps_call_interpreted(&mut self, function_id: FunctionId, args: &CallArgs<'_>) -> bool {
-        let (written, tail_loop) = self.writer_parameters_of(function_id);
-        if written == 0 {
-            return false;
-        }
-        if tail_loop
-            && let Some((leaving, growth)) = self.tail_leaving.take()
-            && leaving == function_id
-        {
-            self.tail_inherited = Some(growth);
-            return true;
-        }
-        let CallArgs::Given(given) = args else {
-            return false;
-        };
-        match given_to_write(written, given) {
-            Some(items) if items >= COPIED_PER_CALL => self
-                .call_growth
-                .entry(function_id)
-                .or_default()
-                .interpreter_wins(items, COPIED_PER_CALL),
-            _ => false,
-        }
-    }
-
-    /// [`Self::keeps_call_interpreted`] for a lambda given `args`, when
-    /// its caller has seen the collection among them grow often enough.
-    pub(crate) fn keeps_lambda_call_interpreted(&self, lambda_val: &Val, args: &[Val]) -> bool {
-        use crate::lang::moves::flag;
-        let Val::Box(boxed) = lambda_val else {
-            return false;
-        };
-        let Some(lambda) = boxed
-            .as_any()
-            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-        else {
-            return false;
-        };
-        if !lambda.moves.iter().any(|entry| entry & flag::WRITER != 0) {
-            return false;
-        }
-        let written = crate::lang::moves::writer_parameters(
-            &lambda.instructions,
-            &lambda.moves,
-            &lambda.parameters,
-            &self.program.constants,
-        );
-        given_to_write(written, args).is_some_and(|items| items >= COPIED_PER_CALL)
-    }
-
-    /// Asked by a compiled tail-call loop at each tail call, of the
-    /// collection it passes on in the parameter it writes: whether the rest
-    /// of the loop should be run by the interpreter. It should once the
-    /// collection has grown to where copying it at each write costs more
-    /// than interpreting the calls between two writes (see
-    /// [`Growth::interpreter_wins`]). The loop then makes this tail call
-    /// through the VM, and [`Self::keeps_call_interpreted`] sees to it
-    /// that the VM interprets it.
-    pub(crate) fn tail_loop_leaves(&mut self, function_id: FunctionId, collection: &Val) -> bool {
-        let growth = &mut self.tail_growth;
-        // Every tail call counts towards how often the loop writes. The
-        // loop leaves on one that passes on a collection nothing else
-        // holds, which the interpreter can go on to write in place.
-        if !growth.interpreter_wins(collection_items(collection), COPIED_PER_CALL)
-            || growth.leaves >= TAIL_LOOP_LEAVES
-            || !held_alone(collection)
-        {
-            return false;
-        }
-        growth.leaves += 1;
-        self.tail_leaving = Some((function_id, growth.clone()));
-        true
-    }
-
     /// Written-register set for a function body (lazily computed and cached).
     /// The name of the function whose instructions ran last.
     fn current_debug_function_name(&self) -> Option<&str> {
@@ -11344,10 +11205,7 @@ impl VirtualMachine {
         mut args: CallArgs<'_>,
         registers_saved: bool,
     ) -> VmResult<Val> {
-        if self.jit.config.is_enabled()
-            && !self.in_constraint_predicate()
-            && !self.keeps_call_interpreted(function_id, &args)
-        {
+        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
             self.jit.record_call(function_id, args.as_slice());
 
             let was_halted = self.has_failed() || self.has_cancelled();
@@ -11587,9 +11445,6 @@ impl VirtualMachine {
                 // Parameters were already bound into the function scope above,
                 // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
-                // For a loop that carries a collection it writes: how the
-                // collection has been growing.
-                let mut growth = self.tail_inherited.take().unwrap_or_default();
                 // The registers the body writes, once a tail call needs
                 // them emptied.
                 let mut written: Option<std::rc::Rc<[u32]>> = None;
@@ -11679,29 +11534,8 @@ impl VirtualMachine {
                                 // switch to compiled code mid-loop once available.
                                 // Without this, a million-iteration tail loop counts
                                 // as ONE call and never compiles.
-                                //
-                                // A loop that carries a collection it writes
-                                // stays interpreted while copying the
-                                // collection at each write would cost more
-                                // than interpreting does. It took twice as
-                                // much to leave compiled code for here, so
-                                // that a loop near the line stays put.
-                                let mut compiles =
+                                let compiles =
                                     self.jit.config.is_enabled() && !self.in_constraint_predicate();
-                                if compiles {
-                                    let (written, tail_loop) =
-                                        self.writer_parameters_of(function_id);
-                                    // The collection counts whoever holds
-                                    // it: the one a compiled loop has just
-                                    // passed on is still in that loop's
-                                    // registers until this one writes it.
-                                    if tail_loop
-                                        && let Some(items) = carried_to_write(written, &new_args)
-                                    {
-                                        compiles =
-                                            !growth.interpreter_wins(items, COPIED_PER_CALL / 2);
-                                    }
-                                }
                                 if compiles {
                                     self.jit.record_call(function_id, &new_args);
                                     if self.jit.should_compile_now(function_id, &new_args)
@@ -11745,13 +11579,8 @@ impl VirtualMachine {
                                     ));
                                     let prev =
                                         super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-                                    // The compiled loop goes on from what
-                                    // this one has seen of the collection.
-                                    let outer =
-                                        std::mem::replace(&mut self.tail_growth, growth.clone());
                                     let call_result =
                                         self.jit.try_call_compiled(function_id, &new_args);
-                                    self.tail_growth = outer;
                                     super::jit::set_jit_vm_ptr(prev);
                                     if let Some(result) = call_result.map_err(|msg| {
                                         VmError::RuntimeError(
@@ -12764,6 +12593,7 @@ impl VirtualMachine {
             | Instruction::IsType { dest, .. }
             | Instruction::EnsureResult { dest, .. }
             | Instruction::MakeVec { dest, .. }
+            | Instruction::MakeMap { dest, .. }
             | Instruction::MakeVecWithSpread { dest, .. }
             | Instruction::MergeMaps { dest, .. }
             | Instruction::LoadVar { dest, .. }

@@ -716,7 +716,14 @@ fn push_checked(out: &mut String, piece: &str, max_bytes: usize) -> bool {
 
 fn push_template_part(out: &mut String, part: &PureValue, max_bytes: usize) -> bool {
     match part {
-        PureValue::Int(i) => push_checked(out, &i.to_string(), max_bytes),
+        PureValue::Int(i) => {
+            let mut digits = [0u8; 20];
+            push_checked(
+                out,
+                crate::lang::runtime::vm::int_digits(*i, &mut digits),
+                max_bytes,
+            )
+        }
         PureValue::Bool(b) => push_checked(out, &b.to_string(), max_bytes),
         PureValue::Other(Val::Str(s)) => push_checked(out, s, max_bytes),
         PureValue::Other(Val::Dec(d)) => push_checked(out, &d.to_string(), max_bytes),
@@ -1345,7 +1352,17 @@ fn trace_range_source(
     last_stage_ip: usize,
 ) -> Option<RangeSource> {
     let source_reg = start_stage.input_reg;
-    for ip in (0..start_stage.ip).rev() {
+    // The search starts where the range's value is copied into the stage's
+    // argument register: the source register may hold another argument by
+    // the time the stage runs, as in `reduce(range(n), f, init)`.
+    let copy_ip = (0..start_stage.ip)
+        .rev()
+        .find(|&ip| {
+            matches!(&instrs[ip], Instruction::Move { dest, src }
+                if *dest == start_stage.input_arg_reg && *src == source_reg)
+        })
+        .unwrap_or(start_stage.ip);
+    for ip in (0..copy_ip).rev() {
         match &instrs[ip] {
             Instruction::Call {
                 dest,
@@ -1425,35 +1442,54 @@ fn range_source_window_is_safe(
         let _ = ip;
     }
 
-    !register_read_between_except_range_setup(
+    !range_value_escapes(
         instrs,
         source_reg,
         range_ip + 1,
-        last_stage_ip + 1,
+        last_stage_ip,
         start_stage.input_arg_reg,
-    ) && !register_read_after(instrs, last_stage_ip + 1, source_reg)
+    )
 }
 
-fn register_read_between_except_range_setup(
+/// Whether the range's value in `reg` is read by anything but the copy
+/// into the stage's argument (or its error check), from `start` on. Within
+/// the pipeline, up to `last_stage_ip`, a write that doesn't read `reg`
+/// ends its value, so later reads there read another one (such as the
+/// next argument of the stage, put in the register the range used); a flow
+/// instruction while the value lives counts as a read. Past the pipeline a
+/// value still live must not be read at all.
+fn range_value_escapes(
     instrs: &[Instruction],
     reg: RegisterId,
     start: usize,
-    end: usize,
+    last_stage_ip: usize,
     stage_input_arg: RegisterId,
 ) -> bool {
-    instrs
-        .iter()
-        .take(end.min(instrs.len()))
-        .skip(start)
-        .any(|ins| {
-            if !reads_register(ins, reg) {
-                return false;
+    for ins in instrs.iter().take(last_stage_ip + 1).skip(start) {
+        if reads_register(ins, reg) {
+            let setup = matches!(ins, Instruction::Move { dest, src }
+                if *src == reg && *dest == stage_input_arg)
+                || matches!(ins, Instruction::ReturnIfErr { src } if *src == reg);
+            if !setup {
+                return true;
             }
-            !matches!(
-                ins,
-                Instruction::Move { dest, src } if *src == reg && *dest == stage_input_arg
-            ) && !matches!(ins, Instruction::ReturnIfErr { src } if *src == reg)
-        })
+        } else if writes_register(ins, reg) {
+            return false;
+        }
+        if matches!(
+            ins,
+            Instruction::BeginFlow { .. }
+                | Instruction::EndFlow { .. }
+                | Instruction::CondBranchStart { .. }
+                | Instruction::CondBranchEnd { .. }
+                | Instruction::Jump { .. }
+                | Instruction::JumpIf { .. }
+                | Instruction::JumpIfNot { .. }
+        ) {
+            return true;
+        }
+    }
+    register_read_after(instrs, last_stage_ip + 1, reg)
 }
 
 fn register_read_after(instrs: &[Instruction], start: usize, reg: RegisterId) -> bool {
@@ -2474,6 +2510,24 @@ f fn (): Int {
                 .all(|plan| plan.stages.iter().all(|stage| stage.stage != HofStage::Map)),
             "map with explicit OnErr disposition must stay on interpreter path; plans={plans:#?}"
         );
+    }
+
+    /// `reduce(range(n), f, init)` copies the range into the stage's first
+    /// argument and puts the lambda in the register the range used: the
+    /// range still streams.
+    #[test]
+    fn detects_range_source_for_a_reduce_call() {
+        let prog = compile(
+            "::t ns\nsc fn (n: Int): Str { reduce(range(n), (acc, i) { concat(acc, `item-${i}-`) }, \"\") }\n",
+        );
+        let func = prog
+            .functions
+            .iter()
+            .find(|f| f.name.ends_with("/sc"))
+            .expect("fn sc");
+        let plans = detect_pipelines(&func.instructions, &prog);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].range_source.is_some(), "the range should stream");
     }
 
     #[test]

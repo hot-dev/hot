@@ -243,13 +243,8 @@ mod tests {
         }}});
         let (_, env, org) = resolve_cli_environment(&db, &conf).await.unwrap();
         assert_eq!((env.env_id, org.org_id), (child.env_id, child.org.org_id));
-        let conflicting = conf.merge(&hot::val!({"profile":{"set":"local-dev"}}));
-        assert!(
-            resolve_cli_environment(&db, &conflicting)
-                .await
-                .unwrap_err()
-                .contains("Conflicting profile")
-        );
+        let missing = conf.merge(&hot::val!({"set":{"profile":"missing"}}));
+        assert!(resolve_cli_environment(&db, &missing).await.is_err());
         let malformed = conf.merge(&hot::val!({"set":{"profile":42}}));
         assert!(resolve_cli_environment(&db, &malformed).await.is_err());
     }

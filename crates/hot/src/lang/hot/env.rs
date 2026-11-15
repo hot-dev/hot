@@ -26,19 +26,10 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     }
 
-    // Normal mode: read from environment. A `HOT_*` setting may come from
-    // `<NAME>_FILE`, as it does for the configuration overlay.
     match (name, default_value) {
-        (Val::Str(n), Val::Str(_) | Val::Null) if n.starts_with("HOT_") => {
-            match crate::environment::read_optional(n) {
-                Ok(Some(value)) => HotResult::Ok(Val::from(value)),
-                Ok(None) => HotResult::Ok(default_value.clone()),
-                Err(e) => HotResult::Err(Val::from(e)),
-            }
-        }
-        (Val::Str(n), Val::Str(_) | Val::Null) => match std::env::var(&**n) {
-            Ok(value) => HotResult::Ok(Val::from(value)),
-            Err(_) => HotResult::Ok(default_value.clone()),
+        (Val::Str(n), Val::Str(_) | Val::Null) => match read(n, default_value) {
+            Ok(value) => HotResult::Ok(value),
+            Err(e) => HotResult::Err(Val::from(e)),
         },
         (_, Val::Str(_) | Val::Null) => {
             // If name is not a string, return the default
@@ -51,6 +42,22 @@ pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             ))
         }
     }
+}
+
+/// The environment variable `name`, or `default_value` when it is unset. A
+/// `HOT_*` setting may come from `<NAME>_FILE`, as it does for the
+/// configuration overlay.
+pub(crate) fn read(name: &str, default_value: &Val) -> Result<Val, String> {
+    if name.starts_with("HOT_") {
+        return Ok(match crate::environment::read_optional(name)? {
+            Some(value) => Val::from(value),
+            None => default_value.clone(),
+        });
+    }
+    Ok(match std::env::var(name) {
+        Ok(value) => Val::from(value),
+        Err(_) => default_value.clone(),
+    })
 }
 
 /// Get all environment variables as a map (VM-aware for isolation mode)

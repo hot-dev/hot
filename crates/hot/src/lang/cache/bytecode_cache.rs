@@ -1680,7 +1680,7 @@ mod tests {
         let bytes = program.serialize().expect("program must serialize");
         let hash = crate::hasher::HotHasher::hash_content(&bytes);
 
-        let expected = "6f61ee18ef7ef2f0df727dc7a235a169844e6ce696528ca6ffecc257735c1765";
+        let expected = "7110a16563f2f7857355c679e653a2c33dc15ec17d64bf0f961837509f0acb6b";
         assert_eq!(
             hash, expected,
             "postcard bytecode wire layout changed (got hash {hash}). If \

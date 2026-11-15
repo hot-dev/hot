@@ -118,9 +118,7 @@ Pass `--profile NAME` to select a profile for one command.
 `hot init`, and the first command in a fresh checkout, create only the local
 identity, and only in an empty database. Any other profile must already exist
 in the database: an active user, an organization the user belongs to, and an
-existing environment in it. Hot doesn't create them for you. The older
-`hot.profile.set` key still works, but it is an error if it names a different
-profile than `hot.set.profile`.
+existing environment in it. Hot doesn't create them for you.
 
 ## Minimum Version Requirement
 

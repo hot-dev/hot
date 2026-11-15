@@ -85,9 +85,8 @@ Direct-database CLI commands resolve the configured profile's current human
 membership and active org/environment, then bind an exact environment handle.
 Inherited root-admin access may select a child profile. Without a profile the
 CLI accepts only an unambiguous single org/environment; it never silently picks
-a child or sibling. The canonical selector is `hot.set.profile` in a Hot
-configuration file, or `--profile NAME` on the CLI. Conflicting legacy
-`profile.set` selectors are rejected. `hot init` uses the resolved profile and
+a child or sibling. The selector is `hot.set.profile` in a Hot
+configuration file, or `--profile NAME` on the CLI. `hot init` uses the resolved profile and
 seeds `local@hot.dev` / `local` / `development` only in a completely empty
 database. Other profiles must already have an active user, authorized org and
 existing environment; init does not grant membership or create a missing

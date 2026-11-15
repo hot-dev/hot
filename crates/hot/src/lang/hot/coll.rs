@@ -377,14 +377,11 @@ fn call_prepared_with_vm_multi_args(
 /// arguments up, as `reduce` gives its accumulator: an interpreted callee
 /// binds them by moving, so a collection among them is then held by that
 /// binding alone and a writer the callee passes it to writes it in place.
-/// `settled` says the accumulator among them has not been growing often
-/// enough for the interpreter to be the better tier for the callee (see
-/// [`crate::lang::runtime::vm::Growth::interpreter_wins`]).
+/// Compiled code gets them as they are too, and writes in place as well.
 fn call_prepared_given(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function: &PreparedFunction<'_>,
     args: Vec<Val>,
-    settled: bool,
 ) -> Result<Val, String> {
     use crate::lang::runtime::vm::{CallTarget, VirtualMachine};
     let halted = |vm: &mut VirtualMachine, kind: &str, vm_error| {
@@ -420,23 +417,19 @@ fn call_prepared_given(
                 .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
         }
         PreparedFunction::CallableVal(function_val, cache) => {
-            let mut args = prepare(vm, CallTarget::Value(function_val), args)
+            let args = prepare(vm, CallTarget::Value(function_val), args)
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
-            // A large collection the callback will write goes to the
-            // interpreter, which writes it in place.
-            if settled || !vm.keeps_lambda_call_interpreted(function_val, &args) {
-                // Compiled code gets the arguments as they are too, so it
-                // writes in place what the interpreter would.
-                match vm.try_jit_lambda_call_given(function_val, args, Some(cache)) {
-                    Ok(Ok(result)) => return Ok(result),
-                    Ok(Err(back)) => args = back,
-                    // A compiled callback that halted already ran: don't
-                    // run it again in the interpreter.
-                    Err(vm_error) => {
-                        return Err(halted(vm, "Lambda execution failed", vm_error));
-                    }
+            // Compiled code gets the arguments as they are, so it writes in
+            // place what the interpreter would.
+            let args = match vm.try_jit_lambda_call_given(function_val, args, Some(cache)) {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(back)) => back,
+                // A compiled callback that halted already ran: don't
+                // run it again in the interpreter.
+                Err(vm_error) => {
+                    return Err(halted(vm, "Lambda execution failed", vm_error));
                 }
-            }
+            };
 
             vm.execute_lambda_args(function_val, args.into())
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))
@@ -1376,22 +1369,16 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     }
 
     let function = prepare_function(function_val);
-    let mut growth = crate::lang::runtime::vm::Growth::default();
-    let settled = |growth: &mut crate::lang::runtime::vm::Growth, accumulator: &Val| {
-        use crate::lang::runtime::vm::{COPIED_PER_CALL, collection_items};
-        !growth.interpreter_wins(collection_items(accumulator), COPIED_PER_CALL)
-    };
     match collection {
         Val::Vec(items) => {
             let mut accumulator = init_val.clone();
 
             for item in items.iter() {
-                let settled = settled(&mut growth, &accumulator);
                 // The accumulator is the reducer's to keep: nothing here
                 // holds it while the reducer runs.
                 let given = std::mem::replace(&mut accumulator, Val::Null);
                 let function_result =
-                    match call_prepared_given(vm, &function, vec![given, item.clone()], settled)
+                    match call_prepared_given(vm, &function, vec![given, item.clone()])
                         .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                     {
                         Ok(val) => val,
@@ -1417,21 +1404,18 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
 
             for (key, value) in map.iter() {
                 let pair = Val::vec(vec![key.clone(), value.clone()]);
-
-                let settled = settled(&mut growth, &accumulator);
                 let given = std::mem::replace(&mut accumulator, Val::Null);
-                let function_result =
-                    match call_prepared_given(vm, &function, vec![given, pair], settled)
-                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
-                    {
-                        Ok(val) => val,
-                        Err(err) => {
-                            return HotResult::Err(Val::from(format!(
-                                "Reduce function call failed: {}",
-                                err
-                            )));
-                        }
-                    };
+                let function_result = match call_prepared_given(vm, &function, vec![given, pair])
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
+                    Ok(val) => val,
+                    Err(err) => {
+                        return HotResult::Err(Val::from(format!(
+                            "Reduce function call failed: {}",
+                            err
+                        )));
+                    }
+                };
 
                 if is_reduced(&function_result) {
                     return HotResult::Ok(unwrap_reduced(function_result));
@@ -1476,14 +1460,11 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     if done {
                         break;
                     }
-
-                    let settled = settled(&mut growth, &accumulator);
                     let given = std::mem::replace(&mut accumulator, Val::Null);
                     let function_result =
-                        match call_prepared_given(vm, &function, vec![given, value], settled)
-                            .and_then(|val| {
-                                apply_onerr_disposition(vm, val, OnErrDisposition::Force)
-                            }) {
+                        match call_prepared_given(vm, &function, vec![given, value]).and_then(
+                            |val| apply_onerr_disposition(vm, val, OnErrDisposition::Force),
+                        ) {
                             Ok(val) => val,
                             Err(err) => {
                                 return HotResult::Err(Val::from(format!(
@@ -4244,42 +4225,6 @@ mod tests {
         let shorter = written(delete_owned(vec![kept.clone(), Val::Int(-1)]));
         assert_eq!(shorter, val!([1]));
         assert_eq!(kept, val!([1, 2]));
-    }
-
-    #[test]
-    fn the_interpreter_is_chosen_once_compiled_code_would_copy_too_much_per_call() {
-        use crate::lang::runtime::vm::{COPIED_PER_CALL, Growth};
-        let wins =
-            |growth: &mut Growth, items: usize| growth.interpreter_wins(items, COPIED_PER_CALL);
-
-        // A callee that writes on every call: from COPIED_PER_CALL items.
-        let mut growth = Growth::default();
-        let chosen: Vec<bool> = (0..3000).map(|items| wins(&mut growth, items)).collect();
-        assert!(chosen[..COPIED_PER_CALL].iter().all(|chosen| !chosen));
-        assert!(chosen[COPIED_PER_CALL..].iter().all(|chosen| *chosen));
-
-        // When it then stops writing, compiled code is chosen again, the
-        // sooner the smaller the collection.
-        let idle = (1..).find(|_| !wins(&mut growth, 2999));
-        assert_eq!(idle, Some(2999 / COPIED_PER_CALL));
-
-        // One that writes on every tenth call copies a tenth as much per
-        // call: from ten times as many items.
-        let mut growth = Growth::default();
-        let mut compiled_until = 0;
-        for writes in 0..2000 {
-            for _ in 0..10 {
-                if !wins(&mut growth, writes * 10) {
-                    compiled_until = writes * 10;
-                }
-            }
-        }
-        assert_eq!(compiled_until, 10 * COPIED_PER_CALL - 10);
-
-        // One whose collection is never seen to grow stays compiled,
-        // however large the collection.
-        let mut growth = Growth::default();
-        assert!((0..5000).all(|_| !wins(&mut growth, 1_000_000)));
     }
 
     #[test]

@@ -569,11 +569,17 @@ thread_local! {
 }
 
 fn drop_value_children(children: impl Iterator<Item = Val>) {
-    // Leaves cannot recurse. Drop them directly instead of allocating a
-    // worklist and borrowing TLS once per element of an ordinary flat value.
+    // Leaves cannot recurse, and neither can a collection something else
+    // still holds: dropping it only gives up one hold. Drop those directly
+    // instead of allocating a worklist and borrowing TLS once per element.
     // Boxes stay on the worklist because their captures can own collections.
     let mut children = children
-        .filter(|value| matches!(value, Val::Vec(_) | Val::Map(_) | Val::Box(_)))
+        .filter(|value| match value {
+            Val::Vec(items) => Arc::strong_count(items) == 1,
+            Val::Map(entries) => Arc::strong_count(entries) == 1,
+            Val::Box(_) => true,
+            _ => false,
+        })
         .peekable();
     if children.peek().is_none() {
         return;
