@@ -2401,6 +2401,72 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     db::Call::purge_org(&unscoped, &root, true, 100, None).await?;
     assert!(remaining(vec![org_call_b]).await?.is_empty());
 
+    // Local retention sets its own scopes too: it deletes expired calls in
+    // every org and deactivates their payload refs, a batch at a time, and
+    // keeps what is newer than the cutoff.
+    let retention_objects = [Uuid::new_v4(), Uuid::new_v4()];
+    for (object, org_id, env_id) in [
+        (retention_objects[0], child_a, env_a),
+        (retention_objects[1], child_b, env_b),
+    ] {
+        sqlx::query("INSERT INTO hot.blob_object(blob_object_id,org_id,env_id,hash,size,storage_backend,storage_path) VALUES($1,$2,$3,$4,1,'local',$4)")
+            .bind(object).bind(org_id).bind(env_id).bind(object.to_string())
+            .execute(&admin).await?;
+    }
+    let mut retention_refs = Vec::new();
+    for (retention_object, org_id, run_id, env_id, runtime, start) in [
+        (
+            retention_objects[0],
+            child_a,
+            run_a,
+            env_a,
+            &a,
+            "2000-01-01",
+        ),
+        (
+            retention_objects[1],
+            child_b,
+            run_b,
+            env_b,
+            &b,
+            "2000-01-01",
+        ),
+        (retention_objects[0], child_a, run_a, env_a, &a, "now"),
+    ] {
+        let call_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'retention','retention','retention',0,$4::timestamptz,5)")
+            .bind(call_id).bind(run_id).bind(env_id).bind(start).execute(runtime).await?;
+        let blob_ref: Uuid = sqlx::query_scalar("INSERT INTO hot.blob_ref(blob_object_id,org_id,env_id,source_kind,source_id,created_by_run_id,created_at) VALUES($1,$2,$3,'call_return',$4,$5,$6::timestamptz) RETURNING blob_ref_id")
+            .bind(retention_object).bind(org_id).bind(env_id).bind(call_id.to_string()).bind(run_id).bind(start)
+            .fetch_one(&admin).await?;
+        retention_refs.push((call_id, blob_ref));
+    }
+    let removed = db::Call::apply_local_retention(&unscoped, 3650, 1).await?;
+    assert!(removed.calls >= 2 && removed.blob_refs >= 2, "{removed:?}");
+    let ref_states: Vec<bool> = sqlx::query_scalar(
+        "SELECT active FROM hot.blob_ref WHERE blob_ref_id=ANY($1) ORDER BY created_at",
+    )
+    .bind(retention_refs.iter().map(|(_, r)| *r).collect::<Vec<_>>())
+    .fetch_all(&admin)
+    .await?;
+    assert_eq!(ref_states, vec![false, false, true]);
+    assert_eq!(
+        remaining(retention_refs.iter().map(|(c, _)| *c).collect()).await?,
+        vec![retention_refs[2].0]
+    );
+    sqlx::query("DELETE FROM hot.call WHERE call_id=$1")
+        .bind(retention_refs[2].0)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.blob_ref WHERE blob_object_id=ANY($1)")
+        .bind(retention_objects)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.blob_object WHERE blob_object_id=ANY($1)")
+        .bind(retention_objects)
+        .execute(&admin)
+        .await?;
+
     // A sub-org's own override turns call tracing off for it alone.
     assert!(db::Features::call_tracing_for_org(&db_a, &child_a).await?);
     sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")

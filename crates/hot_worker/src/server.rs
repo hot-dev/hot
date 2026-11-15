@@ -9322,11 +9322,11 @@ pub async fn run_with_components_shared_context_and_db(
         tokio::spawn(async move {
             let days = hot::db::get_local_call_retention_days(&cleanup_conf);
             if days >= 0 {
-                match hot::db::call::Call::delete_older_than(&cleanup_db, days, 10_000).await {
-                    Ok(count) if count > 0 => {
+                match hot::db::call::Call::apply_local_retention(&cleanup_db, days, 10_000).await {
+                    Ok(removed) if removed.calls > 0 || removed.blob_refs > 0 => {
                         info!(
-                            "hot.dev: WORKER startup call retention cleanup deleted {} rows (>{} days)",
-                            count, days
+                            "hot.dev: WORKER startup call retention cleanup deleted {} rows and deactivated {} call blob ref(s) (>{} days)",
+                            removed.calls, removed.blob_refs, days
                         );
                     }
                     Ok(_) => {}
@@ -11630,27 +11630,16 @@ pub async fn run_with_components_shared_context_and_db(
                                                             // Blob refs sourced from calls follow the same retention:
                                                             // when call rows age out, their call_* refs deactivate so
                                                             // blob GC can reclaim the backing objects.
-                                                            const CALL_REF_KINDS: &[&str] = &["call_args", "call_return", "call_flow"];
                                                             if hot::env::is_local_dev() {
                                                                 let days = hot::db::get_local_call_retention_days(&worker_conf_ref);
                                                                 if days >= 0 {
-                                                                    match hot::db::call::Call::delete_older_than(db, days, 10_000).await {
-                                                                        Ok(count) if count > 0 => {
-                                                                            info!("hot.dev: WORKER {} maintenance: call retention cleanup deleted {} rows (>{} days)", worker_id, count, days);
+                                                                    match hot::db::call::Call::apply_local_retention(db, days, 10_000).await {
+                                                                        Ok(removed) if removed.calls > 0 || removed.blob_refs > 0 => {
+                                                                            info!("hot.dev: WORKER {} maintenance: call retention cleanup deleted {} rows and deactivated {} call blob ref(s) (>{} days)", worker_id, removed.calls, removed.blob_refs, days);
                                                                         }
                                                                         Ok(_) => {}
                                                                         Err(e) => {
                                                                             error!("hot.dev: WORKER {} maintenance: call retention cleanup failed: {}", worker_id, e);
-                                                                        }
-                                                                    }
-                                                                    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), None, CALL_REF_KINDS, cutoff).await {
-                                                                        Ok(n) if n > 0 => {
-                                                                            info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s)", worker_id, n);
-                                                                        }
-                                                                        Ok(_) => {}
-                                                                        Err(e) => {
-                                                                            error!("hot.dev: WORKER {} maintenance: call blob ref deactivation failed: {}", worker_id, e);
                                                                         }
                                                                     }
                                                                 }
@@ -11687,7 +11676,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
 
                                                                     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), Some(*org_id), CALL_REF_KINDS, cutoff).await {
+                                                                    match hot::db::blob::deactivate_call_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), *org_id, cutoff, 10_000).await {
                                                                         Ok(n) if n > 0 => {
                                                                             info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}", worker_id, n, org_id);
                                                                         }
