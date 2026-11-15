@@ -3,9 +3,13 @@ meta {doc: "Hot language benchmarks"}
 
 // Aliases for convenience
 now ::hot::time/now
-epoch-millis ::hot::time/epoch-millis
 epoch-nanos ::hot::time/epoch-nanos
-Millisecond ::hot::time/Millisecond
+
+::records ::benchmarks::records
+::apijson ::benchmarks::apijson
+::money ::benchmarks::money
+::words ::benchmarks::words
+::lambdas ::benchmarks::lambdas
 
 
 // ============================================================================
@@ -190,16 +194,12 @@ fib-cond fn (n: Int): Int {
 }
 
 // ============================================================================
-// BENCHMARK RUNNER
-// ============================================================================
-
-// ============================================================================
 // BENCHMARK 8: Pipelines After JIT Tier-Up
 // ============================================================================
 
 // The shape of sum-even-squares, in a function of its own so its calls are
-// counted from zero. `sum-even-squares(10000)` above runs 50 times, under the
-// JIT threshold of 100, so it only ever times the interpreter.
+// counted from zero: `compile-sum-even-squares` compiles it, and its timed
+// calls only ever run compiled code.
 compiled-sum-even-squares fn (n: Int): Int {
     range(1, add(n, 1))
     |> filter((x) { is-zero(mod(x, 2)) })
@@ -213,66 +213,95 @@ compile-sum-even-squares fn (): Int {
     reduce(range(150), (_acc, _i) { compiled-sum-even-squares(10) }, 0)
 }
 
-// Helper to measure execution time
-measure-repeat fn (name: Str, iterations: Int, f: Fn): Map {
-    start now()
-    result reduce(range(iterations), (_acc, _i) {
-        f()
-    }, null)
-    end now()
-    elapsed-nanos sub(epoch-nanos(end), epoch-nanos(start))
-    avg-micros Int(div(elapsed-nanos, mul(iterations, 1000)))
-    elapsed div(Dec(avg-micros), 1000)
-    println(`${name}: ${elapsed}ms (result: ${result})`)
-    {
-        name: name,
-        iterations: iterations,
-        elapsed: elapsed,
-        result: result,
-    }
+// ============================================================================
+// HARNESS
+// ============================================================================
+
+// Every runner (bench.hot, bench.py, bench.js, bench.ts) times a benchmark the
+// same way, with the same counts:
+//   cold: the first call, alone.
+//   warm: after `warmup` calls in all, the median of 5 samples, where a sample
+//         is the mean time of `iterations` calls.
+// Times are whole nanoseconds. run-all.py reads these lines.
+sample-count 5
+
+elapsed-since fn (start: Int): Int {
+    sub(epoch-nanos(now()), start)
 }
 
-measure fn (name: Str, f: Fn): Map {
-    measure-repeat(name, 1, f)
+measure fn (name: Str, warmup: Int, iterations: Int, f: Fn): Map {
+    start epoch-nanos(now())
+    result f()
+    cold elapsed-since(start)
+    reduce(range(max(sub(warmup, 1), 0)), (_acc, _i) { f() }, null)
+    samples map(range(sample-count), (_s) {
+        sample-start epoch-nanos(now())
+        reduce(range(iterations), (_acc, _i) { f() }, null)
+        floor(div(elapsed-since(sample-start), iterations))
+    })
+    sorted sort(samples)
+    warm get(sorted, floor(div(sample-count, 2)))
+    println(`${name}: cold=${cold}ns warm=${warm}ns (result: ${result})`)
+    {name: name, cold: cold, warm: warm, result: result}
 }
 
-// Run all benchmarks
-run-benchmarks fn (): Vec<Map> {
+// ============================================================================
+// BENCHMARK RUNNER
+// ============================================================================
+
+run-benchmarks fn (): Null {
+    // Inputs built once, outside the timings.
+    api-payload ::apijson/make-payload(1500)
+    text ::words/make-text(50000)
+
     println("=== Hot Language Benchmarks ===")
     println("")
 
     results [
         // Fibonacci
-        measure("fib-recursive(25)", () { fib-recursive(25) }),
-        measure-repeat("fib-iterative(70)", 100, () { fib-iterative(70) }),
+        measure("fib-recursive(25)", 2, 3, () { fib-recursive(25) }),
+        measure("fib-iterative(70)", 100, 200, () { fib-iterative(70) }),
 
         // Collection operations
-        measure-repeat("sum-even-squares(10000)", 50, () { sum-even-squares(10000) }),
-        measure-repeat("collection-benchmark(10000)", 50, () { collection-benchmark(10000) }),
+        measure("sum-even-squares(10000)", 20, 50, () { sum-even-squares(10000) }),
+        measure("collection-benchmark(10000)", 20, 50, () { collection-benchmark(10000) }),
 
         // String operations
-        measure-repeat("string-concat(1000)", 20, () { length(string-concat-benchmark(1000)) }),
+        measure("string-concat(1000)", 20, 50, () { length(string-concat-benchmark(1000)) }),
 
         // JSON processing
-        measure-repeat("json-benchmark(1000)", 10, () { json-benchmark(1000) }),
+        measure("json-benchmark(1000)", 5, 10, () { json-benchmark(1000) }),
 
         // Prime numbers
-        measure-repeat("count-primes(1000)", 3, () { count-primes(1000) }),
+        measure("count-primes(1000)", 1, 2, () { count-primes(1000) }),
 
-        // JIT lazy/flow safety shapes
-        measure-repeat("lazy-if-branch(5000)", 10, () { lazy-if-branch(5000) }),
-        measure-repeat("lazy-generic-ignore(1000)", 5, () { lazy-generic-ignore(1000) }),
-        measure-repeat("cond-skip-expensive(1000)", 20, () { cond-skip-expensive(1000) }),
-        measure-repeat("owned-lazy-branch(1000)", 10, () { owned-lazy-branch(1000) }),
-        measure-repeat("hotlib-json-roundtrip(200)", 20, () { hotlib-json-roundtrip(200) }),
+        // Records, realistic JSON, decimal money, Map counting, lambdas
+        measure("records-reshape(2000)", 5, 10, () { ::records/records-reshape(2000) }),
+        measure("json-api-roundtrip(1500)", 3, 5, () { ::apijson/json-api-roundtrip(api-payload) }),
+        measure("money-dec(10000)", 3, 5, () { ::money/money-dec(10000) }),
+        measure("word-count(50000)", 3, 5, () { ::words/word-count(text) }),
+        measure("closure-capture(10000)", 10, 20, () { ::lambdas/closure-capture(10000) }),
+        measure("fn-as-value(10000)", 10, 20, () { ::lambdas/fn-as-value(10000) }),
+        measure("nested-hof(100)", 10, 20, () { ::lambdas/nested-hof(100) }),
 
-        // Past the JIT threshold (Hot-only regression guard; see section 8)
-        measure("compile-sum-even-squares", () { compile-sum-even-squares() }),
-        measure-repeat("compiled-sum-even-squares(10000)", 50, () { compiled-sum-even-squares(10000) }),
+        // Hot-only: typed records (see bench-records.hot)
+        measure("records-typed(2000)", 5, 10, () { ::records/records-typed(2000) }),
 
-        // Deep recursion (Hot-only regression guards; see section 7)
-        measure("sum-to-tail(1000000)", () { sum-to-tail(1000000, 0) }),
-        measure("fib-cond(20)", () { fib-cond(20) })
+        // Hot-only: JIT lazy/flow safety shapes
+        measure("lazy-if-branch(5000)", 5, 10, () { lazy-if-branch(5000) }),
+        measure("lazy-generic-ignore(1000)", 3, 5, () { lazy-generic-ignore(1000) }),
+        measure("cond-skip-expensive(1000)", 10, 20, () { cond-skip-expensive(1000) }),
+        measure("owned-lazy-branch(1000)", 5, 10, () { owned-lazy-branch(1000) }),
+        measure("hotlib-json-roundtrip(200)", 10, 20, () { hotlib-json-roundtrip(200) }),
+
+        // Hot-only: past the JIT threshold (see section 8). Its cold time
+        // includes the compile.
+        measure("compile-sum-even-squares", 1, 1, () { compile-sum-even-squares() }),
+        measure("compiled-sum-even-squares(10000)", 20, 50, () { compiled-sum-even-squares(10000) }),
+
+        // Hot-only: deep recursion (see section 7)
+        measure("sum-to-tail(1000000)", 2, 3, () { sum-to-tail(1000000, 0) }),
+        measure("fib-cond(20)", 5, 10, () { fib-cond(20) })
     ]
 
     println("")

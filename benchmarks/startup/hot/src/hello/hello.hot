@@ -1,0 +1,3 @@
+::hello ns
+
+println("hello")

@@ -1,0 +1,74 @@
+::benchmarks::records ns
+meta {
+    doc: "Building and reshaping records: map literals, spreads, nested updates, typed construction"
+}
+
+// Orders with a nested customer and two line items. The same shape is built
+// in bench.py, bench.js and bench.ts.
+make-orders fn (n: Int): Vec {
+    map(range(n), (i) {
+        cid mod(i, 100)
+        {
+            id: i,
+            customer: {
+                id: cid,
+                name: `Customer ${cid}`,
+                tier: if(is-zero(mod(cid, 3)), "gold", "basic"),
+            },
+            items: [
+                {sku: `SKU-${mod(i, 7)}`, qty: add(mod(i, 5), 1), cents: mul(add(mod(i, 13), 1), 100)},
+                {sku: `SKU-${mod(add(i, 3), 7)}`, qty: add(mod(i, 3), 1), cents: mul(add(mod(i, 11), 1), 250)},
+            ],
+            status: "open",
+        }
+    })
+}
+
+// A spread with overrides, and a nested spread for the customer.
+price-order fn (order: Map): Map {
+    total reduce(order.items, (acc, item) { add(acc, mul(item.qty, item.cents)) }, 0)
+    {
+        ...order,
+        status: "priced",
+        total: total,
+        customer: {...order.customer, vip: eq(order.customer.tier, "gold")},
+    }
+}
+
+// Build n orders, price each one, and sum the totals of VIP orders.
+records-reshape fn (n: Int): Int {
+    priced map(make-orders(n), (o) { price-order(o) })
+    vip filter(priced, (o) { o.customer.vip })
+    reduce(vip, (acc, o) { add(acc, o.total) }, 0)
+}
+
+// Hot-only: the same orders constructed as typed values, so every field
+// passes its type and `where` check.
+Cents type Int where gte(%, 0)
+Qty type Int where between(%, 1, 100)
+Tier type "gold" | "basic"
+LineItem type {
+    sku: Str,
+    qty: Qty,
+    cents: Cents
+}
+
+Customer type {
+    id: Int,
+    name: Str,
+    tier: Tier
+}
+
+Order type {
+    id: Int,
+    customer: Customer,
+    items: Vec<LineItem>,
+    status: Str
+}
+
+records-typed fn (n: Int): Int {
+    orders map(make-orders(n), (o) { Order(o) })
+    reduce(orders, (acc, o) {
+        add(acc, reduce(o.items, (a, item) { add(a, mul(item.qty, item.cents)) }, 0))
+    }, 0)
+}
