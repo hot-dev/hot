@@ -2,9 +2,8 @@ use crate::db::{BootstrapOperation, Build, DatabasePool, DatabaseScope, Env, Org
 use crate::val;
 use crate::val::Val;
 
-/// Resolve the canonical `set.profile` selector. The legacy `profile.set`
-/// spelling is accepted only when the canonical selector is absent or agrees.
-/// Invalid or conflicting selectors must never silently select another scope.
+/// Resolve the `set.profile` selector. An invalid selector must never
+/// silently select another scope.
 pub fn selected_profile_name(conf: &Val) -> Result<String, String> {
     fn selector(conf: &Val, section: &str, key: &str) -> Result<Option<String>, String> {
         let Some(container) = conf.get(section) else {
@@ -21,15 +20,7 @@ pub fn selected_profile_name(conf: &Val) -> Result<String, String> {
             )),
         }
     }
-    let canonical = selector(conf, "set", "profile")?;
-    let legacy = selector(conf, "profile", "set")?;
-    match (canonical, legacy) {
-        (Some(canonical), Some(legacy)) if canonical != legacy => Err(
-            "Conflicting profile selectors: use set.profile and remove legacy profile.set".into(),
-        ),
-        (Some(name), _) | (None, Some(name)) => Ok(name),
-        (None, None) => Ok("local-dev".into()),
-    }
+    Ok(selector(conf, "set", "profile")?.unwrap_or_else(|| "local-dev".into()))
 }
 
 pub type ProfileIdentifiers = (String, String, String);
@@ -171,26 +162,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_profile_selector_and_legacy_conflicts_are_explicit() {
+    fn profile_selector_is_set_profile_and_must_be_a_name() {
         assert_eq!(selected_profile_name(&val!({})).unwrap(), "local-dev");
         assert_eq!(
             selected_profile_name(&val!({"set":{"profile":"child"}})).unwrap(),
             "child"
         );
+        // `profile.set` is a profile named `set`, not a selector.
         assert_eq!(
-            selected_profile_name(&val!({"profile":{"set":"legacy"}})).unwrap(),
-            "legacy"
-        );
-        assert_eq!(
-            selected_profile_name(&val!({"set":{"profile":"same"},"profile":{"set":"same"}}))
-                .unwrap(),
-            "same"
+            selected_profile_name(&val!({"profile":{"set":"other"}})).unwrap(),
+            "local-dev"
         );
         for conf in [
-            val!({"set":{"profile":"child"},"profile":{"set":"parent"}}),
             val!({"set":{"profile":42}}),
             val!({"set":{"profile":""}}),
-            val!({"set":{"profile":"child"},"profile":{"set":false}}),
             val!({"set":"child"}),
         ] {
             assert!(selected_profile_name(&conf).is_err());

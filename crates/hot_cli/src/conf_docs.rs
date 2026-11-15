@@ -25,16 +25,10 @@ const NOT_SETTINGS: &[(&str, &str, &str)] = &[
 ];
 
 /// Settings the docs name that the template leaves out. (key, why).
-const NOT_IN_TEMPLATE: &[(&str, &str)] = &[
-    (
-        "profile.set",
-        "the old spelling of hot.set.profile, kept for existing files",
-    ),
-    (
-        "test.integration.services",
-        "read from a package's integration.hot, not from hot.hot",
-    ),
-];
+const NOT_IN_TEMPLATE: &[(&str, &str)] = &[(
+    "test.integration.services",
+    "read from a package's integration.hot, not from hot.hot",
+)];
 
 /// Template settings the docs leave out. (key or `prefix.*`, why).
 const NOT_IN_DOCS: &[(&str, &str)] = &[
