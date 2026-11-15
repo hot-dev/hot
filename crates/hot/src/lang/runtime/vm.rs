@@ -556,15 +556,21 @@ fn moved_out() -> Val {
 /// Source of `LexicalScope::frame_id`.
 static NEXT_FRAME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// A map keyed by names from the program (variables, local types): aHash
+/// with fixed keys, which costs nothing to set up. A frame builds three of
+/// these per call, and std's hasher read a thread-local seed for each.
+/// The keys come from the program's own source, not from outside input.
+pub(crate) type NameMap<K, V> = IndexMap<K, V, std::hash::BuildHasherDefault<ahash::AHasher>>;
+
 /// Lexical scope for proper variable resolution
 #[derive(Debug, Clone)]
 pub struct LexicalScope {
     /// Variables in this scope (ordered by insertion)
-    variables: IndexMap<String, Val>,
+    variables: NameMap<String, Val>,
     /// Local type constructors in this scope: type_name -> constructor_function_name
-    local_types: IndexMap<String, String>,
+    local_types: NameMap<String, String>,
     /// Local type implementations in this scope: (source_type, target_type) -> implementation_function_name
-    local_implementations: IndexMap<(String, String), String>,
+    local_implementations: NameMap<(String, String), String>,
     /// The frame of a call to a top-level function. A name lookup that
     /// reaches it goes on to the namespace, never into the caller's frames.
     /// Frames of lambdas and of functions defined in another function's body
@@ -695,9 +701,9 @@ struct ParallelFlowContext {
 impl LexicalScope {
     pub fn new(scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
         Self {
-            variables: IndexMap::new(),
-            local_types: IndexMap::new(),
-            local_implementations: IndexMap::new(),
+            variables: NameMap::default(),
+            local_types: NameMap::default(),
+            local_implementations: NameMap::default(),
             is_boundary: false,
             frame_id: NEXT_FRAME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             link: None,
@@ -711,6 +717,7 @@ impl LexicalScope {
     fn call_frame(param_names: &[String], args: &[Val], is_boundary: bool) -> Self {
         let mut frame = Self::new(ScopeType::Function, None);
         frame.is_boundary = is_boundary;
+        frame.variables.reserve(param_names.len());
         for (idx, name) in param_names.iter().enumerate() {
             frame
                 .variables
@@ -1218,6 +1225,52 @@ fn exact_number_for_param(arg: &Val, param_type: &str) -> Option<Val> {
         ("Int", Val::Dec(d)) if d.floor() == *d => d.to_i64().ok().map(Val::Int),
         _ => None,
     }
+}
+
+/// Append `piece` to a template literal's text, bounding the text up front
+/// with checked arithmetic, so a single template can't drive an unbounded
+/// String allocation (which would call the allocator and potentially abort
+/// on OOM).
+fn push_template_piece(
+    result: &mut String,
+    piece: &str,
+    max_template_bytes: usize,
+) -> VmResult<()> {
+    let projected_len = result
+        .len()
+        .checked_add(piece.len())
+        .ok_or_else(|| VmError::runtime("Template literal length overflows usize".to_string()))?;
+    if projected_len > max_template_bytes {
+        return Err(VmError::runtime(format!(
+            "Template literal too large: would produce {} bytes (limit {}). \
+             Raise HOT_MAX_STRING_BYTES if this is intentional.",
+            projected_len, max_template_bytes
+        )));
+    }
+    crate::lang::runtime::limits::try_reserve_string("template literal", result, piece.len())
+        .map_err(|e| VmError::runtime(e.to_string()))?;
+    result.push_str(piece);
+    Ok(())
+}
+
+/// The decimal digits of `n`, as `n.to_string()` writes them, in `buf`
+/// rather than a String of their own.
+pub(crate) fn int_digits(n: i64, buf: &mut [u8; 20]) -> &str {
+    let mut magnitude = n.unsigned_abs();
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if n < 0 {
+        at -= 1;
+        buf[at] = b'-';
+    }
+    std::str::from_utf8(&buf[at..]).expect("ASCII digits")
 }
 
 /// Whether a parameter's type is a built-in one, as `is_primitive_type_expr`
@@ -6299,6 +6352,22 @@ impl VirtualMachine {
         let mut result = String::new();
         let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
         for part_val in parts {
+            // A Str is itself and an Int its digits, whatever type
+            // implementations exist (those are for typed values): they go
+            // into the text directly, with no conversion or copy between.
+            match part_val {
+                Val::Str(s) => {
+                    push_template_piece(&mut result, s, max_template_bytes)?;
+                    continue;
+                }
+                Val::Int(i) => {
+                    let mut digits = [0u8; 20];
+                    let piece = int_digits(*i, &mut digits);
+                    push_template_piece(&mut result, piece, max_template_bytes)?;
+                    continue;
+                }
+                _ => {}
+            }
             // A Str part is copied as it is; the length check below bounds it.
             if !matches!(part_val, Val::Str(_)) {
                 part_val
@@ -6334,31 +6403,10 @@ impl VirtualMachine {
                     self.unwrap_result_if_ok(&Val::err(error))?
                 }
             };
-            let string_repr: String = match converted {
-                Val::Str(s) => (*s).to_owned(),
-                other => other.to_string(),
-            };
-            // Bound the produced template length up-front using checked
-            // arithmetic so a single template can't drive an unbounded
-            // String allocation (which would call the allocator and
-            // potentially abort on OOM).
-            let projected_len = result.len().checked_add(string_repr.len()).ok_or_else(|| {
-                VmError::runtime("Template literal length overflows usize".to_string())
-            })?;
-            if projected_len > max_template_bytes {
-                return Err(VmError::runtime(format!(
-                    "Template literal too large: would produce {} bytes (limit {}). \
-                     Raise HOT_MAX_STRING_BYTES if this is intentional.",
-                    projected_len, max_template_bytes
-                )));
+            match converted {
+                Val::Str(s) => push_template_piece(&mut result, &s, max_template_bytes)?,
+                other => push_template_piece(&mut result, &other.to_string(), max_template_bytes)?,
             }
-            crate::lang::runtime::limits::try_reserve_string(
-                "template literal",
-                &mut result,
-                string_repr.len(),
-            )
-            .map_err(|e| VmError::runtime(e.to_string()))?;
-            result.push_str(&string_repr);
         }
         Ok(result)
     }

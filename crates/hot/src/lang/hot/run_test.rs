@@ -780,6 +780,39 @@ run fn (n: Int): Vec { step(0, n, []) }"#,
         }
     }
 
+    /// A range a pipeline consumes alone streams; one read again afterwards
+    /// is built, and both give the same answers compiled or not.
+    #[test]
+    fn ranges_stream_into_reduce_only_when_nothing_else_reads_them() {
+        let src = r#"::t ns
+joined fn (n: Int): Str { reduce(range(n), (acc, i) { concat(acc, `${i},`) }, "") }
+both fn (n: Int): Int {
+    xs range(n)
+    t reduce(xs, (a, i) { add(a, i) }, 0)
+    add(t, length(xs))
+}
+rs map(range(120), (i) { [joined(5), both(10)] })
+rs[119]"#;
+        assert_same_with_and_without_jit(src, &val!(["0,1,2,3,4,", 55]));
+    }
+
+    /// An Int in a template is written as its digits, without a String of
+    /// its own, and reads as `to_string` writes it, at both ends of the range.
+    #[test]
+    fn template_ints_read_as_their_digits() {
+        for n in [0, 7, -7, 10, -10, 1234567890, i64::MAX, i64::MIN] {
+            let mut digits = [0u8; 20];
+            assert_eq!(
+                crate::lang::runtime::vm::int_digits(n, &mut digits),
+                n.to_string()
+            );
+        }
+        let src = r#"::t ns
+label fn (i: Int, s: Str): Str { `${s}:${i}|${sub(0, i)}|${null}|${true}|${1.50}` }
+map(range(150), (i) { label(i, "n") })[149]"#;
+        assert_same_with_and_without_jit(src, &val!("n:149|-149||true|1.50"));
+    }
+
     /// A function held in a parameter is called by its value: a named
     /// function through the dispatch cache, a closure by its compiled code.
     /// An implicit arrow on the way in still applies, once.
