@@ -417,14 +417,16 @@ fn call_prepared_given(
                 .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
         }
         PreparedFunction::CallableVal(function_val) => {
-            let args = prepare(vm, CallTarget::Value(function_val), args)
+            let mut args = prepare(vm, CallTarget::Value(function_val), args)
                 .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
             // A large collection the callback will write goes to the
             // interpreter, which writes it in place.
             if settled || !vm.keeps_lambda_call_interpreted(function_val, &args) {
-                match vm.try_jit_lambda_call(function_val, &args) {
-                    Ok(Some(result)) => return Ok(result),
-                    Ok(None) => {}
+                // Compiled code gets the arguments as they are too, so it
+                // writes in place what the interpreter would.
+                match vm.try_jit_lambda_call_given(function_val, args) {
+                    Ok(Ok(result)) => return Ok(result),
+                    Ok(Err(back)) => args = back,
                     // A compiled callback that halted already ran: don't
                     // run it again in the interpreter.
                     Err(vm_error) => {

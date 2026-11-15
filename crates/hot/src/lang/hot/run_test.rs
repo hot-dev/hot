@@ -711,6 +711,78 @@ run fn (n: Int): Vec { step(0, n, []) }"#,
         }
     }
 
+    /// Counting into a Map writes keys it already holds, so the Map stops
+    /// growing while every call still writes it. Compiled code must write
+    /// it in place all the same, whether the reducer reads the count first
+    /// in the same call or binds it before the write.
+    #[test]
+    fn a_map_counted_into_is_written_in_place_with_the_jit_on() {
+        let counters = [
+            (
+                "a count read inside the assoc",
+                "run fn (ws: Vec): Map { reduce(ws, (acc, w) { assoc(acc, w, add(get(acc, w, 0), 1)) }, {}) }",
+            ),
+            (
+                "a count bound before the assoc",
+                r#"run fn (ws: Vec): Map {
+    reduce(ws, (acc, w) {
+        c add(get(acc, w, 0), 1)
+        assoc(acc, w, c)
+    }, {})
+}"#,
+            ),
+            (
+                "update",
+                r#"run fn (ws: Vec): Map {
+    reduce(ws, (acc, w) { update(acc, w, (c) { add(if(is-null(c), 0, c), 1) }) }, {})
+}"#,
+            ),
+        ];
+        // 300 distinct keys: a copy at every write of the 4,000 further
+        // words would copy some 1.2 million items.
+        const RUN_TO_RUN: usize = 200_000;
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            for (name, body) in counters {
+                let label = format!("{name} under {conf:?}");
+                let program = |n: usize| {
+                    format!(
+                        "::t ns\n{body}\nlength(run(map(range({n}), (i) {{ mod(i, 300) }})))"
+                    )
+                };
+                let small = writes_under(&program(2000), conf.clone());
+                let large = writes_under(&program(6000), conf.clone());
+                assert!(
+                    large.1 <= small.1 + RUN_TO_RUN,
+                    "{label}: the items copied grew with the words counted, from {small:?} to {large:?}"
+                );
+            }
+        }
+    }
+
+    /// The second reduce a program runs with the same reducer finds it
+    /// compiled from its first call. It must write in place as the first
+    /// reduce did.
+    #[test]
+    fn a_reducer_compiled_by_an_earlier_reduce_writes_in_place() {
+        let body = "run fn (n: Int): Map { reduce(range(n), (acc, x) { assoc(acc, x, x) }, {}) }";
+        const RUN_TO_RUN: usize = 200_000;
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let label = format!("under {conf:?}");
+            let program =
+                |n: usize| format!("::t ns\n{body}\nfirst length(run(3000))\nlength(run({n}))");
+            let small = writes_under(&program(2000), conf.clone());
+            let large = writes_under(&program(6000), conf.clone());
+            assert!(
+                large.1 <= small.1 + RUN_TO_RUN,
+                "{label}: the second reduce copied more as it grew, from {small:?} to {large:?}"
+            );
+            assert!(
+                large.0 >= small.0 + 3900,
+                "{label}: the second reduce did not write in place, from {small:?} to {large:?}"
+            );
+        }
+    }
+
     /// A call gives its argument registers up, so a writer that receives
     /// the result of another call is that value's only holder and writes it
     /// in place. Only the first writer of a chain copies: it is handed a
@@ -8005,3 +8077,4 @@ mod parallel_failure_tests {
         assert_eq!(stored_failure.as_ref().unwrap().msg, first_msg);
     }
 }
+

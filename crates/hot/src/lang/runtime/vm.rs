@@ -8150,6 +8150,20 @@ impl VirtualMachine {
         self.execute_user_function(function_id, coerced.as_deref().unwrap_or(args).into())
     }
 
+    /// [`Self::execute_compiled_user_function`] with arguments the caller
+    /// gives up, as compiled code gives up registers nothing reads again.
+    pub(crate) fn execute_compiled_user_function_owned(
+        &mut self,
+        function_id: u32,
+        args: Vec<Val>,
+    ) -> VmResult<Val> {
+        let args = match self.coerce_args_of_value_call(function_id, &args)? {
+            Some(coerced) => coerced,
+            None => args,
+        };
+        self.execute_user_function(function_id, CallArgs::Given(args))
+    }
+
     /// Call a function bypassing unified_function_lookup to avoid recursion
     /// This is specifically for the call_vm_aware function to avoid infinite recursion
     pub fn call_function_bypassing_unified_lookup(
@@ -10393,13 +10407,21 @@ impl VirtualMachine {
     /// when there is none, or the thread is too deep in its stack to start
     /// it, for the interpreter to run the call. A traced call is traced as an
     /// interpreted one is.
-    fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
+    /// Run the call by `function_id`'s compiled code, if it has some for
+    /// these arguments. Arguments the caller gave up (`CallArgs::Given`) go
+    /// to the code as they are, and are spent when it runs; otherwise they
+    /// are left for the interpreter.
+    fn try_jit_call(
+        &mut self,
+        function_id: u32,
+        args: &mut CallArgs<'_>,
+    ) -> Result<Option<Val>, String> {
         self.poll_execution_cancelled()
             .map_err(|error| error.to_string())?;
         if self.jit.has_shared_candidates(function_id) {
             self.adopt_shared_code(function_id);
         }
-        let Some(compiled) = self.jit.compiled_function(function_id, args) else {
+        let Some(compiled) = self.jit.compiled_function(function_id, args.as_slice()) else {
             return Ok(None);
         };
         if !crate::lang::runtime::jit::can_start_compiled_code() {
@@ -10410,13 +10432,19 @@ impl VirtualMachine {
             program
                 .functions
                 .get(function_id as usize)
-                .and_then(|function_info| self.begin_traced_call(function_info, args))
+                .and_then(|function_info| self.begin_traced_call(function_info, args.as_slice()))
         } else {
             None
         };
         // A tail-call loop this call starts has seen nothing yet.
         let outer = std::mem::take(&mut self.tail_growth);
-        let result = self.run_compiled_call(function_id, &compiled, args);
+        let result = match std::mem::replace(args, CallArgs::Lent(&[])) {
+            CallArgs::Given(given) => self.run_compiled_call_owned(function_id, &compiled, given),
+            lent => {
+                *args = lent;
+                self.run_compiled_call(function_id, &compiled, args.as_slice())
+            }
+        };
         self.tail_growth = outer;
         if let Ok(value) = &result
             && call_id.is_some()
@@ -10489,12 +10517,89 @@ impl VirtualMachine {
         result
     }
 
+    /// [`Self::run_compiled_call`] with arguments the caller gave up: they go
+    /// to the code as they are (see `JitCompiledFunction::call_owned`). The
+    /// call's frame leaves out a parameter the code gives up at its last
+    /// read, which nothing that looks names up reads.
+    fn run_compiled_call_owned(
+        &mut self,
+        function_id: u32,
+        compiled: &crate::lang::runtime::jit::JitCompiledFunction,
+        args: Vec<Val>,
+    ) -> Result<Val, String> {
+        if !compiled.needs_vm_scope() {
+            let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+            let result = compiled.call_owned(args);
+            crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+            return result;
+        }
+        let function_info = self
+            .program
+            .functions
+            .get(function_id as usize)
+            .map(|function_info| {
+                (
+                    function_info.namespace.clone(),
+                    function_info.param_names.clone(),
+                )
+            });
+        let saved_namespace = self.current_namespace.clone();
+        let saved_scope_depth = self.scope_stack.len();
+        if let Some((namespace, param_names)) = &function_info {
+            self.current_namespace = namespace.clone();
+            if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
+                self.current_namespace = saved_namespace;
+                return Err(err.to_string());
+            }
+            let is_boundary = !self.program.local_functions.contains(&function_id);
+            let frame_args: Vec<Val> = args
+                .iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if compiled.takes_param(idx) {
+                        Val::Null
+                    } else {
+                        value.clone()
+                    }
+                })
+                .collect();
+            self.scope_stack.push(LexicalScope::call_frame(
+                param_names,
+                &frame_args,
+                is_boundary,
+            ));
+        }
+
+        let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+        let result = compiled.call_owned(args);
+        crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        self.scope_stack.truncate(saved_scope_depth);
+        self.current_namespace = saved_namespace;
+        result
+    }
+
     pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
+        Ok(self
+            .try_jit_lambda_call_given(lambda_val, args.to_vec())?
+            .ok())
+    }
+
+    /// [`Self::try_jit_lambda_call`] with arguments the caller gives up, as
+    /// `reduce` gives up its accumulator. When compiled code runs the call,
+    /// it gets them as they are, so a collection the caller held alone is
+    /// the compiled code's alone, and a writer it hands it to on its last
+    /// read writes it in place. `Ok(Err(args))` hands the arguments back for
+    /// the interpreter when there is no compiled code to run.
+    pub fn try_jit_lambda_call_given(
+        &mut self,
+        lambda_val: &Val,
+        args: Vec<Val>,
+    ) -> VmResult<Result<Val, Vec<Val>>> {
         self.poll_execution_cancelled()?;
         // A `where` predicate stays on the interpreter, where every
         // instruction and native call is checked.
         if self.in_constraint_predicate() {
-            return Ok(None);
+            return Ok(Err(args));
         }
         let lambda_info = match lambda_val {
             Val::Box(boxed_val) => boxed_val
@@ -10503,28 +10608,37 @@ impl VirtualMachine {
             _ => None,
         };
         let Some(lambda_info) = lambda_info else {
-            return Ok(None);
+            return Ok(Err(args));
         };
         if lambda_info.is_lazy_param {
-            return Ok(None);
+            return Ok(Err(args));
         }
         // Counted before anything is built for the call: a lambda far from
         // compiling, or one that can't be, costs a lookup here and no more.
         let Some(prior_calls) = self.jit.admit_lambda_call(lambda_info) else {
-            return Ok(None);
+            return Ok(Err(args));
         };
 
-        let normalized_args: Vec<Val> = lambda_info
-            .parameters
-            .iter()
-            .enumerate()
-            .map(|(idx, _)| args.get(idx).cloned().unwrap_or(Val::Null))
-            .collect();
+        // One argument per parameter. Arguments that already fit are used as
+        // they are; others are fitted on a copy, and the originals go back
+        // to the interpreter if nothing compiled runs.
+        let arity = lambda_info.parameters.len();
+        let (normalized_args, original) = if args.len() == arity {
+            (args, None)
+        } else {
+            let normalized = (0..arity)
+                .map(|idx| args.get(idx).cloned().unwrap_or(Val::Null))
+                .collect();
+            (normalized, Some(args))
+        };
+        let give_back = |normalized: Vec<Val>, original: Option<Vec<Val>>| {
+            Ok(Err(original.unwrap_or(normalized)))
+        };
 
         let mut captures = Vec::with_capacity(lambda_info.capture_vars.len());
         for name in &lambda_info.capture_vars {
             let Some(value) = lambda_info.closure_env.get(name) else {
-                return Ok(None);
+                return give_back(normalized_args, original);
             };
             captures.push(value.clone());
         }
@@ -10543,8 +10657,14 @@ impl VirtualMachine {
             )
             .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
         else {
-            return Ok(None);
+            return give_back(normalized_args, original);
         };
+        // Too deep in the stack to start compiled code: the interpreter runs
+        // the call (see `JitCompiledFunction::try_call`).
+        if !compiled.can_start() {
+            crate::lang::runtime::jit::increment_lambda_fallback_count();
+            return give_back(normalized_args, original);
+        }
         let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = if compiled.needs_vm_scope() {
@@ -10553,10 +10673,21 @@ impl VirtualMachine {
                 lambda_info.defining_namespace.clone(),
             );
             // The compiled lambda's frame, as an interpreted lambda call has:
-            // what it captured, then its parameters.
+            // what it captured, then its parameters. A parameter the code
+            // gives up at its last read stays out of it: nothing that looks
+            // names up reads it (see `moves::taken_parameters`), and the
+            // frame would hold the value the code means to write in place.
             let saved_scope_depth = self.scope_stack.len();
-            let mut frame =
-                LexicalScope::call_frame(&lambda_info.parameters, &normalized_args, false);
+            let mut frame_args = normalized_args;
+            for (idx, value) in frame_args.iter_mut().enumerate() {
+                if compiled.takes_param(captures.len() + idx) {
+                    *value = Val::Null;
+                }
+            }
+            let mut frame = LexicalScope::call_frame(&lambda_info.parameters, &frame_args, false);
+            drop(frame_args);
+            drop(original);
+            drop(captures);
             frame.link = lambda_info.defining_frame;
             for (name, value) in &lambda_info.closure_env {
                 frame
@@ -10566,20 +10697,24 @@ impl VirtualMachine {
             }
             self.scope_stack.push(frame);
             let result =
-                crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args);
+                crate::lang::runtime::jit::call_compiled_lambda_owned(&compiled, effective_args);
             self.scope_stack.truncate(saved_scope_depth);
             self.current_namespace = saved_namespace;
             result
         } else {
             // Code that never looks up a name or runs other Hot code needs
-            // neither the call's frame nor its namespace.
-            crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args)
+            // neither the call's frame nor its namespace. Only the compiled
+            // call's arguments hold the values from here.
+            drop(normalized_args);
+            drop(original);
+            drop(captures);
+            crate::lang::runtime::jit::call_compiled_lambda_owned(&compiled, effective_args)
         };
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
         self.propagate_jit_halt(was_halted)?;
-        Ok(result)
+        Ok(Ok(result))
     }
 
     /// Depth- and stack-guarded entry point for user-function execution.
@@ -11130,15 +11265,11 @@ impl VirtualMachine {
             self.jit.record_call(function_id, args.as_slice());
 
             let was_halted = self.has_failed() || self.has_cancelled();
-            if let Some(result) =
-                self.try_jit_call(function_id, args.as_slice())
-                    .map_err(|msg| {
-                        VmError::RuntimeError(
-                            RuntimeError::new(msg)
-                                .with_instruction_pointer(self.instruction_pointer),
-                        )
-                    })?
-            {
+            if let Some(result) = self.try_jit_call(function_id, &mut args).map_err(|msg| {
+                VmError::RuntimeError(
+                    RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
+                )
+            })? {
                 self.propagate_jit_halt(was_halted)?;
                 return Ok(result);
             }
@@ -11167,9 +11298,8 @@ impl VirtualMachine {
                 match compile_result {
                     Ok(()) => {
                         tracing::debug!("[JIT] compiled '{}' (id={})", function_name, function_id);
-                        if let Some(result) = self
-                            .try_jit_call(function_id, args.as_slice())
-                            .map_err(|msg| {
+                        if let Some(result) =
+                            self.try_jit_call(function_id, &mut args).map_err(|msg| {
                                 VmError::RuntimeError(
                                     RuntimeError::new(msg)
                                         .with_function(function_name.to_owned())

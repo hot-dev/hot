@@ -1194,6 +1194,35 @@ pub fn writer_parameters(
     written
 }
 
+/// The parameters of a body, as a bit per position (the first 64), whose
+/// binding the body gives up at a `VAR` load. Nothing the body creates
+/// reads such a name (see [`plan`]), so a frame the VM keeps for the call's
+/// name lookups need not hold its value.
+pub fn taken_parameters(
+    instructions: &[Instruction],
+    plan: &[u8],
+    parameters: &[String],
+    constants: &[Constant],
+) -> u64 {
+    if plan.len() != instructions.len() {
+        return 0;
+    }
+    let mut taken = 0u64;
+    for (instruction, entry) in instructions.iter().zip(plan) {
+        if entry & flag::VAR == 0 {
+            continue;
+        }
+        if let Instruction::LoadVar { var_name, .. } = instruction
+            && let Some(name) = constant_name(constants, *var_name)
+            && let Some(position) = parameters.iter().position(|parameter| parameter == name)
+            && position < 64
+        {
+            taken |= 1 << position;
+        }
+    }
+    taken
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

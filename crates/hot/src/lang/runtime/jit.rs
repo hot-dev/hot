@@ -680,6 +680,7 @@ struct JitHelperRefs {
     run_fused_pipeline: FuncRef,
     take_owned_int: FuncRef,
     call_lib: FuncRef,
+    call_lib_take: FuncRef,
     dot_access: FuncRef,
     dot_access_or_default: FuncRef,
     merge_maps: FuncRef,
@@ -960,6 +961,9 @@ pub struct JitCompiledFunction {
     arg_layout: AbiLayout,
     /// Result buffer word length, computed once at compile time.
     result_word_len: usize,
+    /// The parameters the code gives up at their last read, a bit per
+    /// position (see [`crate::lang::moves::taken_parameters`]).
+    taken_params: u64,
 }
 
 impl JitCompiledFunction {
@@ -982,6 +986,26 @@ impl JitCompiledFunction {
         self.needs_vm_scope
     }
 
+    /// Whether the code gives up its parameter at `position` at the
+    /// parameter's last read, so the VM's frame for the call need not hold it.
+    pub fn takes_param(&self, position: usize) -> bool {
+        position < 64 && self.taken_params & (1 << position) != 0
+    }
+
+    /// Whether the thread has the stack to start the code (see `try_call`).
+    pub fn can_start(&self) -> bool {
+        !jit_stack_exhausted()
+    }
+
+    /// [`Self::call`] with arguments the caller gives up: each goes to the
+    /// code as it is, so a collection the caller held alone is the code's
+    /// alone, for a writer it calls to write in place.
+    pub fn call_owned(&self, args: Vec<Val>) -> Result<Val, String> {
+        self.call_encoded(|signature, layout, words| {
+            signature.encode_args_owned(args, layout, words)
+        })
+    }
+
     /// Run the code: `None` when the thread is already too deep in its stack
     /// to start it, for the interpreter to run the call instead (its own
     /// guard leaves more room, so it refuses any call the body makes).
@@ -996,6 +1020,13 @@ impl JitCompiledFunction {
     /// depth fails the call, as it does in the interpreter: running the call
     /// again there would repeat what it already did.
     pub fn call(&self, args: &[Val]) -> Result<Val, String> {
+        self.call_encoded(|signature, layout, words| signature.encode_args(args, layout, words))
+    }
+
+    fn call_encoded(
+        &self,
+        encode: impl FnOnce(&TypeSig, &AbiLayout, &mut [u64]) -> Result<(), String>,
+    ) -> Result<Val, String> {
         let depth = jit_entry_call_depth();
         let vm_ptr = get_jit_vm_ptr();
         let flow_depth = (self.traces_flows && !vm_ptr.is_null())
@@ -1012,8 +1043,7 @@ impl JitCompiledFunction {
             heap_args.resize(arg_words, 0);
             &mut heap_args
         };
-        self.signature
-            .encode_args(args, &self.arg_layout, raw_args)?;
+        encode(&self.signature, &self.arg_layout, raw_args)?;
         let mut inline_result = [0u64; INLINE_WORDS];
         let mut heap_result = Vec::new();
         let raw_result: &mut [u64] = if self.result_word_len <= INLINE_WORDS {
@@ -1116,7 +1146,9 @@ fn synthetic_function_info_from_lambda<'p>(
         flow_type: None,
         instructions,
         register_count: lambda.register_count,
-        moves: Vec::new(),
+        // The lambda's own plan: the rewrite above replaces instructions in
+        // place, so each entry still belongs to its instruction.
+        moves: lambda.moves.clone(),
         source: None,
     };
     Ok((function_info, program))
@@ -1821,6 +1853,20 @@ impl JitRuntimeState {
 pub type CompiledLambdaCall = (Arc<JitCompiledFunction>, Vec<Val>);
 
 /// Run a compiled lambda, counting the call in the JIT stats.
+/// [`call_compiled_lambda`] with arguments the caller gives up (see
+/// [`JitCompiledFunction::call_owned`]). The caller has checked
+/// [`JitCompiledFunction::can_start`].
+pub fn call_compiled_lambda_owned(
+    compiled: &JitCompiledFunction,
+    effective_args: Vec<Val>,
+) -> Result<Val, String> {
+    let result = compiled.call_owned(effective_args);
+    if result.is_ok() {
+        GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
 pub fn call_compiled_lambda(
     compiled: &JitCompiledFunction,
     effective_args: &[Val],
@@ -1844,6 +1890,10 @@ pub fn global_jit_bailout_count() -> usize {
 
 pub fn increment_jit_bailout_count() {
     GLOBAL_JIT_BAILOUT_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn increment_lambda_fallback_count() {
+    GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn increment_lambda_interpreter_call_count() {
@@ -2252,6 +2302,51 @@ impl TypeSig {
     }
 }
 
+impl TypeSig {
+    /// [`Self::encode_args`] for arguments the caller gives up: each owned
+    /// value goes into its handle as it is.
+    fn encode_args_owned(
+        &self,
+        args: Vec<Val>,
+        layout: &AbiLayout,
+        words: &mut [u64],
+    ) -> Result<(), String> {
+        debug_assert!(
+            self.arity as usize == args.len()
+                && self
+                    .args
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(tag, val)| tag.matches_val(val)),
+            "JIT type guard mismatch"
+        );
+        debug_assert_eq!(words.len(), layout.word_len());
+
+        for (idx, (tag, arg)) in self.args.iter().zip(args).enumerate() {
+            let offset = layout.offset(idx)?;
+            match (tag, arg) {
+                (JitTypeTag::Null, Val::Null) => write_i64(words, offset, 0),
+                (JitTypeTag::Int, Val::Int(n)) => write_i64(words, offset, n),
+                (JitTypeTag::Bool, Val::Bool(b)) => write_i64(words, offset, if b { 1 } else { 0 }),
+                (JitTypeTag::Dec, Val::Dec(d)) => write_dec(words, offset, d),
+                (
+                    JitTypeTag::Str
+                    | JitTypeTag::Vec
+                    | JitTypeTag::Map
+                    | JitTypeTag::TypedMap(_)
+                    | JitTypeTag::Boxed(_)
+                    | JitTypeTag::Byte
+                    | JitTypeTag::Bytes,
+                    value,
+                ) => write_i64(words, offset, new_owned_val(value)),
+                _ => return Err(format!("Unsupported JIT argument type: {:?}", tag)),
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl JitTypeTag {
     fn raw_kind(&self) -> Option<RawKind> {
         match self {
@@ -2590,6 +2685,7 @@ fn compile_with_return_kind(
         hot_jit_take_owned_int as *const u8,
     );
     builder.symbol("hot_jit_call_lib", hot_jit_call_lib as *const u8);
+    builder.symbol("hot_jit_call_lib_take", hot_jit_call_lib_take as *const u8);
     builder.symbol("hot_jit_dot_access", hot_jit_dot_access as *const u8);
     builder.symbol(
         "hot_jit_dot_access_or_default",
@@ -2782,6 +2878,12 @@ fn compile_with_return_kind(
         _baked_vals: baked_vals,
         arg_layout,
         result_word_len,
+        taken_params: crate::lang::moves::taken_parameters(
+            &function_info.instructions,
+            &function_info.moves,
+            &function_info.param_names,
+            &program.constants,
+        ),
     })
 }
 
@@ -3118,6 +3220,9 @@ contained_helpers! {
     hot_jit_call_lib = hot_jit_call_lib_body(
         fn_name_ptr: i64, args_ptr: i64
     ) -> HALT_SENTINEL;
+    hot_jit_call_lib_take = hot_jit_call_lib_take_body(
+        fn_name_ptr: i64, args_ptr: i64
+    ) -> HALT_SENTINEL;
     hot_jit_call_native = hot_jit_call_native_body(
         function_id: i64, args_ptr: *const i64, args_count: i64
     ) -> HALT_SENTINEL;
@@ -3233,6 +3338,9 @@ const HELPER_VAL_KIND_NULL: i64 = 4;
 const HELPER_VAL_KIND_OWNED: i64 = 5;
 /// A `TypeTag` or `StringConst` token, for `hot_jit_eq_value` only.
 const HELPER_VAL_KIND_TYPE_TOKEN: i64 = 6;
+/// An `OwnedVal` handle the helper takes over, for `hot_jit_make_vec` only:
+/// the code gives up a register nothing reads again (see `MakeVec`).
+const HELPER_VAL_KIND_OWNED_TAKE: i64 = 7;
 
 unsafe extern "C" fn hot_jit_copy_dec(src: *const D256, dst: *mut D256) {
     unsafe { *dst = *src };
@@ -3880,7 +3988,9 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
             return vm_error_to_owned_val(err, error_capture);
         }
     };
-    match vm.execute_compiled_user_function(function_id, &args) {
+    // The arguments go to the callee as they are: those the code gave up
+    // (`HELPER_VAL_KIND_OWNED_TAKE`) are then the callee's alone.
+    match vm.execute_compiled_user_function_owned(function_id, args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
@@ -4021,6 +4131,50 @@ unsafe fn hot_jit_call_lib_body(fn_name_ptr: i64, args_ptr: i64) -> i64 {
                 vm_error_to_owned_val(err, error_capture)
             }
         }
+    }
+}
+
+/// JIT helper: [`hot_jit_call_lib_body`] for an argument Vec the code gives
+/// up, its register being dead after the call. The helper takes over the
+/// handle `args_ptr`, as the interpreter's `CallLibBuiltin` takes a dead
+/// argument register: an owning writer (`assoc`, `put`, ...) is then the
+/// only holder of the collection it writes, and writes it in place.
+unsafe fn hot_jit_call_lib_take_body(fn_name_ptr: i64, args_ptr: i64) -> i64 {
+    let args_val = unsafe { take_owned_val(args_ptr) };
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str("JIT call_lib: no VM available".into())));
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let fn_val = unsafe { &*(fn_name_ptr as *const Val) };
+    let error_capture = vm.error_capture_active;
+
+    // The same routing as `hot_jit_call_lib_body`: a lazy thunk among the
+    // function or its arguments goes through `execute_call_lib_builtin`.
+    let is_thunk = |v: &Val| matches!(v, Val::Box(b) if b.as_any().downcast_ref::<crate::lang::bytecode::LambdaInfo>().is_some());
+    let args_has_thunk = match &args_val {
+        Val::Vec(vec) => vec.iter().any(is_thunk),
+        other => is_thunk(other),
+    };
+    if is_thunk(fn_val) || args_has_thunk {
+        return match vm.execute_call_lib_builtin(&[fn_val.clone(), args_val]) {
+            Ok(result) => new_owned_val(result),
+            Err(err) => vm_error_to_owned_val(err, error_capture),
+        };
+    }
+
+    let function_name = vm.value_to_string(fn_val);
+    let args_owned: Vec<Val> = match args_val {
+        Val::Vec(vec) => Arc::unwrap_or_clone(vec).into_inner(),
+        other => vec![other],
+    };
+    let args_prepared = match vm.prepare_lib_call_args(&function_name, args_owned) {
+        Ok(args) => args,
+        Err(err) => return vm_error_to_owned_val(err, error_capture),
+    };
+    match vm.execute_call_lib_owned(&function_name, args_prepared) {
+        Ok(result) => new_owned_val(result),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
     }
 }
 
@@ -5213,6 +5367,14 @@ fn declare_jit_helpers(
             &[types::I64, types::I64],
             &[types::I64],
         )?,
+        call_lib_take: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_call_lib_take",
+            &[types::I64, types::I64],
+            &[types::I64],
+        )?,
         dot_access: declare_helper_func(
             module,
             func,
@@ -5832,8 +5994,9 @@ unsafe fn take_owned_val(raw: i64) -> Val {
     if raw == 0 {
         return Val::Null;
     }
-    let arc = unsafe { Arc::from_raw(raw as *const Val) };
-    (*arc).clone()
+    // The last handle gives its value up as it is, so a collection it holds
+    // stays held by one value only.
+    Arc::unwrap_or_clone(unsafe { Arc::from_raw(raw as *const Val) })
 }
 
 unsafe fn decode_helper_val(kind: i64, raw: i64) -> Val {
@@ -5848,6 +6011,7 @@ unsafe fn decode_helper_val(kind: i64, raw: i64) -> Val {
             let arc = unsafe { Arc::from_raw(ptr) };
             (*arc).clone()
         }
+        HELPER_VAL_KIND_OWNED_TAKE => unsafe { take_owned_val(raw) },
         _ => Val::Null,
     }
 }
@@ -6958,6 +7122,11 @@ struct EmitCtx<'a> {
     /// The depth of the compiled call (its entry block's last parameter);
     /// a self-call passes one more.
     call_depth: cranelift_codegen::ir::Value,
+    /// The body's move plan, an entry per instruction (see
+    /// [`crate::lang::moves`]), or empty for none: the values an
+    /// instruction is the last to read, which the code then gives up
+    /// instead of copying, as the interpreter does.
+    moves: &'a [u8],
 }
 
 enum EmitResult {
@@ -6968,6 +7137,28 @@ enum EmitResult {
 impl<'a> EmitCtx<'a> {
     fn register_kind(&self, reg: u32) -> Result<RawKind, String> {
         register_kind(&self.remap, &self.register_kinds, reg)
+    }
+
+    /// The move plan's bits for the instruction at `ip`: 0 without a plan.
+    fn move_flags(&self, ip: usize) -> u8 {
+        self.moves.get(ip).copied().unwrap_or(0)
+    }
+
+    /// Whether the code holds `reg`'s value as its own, to give up: an
+    /// `OwnedVal` handle, and not one baked into the code as a constant.
+    fn owns_register(&self, reg: u32) -> bool {
+        self.remap_reg(reg).is_ok_and(|idx| {
+            self.register_kinds[idx] == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx)
+        })
+    }
+
+    /// Empty `reg` once its handle has been handed on: it holds nothing to
+    /// release, and nothing reads it again.
+    fn clear_register(&self, builder: &mut FunctionBuilder<'_>, reg: u32) -> Result<(), String> {
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.def_var(self.registers[self.remap_reg(reg)?], zero);
+        Ok(())
     }
 
     fn remap_reg(&self, reg: u32) -> Result<usize, String> {
@@ -7154,9 +7345,13 @@ impl<'a> EmitCtx<'a> {
     }
 
     /// Build arg pairs buffer and emit a call_vm trampoline invocation.
+    /// `ip` is the call instruction's, for its move plan entry, or `None`
+    /// for a call the plan has no entry for: its arguments are all lent.
+    #[allow(clippy::too_many_arguments)]
     fn emit_vm_callback(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
+        ip: Option<usize>,
         dest: u32,
         called_function_id: u32,
         args_start: u32,
@@ -7169,21 +7364,41 @@ impl<'a> EmitCtx<'a> {
             (count * 2 * 8) as u32,
             3,
         ));
+        // Arguments nothing reads after the call go to the callee as they
+        // are (`HELPER_VAL_KIND_OWNED_TAKE`), as the interpreter gives up its
+        // dead argument registers, so a writer the callee hands a collection
+        // to writes it in place.
+        let range_dead =
+            ip.is_some_and(|ip| self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0);
+        let mut taken = Vec::new();
         for i in 0..count {
             let reg = args_start + i as u32;
             let kind = self.register_kind(reg)?;
             let raw = self.reg_value(builder, reg)?;
             let (eff_kind, eff_raw) =
                 resolve_trampoline_arg(self.program, instructions, reg, kind, raw, builder);
-            let kind_val = builder
-                .ins()
-                .iconst(types::I64, helper_value_kind(eff_kind));
+            let give = range_dead
+                && kind == RawKind::OwnedVal
+                && eff_kind == RawKind::OwnedVal
+                && self.owns_register(reg);
+            let kind_val = builder.ins().iconst(
+                types::I64,
+                if give {
+                    HELPER_VAL_KIND_OWNED_TAKE
+                } else {
+                    helper_value_kind(eff_kind)
+                },
+            );
+            if give {
+                taken.push(reg);
+            }
             builder
                 .ins()
                 .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
-            // Borrow convention: the trampoline clones what it needs and the
-            // source register keeps the value alive across the call, so no
-            // extra refcount is taken here (cloning leaked one count per call).
+            // Borrow convention, for the arguments not given up: the
+            // trampoline clones what it needs and the source register keeps
+            // the value alive across the call, so no extra refcount is taken
+            // here (cloning leaked one count per call).
             builder
                 .ins()
                 .stack_store(types::I64, eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
@@ -7200,6 +7415,9 @@ impl<'a> EmitCtx<'a> {
             .ins()
             .call(helper, &[fn_id_val, args_buf_ptr, count_val]);
         let result_handle = builder.inst_results(call)[0];
+        for reg in taken {
+            self.clear_register(builder, reg)?;
+        }
         let halt_block = emit_halt_check(builder, result_handle);
         self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
         Ok(Some(halt_block))
@@ -7497,6 +7715,7 @@ impl<'a> EmitCtx<'a> {
         let halt_block = if let Some(called_fid) = resolved_fid {
             self.emit_vm_callback(
                 builder,
+                Some(ip),
                 dest,
                 called_fid as u32,
                 args_start,
@@ -7613,6 +7832,7 @@ impl<'a> EmitCtx<'a> {
         }
         let halt_block = self.emit_vm_callback(
             builder,
+            Some(ip),
             dest,
             called_function_id,
             args_start,
@@ -8218,7 +8438,14 @@ impl<'a> EmitCtx<'a> {
                 if let Some(&(var, kind)) = self.locals.get(name) {
                     let mut value = builder.use_var(var);
                     if kind == RawKind::OwnedVal {
-                        value = clone_owned_raw(builder, &self.helper_refs, value);
+                        if self.move_flags(ip) & crate::lang::moves::flag::VAR != 0 {
+                            // The binding's last read: the register takes its
+                            // handle, and the binding holds nothing after.
+                            let zero = builder.ins().iconst(types::I64, 0);
+                            builder.def_var(var, zero);
+                        } else {
+                            value = clone_owned_raw(builder, &self.helper_refs, value);
+                        }
                     }
                     self.define_register(builder, *dest, kind, value)?;
                     self.jump_to_next(builder, ip)?;
@@ -8297,7 +8524,15 @@ impl<'a> EmitCtx<'a> {
                 let kind = self.register_kind(*src)?;
                 let mut value = self.reg_value(builder, *src)?;
                 if kind == RawKind::OwnedVal {
-                    value = clone_owned_raw(builder, &self.helper_refs, value);
+                    if self.move_flags(ip) & crate::lang::moves::flag::FIRST != 0
+                        && src != dest
+                        && self.owns_register(*src)
+                    {
+                        // `src` is dead after this: hand its handle on.
+                        self.clear_register(builder, *src)?;
+                    } else {
+                        value = clone_owned_raw(builder, &self.helper_refs, value);
+                    }
                 }
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
@@ -8641,15 +8876,23 @@ impl<'a> EmitCtx<'a> {
                     (count_usize * 2 * 8) as u32,
                     3,
                 ));
+                // Elements nothing reads again go into the Vec as they are,
+                // so a collection among them stays held by one value.
+                let range_dead = self.move_flags(ip) & crate::lang::moves::flag::RANGE != 0;
+                let mut taken = Vec::new();
                 for i in 0..count_usize {
                     let reg = elements_start + i as u32;
-                    let (tag, raw) = encode_helper_val_operand(
+                    let (mut tag, raw) = encode_helper_val_operand(
                         builder,
                         &self.remap,
                         &self.registers,
                         &self.register_kinds,
                         reg,
                     )?;
+                    if range_dead && self.owns_register(reg) {
+                        tag = builder.ins().iconst(types::I64, HELPER_VAL_KIND_OWNED_TAKE);
+                        taken.push(reg);
+                    }
                     builder
                         .ins()
                         .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
@@ -8663,6 +8906,9 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.make_vec, &[args_ptr, count_val]);
                 let result = builder.inst_results(call)[0];
+                for reg in taken {
+                    self.clear_register(builder, reg)?;
+                }
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
@@ -8700,10 +8946,21 @@ impl<'a> EmitCtx<'a> {
                 // it, so it must be released after the call.
                 let fn_temp = (fn_kind != RawKind::OwnedVal).then_some(fn_val);
                 let args_raw = builder.use_var(self.registers[remap_reg(&self.remap, *args)?]);
-                let call = builder
-                    .ins()
-                    .call(self.helper_refs.call_lib, &[fn_val, args_raw]);
+                // An argument Vec nothing reads again goes to the callee, so
+                // a writer among the natives can write its collection in place.
+                let give_args = self.move_flags(ip) & crate::lang::moves::flag::SECOND != 0
+                    && args != function
+                    && self.owns_register(*args);
+                let helper = if give_args {
+                    self.helper_refs.call_lib_take
+                } else {
+                    self.helper_refs.call_lib
+                };
+                let call = builder.ins().call(helper, &[fn_val, args_raw]);
                 let result = builder.inst_results(call)[0];
+                if give_args {
+                    self.clear_register(builder, *args)?;
+                }
                 let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[fn_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
@@ -9646,6 +9903,12 @@ fn build_supported_body(
         returned_use: NumericErrUse::Returned,
         call_scope,
         call_depth,
+        // A plan that doesn't fit the instructions moves nothing.
+        moves: if function_info.moves.len() == instructions.len() {
+            &function_info.moves
+        } else {
+            &[]
+        },
     };
 
     // Guards, as the interpreter's call entry has: the call's depth against
@@ -10672,6 +10935,7 @@ fn emit_tail_call_through_vm(
     let end_ip = flow.end_ip;
     let halt_block = ctx.emit_vm_callback(
         builder,
+        None,
         result_reg,
         function_id,
         args_start,
@@ -12699,6 +12963,8 @@ fn compile_thunk_inline(
         returned_use,
         call_scope,
         call_depth,
+        // An inlined thunk's instructions aren't the body's the plan is for.
+        moves: &[],
     };
 
     let mut return_kind: Option<RawKind> = None;
