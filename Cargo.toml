@@ -190,7 +190,7 @@ parking_lot = "0.13"
 # Tokenizer for OpenAI BPE encodings (cl100k_base, o200k_base, etc.).
 # Used by `::hot::internal::tokenizer` and wrapped by `::ai::tokenizer`.
 tiktoken-rs = "0.12"
-ammonia = "4.2.4"
+ammonia = "4.2.5"
 filetime = "0.2"
 ipnet = "2.12.2"
 libsqlite3-sys = "0.37"
