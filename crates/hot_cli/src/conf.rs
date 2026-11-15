@@ -1178,19 +1178,6 @@ pub(crate) fn apply_configuration_options(
     conf
 }
 
-/// Copy a project's legacy `profile.set` selector to `set.profile` before
-/// defaults are merged. Otherwise the default `set.profile` would always
-/// disagree with the project's choice and selection would fail as a conflict.
-fn adopt_legacy_profile_selector(conf: Val) -> Val {
-    if conf.get("set.profile").is_some() {
-        return conf;
-    }
-    match conf.get("profile.set") {
-        Some(legacy) => conf.set("set.profile", legacy),
-        None => conf,
-    }
-}
-
 // Function to load and parse configuration file using engine
 pub(crate) fn load_conf(
     conf_paths: &[String],
@@ -1238,6 +1225,17 @@ pub(crate) fn load_conf(
         format!("::hot::conf ns\n\n{}", combined_content)
     };
 
+    // Most configuration is literal settings, which need no hot-std or VM.
+    if let Some(hot_var) = hot::lang::engine::literal_conf::literal_conf_value(&namespaced_content)
+    {
+        return Ok(hot_var);
+    }
+
+    eval_conf(&namespaced_content)
+}
+
+/// Run configuration code in the engine and read its `hot` variable.
+fn eval_conf(namespaced_content: &str) -> Result<hot::val::Val, String> {
     // Use engine to execute the configuration code and extract the 'hot' variable
     tracing::debug!("Executing configuration content");
 
@@ -1245,7 +1243,7 @@ pub(crate) fn load_conf(
     // The engine will automatically load hot-std using HOT_HOME or fallback to ./hot/pkg/hot-std
     // when no project configuration is provided (see execute_code_and_retain_state)
     match hot::lang::engine::Engine::execute_eval_and_retain_state(
-        &namespaced_content,
+        namespaced_content,
         &[],  // src_paths - empty, engine will load hot-std automatically
         &[],  // test_paths - empty for config-only execution
         None, // conf - no existing config needed for this execution
@@ -1261,7 +1259,7 @@ pub(crate) fn load_conf(
                     "Successfully extracted 'hot' variable from ::hot::conf namespace: {:?}",
                     hot_var
                 );
-                Ok(adopt_legacy_profile_selector(hot_var))
+                Ok(hot_var)
             } else {
                 tracing::warn!("'hot' variable not found in executed configuration");
 
@@ -2111,24 +2109,9 @@ mod tests {
             hot::profile::selected_profile_identifiers(&reloaded).unwrap(),
             Some(("root@example.com".into(), "child-a".into(), "prod".into()))
         );
-        let invalid = original.set_str("profile.set", Some("different".into()), "");
+        let invalid = original.set_str("set.profile", Some("different".into()), "");
         let reloaded = preserve_runtime_overrides_after_init(Val::map_empty(), &invalid);
         assert!(hot::profile::selected_profile_identifiers(&reloaded).is_err());
-    }
-
-    #[test]
-    fn legacy_profile_selector_becomes_the_canonical_one() {
-        let project = adopt_legacy_profile_selector(val!({"profile": {"set": "child"}}));
-        assert_eq!(project.get_str("set.profile"), "child");
-        assert_eq!(
-            hot::profile::selected_profile_name(&project).unwrap(),
-            "child"
-        );
-        // A project that sets both and disagrees still fails as a conflict.
-        let both = adopt_legacy_profile_selector(
-            val!({"set": {"profile": "prod"}, "profile": {"set": "child"}}),
-        );
-        assert!(hot::profile::selected_profile_name(&both).is_err());
     }
 
     #[test]
@@ -2696,6 +2679,34 @@ mod tests {
             file.path().to_string_lossy()
         );
         assert!(!redacted.to_string().contains("never-print-this"));
+    }
+
+    #[test]
+    fn literal_configuration_reads_as_the_engine_does() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut checked = 0;
+        for file in [
+            "hot.hot",
+            "hot.test.hot",
+            "benchmarks/hot.hot",
+            "benchmarks/startup/hot.hot",
+            "hot/test/noisy-load/hot.hot",
+            "hot/pkg/hot-ai/hot.test.hot",
+            "hot/pkg/mcp/hot.test.hot",
+        ] {
+            let content = fs::read_to_string(root.join(file)).expect(file);
+            let code = if content.contains("::hot::conf ns") {
+                content
+            } else {
+                format!("::hot::conf ns\n\n{content}")
+            };
+            let Some(fast) = hot::lang::engine::literal_conf::literal_conf_value(&code) else {
+                continue;
+            };
+            assert_eq!(Ok(fast), eval_conf(&code), "{file}");
+            checked += 1;
+        }
+        assert!(checked > 0, "no configuration took the literal path");
     }
 
     #[test]
