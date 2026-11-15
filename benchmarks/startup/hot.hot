@@ -1,0 +1,16 @@
+::hot::conf ns
+
+hot.set.profile "startup"
+hot.set.project "startup"
+
+hot.profile.startup.user.email "startup@hot.dev"
+hot.profile.startup.org.slug "startup"
+hot.profile.startup.env.name "startup"
+
+hot.project.startup.src.paths ["./hot/src"]
+hot.project.startup.test.paths []
+
+hot.db.uri ""
+hot.emitter.type "none"
+hot.queue.type "none"
+hot.log.level "warn"

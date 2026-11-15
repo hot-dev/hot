@@ -1,0 +1,20 @@
+::benchmarks::words ns
+meta {doc: "Counting into a Map: word frequencies and the top 10"}
+
+// n words from a vocabulary of 500, skewed toward low numbers so the top 10
+// is well defined. bench.py, bench.js and bench.ts build the same text.
+make-text fn (n: Int): Str {
+    join(map(range(n), (i) {
+        k mod(mul(i, 7919), 1000)
+        `w${floor(div(mul(k, k), 2000))}`
+    }), " ")
+}
+
+// Split, count each word into a Map inside a reduce, then sort by count
+// (highest first, ties by word) and keep the top 10.
+word-count fn (text: Str): Str {
+    counts reduce(split(text, " "), (acc, w) { assoc(acc, w, add(get(acc, w, 0), 1)) }, {})
+    entries map(keys(counts), (w) { [w, get(counts, w)] })
+    top slice(sort-by(entries, (kv) { [sub(0, kv[1]), kv[0]] }), 0, 10)
+    join(map(top, (kv) { `${kv[0]}:${kv[1]}` }), "|")
+}

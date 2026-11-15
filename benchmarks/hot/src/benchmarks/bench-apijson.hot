@@ -1,0 +1,80 @@
+::benchmarks::apijson ns
+meta {
+    doc: "A realistic JSON round trip: parse an API payload, select, reshape, serialize"
+}
+
+statuses ["open", "paid", "shipped", "cancelled"]
+cities ["Austin", "Denver", "Portland", "Chicago", "Boston", "Seattle"]
+
+two-digits fn (n: Int): Str { pad-start(Str(n), 2, "0") }
+
+// One order in the style of a JSON:API response. bench.py, bench.js and
+// bench.ts build the same document byte for byte, which the result checks.
+make-order fn (i: Int): Map {
+    c mod(i, 500)
+    {
+        id: `ord_${i}`,
+        type: "order",
+        attributes: {
+            number: add(100000, i),
+            status: get(statuses, mod(i, 4)),
+            created_at: `2026-11-${two-digits(add(1, mod(i, 28)))}T${two-digits(mod(i, 24))}:00:00Z`,
+            currency: "USD",
+            customer: {
+                id: `cus_${c}`,
+                email: `user${c}@example.com`,
+                name: `Customer ${c}`,
+                address: {
+                    line1: `${add(mod(i, 900), 1)} Main Street`,
+                    city: get(cities, mod(i, 6)),
+                    postcode: Str(add(10000, mod(i, 8999))),
+                    country: "US",
+                },
+            },
+            line_items: map(range(add(1, mod(i, 4))), (j) {
+                k mod(add(i, j), 50)
+                {
+                    sku: `SKU-${k}`,
+                    name: `Product ${k}`,
+                    qty: add(1, mod(add(i, j), 3)),
+                    unit_cents: add(500, mul(mod(add(mul(i, 7), mul(j, 13)), 100), 25)),
+                    tags: [`tag${j}`, `batch${mod(i, 10)}`],
+                }
+            }),
+            notes: if(is-zero(mod(i, 3)), "Leave at front desk", null),
+            gift: is-zero(mod(i, 5)),
+        },
+        relationships: {store: {id: `store_${mod(i, 12)}`}},
+    }
+}
+
+// The payload as a compact JSON string: about 1MB for n = 1500.
+make-payload fn (n: Int): Str {
+    to-json({
+        data: map(range(n), (i) { make-order(i) }),
+        meta: {page: 1, per_page: n, total: n},
+    })
+}
+
+summarize fn (order: Map): Map {
+    a order.attributes
+    {
+        id: order.id,
+        number: a.number,
+        email: a.customer.email,
+        city: a.customer.address.city,
+        items: length(a.line_items),
+        total_cents: reduce(a.line_items, (acc, li) { add(acc, mul(li.qty, li.unit_cents)) }, 0),
+        gift: a.gift,
+    }
+}
+
+// Parse, drop cancelled orders, keep a summary of each, and serialize.
+// The result is payload length / output length / orders kept.
+json-api-roundtrip fn (payload: Str): Str {
+    doc from-json(payload)
+    kept filter(doc.data, (o) { ne(o.attributes.status, "cancelled") })
+    orders map(kept, (o) { summarize(o) })
+    out to-json({orders: orders, count: length(orders)})
+    `${length(payload)}/${length(out)}/${length(orders)}`
+}
