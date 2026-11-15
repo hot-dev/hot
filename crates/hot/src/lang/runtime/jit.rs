@@ -193,10 +193,6 @@ fn jit_entry_call_depth() -> i64 {
     i64::try_from(depth).unwrap_or(i64::MAX)
 }
 
-unsafe extern "C" fn hot_jit_get_stack_limit() -> i64 {
-    jit_stack_limit() as i64
-}
-
 /// Set the thread-local VM pointer before calling JIT code. Returns the previous
 /// value so the caller can restore it (supports re-entrant JIT calls).
 pub fn set_jit_vm_ptr(vm: *mut VirtualMachine) -> *mut VirtualMachine {
@@ -644,7 +640,6 @@ struct AbiLayout {
 #[derive(Debug, Clone, Copy)]
 struct JitHelperRefs {
     poll_cancel: FuncRef,
-    get_stack_limit: FuncRef,
     copy_dec: FuncRef,
     add_numeric: FuncRef,
     sub_numeric: FuncRef,
@@ -730,14 +725,13 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 50] {
+    fn scope_free(&self) -> [FuncRef; 49] {
         [
             self.poll_cancel,
             self.call_vm,
             self.template_interpolate,
             self.dot_access,
             self.dot_access_or_default,
-            self.get_stack_limit,
             self.copy_dec,
             self.add_numeric,
             self.sub_numeric,
@@ -1054,13 +1048,14 @@ impl JitCompiledFunction {
             &mut heap_result
         };
         let fn_ptr = self.entry as *const u8;
-        let jit_fn: unsafe extern "C" fn(*const u8, *mut u8, i64) -> i64 =
+        let jit_fn: unsafe extern "C" fn(*const u8, *mut u8, i64, i64) -> i64 =
             unsafe { mem::transmute(fn_ptr) };
         let ret = unsafe {
             jit_fn(
                 raw_args.as_ptr().cast::<u8>(),
                 raw_result.as_mut_ptr().cast::<u8>(),
                 depth,
+                jit_stack_limit() as i64,
             )
         };
         let result = match ret {
@@ -2620,10 +2615,6 @@ fn compile_with_return_kind(
         .map_err(|e| e.to_string())?;
 
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    builder.symbol(
-        "hot_jit_get_stack_limit",
-        hot_jit_get_stack_limit as *const u8,
-    );
     builder.symbol("hot_jit_copy_dec", hot_jit_copy_dec as *const u8);
     builder.symbol("hot_jit_add_numeric", hot_jit_add_numeric as *const u8);
     builder.symbol("hot_jit_sub_numeric", hot_jit_sub_numeric as *const u8);
@@ -2787,6 +2778,8 @@ fn compile_with_return_kind(
     sig.params.push(AbiParam::new(ptr_ty));
     sig.params.push(AbiParam::new(ptr_ty));
     // The call's depth, counted as the interpreter counts its calls.
+    sig.params.push(AbiParam::new(types::I64));
+    // The thread's stack limit (see `CallFrame`).
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(ptr_ty));
 
@@ -5085,14 +5078,6 @@ fn declare_jit_helpers(
     func: &mut cranelift_codegen::ir::Function,
     ptr_ty: Type,
 ) -> Result<JitHelperRefs, String> {
-    let get_stack_limit = declare_helper_func(
-        module,
-        func,
-        ptr_ty,
-        "hot_jit_get_stack_limit",
-        &[],
-        &[types::I64],
-    )?;
     let copy_dec = declare_helper_func(
         module,
         func,
@@ -5105,7 +5090,6 @@ fn declare_jit_helpers(
     let numeric_cmp = &[types::I64, types::I64, types::I64, types::I64];
     let owned_arg = &[types::I64];
     Ok(JitHelperRefs {
-        get_stack_limit,
         copy_dec,
         add_numeric: declare_helper_func(
             module,
@@ -7093,6 +7077,15 @@ fn prescan_thunk_return_kind(
     thunk_return_kind
 }
 
+/// What a compiled call carries into the calls it makes: its depth, counted
+/// as the interpreter counts calls, and the thread's stack limit, read once
+/// when the VM enters compiled code rather than on every compiled call.
+#[derive(Clone, Copy)]
+struct CallFrame {
+    depth: cranelift_codegen::ir::Value,
+    stack_limit: cranelift_codegen::ir::Value,
+}
+
 /// Shared emission context for JIT instruction compilation.
 /// Holds register state, locals, and program metadata so that both
 /// `build_supported_body` and `compile_thunk_inline` can share instruction
@@ -7133,7 +7126,7 @@ struct EmitCtx<'a> {
     call_scope: CallScope<'a>,
     /// The depth of the compiled call (its entry block's last parameter);
     /// a self-call passes one more.
-    call_depth: cranelift_codegen::ir::Value,
+    call_frame: CallFrame,
     /// The body's move plan, an entry per instruction (see
     /// [`crate::lang::moves`]), or empty for none: the values an
     /// instruction is the last to read, which the code then gives up
@@ -7676,7 +7669,7 @@ impl<'a> EmitCtx<'a> {
                 &self.thunk_registry,
                 self.numeric_err_use(instructions, ip, dest),
                 self.call_scope,
-                self.call_depth,
+                self.call_frame,
             )?
         {
             // An inlined branch that calls this function back reads that
@@ -7713,7 +7706,7 @@ impl<'a> EmitCtx<'a> {
                 &self.register_kinds,
                 args_start,
                 args_count,
-                self.call_depth,
+                self.call_frame,
             )?;
             let err_use = self.numeric_err_use(instructions, ip, dest);
             self.define_register(builder, dest, result_kind, raw)?;
@@ -7789,7 +7782,7 @@ impl<'a> EmitCtx<'a> {
             &self.thunk_registry,
             self.numeric_err_use(instructions, ip, dest),
             self.call_scope,
-            self.call_depth,
+            self.call_frame,
         )? {
             // An inlined branch that calls this function back reads that
             // call's result as the predicted return kind.
@@ -7863,7 +7856,7 @@ impl<'a> EmitCtx<'a> {
     /// eighth level polls, so deep or branching recursion still notices a
     /// cancellation while most frames make no helper call.
     fn emit_self_call_cancel_poll(&self, builder: &mut FunctionBuilder<'_>) {
-        let level = builder.ins().band_imm_u(self.call_depth, 7);
+        let level = builder.ins().band_imm_u(self.call_frame.depth, 7);
         let due =
             builder
                 .ins()
@@ -7912,7 +7905,7 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             args_start,
             args_count,
-            self.call_depth,
+            self.call_frame,
         )?;
         let err_use = self.numeric_err_use(instructions, ip, dest);
         self.define_register(builder, dest, result_kind, raw)?;
@@ -9842,7 +9835,10 @@ fn build_supported_body(
 
     let arg_ptr = builder.block_params(entry_block)[0];
     let ret_ptr = builder.block_params(entry_block)[1];
-    let call_depth = builder.block_params(entry_block)[2];
+    let call_frame = CallFrame {
+        depth: builder.block_params(entry_block)[2],
+        stack_limit: builder.block_params(entry_block)[3],
+    };
     let arg_layout = AbiLayout::for_args(&signature.args)?;
     let mut locals: AHashMap<String, (Variable, RawKind)> = AHashMap::new();
     let mut param_locals: Vec<(Variable, RawKind)> =
@@ -9914,7 +9910,7 @@ fn build_supported_body(
         function_body: true,
         returned_use: NumericErrUse::Returned,
         call_scope,
-        call_depth,
+        call_frame,
         // A plan that doesn't fit the instructions moves nothing.
         moves: if function_info.moves.len() == instructions.len() {
             &function_info.moves
@@ -9930,7 +9926,7 @@ fn build_supported_body(
     let max_depth = i64::try_from(max_recursion_depth()).unwrap_or(i64::MAX);
     let depth_ok = builder.ins().icmp_imm_s(
         cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-        call_depth,
+        call_frame.depth,
         max_depth,
     );
     let stack_block = builder.create_block();
@@ -9954,12 +9950,10 @@ fn build_supported_body(
     let guard_slot =
         builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 0));
     let sp_proxy = builder.ins().stack_addr(ptr_ty, guard_slot, 0);
-    let limit_call = builder.ins().call(helper_refs.get_stack_limit, &[]);
-    let limit_val = builder.inst_results(limit_call)[0];
     let stack_ok = builder.ins().icmp(
         cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThan,
         sp_proxy,
-        limit_val,
+        call_frame.stack_limit,
     );
     let body_block = builder.create_block();
     let overflow_block = builder.create_block();
@@ -9980,15 +9974,12 @@ fn build_supported_body(
     builder.switch_to_block(body_block);
     builder.seal_block(body_block);
     let cancel_budget = builder.declare_var(types::I32);
-    // VM entry samples ordinary calls. Only direct self-recursion bypasses
-    // that dispatch; tail loops count their iterations in this local counter.
-    let recursive = instructions.iter().any(|instruction| {
-        matches!(instruction,
-        Instruction::CallUserFunction { function_id: called, .. } if *called == function_id)
-    });
-    let initial_budget = builder
-        .ins()
-        .iconst(types::I32, if recursive { 0 } else { 1023 });
+    // VM entry samples ordinary calls. Tail loops count their iterations in
+    // this local counter, and direct self-calls, which bypass the VM's
+    // dispatch, sample by depth (see `emit_self_call_cancel_poll`). A frame
+    // starts with a full budget, so a recursive call makes no helper call
+    // on entry: polling on every entry cost a third of a recursive call.
+    let initial_budget = builder.ins().iconst(types::I32, 1023);
     builder.def_var(cancel_budget, initial_budget);
     builder.ins().jump(ctx.blocks[0], &[]);
 
@@ -12911,7 +12902,7 @@ fn compile_thunk_inline(
     merge_block: cranelift_codegen::ir::Block,
     returned_use: NumericErrUse,
     call_scope: CallScope<'_>,
-    call_depth: cranelift_codegen::ir::Value,
+    call_frame: CallFrame,
 ) -> Result<RawKind, String> {
     let instructions = &lambda.instructions;
     if instructions.is_empty() {
@@ -12974,7 +12965,7 @@ fn compile_thunk_inline(
         function_body: false,
         returned_use,
         call_scope,
-        call_depth,
+        call_frame,
         // An inlined thunk's instructions aren't the body's the plan is for.
         moves: &[],
     };
@@ -12982,15 +12973,12 @@ fn compile_thunk_inline(
     let mut return_kind: Option<RawKind> = None;
 
     let cancel_budget = builder.declare_var(types::I32);
-    // VM entry samples ordinary calls. Only direct self-recursion bypasses
-    // that dispatch; tail loops count their iterations in this local counter.
-    let recursive = instructions.iter().any(|instruction| {
-        matches!(instruction,
-        Instruction::CallUserFunction { function_id: called, .. } if *called == function_id)
-    });
-    let initial_budget = builder
-        .ins()
-        .iconst(types::I32, if recursive { 0 } else { 1023 });
+    // VM entry samples ordinary calls. Tail loops count their iterations in
+    // this local counter, and direct self-calls, which bypass the VM's
+    // dispatch, sample by depth (see `emit_self_call_cancel_poll`). A frame
+    // starts with a full budget, so a recursive call makes no helper call
+    // on entry: polling on every entry cost a third of a recursive call.
+    let initial_budget = builder.ins().iconst(types::I32, 1023);
     builder.def_var(cancel_budget, initial_budget);
     builder.ins().jump(ctx.blocks[0], &[]);
 
@@ -13130,7 +13118,7 @@ fn emit_self_recursive_call(
     register_kinds: &[Option<RawKind>],
     args_start: u32,
     args_count: u8,
-    call_depth: cranelift_codegen::ir::Value,
+    call_frame: CallFrame,
 ) -> SelfRecursiveCallResult {
     if usize::from(args_count) != signature.args.len() {
         return Err("JIT self-recursive call arity mismatch".to_string());
@@ -13195,10 +13183,11 @@ fn emit_self_recursive_call(
         3,
     ));
     let result_ptr = builder.ins().stack_addr(ptr_ty, result_slot, 0);
-    let next_depth = builder.ins().iadd_imm_s(call_depth, 1);
-    let call_inst = builder
-        .ins()
-        .call(self_func_ref, &[arg_ptr, result_ptr, next_depth]);
+    let next_depth = builder.ins().iadd_imm_s(call_frame.depth, 1);
+    let call_inst = builder.ins().call(
+        self_func_ref,
+        &[arg_ptr, result_ptr, next_depth, call_frame.stack_limit],
+    );
     let ret_flag = builder.inst_results(call_inst)[0];
 
     let zero = builder.ins().iconst(types::I64, 0);
@@ -13483,7 +13472,7 @@ fn try_inline_lazy_branch_call(
     // amounts to.
     result_use: NumericErrUse,
     call_scope: CallScope<'_>,
-    call_depth: cranelift_codegen::ir::Value,
+    call_frame: CallFrame,
 ) -> Result<Option<(RawKind, cranelift_codegen::ir::Value)>, String> {
     let callee = match program.functions.get(called_function_id as usize) {
         Some(f) => f,
@@ -13581,7 +13570,7 @@ fn try_inline_lazy_branch_call(
             then_merge,
             result_use,
             call_scope,
-            call_depth,
+            call_frame,
         )?;
 
         // Compile else-branch (writes to result_var, jumps to else_merge)
@@ -13604,7 +13593,7 @@ fn try_inline_lazy_branch_call(
                 else_merge,
                 result_use,
                 call_scope,
-                call_depth,
+                call_frame,
             )?
         } else {
             builder.def_var(result_var, zero);
