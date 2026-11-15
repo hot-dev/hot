@@ -6,6 +6,7 @@
 
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 
 /// Convert a yaml_rust2 value into a Hot Val.
@@ -21,7 +22,7 @@ fn yaml_to_val(node: &yaml_rust2::Yaml) -> Val {
         Yaml::Boolean(b) => Val::Bool(*b),
         Yaml::Array(arr) => Val::vec(arr.iter().map(yaml_to_val).collect()),
         Yaml::Hash(h) => {
-            let mut map = indexmap::IndexMap::new();
+            let mut map = ValIndexMap::default();
             for (k, v) in h.iter() {
                 let key = match k {
                     Yaml::String(s) => Val::from(s.as_str()),

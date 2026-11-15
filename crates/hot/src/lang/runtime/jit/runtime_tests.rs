@@ -7,6 +7,7 @@ use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::emitter::{EngineEvent, EngineEventEmitter};
 use crate::lang::event::ExecutionContext;
 use crate::val;
+use crate::val::ValIndexMap;
 use std::sync::Mutex;
 
 /// `source` compiled and its namespaces initialized, with `jit` as the VM's
@@ -402,7 +403,7 @@ fn self_tail_calls_with_owned_arguments_loop() {
             Val::vec(
                 (0..n)
                     .map(|_| {
-                        let mut item = indexmap::IndexMap::new();
+                        let mut item = ValIndexMap::default();
                         item.insert(val!("price"), price.clone());
                         Val::map(item)
                     })

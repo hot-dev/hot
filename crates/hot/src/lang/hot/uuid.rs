@@ -1,7 +1,7 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
-use indexmap::IndexMap;
 use uuid::Uuid;
 
 /// Generate a UUID v4 (random)
@@ -14,7 +14,7 @@ pub fn uuid_v4(args: &[Val]) -> HotResult<Val> {
     let uuid_str = uuid.to_string();
 
     // Return Map with $type field (unified pattern)
-    let mut result = IndexMap::new();
+    let mut result = ValIndexMap::default();
     result.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     result.insert(Val::from("$val"), Val::from(uuid_str));
     HotResult::Ok(Val::map(result))
@@ -31,7 +31,7 @@ pub fn uuid_v7(args: &[Val]) -> HotResult<Val> {
     let uuid_str = uuid.to_string();
 
     // Return Map with $type field (unified pattern)
-    let mut result = IndexMap::new();
+    let mut result = ValIndexMap::default();
     result.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     result.insert(Val::from("$val"), Val::from(uuid_str));
     HotResult::Ok(Val::map(result))
@@ -141,7 +141,7 @@ pub fn uuid_constructor(args: &[Val]) -> HotResult<Val> {
     };
 
     // Create a UUID type instance
-    let mut uuid_map = IndexMap::new();
+    let mut uuid_map = ValIndexMap::default();
     uuid_map.insert(Val::from("$type"), Val::from("::hot::uuid/Uuid"));
     uuid_map.insert(Val::from("$val"), Val::from(uuid_str));
 

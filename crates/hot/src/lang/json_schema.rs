@@ -8,6 +8,7 @@ use crate::lang::ast::{
 };
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
 use indexmap::IndexMap;
@@ -289,7 +290,7 @@ fn literal_members(alias: &TypeExpr) -> Option<Vec<LiteralType>> {
 #[derive(Debug, Default)]
 pub struct SchemaContext {
     /// Definitions hoisted into `$defs` keyed by sanitized name.
-    pub defs: IndexMap<Val, Val>,
+    pub defs: ValIndexMap,
     /// Names of types currently being expanded (cycle detection).
     pub visited: AHashSet<String>,
     /// Names of types we've decided to hoist into `$defs` because they
@@ -368,7 +369,7 @@ fn wrap_with_defs(schema: Val, ctx: &SchemaContext) -> Val {
             .insert(Val::from("$defs"), Val::map(ctx.defs.clone()));
         return Val::Map(existing);
     }
-    let mut wrapped = IndexMap::new();
+    let mut wrapped = ValIndexMap::default();
     wrapped.insert(Val::from("$defs"), Val::map(ctx.defs.clone()));
     wrapped.insert(Val::from("schema"), inlined);
     Val::map(wrapped)
@@ -377,7 +378,7 @@ fn wrap_with_defs(schema: Val, ctx: &SchemaContext) -> Val {
 /// If `schema` is exactly `{"$ref": "#/$defs/<name>"}` and `<name>` is
 /// present in `defs`, return the def's contents instead. Otherwise
 /// returns `schema` unchanged.
-fn inline_top_level_ref(schema: Val, defs: &IndexMap<Val, Val>) -> Val {
+fn inline_top_level_ref(schema: Val, defs: &ValIndexMap) -> Val {
     let map = match &schema {
         Val::Map(m) => m,
         _ => return schema,
@@ -508,7 +509,7 @@ fn union_to_schema_ctx(parts: &[String], registry: &TypeRegistry, ctx: &mut Sche
         .iter()
         .map(|p| type_to_schema_ctx(p, registry, ctx))
         .collect();
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("anyOf"), Val::vec(schemas));
     Val::map(map)
 }
@@ -545,7 +546,7 @@ fn literals_to_schema(literals: &[LiteralType]) -> Val {
     let mut schemas: Vec<Val> = groups
         .into_iter()
         .map(|(json_type, members)| {
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("type"), Val::from(json_type));
             map.insert(Val::from("enum"), Val::vec(members));
             Val::map(map)
@@ -558,7 +559,7 @@ fn literals_to_schema(literals: &[LiteralType]) -> Val {
     if schemas.len() == 1 {
         return schemas.remove(0);
     }
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("anyOf"), Val::vec(schemas));
     Val::map(map)
 }
@@ -571,7 +572,7 @@ fn optional_to_schema_ctx(
 ) -> Val {
     let inner_schema = type_to_schema_ctx(inner_type, registry, ctx);
     let null_schema = builtin_to_schema("Null");
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(
         Val::from("anyOf"),
         Val::vec(vec![inner_schema, null_schema]),
@@ -593,7 +594,7 @@ fn generic_to_schema_ctx(
             } else {
                 type_to_schema_ctx(&params[0], registry, ctx)
             };
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("type"), Val::from("array"));
             map.insert(Val::from("items"), items_schema);
             Val::map(map)
@@ -604,7 +605,7 @@ fn generic_to_schema_ctx(
             } else {
                 Val::map_empty()
             };
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("type"), Val::from("object"));
             map.insert(Val::from("additionalProperties"), value_schema);
             Val::map(map)
@@ -622,7 +623,7 @@ fn generic_to_schema_ctx(
 
 /// Convert built-in types to JSON Schema
 fn builtin_to_schema(type_str: &str) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
 
     match type_str {
         "Str" | "String" => {
@@ -728,7 +729,7 @@ fn custom_type_to_schema_ctx(
         } else if let Some(ref fields) = type_info.fields {
             fields_to_schema_ctx(fields, registry, ctx)
         } else {
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("type"), Val::from("object"));
             Val::map(map)
         };
@@ -737,7 +738,7 @@ fn custom_type_to_schema_ctx(
             None => schema,
         }
     } else {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("type"), Val::from("object"));
         map.insert(
             Val::from("description"),
@@ -1073,7 +1074,7 @@ fn canonical_predicate(expr: &Value, param: &str, out: &mut Vec<(String, Val)>) 
 
 /// Build a `{"$ref": "#/$defs/<sanitized>"}` Val.
 fn ref_to(type_name: &str) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(
         Val::from("$ref"),
         Val::from(format!("#/$defs/{}", sanitize_def_name(type_name))),
@@ -1095,7 +1096,7 @@ fn enum_to_schema_ctx(
 ) -> Val {
     let any_payload = variants.iter().any(|v| v.type_ref.is_some());
     if !any_payload {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         let names: Vec<Val> = variants
             .iter()
             .map(|v| Val::from(v.name.as_str()))
@@ -1109,8 +1110,8 @@ fn enum_to_schema_ctx(
         .map(|v| {
             let qualified_name = format!("{}.{}", enum_name, v.name);
 
-            let mut props = IndexMap::new();
-            let mut tag_map = IndexMap::new();
+            let mut props = ValIndexMap::default();
+            let mut tag_map = ValIndexMap::default();
             tag_map.insert(Val::from("const"), Val::from(qualified_name.as_str()));
             props.insert(Val::from("$type"), Val::map(tag_map));
 
@@ -1122,7 +1123,7 @@ fn enum_to_schema_ctx(
                 required.push(Val::from("$val"));
             }
 
-            let mut variant_schema = IndexMap::new();
+            let mut variant_schema = ValIndexMap::default();
             variant_schema.insert(Val::from("type"), Val::from("object"));
             variant_schema.insert(Val::from("properties"), Val::map(props));
             variant_schema.insert(Val::from("required"), Val::vec(required));
@@ -1130,9 +1131,9 @@ fn enum_to_schema_ctx(
         })
         .collect();
 
-    let mut schema = IndexMap::new();
+    let mut schema = ValIndexMap::default();
     schema.insert(Val::from("oneOf"), Val::vec(one_of));
-    let mut discriminator = IndexMap::new();
+    let mut discriminator = ValIndexMap::default();
     discriminator.insert(Val::from("propertyName"), Val::from("$type"));
     schema.insert(Val::from("discriminator"), Val::map(discriminator));
     Val::map(schema)
@@ -1144,7 +1145,7 @@ fn fields_to_schema_ctx(
     registry: &TypeRegistry,
     ctx: &mut SchemaContext,
 ) -> Val {
-    let mut properties = IndexMap::new();
+    let mut properties = ValIndexMap::default();
     let mut required = Vec::new();
 
     for field in fields {
@@ -1161,7 +1162,7 @@ fn fields_to_schema_ctx(
         }
     }
 
-    let mut schema = IndexMap::new();
+    let mut schema = ValIndexMap::default();
     schema.insert(Val::from("type"), Val::from("object"));
     schema.insert(Val::from("properties"), Val::map(properties));
 
@@ -1191,13 +1192,13 @@ pub fn args_to_input_schema_with_ctx(
     ctx: &mut SchemaContext,
 ) -> Val {
     if args.is_empty() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("type"), Val::from("object"));
         map.insert(Val::from("properties"), Val::map_empty());
         return Val::map(map);
     }
 
-    let mut properties = IndexMap::new();
+    let mut properties = ValIndexMap::default();
     let mut required = Vec::new();
 
     for arg in args {
@@ -1224,7 +1225,7 @@ pub fn args_to_input_schema_with_ctx(
         properties.insert(Val::from(arg_name), type_schema);
     }
 
-    let mut schema = IndexMap::new();
+    let mut schema = ValIndexMap::default();
     schema.insert(Val::from("type"), Val::from("object"));
     schema.insert(Val::from("properties"), Val::map(properties));
 

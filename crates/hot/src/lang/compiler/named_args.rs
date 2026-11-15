@@ -30,8 +30,8 @@ use crate::lang::ast::{
 use crate::lang::compiler::Compiler;
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::AHashMap;
-use indexmap::IndexMap;
 use std::cell::RefCell;
 
 const ONLY_RECORDS: &str = "Only record types and enum variants take named arguments.";
@@ -505,7 +505,7 @@ impl RecordTypes {
 /// nodes, as in a Map literal.
 pub(super) fn into_map_call(mut call: FnCall) -> FnCall {
     let src = call.args.first().and_then(|arg| arg.src.clone());
-    let mut entries = IndexMap::new();
+    let mut entries = ValIndexMap::default();
     for arg in std::mem::take(&mut call.args) {
         let value = match arg.value {
             Value::Val(val, _) => val,

@@ -1126,6 +1126,7 @@ mod tests {
         LambdaInfo, SourceLocation, VariableMetadata,
     };
     use crate::val::Val;
+    use crate::val::ValIndexMap;
 
     #[test]
     fn test_cache_key_calculation() {
@@ -1669,7 +1670,7 @@ mod tests {
     #[test]
     fn postcard_bytecode_schema_drift_canary() {
         let mut program = create_test_bytecode_program();
-        let mut map = indexmap::IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(crate::val::Val::Int(1), crate::val::Val::from("one"));
         program.add_constant(Constant::Val(crate::val::Val::map(map)));
         program.add_constant(Constant::Val(crate::val::Val::bytes(vec![1, 2, 3])));
@@ -1861,7 +1862,7 @@ mod tests {
             namespace: "::my::namespace".to_string(),
             static_scope: Some("::my::namespace/my-func".to_string()),
             meta: Some(Val::map({
-                let mut m = indexmap::IndexMap::new();
+                let mut m = ValIndexMap::default();
                 m.insert(Val::from("key"), Val::from("value"));
                 m
             })),

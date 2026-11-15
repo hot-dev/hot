@@ -1,7 +1,7 @@
 use crate::lang::hot::r#type::{HotResult, untype_recursive};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
-use indexmap::IndexMap;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
@@ -200,14 +200,14 @@ fn get_content(val: &Val) -> Result<Vec<Val>, String> {
     }
 }
 
-fn get_attrs(val: &Val) -> Result<IndexMap<Val, Val>, String> {
+fn get_attrs(val: &Val) -> Result<ValIndexMap, String> {
     match val {
         Val::Map(m) => {
             let key = Val::from("attrs");
             match m.get(&key) {
                 Some(Val::Map(attrs)) => Ok((**attrs).clone().into_inner()),
                 Some(_) => Err("attrs field must be a Map".to_string()),
-                None => Ok(IndexMap::new()),
+                None => Ok(ValIndexMap::default()),
             }
         }
         _ => Err("Expected an Xml map structure".to_string()),
@@ -244,11 +244,11 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
     // and trimmed as a whole when an element boundary or CDATA ends them.
     reader.config_mut().trim_text(false);
 
-    let mut stack: Vec<(String, IndexMap<Val, Val>, Vec<Val>)> = Vec::new();
+    let mut stack: Vec<(String, ValIndexMap, Vec<Val>)> = Vec::new();
     let mut root: Option<Val> = None;
     let mut pending = String::new();
 
-    fn flush_text(pending: &mut String, stack: &mut [(String, IndexMap<Val, Val>, Vec<Val>)]) {
+    fn flush_text(pending: &mut String, stack: &mut [(String, ValIndexMap, Vec<Val>)]) {
         let text = pending.trim();
         if !text.is_empty()
             && let Some((_, _, content)) = stack.last_mut()
@@ -345,7 +345,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
     root.ok_or_else(|| "No root element found".to_string())
 }
 
-fn parse_attributes(e: &BytesStart) -> Result<IndexMap<Val, Val>, String> {
+fn parse_attributes(e: &BytesStart) -> Result<ValIndexMap, String> {
     parse_attributes_with_limits(
         e,
         crate::lang::runtime::limits::max_collection_size(),
@@ -357,8 +357,8 @@ fn parse_attributes_with_limits(
     e: &BytesStart<'_>,
     max_attributes: usize,
     max_bytes: usize,
-) -> Result<IndexMap<Val, Val>, String> {
-    let mut attrs = IndexMap::new();
+) -> Result<ValIndexMap, String> {
+    let mut attrs = ValIndexMap::default();
     let mut total_bytes = 0usize;
 
     for attr_result in e.attributes() {
@@ -390,8 +390,8 @@ fn parse_attributes_with_limits(
     Ok(attrs)
 }
 
-fn build_xml_val(tag: &str, attrs: IndexMap<Val, Val>, content: Vec<Val>) -> Val {
-    let mut map = IndexMap::new();
+fn build_xml_val(tag: &str, attrs: ValIndexMap, content: Vec<Val>) -> Val {
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("tag"), Val::from(tag.to_string()));
     map.insert(Val::from("attrs"), Val::map(attrs));
     map.insert(Val::from("content"), Val::vec(content));

@@ -8,6 +8,7 @@ use crate::lang::runtime::vm::{
     VirtualMachine, VmError, max_recursion_depth, recursion_limit_message,
 };
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use cranelift_codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Type, UserFuncName,
@@ -4330,7 +4331,7 @@ unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
     }
 
     // Wrap in Result.Ok
-    let mut map = indexmap::IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
     map.insert(Val::from("$val"), val);
     new_owned_val(Val::map(map))
@@ -5901,7 +5902,7 @@ fn raw_type_token(kind: RawKind) -> Result<i64, String> {
 /// its failure.
 fn vm_error_to_owned_val(err: VmError, error_capture_active: bool) -> i64 {
     if error_capture_active {
-        let mut m = indexmap::IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("error"), Val::from(err.to_string()));
         return new_owned_val(Val::map(m));
     }
@@ -6151,7 +6152,7 @@ fn emit_empty_accumulator(
     modifier: FlowResultModifier,
 ) -> cranelift_codegen::ir::Value {
     let empty = match modifier {
-        FlowResultModifier::Map => baked_owned_val(Val::map(indexmap::IndexMap::new())),
+        FlowResultModifier::Map => baked_owned_val(Val::map(ValIndexMap::default())),
         FlowResultModifier::Vec => baked_owned_val(Val::vec(Vec::new())),
         FlowResultModifier::One => {
             unreachable!("flow accumulator only created for Map/Vec modifiers")
@@ -9265,7 +9266,7 @@ impl<'a> EmitCtx<'a> {
                 let (src_ptr, src_temp) = self.owned_operand(builder, *src)?;
                 let ok_key = baked_owned_val(Val::Str("ok".into()));
                 let key_ptr = builder.ins().iconst(types::I64, ok_key);
-                let empty_map = baked_owned_val(Val::map(indexmap::IndexMap::new()));
+                let empty_map = baked_owned_val(Val::map(ValIndexMap::default()));
                 let map_ptr = builder.ins().iconst(types::I64, empty_map);
                 if let Ok(idx) = self.remap_reg(*dest) {
                     self.compile_time_owned.insert(idx);
@@ -13673,6 +13674,7 @@ mod tests {
     use crate::lang::runtime::vm::VirtualMachine;
     use crate::val;
     use crate::val::Val;
+    use crate::val::ValIndexMap;
     use ahash::AHashMap;
     use fastnum::{D256, decimal::Context};
     use indexmap::IndexMap;
@@ -18793,7 +18795,7 @@ mod tests {
 
     #[test]
     fn jit_map_keys_refuse_values_past_the_shape_budget() {
-        let map = Val::map(indexmap::IndexMap::new());
+        let map = Val::map(ValIndexMap::default());
         let depth = crate::lang::runtime::limits::MAX_VALUE_DEPTH + 10;
         let key = (0..depth).fold(Val::Null, |value, _| Val::vec(vec![value]));
         let value = Val::Int(1);
@@ -19526,9 +19528,9 @@ mod tests {
 
     #[test]
     fn jit_and_interpreter_route_non_string_keys_through_tagged_payloads() {
-        let mut payload = IndexMap::new();
+        let mut payload = ValIndexMap::default();
         payload.insert(val!(0), val!("old"));
-        let mut wrapper = IndexMap::new();
+        let mut wrapper = ValIndexMap::default();
         wrapper.insert(Val::from("$type"), Val::from("::test/Tagged"));
         wrapper.insert(Val::from("$val"), Val::map(payload));
         let args = [Val::map(wrapper), val!(0), val!("new")];
@@ -19561,9 +19563,9 @@ mod tests {
 
     #[test]
     fn jit_and_interpreter_preserve_reserved_tagged_metadata() {
-        let mut payload = IndexMap::new();
+        let mut payload = ValIndexMap::default();
         payload.insert(Val::from("message"), Val::from("original"));
-        let mut wrapper = IndexMap::new();
+        let mut wrapper = ValIndexMap::default();
         wrapper.insert(Val::from("$type"), Val::from("::hot::run/Failure"));
         wrapper.insert(Val::from("$origin"), val!({"name": "test"}));
         wrapper.insert(Val::from("$val"), Val::map(payload));

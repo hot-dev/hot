@@ -52,6 +52,7 @@ use crate::lang::compiler::resolver::Resolver;
 use crate::lang::compiler::type_checker::TypeChecker;
 use crate::lang::errors::{CompilerErrors, CompilerResult};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use serde_json;
@@ -6554,13 +6555,13 @@ impl Compiler {
     ///   $all_fields: ["field1", "field2", ...]  // All expected field names for validation
     /// }
     fn build_type_info(&self, type_name: &str, type_def: &crate::lang::ast::TypeDef) -> Val {
-        let mut type_info = indexmap::IndexMap::new();
+        let mut type_info = ValIndexMap::default();
         type_info.insert(Val::from("$type"), Val::from(type_name));
 
         // Build field type info if this type has fields
         if let Some(ref fields) = type_def.fields {
-            let mut fields_info = indexmap::IndexMap::new();
-            let mut field_checks = indexmap::IndexMap::new();
+            let mut fields_info = ValIndexMap::default();
+            let mut field_checks = ValIndexMap::default();
             let mut required_fields = Vec::new();
             let mut all_fields = Vec::new();
 
@@ -6635,7 +6636,7 @@ impl Compiler {
                     return Val::map_empty();
                 }
 
-                let mut union_info = indexmap::IndexMap::new();
+                let mut union_info = ValIndexMap::default();
                 union_info.insert(Val::from("$union"), Val::vec(members));
                 Val::map(union_info)
             }
@@ -6649,7 +6650,7 @@ impl Compiler {
             TypeExpr::Generic(name, params) if name == "Vec" && params.len() == 1 => {
                 let item_type_info = self.build_field_type_info_from_expr(&params[0], false);
                 if !Self::is_empty_map(&item_type_info) || include_builtin {
-                    let mut vec_info = indexmap::IndexMap::new();
+                    let mut vec_info = ValIndexMap::default();
                     vec_info.insert(Val::from("$type"), Val::from("Vec"));
                     if !Self::is_empty_map(&item_type_info) {
                         vec_info.insert(Val::from("$item_type"), item_type_info);
@@ -6715,7 +6716,7 @@ impl Compiler {
                 }
             }
             TypeExpr::Literal(lit) => {
-                let mut type_info = indexmap::IndexMap::new();
+                let mut type_info = ValIndexMap::default();
                 type_info.insert(Val::from("$literal"), Val::from(lit.to_string()));
                 Val::map(type_info)
             }
@@ -6753,7 +6754,7 @@ impl Compiler {
     fn build_custom_type_info(&self, type_name: &str) -> Val {
         let (qualified_name, _found) = self.resolve_type_path(type_name);
 
-        let mut type_info = indexmap::IndexMap::new();
+        let mut type_info = ValIndexMap::default();
         if self.is_constructed_type(&qualified_name) {
             type_info.insert(Val::from("$constructed"), Val::Bool(true));
         }
@@ -6765,7 +6766,7 @@ impl Compiler {
     }
 
     fn simple_type_info(type_name: &str) -> Val {
-        let mut type_info = indexmap::IndexMap::new();
+        let mut type_info = ValIndexMap::default();
         type_info.insert(Val::from("$type"), Val::from(type_name));
         Val::map(type_info)
     }
@@ -6812,7 +6813,7 @@ impl Compiler {
     /// assoc base entries in insertion order.
     fn compile_map_with_spread(
         &mut self,
-        base_entries: &IndexMap<Val, Val>,
+        base_entries: &ValIndexMap,
         spread_entries: &[(usize, Value)],
     ) -> Result<RegisterId, String> {
         let dest_reg = self.allocate_register();
@@ -7959,7 +7960,7 @@ impl Compiler {
 
     /// Load the value a function alias binds: `$target` names the function.
     fn load_function_alias(&mut self, target: &str) -> RegisterId {
-        let mut alias_map = indexmap::IndexMap::new();
+        let mut alias_map = ValIndexMap::default();
         alias_map.insert(Val::from("$type"), Val::from("::hot::type/FunctionAlias"));
         alias_map.insert(Val::from("$target"), Val::from(target));
 

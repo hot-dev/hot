@@ -21,6 +21,7 @@
 //! never prints them.
 
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use aho_corasick::AhoCorasick;
 use base64::Engine as _;
 use once_cell::sync::Lazy;
@@ -809,7 +810,7 @@ impl<'a> RecordMask<'a> {
         }
         match value {
             Val::Map(map) => {
-                let masked: indexmap::IndexMap<Val, Val> = Arc::unwrap_or_clone(map)
+                let masked: ValIndexMap = Arc::unwrap_or_clone(map)
                     .into_iter()
                     .map(|(key, child)| {
                         let credential = matches!(&key, Val::Str(name) if is_credential_field(name))

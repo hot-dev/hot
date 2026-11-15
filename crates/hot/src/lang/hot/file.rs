@@ -9,8 +9,8 @@ use crate::lang::hot::iter::{HotIterator, IteratorBox};
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_args_range};
-use indexmap::IndexMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -143,7 +143,7 @@ fn infer_content_type(path: &str) -> Option<String> {
 fn create_direct_file_meta(path: &str, metadata: &std::fs::Metadata) -> Val {
     use std::time::UNIX_EPOCH;
 
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("file-id"), Val::from(path.to_string())); // Use path as ID
     map.insert(Val::from("path"), Val::from(path.to_string()));
     map.insert(Val::from("size"), Val::Int(metadata.len() as i64));
@@ -228,7 +228,7 @@ fn write_file_direct(path: &str, contents: &str) -> HotResult<Val> {
                 Ok(meta) => HotResult::Ok(create_direct_file_meta(path, &meta)),
                 Err(_) => {
                     // File written but can't get metadata - create minimal response
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("file-id"), Val::from(path.to_string()));
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));
@@ -266,7 +266,7 @@ fn write_file_bytes_direct(path: &str, contents: &[u8]) -> HotResult<Val> {
                 Ok(meta) => HotResult::Ok(create_direct_file_meta(path, &meta)),
                 Err(_) => {
                     // File written but can't get metadata - create minimal response
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("file-id"), Val::from(path.to_string()));
                     map.insert(Val::from("path"), Val::from(path.to_string()));
                     map.insert(Val::from("size"), Val::Int(contents.len() as i64));

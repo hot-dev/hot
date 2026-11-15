@@ -11,6 +11,7 @@ pub(crate) type StoreWrite = (
     Option<String>,
 );
 
+use crate::val::ValIndexMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,7 +63,7 @@ fn classify_embedding_input(val: Option<&Val>) -> EmbeddingInput<'_> {
     }
 }
 
-fn embedding_fields_map(val: &Val) -> Option<&indexmap::IndexMap<Val, Val>> {
+fn embedding_fields_map(val: &Val) -> Option<&ValIndexMap> {
     let Val::Map(m) = val else {
         return None;
     };
@@ -977,26 +978,26 @@ mod tests {
     }
 
     fn map_val(name: &str) -> Val {
-        let mut inner = indexmap::IndexMap::new();
+        let mut inner = ValIndexMap::default();
         inner.insert(Val::from("name"), Val::from(name));
-        let mut outer = indexmap::IndexMap::new();
+        let mut outer = ValIndexMap::default();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
         outer.insert(Val::from("$val"), Val::map(inner));
         Val::map(outer)
     }
 
     fn map_val_with_embedding(name: &str, embedding: Val) -> Val {
-        let mut inner = indexmap::IndexMap::new();
+        let mut inner = ValIndexMap::default();
         inner.insert(Val::from("name"), Val::from(name));
         inner.insert(Val::from("embedding"), embedding);
-        let mut outer = indexmap::IndexMap::new();
+        let mut outer = ValIndexMap::default();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
         outer.insert(Val::from("$val"), Val::map(inner));
         Val::map(outer)
     }
 
     fn typed_val(type_name: &str, payload: Option<Val>) -> Val {
-        let mut outer = indexmap::IndexMap::new();
+        let mut outer = ValIndexMap::default();
         outer.insert(Val::from("$type"), Val::from(type_name));
         if let Some(payload) = payload {
             outer.insert(Val::from("$val"), payload);
@@ -1056,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_config_from_val_embedding_conf_custom_map() {
-        let mut em = indexmap::IndexMap::new();
+        let mut em = ValIndexMap::default();
         em.insert(Val::from("model"), Val::from("text-embedding-3-small"));
         em.insert(Val::from("provider"), Val::from("openai"));
         em.insert(Val::from("field"), Val::from("body"));
@@ -1082,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_config_from_val_embedding_conf_custom_hot_fn() {
-        let mut em = indexmap::IndexMap::new();
+        let mut em = ValIndexMap::default();
         em.insert(Val::from("provider"), Val::from("test"));
         em.insert(Val::from("dimensions"), Val::Int(2));
         em.insert(Val::from("embed-fn"), Val::from("test-embed"));
@@ -1127,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_config_from_val_embedding_conf_custom() {
-        let mut em = indexmap::IndexMap::new();
+        let mut em = ValIndexMap::default();
         em.insert(Val::from("model"), Val::from("text-embedding-3-small"));
         em.insert(Val::from("provider"), Val::from("openai"));
         em.insert(Val::from("field"), Val::from("body"));
@@ -1150,9 +1151,9 @@ mod tests {
 
     #[test]
     fn test_config_from_val_missing_name() {
-        let mut inner = indexmap::IndexMap::new();
+        let mut inner = ValIndexMap::default();
         inner.insert(Val::from("not-name"), Val::from("oops"));
-        let mut outer = indexmap::IndexMap::new();
+        let mut outer = ValIndexMap::default();
         outer.insert(Val::from("$type"), Val::from("::hot::store/Map"));
         outer.insert(Val::from("$val"), Val::map(inner));
         let val = Val::map(outer);

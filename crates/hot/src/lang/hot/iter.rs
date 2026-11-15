@@ -7,8 +7,8 @@ use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::stream::StreamPublisher;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
-use indexmap::IndexMap;
 use std::any::Any;
 use std::hash::Hasher;
 use std::sync::{Arc, Mutex};
@@ -220,7 +220,7 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 
     // Build typed Next result
-    let mut result_map: IndexMap<Val, Val> = IndexMap::new();
+    let mut result_map: ValIndexMap = ValIndexMap::default();
     result_map.insert(Val::from("$type"), Val::from("::hot::iter/Next"));
     result_map.insert(Val::from("value"), value);
     result_map.insert(Val::from("done"), Val::Bool(done));
@@ -310,7 +310,7 @@ pub struct MapIterator {
 }
 
 impl MapIterator {
-    pub fn new(map: &IndexMap<Val, Val>) -> Self {
+    pub fn new(map: &ValIndexMap) -> Self {
         let pairs: Vec<(Val, Val)> = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         Self { pairs, index: 0 }
     }
@@ -336,7 +336,7 @@ pub struct MapKeysIterator {
 }
 
 impl MapKeysIterator {
-    pub fn new(map: &IndexMap<Val, Val>) -> Self {
+    pub fn new(map: &ValIndexMap) -> Self {
         let keys: Vec<Val> = map.keys().cloned().collect();
         Self { keys, index: 0 }
     }
@@ -362,7 +362,7 @@ pub struct MapValuesIterator {
 }
 
 impl MapValuesIterator {
-    pub fn new(map: &IndexMap<Val, Val>) -> Self {
+    pub fn new(map: &ValIndexMap) -> Self {
         let values: Vec<Val> = map.values().cloned().collect();
         Self { values, index: 0 }
     }

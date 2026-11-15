@@ -1,5 +1,6 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::limits;
+use crate::val::ValIndexMap;
 use crate::val::{Val, tagged_type_name};
 use crate::validate_args;
 use ego_tree::NodeId;
@@ -375,7 +376,7 @@ struct NodeKeys {
 
 struct NodeParts<'a> {
     tag: &'a str,
-    attrs: Option<&'a IndexMap<Val, Val>>,
+    attrs: Option<&'a ValIndexMap>,
     content: &'a [Val],
 }
 
@@ -437,7 +438,7 @@ impl NameCache {
 fn document_to_val(html: &Html) -> Result<Val, String> {
     struct OpenElement {
         tag: Val,
-        attrs: IndexMap<Val, Val>,
+        attrs: ValIndexMap,
         content: Vec<Val>,
     }
 
@@ -453,7 +454,10 @@ fn document_to_val(html: &Html) -> Result<Val, String> {
                     if open.len() >= MAX_HTML_DEPTH {
                         return Err(depth_error());
                     }
-                    let mut attrs = IndexMap::with_capacity(element.attrs.len());
+                    let mut attrs = ValIndexMap::with_capacity_and_hasher(
+                        element.attrs.len(),
+                        Default::default(),
+                    );
                     for (name, value) in &element.attrs {
                         let key = match &name.prefix {
                             Some(prefix) => names.get(&format!("{prefix}:{}", name.local)),
@@ -478,7 +482,7 @@ fn document_to_val(html: &Html) -> Result<Val, String> {
             },
             Edge::Close(node) if node.value().is_element() => {
                 if let Some(element) = open.pop() {
-                    let mut map = IndexMap::with_capacity(3);
+                    let mut map = ValIndexMap::with_capacity_and_hasher(3, Default::default());
                     map.insert(keys.tag.clone(), element.tag);
                     map.insert(keys.attrs.clone(), Val::map(element.attrs));
                     map.insert(keys.content.clone(), Val::vec(element.content));
@@ -692,9 +696,9 @@ mod tests {
     }
 
     fn element(tag: &str, content: Vec<Val>) -> Val {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("tag"), Val::from(tag));
-        map.insert(Val::from("attrs"), Val::map(IndexMap::new()));
+        map.insert(Val::from("attrs"), Val::map(ValIndexMap::default()));
         map.insert(Val::from("content"), Val::vec(content));
         Val::map(map)
     }
@@ -922,7 +926,7 @@ mod tests {
 
     #[test]
     fn malformed_nodes_are_an_err() {
-        for bad in [Val::Null, Val::Int(1), Val::map(IndexMap::new())] {
+        for bad in [Val::Null, Val::Int(1), Val::map(ValIndexMap::default())] {
             assert!(matches!(
                 select(&[bad.clone(), Val::from("a")]),
                 HotResult::Err(_)

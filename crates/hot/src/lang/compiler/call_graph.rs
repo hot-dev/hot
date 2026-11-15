@@ -582,6 +582,7 @@ fn resolve_ref_fqn(
 mod tests {
     use super::*;
     use crate::lang::ast::*;
+    use crate::val::ValIndexMap;
     use indexmap::IndexMap;
 
     fn make_ns_path(name: &str) -> NsPath {
@@ -600,17 +601,17 @@ mod tests {
     }
 
     fn make_var_with_ctx(name: &str, ctx_keys: Vec<(&str, bool)>) -> Var {
-        let ctx_map: IndexMap<Val, Val> = ctx_keys
+        let ctx_map: ValIndexMap = ctx_keys
             .into_iter()
             .map(|(k, required)| {
-                let config: IndexMap<Val, Val> = [(Val::from("required"), Val::Bool(required))]
+                let config: ValIndexMap = [(Val::from("required"), Val::Bool(required))]
                     .into_iter()
                     .collect();
                 (Val::from(k), Val::map(config))
             })
             .collect();
 
-        let meta_map: IndexMap<Val, Val> = [(Val::from("ctx"), Val::map(ctx_map))]
+        let meta_map: ValIndexMap = [(Val::from("ctx"), Val::map(ctx_map))]
             .into_iter()
             .collect();
 
@@ -1288,7 +1289,7 @@ entry fn (a: Int, b: Int): Str { plain() }
     }
 
     fn make_var_with_box(name: &str, min_size: Option<&str>, network: Option<bool>) -> Var {
-        let mut box_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut box_map: ValIndexMap = ValIndexMap::default();
         if let Some(size) = min_size {
             box_map.insert(Val::from("min-size"), Val::from(size));
         }
@@ -1296,7 +1297,7 @@ entry fn (a: Int, b: Int): Str { plain() }
             box_map.insert(Val::from("network"), Val::Bool(net));
         }
 
-        let meta_map: IndexMap<Val, Val> = [(Val::from("box"), Val::map(box_map))]
+        let meta_map: ValIndexMap = [(Val::from("box"), Val::map(box_map))]
             .into_iter()
             .collect();
 

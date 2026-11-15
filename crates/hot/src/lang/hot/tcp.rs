@@ -12,7 +12,7 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::outbound::DestinationPolicy;
 use crate::val::Val;
-use indexmap::IndexMap;
+use crate::val::ValIndexMap;
 use std::any::Any;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -221,7 +221,7 @@ pub(crate) fn build_conn_map(inner: &Arc<TcpConnInner>, port: i64, tls: bool) ->
     let handle = TcpConnectionHandle {
         inner: Arc::clone(inner),
     };
-    let mut conn_map: IndexMap<Val, Val> = IndexMap::new();
+    let mut conn_map: ValIndexMap = ValIndexMap::default();
     conn_map.insert(Val::from("id"), Val::from(inner.id.clone()));
     conn_map.insert(Val::from("host"), Val::from(inner.host.clone()));
     conn_map.insert(Val::from("port"), Val::Int(port));
@@ -718,7 +718,7 @@ mod tests {
 
         tokio::task::spawn_blocking(move || {
             let conn = unwrap_ok(connect(&[Val::from("127.0.0.1"), Val::Int(port as i64)]));
-            let mut opts: IndexMap<Val, Val> = IndexMap::new();
+            let mut opts: ValIndexMap = ValIndexMap::default();
             opts.insert(Val::from("timeout"), Val::Int(200));
             let err = expect_err(read(&[conn, Val::Int(16), Val::map(opts)]));
             assert!(err.to_string().contains("timed out"), "got: {:?}", err);
@@ -735,7 +735,7 @@ mod tests {
                 let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 l.local_addr().unwrap().port()
             };
-            let mut opts: IndexMap<Val, Val> = IndexMap::new();
+            let mut opts: ValIndexMap = ValIndexMap::default();
             opts.insert(Val::from("timeout"), Val::Int(2000));
             let err = expect_err(connect(&[
                 Val::from("127.0.0.1"),
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn isolation_rejects_infinite_timeout() {
-        let mut opts = IndexMap::new();
+        let mut opts = ValIndexMap::default();
         opts.insert(Val::from("timeout"), Val::Int(0));
         let result = opt_timeout("::hot::tcp/read", Some(&Val::map(opts)), false);
         assert!(result.is_err());

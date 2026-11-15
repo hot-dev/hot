@@ -16,6 +16,7 @@
 
 use crate::lang::ast::{DeepPath, Ref, Value};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use indexmap::IndexMap;
 
 /// Evaluate a file of literal bindings and return the last binding's value
@@ -112,7 +113,7 @@ fn set_path(current: Val, keys: &[String], value: Val) -> Result<Val, String> {
     };
     let mut map = match current {
         Val::Map(map) => std::sync::Arc::unwrap_or_clone(map).into_inner(),
-        Val::Null => IndexMap::new(),
+        Val::Null => ValIndexMap::default(),
         other => return Err(format!("'{}' is set on a {}, not a map", key, other)),
     };
     let key = Val::from(key.as_str());

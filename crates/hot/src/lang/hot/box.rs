@@ -16,6 +16,7 @@ use crate::lang::hot::task::{TaskRequest, fail_task_after_enqueue_error};
 use crate::lang::hot::r#type::HotResult;
 use crate::queue::Queue;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody, HostConfig};
@@ -1091,7 +1092,7 @@ pub async fn run_container_async(
 
 /// Get the list of denied images (images that are blocked).
 pub fn allowed_images(_args: &[Val]) -> HotResult<Val> {
-    let mut result = indexmap::IndexMap::new();
+    let mut result = ValIndexMap::default();
     let denied: Vec<Val> = DENIED_IMAGES
         .iter()
         .map(|s| Val::from(s.to_string()))
@@ -1156,7 +1157,7 @@ pub fn sizes(_args: &[Val]) -> HotResult<Val> {
 
 /// Get container execution statistics.
 pub fn stats(vm: &mut crate::lang::runtime::vm::VirtualMachine, _args: &[Val]) -> HotResult<Val> {
-    let mut result = indexmap::IndexMap::new();
+    let mut result = ValIndexMap::default();
     result.insert(
         Val::from("enabled"),
         Val::from(is_box_enabled_from_conf(vm.get_conf())),
@@ -1275,9 +1276,9 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 minutes_remaining < 0 || compute_units_remaining < 0
             };
 
-            let mut map = indexmap::IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("$type"), Val::from("::hot::box/BoxQuota"));
-            let mut val_map = indexmap::IndexMap::new();
+            let mut val_map = ValIndexMap::default();
             // The limits tell `-1 = unlimited` apart from a paid plan that is
             // exactly one unit over.
             val_map.insert(
@@ -1364,9 +1365,9 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 (cpu_quota / 1000).min(100)
             };
 
-            let mut map = indexmap::IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("$type"), Val::from("::hot::box/BoxLimits"));
-            let mut val_map = indexmap::IndexMap::new();
+            let mut val_map = ValIndexMap::default();
             val_map.insert(Val::from("memory-mb"), Val::Int(memory_mb));
             val_map.insert(Val::from("cpu-pct"), Val::Int(cpu_pct));
             val_map.insert(Val::from("tmp-mb"), Val::Int(tmp_size_mb));

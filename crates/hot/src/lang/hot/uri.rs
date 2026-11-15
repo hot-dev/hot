@@ -1,7 +1,7 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_args_range};
-use indexmap::IndexMap;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use url::Url;
 
@@ -22,7 +22,7 @@ const URI_TYPE: &str = "::hot::uri/Uri";
 
 /// Build a Uri typed map from parsed Url components
 fn url_to_uri_map(parsed: &Url) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("$type"), Val::from(URI_TYPE));
 
     map.insert(Val::from("scheme"), Val::from(parsed.scheme()));
@@ -89,7 +89,7 @@ fn url_to_uri_map(parsed: &Url) -> Val {
 
 /// Reconstruct a URI string from a Uri typed map.
 /// Used by the Uri -> Str coercion and by join.
-fn uri_map_to_string(map: &IndexMap<Val, Val>) -> HotResult<Val> {
+fn uri_map_to_string(map: &ValIndexMap) -> HotResult<Val> {
     let scheme = match map.get(&Val::from("scheme")) {
         Some(Val::Str(s)) => s.clone(),
         _ => return HotResult::Err(Val::from("Uri: scheme is required")),
@@ -290,7 +290,7 @@ pub fn decode_query(args: &[Val]) -> HotResult<Val> {
         query.as_ref()
     };
 
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     for (key, value) in url::form_urlencoded::parse(query_str.as_bytes()) {
         map.insert(Val::from(key.as_ref()), Val::from(value.as_ref()));
     }
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_encode_query_basic() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("city"), Val::from("Salt Lake City"));
         map.insert(Val::from("days"), Val::Int(3));
 
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_build_basic() {
-        let mut parts = IndexMap::new();
+        let mut parts = ValIndexMap::default();
         parts.insert(Val::from("scheme"), Val::from("https"));
         parts.insert(Val::from("host"), Val::from("example.com"));
         parts.insert(Val::from("path"), Val::from("/users"));
@@ -708,11 +708,11 @@ mod tests {
 
     #[test]
     fn test_build_with_query_map() {
-        let mut query = IndexMap::new();
+        let mut query = ValIndexMap::default();
         query.insert(Val::from("active"), Val::Bool(true));
         query.insert(Val::from("page"), Val::Int(1));
 
-        let mut parts = IndexMap::new();
+        let mut parts = ValIndexMap::default();
         parts.insert(Val::from("scheme"), Val::from("https"));
         parts.insert(Val::from("host"), Val::from("example.com"));
         parts.insert(Val::from("path"), Val::from("/users"));
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn test_build_with_port() {
-        let mut parts = IndexMap::new();
+        let mut parts = ValIndexMap::default();
         parts.insert(Val::from("scheme"), Val::from("https"));
         parts.insert(Val::from("host"), Val::from("example.com"));
         parts.insert(Val::from("port"), Val::Int(8080));
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_encode_query_decode_query_roundtrip() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("name"), Val::from("Alice & Bob"));
         map.insert(Val::from("q"), Val::from("hello=world"));
 

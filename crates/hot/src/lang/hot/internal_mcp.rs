@@ -16,6 +16,7 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::function_ref::{FunctionRef, extract_function_ref};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
@@ -141,7 +142,7 @@ pub fn clear_registry() {
 }
 
 fn entry_to_val(entry: &ToolSchemaEntry) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("name"), Val::from(entry.name.as_str()));
     map.insert(Val::from("input-schema"), entry.input_schema.clone());
     map.insert(
@@ -248,7 +249,7 @@ pub fn invoke_with_input(
 
     let input_map = match input {
         Val::Map(m) => m.clone(),
-        Val::Null => Arc::new(IndexMap::new().into()),
+        Val::Null => Arc::new(ValIndexMap::default().into()),
         other => {
             return HotResult::Err(Val::from(format!(
                 "::hot::internal::mcp/invoke-with-input: input must be a Map (got {:?})",
@@ -378,13 +379,13 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture_entry(name: &str) -> ToolSchemaEntry {
-        let mut props = IndexMap::new();
+        let mut props = ValIndexMap::default();
         props.insert(Val::from("query"), {
-            let mut p = IndexMap::new();
+            let mut p = ValIndexMap::default();
             p.insert(Val::from("type"), Val::from("string"));
             Val::map(p)
         });
-        let mut input_schema = IndexMap::new();
+        let mut input_schema = ValIndexMap::default();
         input_schema.insert(Val::from("type"), Val::from("object"));
         input_schema.insert(Val::from("properties"), Val::map(props));
         ToolSchemaEntry {

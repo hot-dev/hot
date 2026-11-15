@@ -1,4 +1,5 @@
 use crate::lang::hot::r#type::HotResult;
+use crate::val::ValIndexMap;
 use crate::val::{HOT_BYTE_TYPE, HOT_BYTES_TYPE, Val};
 use crate::validate_args;
 
@@ -155,7 +156,7 @@ fn convert_json_value_to_val(v: &serde_json::Value, depth: usize) -> Result<Val,
                 }
             }
 
-            let mut out = indexmap::IndexMap::new();
+            let mut out = ValIndexMap::default();
             for (k, v) in map.iter() {
                 out.insert(
                     Val::from(k.clone()),

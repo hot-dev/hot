@@ -67,7 +67,7 @@ pub fn check_json_shape(value: &JsonValue, operation: &str) -> Result<(), String
 /// This is an implementation-level lookup. User code should construct types and
 /// inspect them with the language's type operations rather than reading or
 /// writing representation keys directly.
-pub(crate) fn tagged_type_name(map: &IndexMap<Val, Val>) -> Option<&str> {
+pub(crate) fn tagged_type_name(map: &ValIndexMap) -> Option<&str> {
     static TYPE_KEY: OnceLock<Val> = OnceLock::new();
     match map.get(TYPE_KEY.get_or_init(|| Val::from("$type"))) {
         Some(Val::Str(name)) => Some(name),
@@ -87,7 +87,7 @@ fn tagged_payload_key() -> &'static Val {
 /// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
 /// other sibling field keeps foreign maps stable instead of guessing that
 /// arbitrary `$...` application data is Hot metadata.
-pub(crate) fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
+pub(crate) fn is_tagged_wrapper(map: &ValIndexMap) -> bool {
     let Some(type_name) = tagged_type_name(map) else {
         return false;
     };
@@ -121,7 +121,7 @@ fn names_variant(type_name: &str) -> bool {
 /// (`Server({...base, port: 2})`) to get a typed value back. An `Err` wrapper
 /// is left intact so the error keeps propagating instead of having its
 /// payload merged as data.
-pub(crate) fn map_spread_entries(source: &Val) -> Option<&IndexMap<Val, Val>> {
+pub(crate) fn map_spread_entries(source: &Val) -> Option<&ValIndexMap> {
     let Val::Map(map) = source else {
         return None;
     };
@@ -445,10 +445,33 @@ impl fmt::Debug for ValVec {
     }
 }
 
+/// The hasher of a Hot Map's keys: aHash, seeded at random per process.
+/// A Map's keys often come from outside (JSON bodies, webhook payloads), so
+/// the hasher must resist collision flooding, as std's SipHash does; aHash
+/// does that at a fraction of SipHash's cost for the short keys Maps hold.
+/// Iteration follows insertion order whatever the hasher.
+pub type ValHasher = ahash::RandomState;
+
+/// A Hot Map's entries, in insertion order.
+pub type ValIndexMap = IndexMap<Val, Val, ValHasher>;
+
+/// [`indexmap::indexmap!`] for a [`ValIndexMap`], for tests.
+#[cfg(test)]
+macro_rules! val_index_map {
+    ($($key:expr => $value:expr),* $(,)?) => {{
+        #[allow(unused_mut)]
+        let mut map = $crate::val::ValIndexMap::default();
+        $(map.insert($key, $value);)*
+        map
+    }};
+}
+#[cfg(test)]
+pub(crate) use val_index_map;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ValMap(
-    IndexMap<Val, Val>,
+    ValIndexMap,
     // Deserialized or mutably borrowed maps conservatively use iterative drop.
     #[serde(skip, default = "may_have_children")] bool,
 );
@@ -471,7 +494,7 @@ impl PartialEq for ValMap {
 }
 impl Eq for ValMap {}
 impl std::ops::Deref for ValMap {
-    type Target = IndexMap<Val, Val>;
+    type Target = ValIndexMap;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -482,8 +505,8 @@ impl std::ops::DerefMut for ValMap {
         &mut self.0
     }
 }
-impl From<IndexMap<Val, Val>> for ValMap {
-    fn from(entries: IndexMap<Val, Val>) -> Self {
+impl From<ValIndexMap> for ValMap {
+    fn from(entries: ValIndexMap) -> Self {
         let recursive = entries
             .iter()
             .any(|(key, value)| recursive_value(key) || recursive_value(value));
@@ -491,7 +514,7 @@ impl From<IndexMap<Val, Val>> for ValMap {
     }
 }
 impl ValMap {
-    pub fn into_inner(mut self) -> IndexMap<Val, Val> {
+    pub fn into_inner(mut self) -> ValIndexMap {
         std::mem::take(&mut self.0)
     }
     pub fn insert(&mut self, key: Val, value: Val) -> Option<Val> {
@@ -1072,7 +1095,7 @@ impl<T: ValType> ValType for Vec<T> {
 
 impl<K: ValType, V: ValType> ValType for IndexMap<K, V> {
     fn val(&self) -> Val {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         for (k, v) in self.iter() {
             map.insert(k.val(), v.val());
         }
@@ -1703,9 +1726,9 @@ impl From<Vec<u8>> for Val {
     }
 }
 
-// Implementation of From<IndexMap<Val, Val>> for Val
-impl From<IndexMap<Val, Val>> for Val {
-    fn from(m: IndexMap<Val, Val>) -> Self {
+// Implementation of From<ValIndexMap> for Val
+impl From<ValIndexMap> for Val {
+    fn from(m: ValIndexMap) -> Self {
         Val::map(m)
     }
 }
@@ -1736,7 +1759,7 @@ pub struct MapEntries(pub Vec<MapEntry>);
 // Convert MapEntries to a Val::Map
 impl From<MapEntries> for Val {
     fn from(entries: MapEntries) -> Self {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         for MapEntry(k, v) in entries.0 {
             map.insert(k, v);
         }
@@ -1786,7 +1809,7 @@ impl From<Vec<Val>> for Val {
 
 impl From<Vec<(Val, Val)>> for Val {
     fn from(pairs: Vec<(Val, Val)>) -> Self {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         for (k, v) in pairs {
             map.insert(k, v);
         }
@@ -2204,7 +2227,7 @@ fn json_entries_to_val(mut entries: IndexMap<String, JsonNode>) -> Val {
         }
         Some(tag) => {
             // A typed map keeps `$type` first, wherever it came in.
-            let mut map = IndexMap::with_capacity(entries.len());
+            let mut map = ValIndexMap::with_capacity_and_hasher(entries.len(), Default::default());
             map.insert(Val::from("$type"), Val::from(tag));
             for (key, value) in entries {
                 if key != "$type" {
@@ -2338,7 +2361,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
                     }
                     _ => {
                         // Regular typed map - convert to Map with $type field
-                        let mut map = IndexMap::new();
+                        let mut map = ValIndexMap::default();
                         // Add the $type field
                         map.insert(Val::from("$type"), Val::from(tag_str.to_string()));
                         // Add other fields (excluding $type field)
@@ -2353,7 +2376,7 @@ fn serde_json_to_val(value: serde_json::Value) -> Val {
             }
 
             // Regular map handling
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             for (k, v) in obj {
                 map.insert(Val::from(k), serde_json_to_val(v));
             }
@@ -2396,7 +2419,7 @@ macro_rules! val {
     // Map with JSON-like syntax
     ({ $($tt:tt)+ }) => {
         {
-            let mut map = $crate::val::indexmap::IndexMap::new();
+            let mut map = $crate::val::ValIndexMap::default();
             $crate::val_internal!(@map map () ($($tt)+) ($($tt)+));
             $crate::val::Val::map(map)
         }
@@ -2543,7 +2566,7 @@ macro_rules! val_internal {
 // Implement From for vector literals of key-value pairs
 impl<const N: usize> From<[(Val, Val); N]> for Val {
     fn from(pairs: [(Val, Val); N]) -> Self {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         for (k, v) in pairs {
             map.insert(k, v);
         }
@@ -2578,7 +2601,7 @@ impl Val {
     }
 
     /// A Map value holding `entries`.
-    pub fn map(entries: IndexMap<Val, Val>) -> Self {
+    pub fn map(entries: ValIndexMap) -> Self {
         Val::Map(Arc::new(ValMap::from(entries)))
     }
 
@@ -2589,7 +2612,7 @@ impl Val {
 
     /// Creates a new empty map value
     pub fn map_empty() -> Self {
-        Val::map(IndexMap::new())
+        Val::map(ValIndexMap::default())
     }
 
     pub fn vec_empty() -> Self {
@@ -2598,7 +2621,7 @@ impl Val {
 
     /// Creates a map with a single key-value pair
     pub fn map_with_kv(key: impl Into<Val>, value: impl Into<Val>) -> Self {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(key.into(), value.into());
         Val::map(map)
     }
@@ -2608,7 +2631,7 @@ impl Val {
     where
         I: IntoIterator<Item = (Val, Val)>,
     {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         for (k, v) in entries {
             map.insert(k, v);
         }
@@ -2617,14 +2640,14 @@ impl Val {
 
     /// Creates a Val::Map from an IndexMap (boxes the map internally)
     #[inline]
-    pub fn new_map(map: IndexMap<Val, Val>) -> Self {
+    pub fn new_map(map: ValIndexMap) -> Self {
         Val::map(map)
     }
 
     /// Get a new IndexMap for internal use
     #[doc(hidden)]
-    pub fn new_indexmap() -> IndexMap<Val, Val> {
-        IndexMap::new()
+    pub fn new_indexmap() -> ValIndexMap {
+        ValIndexMap::default()
     }
 
     /// Recursively resolve `Val::Box` wrappers (AstNode, TypeRef, FunctionRef,
@@ -2637,7 +2660,7 @@ impl Val {
     pub fn resolve_boxes(&self) -> Val {
         match self {
             Val::Map(m) => {
-                let resolved: indexmap::IndexMap<Val, Val> = m
+                let resolved: ValIndexMap = m
                     .iter()
                     .map(|(k, v)| (k.resolve_boxes(), v.resolve_boxes()))
                     .collect();
@@ -2679,7 +2702,7 @@ impl Val {
     pub fn to_hot_data_repr(&self) -> Val {
         match self {
             Val::Map(m) => {
-                let mapped: indexmap::IndexMap<Val, Val> = m
+                let mapped: ValIndexMap = m
                     .iter()
                     .map(|(key, value)| (key.to_hot_data_repr(), value.to_hot_data_repr()))
                     .collect();
@@ -2692,14 +2715,14 @@ impl Val {
     }
 
     fn typed_hot_data_value(type_name: &str, value: Val) -> Val {
-        let mut map = indexmap::IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
         map.insert(Val::from("$val"), value);
         Val::map(map)
     }
 
     fn lambda_info_data(lambda: &crate::lang::bytecode::LambdaInfo) -> Val {
-        let mut meta = indexmap::IndexMap::new();
+        let mut meta = ValIndexMap::default();
         meta.insert(
             Val::from("parameters"),
             Val::vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
@@ -2723,7 +2746,7 @@ impl Val {
         extra_capture_names.sort();
         capture_names.extend(extra_capture_names);
 
-        let captures: indexmap::IndexMap<Val, Val> = capture_names
+        let captures: ValIndexMap = capture_names
             .into_iter()
             .filter_map(|name| {
                 lambda
@@ -3134,7 +3157,7 @@ impl Val {
                 return value.format_hot_display(0);
             }
 
-            let mut meta = indexmap::IndexMap::new();
+            let mut meta = ValIndexMap::default();
             meta.insert(
                 Val::from("parameters"),
                 Val::vec(lambda.parameters.iter().cloned().map(Val::from).collect()),
@@ -3826,7 +3849,7 @@ impl Val {
                                 .insert(Val::from("$val"), Val::map(new_val_map.into_inner()));
                         } else {
                             // $val doesn't exist or isn't a map, create it
-                            let mut new_val_map = IndexMap::new();
+                            let mut new_val_map = ValIndexMap::default();
                             new_val_map.insert(key, value);
                             new_indexmap.insert(Val::from("$val"), Val::map(new_val_map));
                         }
@@ -3901,7 +3924,7 @@ impl Val {
                     Val::vec(new_vec)
                 } else {
                     // If we can't parse the index, create a map instead
-                    let mut new_indexmap = IndexMap::new();
+                    let mut new_indexmap = ValIndexMap::default();
                     let key = Val::from(current_part.to_string());
 
                     if remaining_parts.is_empty() {
@@ -3936,7 +3959,7 @@ impl Val {
                     Val::vec(new_vec)
                 } else {
                     // Create a new map
-                    let mut new_indexmap = IndexMap::new();
+                    let mut new_indexmap = ValIndexMap::default();
                     let key = Val::from(current_part.to_string());
 
                     if remaining_parts.is_empty() {
@@ -4017,7 +4040,10 @@ impl Val {
                 let _analysis_duration = analysis_start.elapsed();
 
                 let build_start = Instant::now();
-                let mut result = IndexMap::with_capacity(map1.len() + map2.len());
+                let mut result = ValIndexMap::with_capacity_and_hasher(
+                    map1.len() + map2.len(),
+                    Default::default(),
+                );
 
                 if !has_overlaps {
                     // No overlapping keys - just combine both maps (fast path)
@@ -4165,14 +4191,14 @@ impl Val {
     /// The value `Type({...})` builds: `fields` wrapped as `{$type, $val}`.
     /// A native whose declared return type is a struct returns this, so the
     /// result has that type's identity for arrows, `match` and `is-type`.
-    pub fn constructed(type_name: &str, fields: IndexMap<Val, Val>) -> Self {
-        let mut map = IndexMap::with_capacity(2);
+    pub fn constructed(type_name: &str, fields: ValIndexMap) -> Self {
+        let mut map = ValIndexMap::with_capacity_and_hasher(2, Default::default());
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
         map.insert(Val::from("$val"), Val::map(fields));
         Val::map(map)
     }
 
-    pub fn typed_map(type_name: &str, content: IndexMap<Val, Val>) -> Self {
+    pub fn typed_map(type_name: &str, content: ValIndexMap) -> Self {
         let mut map = content;
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
         Val::map(map)
@@ -4196,7 +4222,7 @@ impl Val {
     /// Create a Result.Ok variant from value
     /// Format: {$type: "::hot::type/Result.Ok", $val: value}
     pub fn ok(value: Val) -> Self {
-        let mut result_map = IndexMap::new();
+        let mut result_map = ValIndexMap::default();
         result_map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
         result_map.insert(Val::from("$val"), value);
         Val::map(result_map)
@@ -4205,7 +4231,7 @@ impl Val {
     /// Create a Result.Err variant from error value
     /// Format: {$type: "::hot::type/Result.Err", $val: error}
     pub fn err(value: Val) -> Self {
-        let mut result_map = IndexMap::new();
+        let mut result_map = ValIndexMap::default();
         result_map.insert(Val::from("$type"), Val::from("::hot::type/Result.Err"));
         result_map.insert(Val::from("$val"), value);
         Val::map(result_map)
@@ -4325,7 +4351,7 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(128 * 1024)
             .spawn(|| {
-                let mut map = ValMap::from(IndexMap::new());
+                let mut map = ValMap::from(ValIndexMap::default());
                 map.insert(Val::from("x"), Val::Int(1));
                 assert!(!map.1);
                 let restored: ValMap =
@@ -4336,7 +4362,7 @@ mod tests {
                 *map.get_mut(&Val::from("x")).unwrap() = deep();
                 assert!(map.1);
                 drop(map);
-                let mut map = ValMap::from(IndexMap::new());
+                let mut map = ValMap::from(ValIndexMap::default());
                 map.insert(Val::from("nested"), deep());
                 assert!(map.1);
                 drop(map);
@@ -4774,7 +4800,7 @@ mod tests {
         assert_eq!(float_val, Val::Dec("12.34".parse().unwrap()));
 
         // Map
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("key"), Val::from(123));
         let map_val = Val::from(map.clone());
         assert_eq!(map_val, Val::map(map));
@@ -5069,30 +5095,30 @@ mod tests {
     #[test]
     fn test_get_by_path() {
         // Create nested test structure
-        let mut profile_map = IndexMap::new();
+        let mut profile_map = ValIndexMap::default();
         profile_map.insert(Val::from("name"), Val::from("John"));
         profile_map.insert(Val::from("age"), Val::Int(30));
 
-        let mut settings_map = IndexMap::new();
+        let mut settings_map = ValIndexMap::default();
         settings_map.insert(Val::from("theme"), Val::from("light"));
 
-        let mut user_map = IndexMap::new();
+        let mut user_map = ValIndexMap::default();
         user_map.insert(Val::from("profile"), Val::map(profile_map));
         user_map.insert(Val::from("settings"), Val::map(settings_map));
 
         // Create post 1
-        let mut post1_map = IndexMap::new();
+        let mut post1_map = ValIndexMap::default();
         post1_map.insert(Val::from("id"), Val::Int(1));
         post1_map.insert(Val::from("title"), Val::from("Hello"));
 
         // Create post 2
-        let mut post2_map = IndexMap::new();
+        let mut post2_map = ValIndexMap::default();
         post2_map.insert(Val::from("id"), Val::Int(2));
         post2_map.insert(Val::from("title"), Val::from("World"));
 
         let posts_vec = vec![Val::map(post1_map), Val::map(post2_map)];
 
-        let mut root_map = IndexMap::new();
+        let mut root_map = ValIndexMap::default();
         root_map.insert(Val::from("user"), Val::map(user_map));
         root_map.insert(Val::from("posts"), Val::vec(posts_vec));
 
@@ -5119,21 +5145,21 @@ mod tests {
     #[test]
     fn test_set_by_path() {
         // Create nested test structure
-        let mut profile_map = IndexMap::new();
+        let mut profile_map = ValIndexMap::default();
         profile_map.insert(Val::from("name"), Val::from("John"));
         profile_map.insert(Val::from("age"), Val::Int(30));
 
-        let mut user_map = IndexMap::new();
+        let mut user_map = ValIndexMap::default();
         user_map.insert(Val::from("profile"), Val::map(profile_map));
 
         // Create post 1
-        let mut post1_map = IndexMap::new();
+        let mut post1_map = ValIndexMap::default();
         post1_map.insert(Val::from("id"), Val::Int(1));
         post1_map.insert(Val::from("title"), Val::from("Hello"));
 
         let posts_vec = vec![Val::map(post1_map)];
 
-        let mut root_map = IndexMap::new();
+        let mut root_map = ValIndexMap::default();
         root_map.insert(Val::from("user"), Val::map(user_map));
         root_map.insert(Val::from("posts"), Val::vec(posts_vec));
 
@@ -5154,7 +5180,7 @@ mod tests {
         assert_eq!(updated.get("posts.0.title"), Some(Val::from("Updated")));
 
         // Add new vector element
-        let mut post2_map = IndexMap::new();
+        let mut post2_map = ValIndexMap::default();
         post2_map.insert(Val::from("id"), Val::Int(2));
         post2_map.insert(Val::from("title"), Val::from("New Post"));
 
@@ -5761,7 +5787,7 @@ mod tests {
         assert!(!pretty_json.contains("\"$box\": true"));
 
         // Test creating a map with boxed values
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("boxed"), boxed_val);
         map.insert(Val::from("normal"), Val::Int(123));
 
@@ -5786,7 +5812,7 @@ mod tests {
     #[test]
     fn test_typed_map() {
         // Create a typed map
-        let mut content = IndexMap::new();
+        let mut content = ValIndexMap::default();
         content.insert(Val::from("key"), Val::Int(42));
         let typed_map = Val::typed_map("Tag", content);
 
@@ -5859,7 +5885,7 @@ mod tests {
         assert!(Val::vec(vec![]).is_truthy()); // Empty vector is truthy in Hot
 
         // All maps are truthy, including empty maps
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("key"), Val::Int(1));
         assert!(Val::map(map).is_truthy());
         assert!(Val::map_empty().is_truthy()); // Empty map is truthy in Hot
@@ -6128,11 +6154,11 @@ mod tests {
     #[test]
     fn test_struct_field_access_without_val() {
         // Create a struct-like type instance with $type and $val fields
-        let mut struct_instance = IndexMap::new();
+        let mut struct_instance = ValIndexMap::default();
         struct_instance.insert(Val::from("$type"), Val::from("::test/A"));
 
         // Create the field data in $val
-        let mut field_data = IndexMap::new();
+        let mut field_data = ValIndexMap::default();
         field_data.insert(Val::from("a"), Val::Int(42));
         field_data.insert(Val::from("b"), Val::from("hello"));
         struct_instance.insert(Val::from("$val"), Val::map(field_data));
@@ -6322,7 +6348,7 @@ mod tests {
         assert_roundtrip(&empty_map, "empty map");
 
         // Map with string keys (the common case)
-        let mut string_key_map = IndexMap::new();
+        let mut string_key_map = ValIndexMap::default();
         string_key_map.insert(Val::from("name"), Val::from("Alice"));
         string_key_map.insert(Val::from("age"), Val::Int(30));
         assert_roundtrip(&Val::map(string_key_map), "map with string keys");
@@ -6332,7 +6358,7 @@ mod tests {
     fn test_val_roundtrip_map_int_keys() {
         // Map with integer keys - these get serialized as strings
         // and deserialized back as strings, so we expect the keys to change type
-        let mut int_key_map = IndexMap::new();
+        let mut int_key_map = ValIndexMap::default();
         int_key_map.insert(Val::Int(1), Val::from("one"));
         int_key_map.insert(Val::Int(2), Val::from("two"));
 
@@ -6352,11 +6378,11 @@ mod tests {
     #[test]
     fn test_val_roundtrip_nested_structures() {
         // Complex nested structure
-        let mut inner_map = IndexMap::new();
+        let mut inner_map = ValIndexMap::default();
         inner_map.insert(Val::from("x"), Val::Int(10));
         inner_map.insert(Val::from("y"), Val::Int(20));
 
-        let mut outer_map = IndexMap::new();
+        let mut outer_map = ValIndexMap::default();
         outer_map.insert(Val::from("point"), Val::map(inner_map));
         outer_map.insert(
             Val::from("tags"),
@@ -6378,7 +6404,7 @@ mod tests {
             Val::Bool(true),
             Val::vec(vec![Val::Int(1)]),
             Val::map({
-                let mut m = IndexMap::new();
+                let mut m = ValIndexMap::default();
                 m.insert(Val::from("key"), Val::Int(1));
                 m
             }),

@@ -4,6 +4,7 @@ use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::limits;
 use crate::lang::runtime::vm::{CancellationState, FailureState};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::AHashSet;
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ pub fn fast_is_empty_str(s: &str) -> Val {
 }
 
 #[inline(always)]
-pub fn fast_is_empty_map(m: &IndexMap<Val, Val>) -> Val {
+pub fn fast_is_empty_map(m: &ValIndexMap) -> Val {
     Val::Bool(m.is_empty())
 }
 
@@ -36,7 +37,7 @@ pub fn fast_length_str(s: &str) -> Val {
 }
 
 #[inline(always)]
-pub fn fast_length_map(m: &IndexMap<Val, Val>) -> Val {
+pub fn fast_length_map(m: &ValIndexMap) -> Val {
     Val::Int(m.len() as i64)
 }
 
@@ -67,7 +68,7 @@ pub fn fast_get_vec_int(v: &[Val], i: i64) -> Val {
 }
 
 #[inline(always)]
-pub fn fast_get_map(m: &IndexMap<Val, Val>, key: &Val) -> Val {
+pub fn fast_get_map(m: &ValIndexMap, key: &Val) -> Val {
     m.get(key).cloned().unwrap_or(Val::Null)
 }
 
@@ -217,7 +218,7 @@ pub(crate) fn onerr_disposition_of(val: &Val) -> Option<OnErrDisposition> {
 }
 
 fn onerr_variant_val(variant: &str) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(
         Val::from("$type"),
         Val::from(format!("::hot::type/OnErr.{}", variant)),
@@ -2233,7 +2234,7 @@ fn pmap_vec(
 fn pmap_map(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function_val: &Val,
-    map_val: &IndexMap<Val, Val>,
+    map_val: &ValIndexMap,
     _thread_count: usize,
     disposition: OnErrDisposition,
 ) -> HotResult<Val> {
@@ -2405,7 +2406,7 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             HotResult::Ok(Val::vec(result))
         }
         Val::Map(map) => {
-            let mut result_map = indexmap::IndexMap::new();
+            let mut result_map = ValIndexMap::default();
             for (key, value) in map.iter() {
                 match call_function_with_vm_multi_args(
                     vm,
@@ -2641,7 +2642,7 @@ pub fn partition(
             }
             Val::Map(map) => {
                 let mut result: Vec<Val> = Vec::new();
-                let mut current = indexmap::IndexMap::new();
+                let mut current = ValIndexMap::default();
                 for (i, (k, v)) in map.iter().enumerate() {
                     current.insert(k.clone(), v.clone());
                     if (i + 1) % chunk_size == 0 {
@@ -2692,8 +2693,8 @@ pub fn partition(
             HotResult::Ok(Val::vec(vec![Val::vec(true_items), Val::vec(false_items)]))
         }
         Val::Map(map) => {
-            let mut true_map = indexmap::IndexMap::new();
-            let mut false_map = indexmap::IndexMap::new();
+            let mut true_map = ValIndexMap::default();
+            let mut false_map = ValIndexMap::default();
 
             for (key, value) in map.iter() {
                 let pair = Val::vec(vec![key.clone(), value.clone()]);
@@ -2817,14 +2818,14 @@ fn vec_items<'a>(name: &str, coll: &'a Val) -> Result<&'a [Val], Val> {
 }
 
 /// The entries an `m: Map` function reads.
-fn map_entries<'a>(name: &str, map: &'a Val) -> Result<&'a IndexMap<Val, Val>, Val> {
+fn map_entries<'a>(name: &str, map: &'a Val) -> Result<&'a ValIndexMap, Val> {
     match crate::val::as_fields(map) {
         Val::Map(map) => Ok(map),
         _ => Err(Val::from(format!("{name} requires a map"))),
     }
 }
 
-fn into_hot_result(result: Result<IndexMap<Val, Val>, Val>) -> HotResult<Val> {
+fn into_hot_result(result: Result<ValIndexMap, Val>) -> HotResult<Val> {
     match result {
         Ok(map) => HotResult::Ok(Val::map(map)),
         Err(err) => HotResult::Err(err),
@@ -2842,7 +2843,7 @@ fn groups_by(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     coll: &Val,
     func: &Val,
-) -> Result<IndexMap<Val, Val>, Val> {
+) -> Result<ValIndexMap, Val> {
     let function = prepare_function(func);
     let mut groups: IndexMap<Val, Vec<Val>> = IndexMap::new();
     for item in vec_items("group-by", coll)? {
@@ -2867,9 +2868,9 @@ fn indexed_by(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     coll: &Val,
     func: &Val,
-) -> Result<IndexMap<Val, Val>, Val> {
+) -> Result<ValIndexMap, Val> {
     let function = prepare_function(func);
-    let mut index = IndexMap::new();
+    let mut index = ValIndexMap::default();
     for item in vec_items("index-by", coll)? {
         let key = call_forced(vm, &function, item, "Index-by function call")?;
         key.check_shape("index-by map key").map_err(Val::from)?;
@@ -2912,14 +2913,14 @@ fn mapped_entries(
     args: &[Val],
     name: &str,
     keys: bool,
-) -> Result<IndexMap<Val, Val>, Val> {
+) -> Result<ValIndexMap, Val> {
     let function = prepare_function(&args[1]);
     let what = format!(
         "{} function call",
         if keys { "Map-keys" } else { "Map-vals" }
     );
     let entries = map_entries(name, &args[0])?;
-    let mut out = IndexMap::with_capacity(entries.len());
+    let mut out = ValIndexMap::with_capacity_and_hasher(entries.len(), Default::default());
     for (key, value) in entries {
         if keys {
             let mapped = call_forced(vm, &function, key, &what)?;
@@ -2938,13 +2939,13 @@ fn filter_entries(
     args: &[Val],
     name: &str,
     by_key: bool,
-) -> Result<IndexMap<Val, Val>, Val> {
+) -> Result<ValIndexMap, Val> {
     let predicate = prepare_function(&args[1]);
     let what = format!(
         "{} predicate call",
         if by_key { "Filter-keys" } else { "Filter-vals" }
     );
-    let mut out = IndexMap::new();
+    let mut out = ValIndexMap::default();
     for (key, value) in map_entries(name, &args[0])? {
         let tested = if by_key { key } else { value };
         if call_forced(vm, &predicate, tested, &what)?.is_truthy() {
@@ -3305,7 +3306,7 @@ pub fn zipmap(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("zipmap values must be a collection")),
     };
 
-    let mut result_map = indexmap::IndexMap::new();
+    let mut result_map = ValIndexMap::default();
 
     // Zip keys and values together
     for (key, value) in keys.into_iter().zip(values) {
@@ -3491,7 +3492,7 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
             let end_idx = end.unwrap_or(len).min(len);
 
             if start_idx <= end_idx {
-                let mut result_map = indexmap::IndexMap::new();
+                let mut result_map = ValIndexMap::default();
                 for (i, (k, v)) in map.iter().enumerate() {
                     if i >= start_idx && i < end_idx {
                         result_map.insert(k.clone(), v.clone());
@@ -3743,7 +3744,7 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
             Val::vec(result)
         }
         Val::Map(map) => {
-            let mut result = IndexMap::with_capacity(map.len());
+            let mut result = ValIndexMap::with_capacity_and_hasher(map.len(), Default::default());
             for (key, value) in map.iter() {
                 match call_function_with_vm(vm, inner, value)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
@@ -3809,7 +3810,7 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
                 HotResult::Ok(Val::vec(result))
             }
             Val::Map(map) => {
-                let mut result_map = indexmap::IndexMap::new();
+                let mut result_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     match prewalk_recursive(vm, function_val, value) {
                         HotResult::Ok(walked_value) => {
@@ -3860,7 +3861,7 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                 Val::vec(result)
             }
             Val::Map(map) => {
-                let mut result_map = indexmap::IndexMap::new();
+                let mut result_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     match postwalk_recursive(vm, function_val, value) {
                         HotResult::Ok(walked_value) => {
@@ -3911,10 +3912,7 @@ pub fn postwalk_replace(
     };
     let data = &args[1];
 
-    fn postwalk_replace_recursive(
-        replacement_map: &indexmap::IndexMap<Val, Val>,
-        data: &Val,
-    ) -> Val {
+    fn postwalk_replace_recursive(replacement_map: &ValIndexMap, data: &Val) -> Val {
         // First recurse into children (post-order). A constructed value is
         // walked through its fields and keeps its type; a wrapper without map
         // fields is a leaf.
@@ -3927,7 +3925,7 @@ pub fn postwalk_replace(
                     .collect(),
             ),
             Val::Map(map) => {
-                let mut result_map = indexmap::IndexMap::new();
+                let mut result_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     result_map.insert(
                         postwalk_replace_recursive(replacement_map, key),
@@ -4040,7 +4038,10 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
         match crate::val::as_fields(coll) {
             Val::Map(m) => {
                 let mut new_map = (**m).clone();
-                let child = m.get(key).cloned().unwrap_or(Val::map(IndexMap::new()));
+                let child = m
+                    .get(key)
+                    .cloned()
+                    .unwrap_or(Val::map(ValIndexMap::default()));
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
                 // Constructed values along the path keep their types.
@@ -4086,7 +4087,7 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                     let child = new_vec
                         .get(idx)
                         .cloned()
-                        .unwrap_or(Val::map(IndexMap::new()));
+                        .unwrap_or(Val::map(ValIndexMap::default()));
                     new_vec[idx] = assoc_in_recursive(&child, rest, value)?;
                     Ok(Val::vec(new_vec))
                 } else {
@@ -4095,8 +4096,8 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
             }
             _ => {
                 // Non-collection at intermediate path: create a new map
-                let mut new_map = IndexMap::new();
-                let child = Val::map(IndexMap::new());
+                let mut new_map = ValIndexMap::default();
+                let child = Val::map(ValIndexMap::default());
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
                 Ok(Val::map(new_map))
@@ -4286,7 +4287,7 @@ mod tests {
         let depth = crate::lang::runtime::limits::MAX_VALUE_DEPTH + 10;
         let nested = || {
             (0..depth).fold(val!({}), |inner, _| {
-                Val::map(indexmap::IndexMap::from([(Val::from("k"), inner)]))
+                Val::map(ValIndexMap::from_iter([(Val::from("k"), inner)]))
             })
         };
         // The merge would walk all of the right map.
@@ -4365,10 +4366,10 @@ mod tests {
 
     #[test]
     fn test_merge_preserves_left_key_order() {
-        let mut a = IndexMap::new();
+        let mut a = ValIndexMap::default();
         a.insert(Val::from("a"), Val::Int(1));
         a.insert(Val::from("b"), Val::Int(2));
-        let mut b = IndexMap::new();
+        let mut b = ValIndexMap::default();
         b.insert(Val::from("b"), Val::Int(3));
         b.insert(Val::from("c"), Val::Int(4));
 
@@ -4393,7 +4394,7 @@ mod tests {
 
     #[test]
     fn test_get_map_found() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("a"), Val::Int(1));
         map.insert(Val::from("b"), Val::Int(2));
 
@@ -4404,7 +4405,7 @@ mod tests {
 
     #[test]
     fn test_get_map_not_found() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("a"), Val::Int(1));
 
         // 2-arity: get(map, key) - not found, returns null
@@ -4414,7 +4415,7 @@ mod tests {
 
     #[test]
     fn test_get_map_with_default() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("a"), Val::Int(1));
 
         // 3-arity: get(map, key, default) - not found, returns default
@@ -4529,13 +4530,13 @@ mod tests {
 
     #[test]
     fn test_get_in_nested_map() {
-        let inner = indexmap::indexmap! {
+        let inner = crate::val::val_index_map! {
             Val::from("c") => Val::Int(42),
         };
-        let mid = indexmap::indexmap! {
+        let mid = crate::val::val_index_map! {
             Val::from("b") => Val::map(inner),
         };
-        let outer = indexmap::indexmap! {
+        let outer = crate::val::val_index_map! {
             Val::from("a") => Val::map(mid),
         };
         let path = vec![Val::from("a"), Val::from("b"), Val::from("c")];
@@ -4545,11 +4546,11 @@ mod tests {
 
     #[test]
     fn test_get_in_mixed_map_vec() {
-        let user = indexmap::indexmap! {
+        let user = crate::val::val_index_map! {
             Val::from("name") => Val::from("Alice"),
         };
         let users_vec = vec![Val::map(user)];
-        let outer = indexmap::indexmap! {
+        let outer = crate::val::val_index_map! {
             Val::from("users") => Val::vec(users_vec),
         };
         let path = vec![Val::from("users"), Val::Int(0), Val::from("name")];
@@ -4559,7 +4560,7 @@ mod tests {
 
     #[test]
     fn test_get_in_missing_key() {
-        let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
+        let m = crate::val::val_index_map! { Val::from("a") => Val::Int(1) };
         let path = vec![Val::from("b"), Val::from("c")];
         let result = get_in(&[Val::map(m), Val::vec(path)]);
         assert_eq!(result, HotResult::Ok(Val::Null));
@@ -4567,7 +4568,7 @@ mod tests {
 
     #[test]
     fn test_get_in_with_default() {
-        let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
+        let m = crate::val::val_index_map! { Val::from("a") => Val::Int(1) };
         let path = vec![Val::from("b")];
         let result = get_in(&[Val::map(m), Val::vec(path), Val::from("fallback")]);
         assert_eq!(result, HotResult::Ok(Val::from("fallback")));
@@ -4575,7 +4576,7 @@ mod tests {
 
     #[test]
     fn test_get_in_empty_path() {
-        let m = indexmap::indexmap! { Val::from("a") => Val::Int(1) };
+        let m = crate::val::val_index_map! { Val::from("a") => Val::Int(1) };
         let result = get_in(&[Val::map(m.clone()), Val::vec(vec![])]);
         assert_eq!(result, HotResult::Ok(Val::map(m)));
     }
@@ -4584,8 +4585,8 @@ mod tests {
 
     #[test]
     fn test_assoc_in_nested() {
-        let inner = indexmap::indexmap! { Val::from("b") => Val::Int(1) };
-        let outer = indexmap::indexmap! { Val::from("a") => Val::map(inner) };
+        let inner = crate::val::val_index_map! { Val::from("b") => Val::Int(1) };
+        let outer = crate::val::val_index_map! { Val::from("a") => Val::map(inner) };
         let path = vec![Val::from("a"), Val::from("b")];
         let result = assoc_in(&[Val::map(outer), Val::vec(path), Val::Int(99)]);
         if let HotResult::Ok(Val::Map(m)) = &result
@@ -4599,7 +4600,7 @@ mod tests {
 
     #[test]
     fn test_assoc_in_creates_intermediates() {
-        let m = indexmap::indexmap! {};
+        let m = crate::val::val_index_map! {};
         let path = vec![Val::from("a"), Val::from("b")];
         let result = assoc_in(&[Val::map(m), Val::vec(path), Val::Int(1)]);
         if let HotResult::Ok(Val::Map(outer)) = &result
@@ -4613,11 +4614,11 @@ mod tests {
 
     #[test]
     fn test_assoc_in_preserves_siblings() {
-        let inner = indexmap::indexmap! {
+        let inner = crate::val::val_index_map! {
             Val::from("b") => Val::Int(1),
             Val::from("c") => Val::Int(2),
         };
-        let outer = indexmap::indexmap! { Val::from("a") => Val::map(inner) };
+        let outer = crate::val::val_index_map! { Val::from("a") => Val::map(inner) };
         let path = vec![Val::from("a"), Val::from("b")];
         let result = assoc_in(&[Val::map(outer), Val::vec(path), Val::Int(99)]);
         if let HotResult::Ok(Val::Map(outer)) = &result

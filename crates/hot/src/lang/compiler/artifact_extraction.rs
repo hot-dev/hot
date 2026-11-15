@@ -20,6 +20,7 @@ use super::artifacts::{
 use crate::lang::ast::{FnCall, FnCallArg, Meta, Namespace, NsPath, Program, Ref, Value, Var};
 use crate::lang::errors::{CompilerErrors, CompilerResult};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 
 /// Maximum alias-chain depth we'll follow when resolving the target of a
 /// reference-typed value (e.g. `aliased ::lib/handler` where `::lib/handler`
@@ -866,7 +867,7 @@ impl Compiler {
     }
 
     /// Extract MCP configuration from a variable's metadata if it's an MCP tool
-    fn extract_mcp_from_var(&self, var: &Var) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_mcp_from_var(&self, var: &Var) -> Option<ValIndexMap> {
         // Check if the variable has metadata
         let meta = var.meta.as_ref()?;
 
@@ -1083,7 +1084,7 @@ impl Compiler {
     }
 
     /// Extract webhook configuration from a variable's metadata
-    fn extract_webhook_from_var(&self, var: &Var) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_webhook_from_var(&self, var: &Var) -> Option<ValIndexMap> {
         let meta = var.meta.as_ref()?;
 
         // Handle both Map and JSON string formats
@@ -1184,13 +1185,13 @@ impl Compiler {
 
     /// Extract `agent` config map from the Var's meta.
     /// Returns `Some(map)` when `meta.agent` is a Map (agent type definition).
-    fn extract_agent_meta_from_var(var: &Var) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_agent_meta_from_var(var: &Var) -> Option<ValIndexMap> {
         let meta = var.meta.as_ref()?;
         Self::extract_agent_config_from_meta_val(&meta.val)
     }
 
     /// Given a meta Val, extract the `agent` key if it's a Map (agent config).
-    fn extract_agent_config_from_meta_val(meta_val: &Val) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_agent_config_from_meta_val(meta_val: &Val) -> Option<ValIndexMap> {
         match meta_val {
             Val::Map(meta_map) => match meta_map.get(&Val::from("agent")) {
                 Some(Val::Map(agent_config)) => Some(agent_config.as_ref().clone().into_inner()),
@@ -1278,15 +1279,13 @@ impl Compiler {
 
     /// Extract `workflow` config map from the Var's meta.
     /// Returns `Some(map)` when `meta.workflow` is a Map (workflow type definition).
-    fn extract_workflow_meta_from_var(var: &Var) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_workflow_meta_from_var(var: &Var) -> Option<ValIndexMap> {
         let meta = var.meta.as_ref()?;
         Self::extract_workflow_config_from_meta_val(&meta.val)
     }
 
     /// Given a meta Val, extract the `workflow` key if it's a Map (workflow config).
-    fn extract_workflow_config_from_meta_val(
-        meta_val: &Val,
-    ) -> Option<indexmap::IndexMap<Val, Val>> {
+    fn extract_workflow_config_from_meta_val(meta_val: &Val) -> Option<ValIndexMap> {
         match meta_val {
             Val::Map(meta_map) => match meta_map.get(&Val::from("workflow")) {
                 Some(Val::Map(workflow_config)) => {

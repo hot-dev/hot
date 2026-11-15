@@ -12,6 +12,7 @@
 use crate::lang::hot::tcp::{TcpStreamState, build_conn_map, extract_handle};
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -80,7 +81,7 @@ struct UpgradeOpts {
     client_key_pem: Option<String>,
 }
 
-fn get_str(m: &indexmap::IndexMap<Val, Val>, key: &str) -> Option<String> {
+fn get_str(m: &ValIndexMap, key: &str) -> Option<String> {
     match m.get(&Val::from(key)) {
         Some(Val::Str(s)) => Some(s.to_string()),
         _ => None,
@@ -369,7 +370,6 @@ pub fn peer_cert_hash(args: &[Val]) -> HotResult<Val> {
 mod tests {
     use super::*;
     use crate::lang::hot::tcp;
-    use indexmap::IndexMap;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
 
@@ -471,7 +471,7 @@ bFnC3vIJb6vFzmYBofuCaGXWbIQ/HnZsZRgEOTBaN3XlJ5J3WUMER9wT\n\
     }
 
     fn opts_map(pairs: &[(&str, Val)]) -> Val {
-        let mut m: IndexMap<Val, Val> = IndexMap::new();
+        let mut m: ValIndexMap = ValIndexMap::default();
         for (k, v) in pairs {
             m.insert(Val::from(*k), v.clone());
         }

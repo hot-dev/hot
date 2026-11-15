@@ -32,6 +32,7 @@
 //! * The captured backtrace respects `RUST_BACKTRACE` like the default
 //!   hook would, so debug ergonomics are preserved.
 
+use crate::val::ValIndexMap;
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Once;
@@ -296,10 +297,9 @@ impl UserCodePanic {
     /// ```
     pub fn to_failure_val(&self) -> crate::val::Val {
         use crate::val::Val;
-        use indexmap::IndexMap;
 
         // Inner err map carrying structured panic info.
-        let mut err: IndexMap<Val, Val> = IndexMap::new();
+        let mut err: ValIndexMap = ValIndexMap::default();
         err.insert(Val::from("panic"), Val::from(true));
         if let Some(loc) = &self.location {
             err.insert(Val::from("location"), Val::from(loc.clone()));
@@ -312,20 +312,20 @@ impl UserCodePanic {
         }
 
         // ::hot::task/Failure payload.
-        let mut failure_val: IndexMap<Val, Val> = IndexMap::new();
+        let mut failure_val: ValIndexMap = ValIndexMap::default();
         failure_val.insert(
             Val::from("msg"),
             Val::from(format!("panicked: {}", self.message)),
         );
         failure_val.insert(Val::from("err"), Val::from(err));
 
-        let mut failure: IndexMap<Val, Val> = IndexMap::new();
+        let mut failure: ValIndexMap = ValIndexMap::default();
         failure.insert(Val::from("$type"), Val::from("::hot::task/Failure"));
         failure.insert(Val::from("$val"), Val::from(failure_val));
 
         // Wrap in Result.Err so call sites that check `Val::is_err()` route
         // it through the existing failure path.
-        let mut result: IndexMap<Val, Val> = IndexMap::new();
+        let mut result: ValIndexMap = ValIndexMap::default();
         result.insert(Val::from("$type"), Val::from("::hot::type/Result.Err"));
         result.insert(Val::from("$val"), Val::from(failure));
         Val::from(result)

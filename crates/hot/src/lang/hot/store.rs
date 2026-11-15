@@ -2,8 +2,8 @@ use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::store::{self, ListOptions, SearchMode, SearchOptions, StoreMapConfig};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_args_range};
-use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 
 fn block_on<F, T>(future: F) -> T
@@ -382,14 +382,14 @@ fn list_options(function: &str, opts: &Val) -> Result<ListOptions, Val> {
 }
 
 fn entry_to_val(entry: &store::StoreEntry) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("key"), json_to_val(entry.key.clone()));
     map.insert(Val::from("value"), json_to_val(entry.value.clone()));
     Val::map(map)
 }
 
 fn search_result_to_val(result: &store::SearchResult) -> Val {
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("key"), json_to_val(result.entry.key.clone()));
     map.insert(Val::from("value"), json_to_val(result.entry.value.clone()));
     map.insert(

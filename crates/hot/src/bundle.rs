@@ -1,5 +1,6 @@
 use crate::discovery::{DiscoveryOpts, discover};
 use crate::hasher::HotHasher;
+use crate::val::ValIndexMap;
 use crate::val::{Val, val};
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
@@ -139,7 +140,7 @@ impl<'a> ManifestDataParser<'a> {
     fn parse_map(&mut self, depth: usize) -> Result<Val, String> {
         self.expect_char('{')?;
         self.skip_whitespace();
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         if self.consume_char('}') {
             return Ok(Val::map(map));
         }
@@ -781,7 +782,7 @@ fn normalize_manifest_artifact_source_path(
 }
 
 fn normalize_manifest_source_field(
-    map: &mut indexmap::IndexMap<Val, Val>,
+    map: &mut ValIndexMap,
     field: &str,
     normalizer: &ManifestSourcePathNormalizer,
 ) {
@@ -823,7 +824,7 @@ pub fn create_manifest(
     }
 
     // Convert event handlers to manifest format - organize by event type
-    let mut handlers_map = indexmap::IndexMap::new();
+    let mut handlers_map = ValIndexMap::default();
     for (event_type, handlers) in event_handlers {
         let mut handler_list = Vec::new();
         for handler in handlers {
@@ -838,7 +839,7 @@ pub fn create_manifest(
     let handlers_entries = Val::map(handlers_map);
 
     // Convert scheduled functions to manifest format - organize by cron expression
-    let mut schedules_map = indexmap::IndexMap::new();
+    let mut schedules_map = ValIndexMap::default();
     for (cron_expr, functions) in scheduled_functions {
         let mut function_list = Vec::new();
         for function in functions {
@@ -853,7 +854,7 @@ pub fn create_manifest(
     let schedules_entries = Val::map(schedules_map);
 
     // Convert MCP tools to manifest format - organize by service
-    let mut mcp_tools_map = indexmap::IndexMap::new();
+    let mut mcp_tools_map = ValIndexMap::default();
     for (service, tools) in mcp_tools {
         let mut tool_list = Vec::new();
         for tool in tools {
@@ -867,7 +868,7 @@ pub fn create_manifest(
     let mcp_tools_entries = Val::map(mcp_tools_map);
 
     // Convert webhooks to manifest format - organize by service
-    let mut webhooks_map = indexmap::IndexMap::new();
+    let mut webhooks_map = ValIndexMap::default();
     for (service, entries) in webhooks {
         let mut entry_list = Vec::new();
         for entry in entries {
@@ -894,7 +895,7 @@ pub fn create_manifest(
             let mut entries: Vec<Val> = Vec::new();
             for ns in &reqs.namespaces {
                 for k in ns.required_keys() {
-                    let mut entry = indexmap::IndexMap::new();
+                    let mut entry = ValIndexMap::default();
                     entry.insert(Val::from("key"), Val::from(k.key.as_str()));
                     entry.insert(Val::from("declared-by"), Val::from(ns.namespace.as_str()));
                     if let Some(src) = &ns.source_file {
@@ -917,7 +918,7 @@ pub fn create_manifest(
 
     // Convert box_requirements to manifest format
     let box_requirements_val = if let Some(box_reqs) = box_requirements {
-        let mut box_map = indexmap::IndexMap::new();
+        let mut box_map = ValIndexMap::default();
         if let Some(min_size) = box_reqs.effective_min_size() {
             box_map.insert(Val::from("min_size"), Val::from(min_size.as_str()));
         }
@@ -929,7 +930,7 @@ pub fn create_manifest(
             .requirements
             .iter()
             .map(|r| {
-                let mut entry = indexmap::IndexMap::new();
+                let mut entry = ValIndexMap::default();
                 entry.insert(Val::from("fn"), Val::from(r.fqn.as_str()));
                 if let Some(ref size) = r.requirement.min_size {
                     entry.insert(Val::from("min_size"), Val::from(size.as_str()));
@@ -951,7 +952,7 @@ pub fn create_manifest(
         }
         Val::map(box_map)
     } else {
-        Val::map(indexmap::IndexMap::new())
+        Val::map(ValIndexMap::default())
     };
 
     // Convert agents to manifest format — flat Vec of agent_val maps
@@ -977,7 +978,7 @@ pub fn create_manifest(
         .collect();
 
     // Convert send targets to manifest format: { "ns/var": ["event-a", "event-b"] }
-    let mut send_targets_map = indexmap::IndexMap::new();
+    let mut send_targets_map = ValIndexMap::default();
     for (fn_key, targets) in send_targets {
         let event_names: Vec<Val> = targets
             .iter()
@@ -1925,7 +1926,7 @@ mod tests {
         // character (including other control characters) is emitted raw, and
         // Byte/Bytes print as data constructors. Stored manifests may contain
         // any of these, so the parser must round-trip them all.
-        let mut inner = IndexMap::new();
+        let mut inner = ValIndexMap::default();
         inner.insert(
             Val::from("escapes"),
             Val::from("line\nreturn\rtab\tquote\"backslash\\"),
@@ -1934,7 +1935,7 @@ mod tests {
         inner.insert(Val::from("byte"), Val::Byte(7));
         inner.insert(Val::from("bytes"), Val::bytes(vec![0, 128, 255]));
         inner.insert(Val::from("empty-bytes"), Val::bytes(Vec::new()));
-        let mut manifest_map = IndexMap::new();
+        let mut manifest_map = ValIndexMap::default();
         manifest_map.insert(Val::from("hot.bundle.writer-forms"), Val::map(inner));
         let manifest = Val::map(manifest_map);
 
@@ -2268,7 +2269,7 @@ mod tests {
     }
 
     fn first_nested_vec_item<'a>(
-        bundle_info: &'a indexmap::IndexMap<Val, Val>,
+        bundle_info: &'a ValIndexMap,
         section: &str,
         key: &str,
     ) -> &'a Val {
@@ -2281,7 +2282,7 @@ mod tests {
         items.first().expect("section should have an item")
     }
 
-    fn first_vec_item<'a>(bundle_info: &'a indexmap::IndexMap<Val, Val>, section: &str) -> &'a Val {
+    fn first_vec_item<'a>(bundle_info: &'a ValIndexMap, section: &str) -> &'a Val {
         let Some(Val::Vec(items)) = bundle_info.get(&Val::from(section)) else {
             panic!("{section} should be a vec");
         };
@@ -2309,7 +2310,7 @@ limits {port: 8080}
 "#;
 
     /// The manifest entry of a bundle of `META_NAMES_LIB` and `source`.
-    fn meta_names_bundle(source: &str) -> indexmap::IndexMap<Val, Val> {
+    fn meta_names_bundle(source: &str) -> ValIndexMap {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let src_dir = temp_dir.path().join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
@@ -2331,11 +2332,7 @@ limits {port: 8080}
         artifact.get("meta").expect("artifact should have meta")
     }
 
-    fn manifest_type<'a>(
-        bundle_info: &'a indexmap::IndexMap<Val, Val>,
-        section: &str,
-        type_name: &str,
-    ) -> &'a Val {
+    fn manifest_type<'a>(bundle_info: &'a ValIndexMap, section: &str, type_name: &str) -> &'a Val {
         let Some(Val::Vec(items)) = bundle_info.get(&Val::from(section)) else {
             panic!("{section} should be a vec");
         };

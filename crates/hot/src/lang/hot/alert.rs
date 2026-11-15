@@ -4,6 +4,7 @@
 
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 
 /// Publish an alert (VM-aware version)
 ///
@@ -71,7 +72,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 "::hot::alert/alert: channel='{}' (no env_id in execution context, alert not persisted)",
                 channel
             );
-            let mut result = indexmap::IndexMap::new();
+            let mut result = ValIndexMap::default();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_context"));
             return HotResult::Ok(Val::ok(Val::map(result)));
@@ -86,7 +87,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 "::hot::alert/alert: channel='{}' (no org_id in execution context, alert not persisted)",
                 channel
             );
-            let mut result = indexmap::IndexMap::new();
+            let mut result = ValIndexMap::default();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_context"));
             return HotResult::Ok(Val::ok(Val::map(result)));
@@ -102,7 +103,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 "::hot::alert/alert: channel='{}' (no database configured, alert not persisted)",
                 channel
             );
-            let mut result = indexmap::IndexMap::new();
+            let mut result = ValIndexMap::default();
             result.insert(Val::from("channel"), Val::from(channel.as_str()));
             result.insert(Val::from("status"), Val::from("no_database"));
             return HotResult::Ok(Val::ok(Val::map(result)));
@@ -123,7 +124,7 @@ pub fn alert(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 alert.alert_id
             );
 
-            let mut result = indexmap::IndexMap::new();
+            let mut result = ValIndexMap::default();
             result.insert(Val::from("alert_id"), Val::from(alert.alert_id.to_string()));
             result.insert(Val::from("channel"), Val::from(alert.channel.as_str()));
             result.insert(Val::from("status"), Val::from("published"));

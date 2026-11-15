@@ -11,6 +11,7 @@
 
 use crate::lang::ast::Var;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use indexmap::IndexMap;
 
 /// Represents an event handler found during compilation
@@ -135,7 +136,7 @@ impl McpTool {
         };
 
         // Build the MCP tool Val with all fields
-        let mut tool_map = indexmap::IndexMap::new();
+        let mut tool_map = ValIndexMap::default();
         tool_map.insert(Val::from("service"), Val::from(service.clone()));
         tool_map.insert(Val::from("name"), Val::from(name.clone()));
         tool_map.insert(Val::from("auth_mode"), Val::from(auth_mode.clone()));
@@ -305,7 +306,7 @@ impl Webhook {
         };
 
         // Build the webhook endpoint Val with all fields
-        let mut endpoint_map = indexmap::IndexMap::new();
+        let mut endpoint_map = ValIndexMap::default();
         endpoint_map.insert(Val::from("service"), Val::from(service.clone()));
         endpoint_map.insert(Val::from("path"), Val::from(path.clone()));
         endpoint_map.insert(Val::from("method"), Val::from(method.clone()));
@@ -432,7 +433,7 @@ impl AgentDef {
         type_name: String,
         namespace: &str,
         var: &Var,
-        agent_meta: &indexmap::IndexMap<Val, Val>,
+        agent_meta: &ValIndexMap,
         config_fields: Option<&[crate::lang::ast::TypeField]>,
     ) -> Self {
         let (file, line, column, position) = if let Some(ref src) = var.src {
@@ -485,7 +486,7 @@ impl AgentDef {
 
         // Build config_fields from struct fields
         let fields_val = config_fields.map(|fields| {
-            let mut fields_map = indexmap::IndexMap::new();
+            let mut fields_map = ValIndexMap::default();
             for field in fields {
                 fields_map.insert(
                     Val::from(field.name.to_string()),
@@ -498,7 +499,7 @@ impl AgentDef {
         // Full meta from the variable
         let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
-        let mut agent_map = indexmap::IndexMap::new();
+        let mut agent_map = ValIndexMap::default();
         agent_map.insert(Val::from("type_name"), Val::from(type_name.clone()));
         agent_map.insert(Val::from("namespace"), Val::from(namespace.to_string()));
         if let Some(n) = name {
@@ -581,7 +582,7 @@ impl AgentDef {
                             Val::Str(s) => (**s).to_owned(),
                             _ => format!("{:?}", only_key),
                         };
-                        let mut summary = indexmap::IndexMap::new();
+                        let mut summary = ValIndexMap::default();
                         summary.insert(Val::from("kind"), Val::from("named"));
                         summary.insert(Val::from("name"), Val::from(name_str));
                         summary.insert(Val::from("inner"), Self::summarize_mcp_entry(inner_val));
@@ -593,7 +594,7 @@ impl AgentDef {
                     Val::Str(s) => Some(Val::from((**s).to_owned())),
                     _ => None,
                 });
-                let mut summary = indexmap::IndexMap::new();
+                let mut summary = ValIndexMap::default();
                 summary.insert(Val::from("kind"), Val::from("map"));
                 if let Some(u) = url {
                     summary.insert(Val::from("url"), u);
@@ -601,7 +602,7 @@ impl AgentDef {
                 Val::map(summary)
             }
             other if Self::val_is_fn_or_var_ref(other) => {
-                let mut summary = indexmap::IndexMap::new();
+                let mut summary = ValIndexMap::default();
                 summary.insert(Val::from("kind"), Val::from("ref"));
                 if let Some(target) = Self::extract_ref_target(other) {
                     summary.insert(Val::from("target"), Val::from(target));
@@ -613,7 +614,7 @@ impl AgentDef {
                     "agent meta `mcp-servers` entry is not a Map or callable ref: {:?}",
                     other
                 );
-                let mut summary = indexmap::IndexMap::new();
+                let mut summary = ValIndexMap::default();
                 summary.insert(Val::from("kind"), Val::from("unknown"));
                 Val::map(summary)
             }
@@ -667,12 +668,7 @@ pub struct WorkflowDef {
 }
 
 impl WorkflowDef {
-    pub fn new(
-        type_name: String,
-        namespace: &str,
-        var: &Var,
-        workflow_meta: &indexmap::IndexMap<Val, Val>,
-    ) -> Self {
+    pub fn new(type_name: String, namespace: &str, var: &Var, workflow_meta: &ValIndexMap) -> Self {
         let (file, line, column, position) = if let Some(ref src) = var.src {
             (
                 normalize_manifest_file_path(src.file.clone()),
@@ -712,7 +708,7 @@ impl WorkflowDef {
         // Full meta from the variable.
         let meta = var.meta.as_ref().map(|m| m.val.resolve_boxes());
 
-        let mut workflow_map = indexmap::IndexMap::new();
+        let mut workflow_map = ValIndexMap::default();
         workflow_map.insert(Val::from("type_name"), Val::from(type_name.clone()));
         workflow_map.insert(Val::from("namespace"), Val::from(namespace.to_string()));
         if let Some(n) = name {

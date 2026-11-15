@@ -4,8 +4,8 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::outbound::DestinationPolicy;
+use crate::val::ValIndexMap;
 use crate::val::{Val, as_fields};
-use indexmap::IndexMap;
 use russh::client;
 use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh_sftp::client::{SftpSession, fs::File};
@@ -189,8 +189,8 @@ impl<T: Resource> crate::val::ValBox for Handle<T> {
     }
 }
 
-fn resource_fields<T: Resource>(inner: Arc<T>) -> IndexMap<Val, Val> {
-    let mut m = IndexMap::new();
+fn resource_fields<T: Resource>(inner: Arc<T>) -> ValIndexMap {
+    let mut m = ValIndexMap::default();
     m.insert(Val::from("id"), Val::from(inner.id()));
     m.insert(Val::from(T::FIELD), Val::Box(Box::new(Handle(inner))));
     m

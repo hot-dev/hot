@@ -7,8 +7,8 @@ use crate::lang::hot::iter::{HotIterator, IteratorBox};
 use crate::lang::hot::r#type::HotResult;
 use crate::outbound::DestinationPolicy;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use futures::{SinkExt, StreamExt};
-use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 use std::any::Any;
 use std::hash::Hasher;
@@ -240,13 +240,13 @@ fn connect_with_policy(args: &[Val], policy: DestinationPolicy) -> HotResult<Val
         }
     };
 
-    let headers: IndexMap<Val, Val> = if args.len() > 1 {
+    let headers: ValIndexMap = if args.len() > 1 {
         match &args[1] {
             Val::Map(m) => match m.get(&Val::from("headers")) {
                 Some(Val::Map(h)) => (**h).clone().into_inner(),
-                _ => IndexMap::new(),
+                _ => ValIndexMap::default(),
             },
-            Val::Null => IndexMap::new(),
+            Val::Null => ValIndexMap::default(),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::ws/connect: options must be a map".to_string(),
@@ -254,7 +254,7 @@ fn connect_with_policy(args: &[Val], policy: DestinationPolicy) -> HotResult<Val
             }
         }
     } else {
-        IndexMap::new()
+        ValIndexMap::default()
     };
 
     super::native_io::block_on_hot("::hot::ws/connect", async {
@@ -296,7 +296,7 @@ async fn connect_socket(
 
 async fn ws_connect_async(
     url: &str,
-    headers: &IndexMap<Val, Val>,
+    headers: &ValIndexMap,
     policy: &DestinationPolicy,
 ) -> HotResult<Val> {
     let mut request = match url.into_client_request() {
@@ -415,7 +415,7 @@ async fn ws_connect_async(
         receiver: msg_rx_arc,
     };
 
-    let mut conn_map: IndexMap<Val, Val> = IndexMap::new();
+    let mut conn_map: ValIndexMap = ValIndexMap::default();
     conn_map.insert(Val::from("id"), Val::from(conn_id));
     conn_map.insert(Val::from("messages"), Val::Box(Box::new(iter_box)));
     conn_map.insert(Val::from("$ws"), Val::Box(Box::new(handle)));
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_val_to_message_map() {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("type"), Val::from("test"));
         let val = Val::map(map);
         let msg = val_to_message(&val);

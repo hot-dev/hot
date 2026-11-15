@@ -8,11 +8,12 @@
 use crate::lang::hot::iter::{HotIterator, IteratorBox, VecIterator};
 use crate::lang::hot::r#type::{HotResult, untype_recursive};
 use crate::lang::runtime::limits;
+use crate::val::ValIndexMap;
 use crate::val::{Val, tagged_type_name};
 use crate::validate_args_range;
 use ahash::AHashSet;
 use fastnum::D256;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexSet;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::io::{self, Read};
@@ -455,7 +456,7 @@ enum RowShape {
     Named {
         /// The column names with null values, cloned for each row so that a
         /// row needn't hash its keys again.
-        template: IndexMap<Val, Val>,
+        template: ValIndexMap,
         types: Vec<Option<CellType>>,
     },
     /// No names: rows are Vecs, as wide as the first one.

@@ -3,8 +3,8 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
-use indexmap::IndexMap;
 
 /// Get environment variable with default value (VM-aware for isolation mode)
 pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
@@ -66,7 +66,7 @@ pub fn get_all(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 
     // Normal mode: return all environment variables
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
 
     for (key, value) in std::env::vars() {
         map.insert(Val::from(key), Val::from(value));
