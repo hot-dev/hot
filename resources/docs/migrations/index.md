@@ -36,6 +36,17 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.9 to 3.0.10 {#upgrading-from-3-0-9-to-3-0-10}
+
+**Migration 040.** Run `hot db migrate` with the 3.0.10 CLI. It adds the partial index `blob_ref_call_active_idx` on `blob_ref(org_id, created_at)` for active refs to spilled call payloads. On Postgres it runs outside a transaction with `CONCURRENTLY`, so writes don't wait. If it is interrupted, Postgres leaves an invalid index behind: drop it and run `hot db migrate` again.
+
+**What to check in your configuration:** `hot.profile.set` no longer selects a profile. If your `hot.hot` uses it, change it to `hot.set.profile`. Otherwise commands select `local-dev`.
+
+**What to check in your deployment:**
+
+- If call traffic has built up a backlog of spilled call payloads, the first daily retention pass after the upgrade releases them, 10,000 refs per batch. Blob GC then frees the objects after its usual grace period, so expect blob storage to shrink over the following days.
+- Bytecode caches are rebuilt once.
+
 ## Upgrading from Hot 3.0.8 to 3.0.9 {#upgrading-from-3-0-8-to-3-0-9}
 
 **No migrations.** Replace the binaries and restart.
