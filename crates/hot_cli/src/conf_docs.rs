@@ -22,6 +22,11 @@ const NOT_SETTINGS: &[(&str, &str, &str)] = &[
     ("*", "dev", "the site hot.dev"),
     ("*", "request", "the `hot.request` context value"),
     ("editor/index.md", "lsp.enabled", "a VS Code setting"),
+    (
+        "migrations/index.md",
+        "profile.set",
+        "the selector 3.0.10 removed, named in its upgrade note",
+    ),
 ];
 
 /// Settings the docs name that the template leaves out. (key, why).
