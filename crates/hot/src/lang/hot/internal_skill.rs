@@ -14,6 +14,7 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::function_ref::extract_function_ref;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
@@ -154,9 +155,9 @@ pub fn meta_from_fn(args: &[Val]) -> HotResult<Val> {
             // Always include the canonical Hot fn name so callers can
             // round-trip a Skill back to its source fn even when no
             // `name:` was provided in the annotation.
-            let mut merged: IndexMap<Val, Val> = match &entry.skill_meta {
+            let mut merged: ValIndexMap = match &entry.skill_meta {
                 Val::Map(m) => (**m).clone().into_inner(),
-                _ => IndexMap::new(),
+                _ => ValIndexMap::default(),
             };
             merged
                 .entry(Val::from("fn-name"))
@@ -187,9 +188,9 @@ pub fn all_skill_metas(args: &[Val]) -> HotResult<Val> {
             .entries
             .values()
             .map(|e| {
-                let mut merged: IndexMap<Val, Val> = match &e.skill_meta {
+                let mut merged: ValIndexMap = match &e.skill_meta {
                     Val::Map(m) => (**m).clone().into_inner(),
-                    _ => IndexMap::new(),
+                    _ => ValIndexMap::default(),
                 };
                 merged
                     .entry(Val::from("fn-name"))
@@ -210,7 +211,7 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture_entry(name: &str, desc: &str) -> SkillSpecEntry {
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("description"), Val::from(desc));
         m.insert(Val::from("when"), Val::vec(vec![Val::from("trigger")]));
         SkillSpecEntry {

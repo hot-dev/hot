@@ -1,5 +1,6 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_no_args};
 
 use super::coll::{
@@ -124,7 +125,7 @@ fn handle_call_execution_error(
 
 fn wrap_preserved_call_result(val: Val, disposition: OnErrDisposition) -> Val {
     if matches!(disposition, OnErrDisposition::Preserve) && val.is_err() {
-        let mut raw = indexmap::IndexMap::new();
+        let mut raw = ValIndexMap::default();
         raw.insert(Val::from("$type"), Val::from("Raw"));
         raw.insert(Val::from("$val"), val);
         Val::map(raw)

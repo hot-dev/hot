@@ -1,9 +1,9 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::limits;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 use ahash::AHashMap;
-use indexmap::IndexMap;
 use parking_lot::Mutex;
 use regex::{Regex, RegexBuilder};
 use std::collections::VecDeque;
@@ -156,7 +156,7 @@ pub fn find(args: &[Val]) -> HotResult<Val> {
             };
             match re.find(val) {
                 Some(m) => {
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("match"), Val::from(m.as_str()));
                     let (start, end) = char_span(val, &m, (0, 0));
                     map.insert(Val::from("start"), pos(start));
@@ -197,7 +197,7 @@ pub fn find_all(args: &[Val]) -> HotResult<Val> {
                         max_matches
                     )));
                 }
-                let mut map = IndexMap::new();
+                let mut map = ValIndexMap::default();
                 map.insert(Val::from("match"), Val::from(m.as_str()));
                 let (start, end) = char_span(val, &m, scanned);
                 scanned = (m.end(), end);
@@ -310,7 +310,7 @@ pub fn capture(args: &[Val]) -> HotResult<Val> {
             };
             match re.captures(val) {
                 Some(caps) => {
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     if let Some(full) = caps.get(0) {
                         map.insert(Val::from("match"), Val::from(full.as_str()));
                     }
@@ -355,7 +355,7 @@ pub fn capture_all(args: &[Val]) -> HotResult<Val> {
                         max_matches
                     )));
                 }
-                let mut map = IndexMap::new();
+                let mut map = ValIndexMap::default();
                 if let Some(full) = caps.get(0) {
                     map.insert(Val::from("match"), Val::from(full.as_str()));
                 }

@@ -4,9 +4,9 @@
 //! Files can be stored locally on the filesystem, in AWS S3, or using other backends.
 //! All file operations are tracked in the database for billing and audit purposes.
 
+use crate::val::ValIndexMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -51,7 +51,7 @@ pub struct FileReadStream {
 impl FileMetadata {
     /// Convert FileMetadata to a Hot `FileMeta`
     pub fn to_val(&self) -> Val {
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("file-id"), Val::from(self.file_id.to_string()));
         map.insert(Val::from("path"), Val::from(self.path.clone()));
         map.insert(Val::from("size"), Val::Int(self.size));

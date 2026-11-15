@@ -2081,6 +2081,7 @@ mod tests {
     use super::*;
     use crate::lang::compiler::Compiler;
     use crate::lang::parser;
+    use crate::val::ValIndexMap;
 
     fn compile(src: &str) -> std::sync::Arc<BytecodeProgram> {
         let mut compiler = Compiler::new();
@@ -2237,7 +2238,7 @@ f fn (n: Int): Str {
             base: Box::new(PureExpr::Param(0)),
             key: Arc::from("count"),
         };
-        let mut m = indexmap::IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("count"), Val::Int(7));
         let record = PureValue::Other(Val::map(m));
         assert_eq!(
@@ -2692,7 +2693,7 @@ f fn (n: Int): Int {
     }
 
     fn record(count: i64) -> Val {
-        let mut m = indexmap::IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("count"), Val::Int(count));
         Val::map(m)
     }

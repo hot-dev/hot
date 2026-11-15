@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::lang::parser::parse_hot;
+use crate::val::ValIndexMap;
 
 #[test]
 fn test_compiler_creation() {
@@ -1712,7 +1713,7 @@ fn test_extract_send_definition_order_irrelevant() {
 
 #[test]
 fn test_summarize_mcp_servers_map_with_url() {
-    let mut entry = indexmap::IndexMap::new();
+    let mut entry = ValIndexMap::default();
     entry.insert(Val::from("url"), Val::from("https://mcp.example.com/mcp"));
     let servers = Val::vec(vec![Val::map(entry)]);
 
@@ -1733,10 +1734,10 @@ fn test_summarize_mcp_servers_map_with_url() {
 
 #[test]
 fn test_summarize_mcp_servers_named_wrapper() {
-    let mut inner = indexmap::IndexMap::new();
+    let mut inner = ValIndexMap::default();
     inner.insert(Val::from("url"), Val::from("https://t.example.com/mcp"));
 
-    let mut wrapper = indexmap::IndexMap::new();
+    let mut wrapper = ValIndexMap::default();
     wrapper.insert(Val::from("time"), Val::map(inner));
 
     let servers = Val::vec(vec![Val::map(wrapper)]);

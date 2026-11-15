@@ -2,9 +2,9 @@
 // These functions implement core type constructors and type conversion
 
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_args_at_least};
 use fastnum::D256;
-use indexmap::IndexMap;
 
 /// Hot Result type for Rust library functions
 /// This enum is used by all hotlib functions to return success or failure.
@@ -197,7 +197,7 @@ pub fn str_constructor(
                         Val::Map(typed_inner)
                     } else {
                         // For non-map $val, create a simple typed wrapper
-                        let mut typed_wrapper = indexmap::IndexMap::new();
+                        let mut typed_wrapper = ValIndexMap::default();
                         typed_wrapper
                             .insert(Val::from("$type"), Val::from(type_name_full.to_owned()));
                         typed_wrapper.insert(Val::from("$val"), inner_val.clone());
@@ -585,7 +585,7 @@ pub fn user_type_constructor(type_name: &str, args: &[Val]) -> HotResult<Val> {
     }
 
     // Always create the Hot type pattern: {"$type": "TypeName", "$val": data}
-    let mut result_map = IndexMap::new();
+    let mut result_map = ValIndexMap::default();
     result_map.insert(Val::from("$type"), Val::from(type_name.to_string()));
     result_map.insert(Val::from("$val"), args[0].clone());
 
@@ -594,7 +594,7 @@ pub fn user_type_constructor(type_name: &str, args: &[Val]) -> HotResult<Val> {
 
 /// The text of a map: `{a: 1}`, or for a typed value `::ns/Type({…})`, or
 /// the name a `Fn` or `Namespace` value holds.
-fn format_map_for_string(map: &IndexMap<Val, Val>) -> String {
+fn format_map_for_string(map: &ValIndexMap) -> String {
     let Some(type_name) = crate::val::tagged_type_name(map) else {
         return format_map_contents(map);
     };
@@ -626,7 +626,7 @@ fn format_vec_for_string(items: &[Val]) -> String {
 }
 
 /// Helper function to format map contents for string representation
-fn format_map_contents(map: &IndexMap<Val, Val>) -> String {
+fn format_map_contents(map: &ValIndexMap) -> String {
     let items: Vec<String> = map
         .iter()
         .filter(|(key, _)| !matches!(key, Val::Str(s) if s.starts_with('$'))) // Skip metadata
@@ -775,7 +775,7 @@ pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
         match &args[0] {
             Val::Map(m) => return HotResult::Ok(Val::Map(m.clone())),
             Val::Vec(entries) => {
-                let mut map = IndexMap::new();
+                let mut map = ValIndexMap::default();
                 for entry in entries.iter() {
                     match entry {
                         Val::Vec(pair) if pair.len() == 2 => {
@@ -812,7 +812,7 @@ pub fn map_constructor(args: &[Val]) -> HotResult<Val> {
         ));
     }
 
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     for chunk in args.chunks(2) {
         map.insert(chunk[0].clone(), chunk[1].clone());
     }
@@ -1115,7 +1115,7 @@ pub fn typed_map(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("typed-map expects a string type name")),
     };
 
-    let mut content = IndexMap::new();
+    let mut content = ValIndexMap::default();
     if args.len() > 1 {
         if !(args.len() - 1).is_multiple_of(2) {
             return HotResult::Err(Val::from(
@@ -1142,7 +1142,7 @@ pub fn untype(args: &[Val]) -> HotResult<Val> {
 
 /// The variant a tagged value is, from its `::ns/Enum.Variant` tag. A `Result`
 /// has none here: it holds a value rather than being data of its own.
-fn untyped_variant_name(map: &IndexMap<Val, Val>) -> Option<&str> {
+fn untyped_variant_name(map: &ValIndexMap) -> Option<&str> {
     if !crate::val::is_tagged_wrapper(map) {
         return None;
     }
@@ -1183,7 +1183,7 @@ pub fn untype_recursive(form: &Val) -> HotResult<Val> {
                 }
 
                 // Otherwise, construct a new map excluding metadata keys (those starting with '$')
-                let mut new_map = IndexMap::new();
+                let mut new_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     if let Val::Str(key_str) = key
                         && key_str.starts_with('$')
@@ -1199,7 +1199,7 @@ pub fn untype_recursive(form: &Val) -> HotResult<Val> {
                 HotResult::Ok(Val::map(new_map))
             } else {
                 // Regular map: recursively untype values (keys remain as-is)
-                let mut new_map = IndexMap::new();
+                let mut new_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     let untyped_value = match untype_recursive(value) {
                         HotResult::Ok(val) => val,
@@ -1622,7 +1622,7 @@ mod constructor_tests {
             HotResult::Ok(Val::vec(vec![Val::Int(1), Val::Int(2)]))
         );
         // Map becomes [key, value] pairs
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("a"), Val::Int(1));
         assert_eq!(
             vec_constructor(&[Val::map(m)]),
@@ -1669,9 +1669,9 @@ mod constructor_tests {
         }
 
         // Vec of single-entry maps
-        let mut e1 = IndexMap::new();
+        let mut e1 = ValIndexMap::default();
         e1.insert(Val::from("x"), Val::Int(10));
-        let mut e2 = IndexMap::new();
+        let mut e2 = ValIndexMap::default();
         e2.insert(Val::from("y"), Val::Int(20));
         let entries = Val::vec(vec![Val::map(e1), Val::map(e2)]);
         let result = map_constructor(&[entries]);
@@ -1688,7 +1688,7 @@ mod constructor_tests {
         assert!(matches!(map_constructor(&[bad]), HotResult::Err(_)));
 
         // Map identity coercion
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("k"), Val::Int(9));
         let result = map_constructor(&[Val::map(m)]);
         match result {

@@ -483,13 +483,14 @@ mod tests {
     use super::*;
     use crate::lang::ast::{Namespace, NamespaceAliases, NsPath, Scope, Sym, Var};
     use crate::val::Val;
+    use crate::val::ValIndexMap;
 
     fn create_test_namespace(name: &str) -> (NsPath, Namespace) {
         let path = NsPath::from_string(name);
         let mut vars = IndexMap::new();
 
         // Add a variable with a Val::Map with integer keys (the problematic case)
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
 
@@ -723,7 +724,7 @@ mod tests {
         );
 
         // 2. Val::Map with int keys
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
         vars.insert(

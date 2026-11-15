@@ -9,6 +9,7 @@ use crate::lang::ast::{
 };
 use crate::lang::lexer::{KeywordKind, Lexer, Token, TokenType};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ariadne::{ColorGenerator, Config, Label, Report, ReportKind};
 use indexmap::IndexMap;
 use std::iter::Iterator;
@@ -3947,7 +3948,7 @@ impl Parser {
             return self.parse_block_expression_after_brace();
         }
 
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
 
         // Skip newlines after opening brace
         while self.check(&TokenType::Newline) {
@@ -4069,7 +4070,7 @@ impl Parser {
     /// (`IndexMap::insert` alone kept the first slot while the entry count
     /// still advanced, which misplaced or dropped later spreads.)
     fn insert_map_entry(
-        map: &mut IndexMap<Val, Val>,
+        map: &mut ValIndexMap,
         spread_entries: &mut [(usize, Value)],
         entry_index: &mut usize,
         key: Val,

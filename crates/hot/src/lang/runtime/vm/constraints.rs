@@ -9,6 +9,7 @@
 use super::{VirtualMachine, VmError, VmResult};
 use crate::lang::bytecode::{ConstantId, param_mask};
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use fastnum::D256;
 
@@ -975,7 +976,8 @@ impl VirtualMachine {
                 };
                 let elem = get(node, "elem").cloned().unwrap_or(Val::Null);
                 let key_spec = get(node, "key").cloned();
-                let mut checked_entries = indexmap::IndexMap::with_capacity(entries.len());
+                let mut checked_entries =
+                    ValIndexMap::with_capacity_and_hasher(entries.len(), Default::default());
                 for (key, item) in std::sync::Arc::unwrap_or_clone(entries).into_iter() {
                     path.push(key.clone());
                     let failure =
@@ -1482,7 +1484,7 @@ fn with_article(type_name: &str) -> String {
 fn with_field(value: &Val, field: Val, field_value: Val) -> Val {
     let mut fields = match crate::val::as_fields(value) {
         Val::Map(fields) => fields.as_ref().clone().into_inner(),
-        _ => indexmap::IndexMap::new(),
+        _ => ValIndexMap::default(),
     };
     fields.insert(field, field_value);
     crate::val::with_type_of(value, Val::map(fields))

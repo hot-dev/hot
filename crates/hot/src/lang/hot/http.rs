@@ -1,8 +1,8 @@
 use crate::lang::hot::r#type::{HotResult, untype_recursive};
 use crate::outbound::DestinationPolicy;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::{validate_args, validate_args_range};
-use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 use std::time::Duration;
 use url::Url;
@@ -105,7 +105,7 @@ fn request_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new().into()),
+            Some(Val::Null) | None => std::sync::Arc::new(ValIndexMap::default().into()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request: headers must be a map".to_string(),
@@ -161,7 +161,7 @@ fn request_with_policy(
 }
 
 /// Build the User-Agent string, appending hot version to any user-provided value
-fn build_user_agent(headers: &IndexMap<Val, Val>) -> String {
+fn build_user_agent(headers: &ValIndexMap) -> String {
     let hot_ua = format!("hot/{}", crate::build_info::VERSION);
 
     // Check if user provided a User-Agent header
@@ -223,7 +223,7 @@ fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
 async fn send_with_redirect_validation(
     method: &str,
     url: &str,
-    headers: &IndexMap<Val, Val>,
+    headers: &ValIndexMap,
     body: &Val,
     policy: DestinationPolicy,
     time_limit: TimeLimit,
@@ -351,7 +351,7 @@ async fn send_with_redirect_validation(
 async fn make_http_request(
     method: &str,
     url: &str,
-    headers: &IndexMap<Val, Val>,
+    headers: &ValIndexMap,
     body: &Val,
     policy: DestinationPolicy,
     max_response_bytes: usize,
@@ -372,7 +372,7 @@ async fn make_http_request(
         .map(|value| value.to_string());
 
     // Get headers
-    let mut response_headers: IndexMap<Val, Val> = IndexMap::new();
+    let mut response_headers: ValIndexMap = ValIndexMap::default();
     for (key, value) in response.headers().iter() {
         if let Ok(v) = value.to_str() {
             response_headers.insert(Val::from(key.to_string()), Val::from(v.to_string()));
@@ -417,7 +417,7 @@ async fn make_http_request(
     let body_val = response_body_val(body_bytes, content_type.as_deref());
 
     // Build response map
-    let mut response_map: IndexMap<Val, Val> = IndexMap::new();
+    let mut response_map: ValIndexMap = ValIndexMap::default();
     response_map.insert(Val::from("status"), Val::Int(status));
     response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), body_val);
@@ -567,7 +567,7 @@ pub struct HttpStreamIterator {
     /// Response status code
     pub status: i64,
     /// Response headers
-    pub headers: IndexMap<Val, Val>,
+    pub headers: ValIndexMap,
     /// Stream format hint (e.g., "sse", "ndjson", "raw")
     pub format: String,
     /// Bytes not yet decoded: a partial SSE event or NDJSON line, or the start
@@ -739,7 +739,7 @@ impl HttpStreamIterator {
             Err(_) => Val::from(data_str),
         };
 
-        let mut event_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut event_map: ValIndexMap = ValIndexMap::default();
         if !event_type.is_empty() {
             event_map.insert(Val::from("event"), Val::from(event_type));
         }
@@ -891,7 +891,7 @@ fn request_stream_with_policy(
 
         headers = match map.get(&Val::from("headers")) {
             Some(Val::Map(m)) => m.clone(),
-            Some(Val::Null) | None => std::sync::Arc::new(IndexMap::new().into()),
+            Some(Val::Null) | None => std::sync::Arc::new(ValIndexMap::default().into()),
             _ => {
                 return HotResult::Err(err_val(
                     "::hot::http/request-stream: headers must be a map".to_string(),
@@ -979,7 +979,7 @@ fn request_stream_with_policy(
 async fn make_streaming_request(
     method: &str,
     url: &str,
-    headers: &IndexMap<Val, Val>,
+    headers: &ValIndexMap,
     body: &Val,
     format: &str,
     policy: DestinationPolicy,
@@ -1011,7 +1011,7 @@ async fn make_streaming_request(
     let format = if status >= 400 { "raw" } else { format };
 
     // Get headers
-    let mut response_headers: IndexMap<Val, Val> = IndexMap::new();
+    let mut response_headers: ValIndexMap = ValIndexMap::default();
     for (key, value) in response.headers().iter() {
         if let Ok(v) = value.to_str() {
             response_headers.insert(Val::from(key.to_string()), Val::from(v.to_string()));
@@ -1075,7 +1075,7 @@ async fn make_streaming_request(
     let iter_box = IteratorBox::new(Box::new(iterator));
 
     // Build response map with iterator as body
-    let mut response_map: IndexMap<Val, Val> = IndexMap::new();
+    let mut response_map: ValIndexMap = ValIndexMap::default();
     response_map.insert(Val::from("status"), Val::Int(status));
     response_map.insert(Val::from("headers"), Val::map(response_headers));
     response_map.insert(Val::from("body"), Val::Box(Box::new(iter_box)));
@@ -1125,7 +1125,7 @@ mod tests {
         HttpStreamIterator {
             receiver: Arc::new(Mutex::new(rx)),
             status: 200,
-            headers: IndexMap::new(),
+            headers: ValIndexMap::default(),
             format: format.to_string(),
             sse_buffer: Vec::new(),
             pending_sse_events: VecDeque::new(),
@@ -1184,7 +1184,7 @@ mod tests {
         make_streaming_request(
             "GET",
             &url,
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::from(""),
             format,
             DestinationPolicy::AllowPrivate,
@@ -1312,7 +1312,7 @@ mod tests {
         let result = make_http_request(
             "GET",
             &url,
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             DestinationPolicy::AllowPrivate,
             4,
@@ -1340,7 +1340,7 @@ mod tests {
             make_http_request(
                 "PUT",
                 &url,
-                &IndexMap::new(),
+                &ValIndexMap::default(),
                 &Val::from("chunk"),
                 DestinationPolicy::AllowPrivate,
                 DEFAULT_MAX_RESPONSE_BYTES,
@@ -1368,7 +1368,7 @@ mod tests {
             make_http_request(
                 "GET",
                 &url,
-                &IndexMap::new(),
+                &ValIndexMap::default(),
                 &Val::Null,
                 DestinationPolicy::AllowPrivate,
                 DEFAULT_MAX_RESPONSE_BYTES,
@@ -1402,7 +1402,7 @@ mod tests {
             make_http_request(
                 "options",
                 &url,
-                &IndexMap::new(),
+                &ValIndexMap::default(),
                 &Val::Null,
                 DestinationPolicy::AllowPrivate,
                 DEFAULT_MAX_RESPONSE_BYTES,
@@ -1421,7 +1421,7 @@ mod tests {
         let result = make_http_request(
             "OPTIONS",
             &url,
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             DestinationPolicy::PublicOnly,
             DEFAULT_MAX_RESPONSE_BYTES,
@@ -1440,7 +1440,7 @@ mod tests {
             .block_on(make_http_request(
                 "TRACE",
                 "http://127.0.0.1:1/",
-                &IndexMap::new(),
+                &ValIndexMap::default(),
                 &Val::Null,
                 DestinationPolicy::AllowPrivate,
                 DEFAULT_MAX_RESPONSE_BYTES,
@@ -1460,7 +1460,7 @@ mod tests {
         let result = make_http_request(
             "GET",
             &url,
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             DestinationPolicy::AllowPrivate,
             DEFAULT_MAX_RESPONSE_BYTES,
@@ -1515,7 +1515,7 @@ mod tests {
         let result = make_http_request(
             "GET",
             "http://hot-egress-test.invalid/path",
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             policy.clone(),
             DEFAULT_MAX_RESPONSE_BYTES,
@@ -1532,7 +1532,7 @@ mod tests {
         let result = make_http_request(
             "GET",
             "http://169.254.169.254/latest/meta-data/",
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             policy,
             DEFAULT_MAX_RESPONSE_BYTES,
@@ -1548,7 +1548,7 @@ mod tests {
         let result = make_http_request(
             "GET",
             &url,
-            &IndexMap::new(),
+            &ValIndexMap::default(),
             &Val::Null,
             DestinationPolicy::PublicOnly,
             DEFAULT_MAX_RESPONSE_BYTES,
@@ -1650,7 +1650,7 @@ mod tests {
         let mut iterator = HttpStreamIterator {
             receiver: Arc::new(Mutex::new(rx)),
             status: 200,
-            headers: IndexMap::new(),
+            headers: ValIndexMap::default(),
             format: "sse".to_string(),
             sse_buffer: Vec::new(),
             pending_sse_events: VecDeque::new(),
@@ -2223,7 +2223,7 @@ mod tests {
         let url = format!("{}/echo", base_url);
 
         // Create request body
-        let mut body_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut body_map: ValIndexMap = ValIndexMap::default();
         body_map.insert(Val::from("name"), Val::from("test"));
         body_map.insert(Val::from("value"), Val::Int(123));
 
@@ -2268,12 +2268,12 @@ mod tests {
         let url = format!("{}/echo", base_url);
 
         // Build an HttpRequest-like map (with $type) as a single arg
-        let mut req_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut req_map: ValIndexMap = ValIndexMap::default();
         req_map.insert(Val::from("$type"), Val::from("HttpRequest"));
         req_map.insert(Val::from("method"), Val::from("POST"));
         req_map.insert(Val::from("url"), Val::from(url));
 
-        let mut body_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut body_map: ValIndexMap = ValIndexMap::default();
         body_map.insert(Val::from("greeting"), Val::from("hello"));
         req_map.insert(Val::from("body"), Val::map(body_map));
         // headers omitted — should default to empty
@@ -2315,15 +2315,15 @@ mod tests {
         let url = format!("{}/echo", base_url);
 
         // Build a plain map (no $type) as a single arg — structural match
-        let mut req_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut req_map: ValIndexMap = ValIndexMap::default();
         req_map.insert(Val::from("method"), Val::from("POST"));
         req_map.insert(Val::from("url"), Val::from(url));
 
-        let mut headers_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut headers_map: ValIndexMap = ValIndexMap::default();
         headers_map.insert(Val::from("x-custom-header"), Val::from("test-value"));
         req_map.insert(Val::from("headers"), Val::map(headers_map));
 
-        let mut body_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut body_map: ValIndexMap = ValIndexMap::default();
         body_map.insert(Val::from("data"), Val::from("test"));
         req_map.insert(Val::from("body"), Val::map(body_map));
 
@@ -2365,15 +2365,15 @@ mod tests {
 
         // Build an HttpRequest with $val wrapping — this is how typed struct values
         // actually arrive from the VM: {$type: "...", $val: {method: ..., url: ...}}
-        let mut inner_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut inner_map: ValIndexMap = ValIndexMap::default();
         inner_map.insert(Val::from("method"), Val::from("POST"));
         inner_map.insert(Val::from("url"), Val::from(url));
 
-        let mut body_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut body_map: ValIndexMap = ValIndexMap::default();
         body_map.insert(Val::from("msg"), Val::from("wrapped"));
         inner_map.insert(Val::from("body"), Val::map(body_map));
 
-        let mut req_map: IndexMap<Val, Val> = IndexMap::new();
+        let mut req_map: ValIndexMap = ValIndexMap::default();
         req_map.insert(Val::from("$type"), Val::from("::hot::http/HttpRequest"));
         req_map.insert(Val::from("$val"), Val::map(inner_map));
 

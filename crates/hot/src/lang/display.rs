@@ -5,6 +5,7 @@
 // syntax for display in the UI and LSP.
 
 use crate::val::Val;
+use crate::val::ValIndexMap;
 
 /// Format enriched metadata as Hot code syntax
 ///
@@ -216,7 +217,7 @@ fn extract_string(val: &Val, field: &str) -> Option<String> {
 }
 
 /// Extract a string field from an IndexMap
-fn extract_string_from_map(map: &indexmap::IndexMap<Val, Val>, field: &str) -> Option<String> {
+fn extract_string_from_map(map: &ValIndexMap, field: &str) -> Option<String> {
     match map.get(&Val::from(field.to_string()))? {
         Val::Str(s) => Some((*s).to_string()),
         _ => None,
@@ -224,7 +225,7 @@ fn extract_string_from_map(map: &indexmap::IndexMap<Val, Val>, field: &str) -> O
 }
 
 /// Extract a bool field from an IndexMap
-fn extract_bool_from_map(map: &indexmap::IndexMap<Val, Val>, field: &str) -> Option<bool> {
+fn extract_bool_from_map(map: &ValIndexMap, field: &str) -> Option<bool> {
     match map.get(&Val::from(field.to_string()))? {
         Val::Bool(b) => Some(*b),
         _ => None,

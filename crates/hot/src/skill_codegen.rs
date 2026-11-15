@@ -917,6 +917,7 @@ fn blake3_short(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val::ValIndexMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1344,11 +1345,11 @@ mod tests {
         // Note: run_skill_codegen itself doesn't gate on `enabled` —
         // that's the responsibility of `run_skill_codegen_from_conf`.
         // This test pins down the gate-from-conf behavior.
-        let mut conf_map = indexmap::IndexMap::new();
-        let mut project_map = indexmap::IndexMap::new();
-        let mut my_proj = indexmap::IndexMap::new();
-        let mut skills_map = indexmap::IndexMap::new();
-        let mut codegen_map = indexmap::IndexMap::new();
+        let mut conf_map = ValIndexMap::default();
+        let mut project_map = ValIndexMap::default();
+        let mut my_proj = ValIndexMap::default();
+        let mut skills_map = ValIndexMap::default();
+        let mut codegen_map = ValIndexMap::default();
         codegen_map.insert(Val::from("enabled"), Val::Bool(false));
         skills_map.insert(Val::from("codegen"), Val::map(codegen_map));
         my_proj.insert(Val::from("skills"), Val::map(skills_map));
@@ -1364,11 +1365,11 @@ mod tests {
 
     #[test]
     fn opts_from_conf_reads_codegen_paths_override() {
-        let mut conf_map = indexmap::IndexMap::new();
-        let mut project_map = indexmap::IndexMap::new();
-        let mut my_proj = indexmap::IndexMap::new();
-        let mut skills_map = indexmap::IndexMap::new();
-        let mut codegen_map = indexmap::IndexMap::new();
+        let mut conf_map = ValIndexMap::default();
+        let mut project_map = ValIndexMap::default();
+        let mut my_proj = ValIndexMap::default();
+        let mut skills_map = ValIndexMap::default();
+        let mut codegen_map = ValIndexMap::default();
 
         codegen_map.insert(
             Val::from("paths"),
@@ -1396,20 +1397,20 @@ mod tests {
         let res_root = tmp.path().join("resources");
         write(&res_root, "skills/foo.skill.md", &fixture_md("foo"));
 
-        let mut resources = indexmap::IndexMap::new();
+        let mut resources = ValIndexMap::default();
         resources.insert(
             Val::from("paths"),
             Val::vec(vec![Val::from(res_root.to_string_lossy().to_string())]),
         );
 
-        let mut project = indexmap::IndexMap::new();
+        let mut project = ValIndexMap::default();
         project.insert(Val::from("resources"), Val::map(resources));
-        project.insert(Val::from("deps"), Val::map(indexmap::IndexMap::new()));
+        project.insert(Val::from("deps"), Val::map(ValIndexMap::default()));
 
-        let mut projects = indexmap::IndexMap::new();
+        let mut projects = ValIndexMap::default();
         projects.insert(Val::from("my-proj"), Val::map(project));
 
-        let mut conf = indexmap::IndexMap::new();
+        let mut conf = ValIndexMap::default();
         conf.insert(Val::from("project"), Val::map(projects));
 
         let report = run_skill_codegen_from_conf(&Val::map(conf), "my-proj", &[]);
@@ -1424,19 +1425,19 @@ mod tests {
 
     #[test]
     fn project_declares_hot_ai_accepts_full_package_name() {
-        let mut deps = indexmap::IndexMap::new();
+        let mut deps = ValIndexMap::default();
         deps.insert(
             Val::from("hot.dev/hot-ai"),
-            Val::map(indexmap::IndexMap::new()),
+            Val::map(ValIndexMap::default()),
         );
 
-        let mut project = indexmap::IndexMap::new();
+        let mut project = ValIndexMap::default();
         project.insert(Val::from("deps"), Val::map(deps));
 
-        let mut projects = indexmap::IndexMap::new();
+        let mut projects = ValIndexMap::default();
         projects.insert(Val::from("my-proj"), Val::map(project));
 
-        let mut conf = indexmap::IndexMap::new();
+        let mut conf = ValIndexMap::default();
         conf.insert(Val::from("project"), Val::map(projects));
 
         assert!(project_declares_hot_ai(&Val::map(conf), "my-proj"));

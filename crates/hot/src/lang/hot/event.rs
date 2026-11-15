@@ -1,5 +1,6 @@
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 use crate::validate_args_range;
 
@@ -244,7 +245,7 @@ pub fn listen(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::event/listen", args, 1);
 
     // Mock event listener
-    let mut result_map = indexmap::IndexMap::new();
+    let mut result_map = ValIndexMap::default();
     result_map.insert(Val::from("listening"), Val::Bool(true));
     result_map.insert(Val::from("event_type"), args[0].clone());
 
@@ -255,7 +256,7 @@ pub fn listen(args: &[Val]) -> HotResult<Val> {
 pub fn create_event(args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::event/create-event", args, 1, 3);
 
-    let mut event_map = indexmap::IndexMap::new();
+    let mut event_map = ValIndexMap::default();
     event_map.insert(Val::from("type"), args[0].clone());
 
     if args.len() > 1 {

@@ -11,6 +11,7 @@ use crate::lang::runtime::jit::{
 };
 use crate::lang::runtime::native_core::NativeCoreShadows;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -3505,7 +3506,7 @@ impl VirtualMachine {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
-                            let mut m = indexmap::IndexMap::new();
+                            let mut m = ValIndexMap::default();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
                             Val::map(m)
                         } else {
@@ -3540,7 +3541,7 @@ impl VirtualMachine {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
-                            let mut m = indexmap::IndexMap::new();
+                            let mut m = ValIndexMap::default();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
                             Val::map(m)
                         } else {
@@ -3591,7 +3592,7 @@ impl VirtualMachine {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
-                            let mut m = indexmap::IndexMap::new();
+                            let mut m = ValIndexMap::default();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
                             Val::map(m)
                         } else {
@@ -4067,7 +4068,7 @@ impl VirtualMachine {
                     val
                 } else {
                     // Wrap in Result.Ok
-                    let mut map = indexmap::IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("$type"), Val::from("::hot::type/Result.Ok"));
                     map.insert(Val::from("$val"), val);
                     Val::map(map)
@@ -4113,7 +4114,7 @@ impl VirtualMachine {
                         Ok(v) => v,
                         Err(e) => {
                             if self.error_capture_active {
-                                let mut m = indexmap::IndexMap::new();
+                                let mut m = ValIndexMap::default();
                                 m.insert(Val::from("error"), Val::from(e.to_string()));
                                 Val::map(m)
                             } else {
@@ -4141,7 +4142,7 @@ impl VirtualMachine {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
-                            let mut m = indexmap::IndexMap::new();
+                            let mut m = ValIndexMap::default();
                             m.insert(Val::from("error"), Val::from(e.to_string()));
                             Val::map(m)
                         } else {
@@ -4419,7 +4420,7 @@ impl VirtualMachine {
                 let dest = *dest;
                 let src = *src;
                 let val = self.get_register(src)?.clone();
-                let mut m = indexmap::IndexMap::new();
+                let mut m = ValIndexMap::default();
                 m.insert(Val::from("ok"), val);
                 self.set_register(dest, Val::map(m))?;
                 self.instruction_pointer += 1;
@@ -4617,7 +4618,7 @@ impl VirtualMachine {
         match val {
             Val::Map(map) => {
                 // Recursively resolve variable references in maps
-                let mut resolved_map = indexmap::IndexMap::new();
+                let mut resolved_map = ValIndexMap::default();
                 for (key, value) in map.iter() {
                     // Execute boxed FnCall or boxed Value eagerly when found in map values
                     // BUT preserve lazy lambdas without evaluation
@@ -5123,7 +5124,7 @@ impl VirtualMachine {
                 if constructed {
                     return Ok(self.constructor_mismatch(&type_name, data));
                 }
-                let mut result_map = indexmap::IndexMap::new();
+                let mut result_map = ValIndexMap::default();
                 result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
                 result_map.insert(Val::from("$val"), data.clone());
                 return Ok(Val::map(result_map));
@@ -5362,7 +5363,7 @@ impl VirtualMachine {
         // Handle newtypes (types with no fields that wrap a single value)
         // If $all_fields is empty and data is not a map, just wrap with $type/$val
         if all_fields.is_empty() && !matches!(data, Val::Map(_)) {
-            let mut result_map = indexmap::IndexMap::new();
+            let mut result_map = ValIndexMap::default();
             result_map.insert(Val::from("$type"), Val::from(type_name.clone()));
             result_map.insert(Val::from("$val"), data.clone());
             return Ok(Val::map(result_map));
@@ -5392,7 +5393,7 @@ impl VirtualMachine {
                 }
 
                 // For map data, recursively construct typed fields
-                let mut new_map = indexmap::IndexMap::new();
+                let mut new_map = ValIndexMap::default();
 
                 for (key, value) in data_map.iter() {
                     if !matches!(key, Val::Str(_)) {
@@ -5495,7 +5496,7 @@ impl VirtualMachine {
         };
 
         // Wrap in typed structure: {$type: "...", $val: processed_val}
-        let mut result_map = indexmap::IndexMap::new();
+        let mut result_map = ValIndexMap::default();
         result_map.insert(Val::from("$type"), Val::from(type_name));
         result_map.insert(Val::from("$val"), processed_val);
 
@@ -5540,7 +5541,7 @@ impl VirtualMachine {
         }
 
         let holds_results = Self::type_info_preserves_result_values(value_type);
-        let mut built = indexmap::IndexMap::with_capacity(entries.len());
+        let mut built = ValIndexMap::with_capacity_and_hasher(entries.len(), Default::default());
         for (key, value) in entries.iter() {
             let result = self.construct_typed_recursive(value, value_type)?;
             if result.is_err() && !holds_results {
@@ -6195,7 +6196,7 @@ impl VirtualMachine {
                         // Create a map from branch names to results.
                         // Strip the per-cond uniqueness suffix from each branch
                         // name before exposing it as a user-visible map key.
-                        let mut result_map = indexmap::IndexMap::new();
+                        let mut result_map = ValIndexMap::default();
 
                         for (branch_name, branch_result) in &flow_context.cond_branch_results {
                             let key = user_facing_branch_name(branch_name);
@@ -6246,7 +6247,7 @@ impl VirtualMachine {
                 match flow_context._result_modifier {
                     crate::lang::bytecode::FlowResultModifier::Map => {
                         // Create a map from variable references
-                        let mut result_map = indexmap::IndexMap::new();
+                        let mut result_map = ValIndexMap::default();
 
                         for (var_name, var_value) in &flow_context.flow_variable_refs {
                             result_map.insert(Val::from(var_name.clone()), var_value.clone());
@@ -6284,7 +6285,7 @@ impl VirtualMachine {
                 match flow_context._result_modifier {
                     crate::lang::bytecode::FlowResultModifier::Map => {
                         // Create a map from pipe step results
-                        let mut result_map = indexmap::IndexMap::new();
+                        let mut result_map = ValIndexMap::default();
 
                         for (step_name, step_value) in &flow_context.pipe_step_results {
                             result_map.insert(Val::from(step_name.clone()), step_value.clone());
@@ -10712,7 +10713,7 @@ impl VirtualMachine {
             FlowType::Match => "match",
             FlowType::MatchAll => "match-all",
         };
-        let mut flow_map = IndexMap::new();
+        let mut flow_map = ValIndexMap::default();
         flow_map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
         if origin.is_some() {
             // Compiler-inlined named callable (e.g. `if()`): mirror the flow
@@ -10880,7 +10881,7 @@ impl VirtualMachine {
                     FlowType::MatchAll => Some("match-all"),
                 };
                 flow_type_str.map(|flow_type_str| {
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
                     map.insert(Val::from("fn"), Val::Bool(true)); // Mark as function-level flow
                     Val::map(map)
@@ -10897,7 +10898,7 @@ impl VirtualMachine {
                         FlowType::Match => "match",
                         FlowType::MatchAll => "match-all",
                     };
-                    let mut map = IndexMap::new();
+                    let mut map = ValIndexMap::default();
                     map.insert(Val::from("type"), Val::from(flow_type_str.to_string()));
                     map.insert(Val::from("flow_id"), Val::from(ctx.flow_id.to_string()));
                     // Include branch name if we're inside a cond/match branch
@@ -11841,7 +11842,8 @@ impl VirtualMachine {
             // one bad entry doesn't fail every read of the meta (test
             // discovery reads `test` off every function's meta).
             Val::Map(map) => {
-                let mut resolved = indexmap::IndexMap::with_capacity(map.len());
+                let mut resolved =
+                    ValIndexMap::with_capacity_and_hasher(map.len(), Default::default());
                 for (key, value) in map.iter() {
                     let value = self
                         .resolve_meta_refs(value)
@@ -12863,7 +12865,7 @@ impl VirtualMachine {
 
     /// Return true when a map uses Hot's tagged JSON wrapper representation.
     /// See [`crate::val::is_tagged_wrapper`].
-    fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
+    fn is_tagged_wrapper(&self, map: &ValIndexMap) -> bool {
         crate::val::is_tagged_wrapper(map)
     }
 
@@ -12918,7 +12920,7 @@ impl VirtualMachine {
             }
             Val::Null => {
                 // Convert null to map and set property
-                let mut new_map = indexmap::IndexMap::new();
+                let mut new_map = ValIndexMap::default();
                 new_map.insert(Val::from(property.to_string()), new_value);
                 *value = Val::map(new_map);
                 Ok(())
@@ -13144,7 +13146,7 @@ impl VirtualMachine {
                             // Unit variant: return the constructed value directly
                             // {$type: "::namespace/Type.Variant"}
                             let full_type = format!("{}.{}", type_ref.name, property);
-                            let mut result_map = indexmap::IndexMap::new();
+                            let mut result_map = ValIndexMap::default();
                             result_map.insert(Val::from("$type"), Val::from(full_type));
                             return Ok(Val::map(result_map));
                         } else {
@@ -13922,10 +13924,10 @@ mod tests {
         );
 
         // Map payloads: msg, then message, are preferred
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("msg"), Val::from("boom"));
         assert_eq!(VirtualMachine::result_err_message(&Val::map(m)), "boom");
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("message"), Val::from("pg: relation missing"));
         m.insert(Val::from("code"), Val::from("42P01"));
         assert_eq!(

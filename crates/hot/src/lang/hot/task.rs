@@ -9,7 +9,7 @@ use crate::lang::runtime::vm::VirtualMachine;
 use crate::queue::Queue;
 use crate::stream::StreamPublisher;
 use crate::val::Val;
-use indexmap::IndexMap;
+use crate::val::ValIndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -461,7 +461,7 @@ pub(crate) fn task_info(
         }
     });
 
-    let mut fields = indexmap::IndexMap::new();
+    let mut fields = ValIndexMap::default();
     fields.insert(Val::from("id"), Val::from(task_id.to_string()));
     fields.insert(Val::from("stream"), stream_val);
     fields.insert(Val::from("origin-run"), origin_run_val);
@@ -1035,7 +1035,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let container_id_val = get_str("container-id").map(Val::from).unwrap_or(Val::Null);
     let backend_val = get_str("backend").map(Val::from).unwrap_or(Val::Null);
 
-    let mut val_map = IndexMap::new();
+    let mut val_map = ValIndexMap::default();
     val_map.insert(Val::from("id"), Val::from(task_id.to_string()));
     val_map.insert(Val::from("status"), Val::from(task.status.clone()));
     val_map.insert(Val::from("exit-code"), exit_code_val);
@@ -1053,7 +1053,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     val_map.insert(Val::from("backend"), backend_val);
     val_map.insert(Val::from("result"), result_val);
 
-    let mut result_map = IndexMap::new();
+    let mut result_map = ValIndexMap::default();
     result_map.insert(Val::from("$type"), Val::from("::hot::task/TaskResult"));
     result_map.insert(Val::from("$val"), Val::map(val_map));
     let result = Val::map(result_map);

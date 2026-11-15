@@ -18,8 +18,8 @@
 //! - `circular-type-reference`: a type defined in terms of itself, such as
 //!   `A type B | "x"` with `B type A`. No value could be checked against it.
 
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
-use indexmap::IndexMap;
 
 use super::constraint_specs::is_constructor_only;
 use super::core_registry::CoreVariableRegistry;
@@ -206,7 +206,7 @@ fn variant_payload<'t>(function: &Value, type_def: &'t TypeDef) -> Option<&'t st
 }
 
 /// The entries of a Map literal, when `val` is one.
-fn map_literal(val: &Val) -> Option<&IndexMap<Val, Val>> {
+fn map_literal(val: &Val) -> Option<&ValIndexMap> {
     match val {
         Val::Map(entries) => Some(entries),
         Val::Box(boxed) => match boxed.as_any().downcast_ref::<AstNode>() {
@@ -1267,7 +1267,7 @@ impl<'a> Index<'a> {
         &self,
         ns: &str,
         record: &TypeDef,
-        entries: &IndexMap<Val, Val>,
+        entries: &ValIndexMap,
         site: &mut RecordSite,
         out: &mut ConstraintDiagnostics,
     ) {
@@ -1314,7 +1314,7 @@ impl<'a> Index<'a> {
         if failed || record.refinement.is_none() {
             return;
         }
-        let known: IndexMap<Val, Val> = fields
+        let known: ValIndexMap = fields
             .iter()
             .filter_map(|field| {
                 let key = Val::from(field.name.name());

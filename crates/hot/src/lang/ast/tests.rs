@@ -1,5 +1,6 @@
 use super::*;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 
 /// Helper to test round-trip serialization
 fn assert_roundtrip<
@@ -364,7 +365,7 @@ fn test_deeply_nested_value_roundtrip() {
 #[test]
 fn test_value_with_val_map_roundtrip() {
     // Val::Map with string keys should round-trip correctly
-    let mut map = indexmap::IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("key1"), Val::Int(1));
     map.insert(Val::from("key2"), Val::from("value"));
 

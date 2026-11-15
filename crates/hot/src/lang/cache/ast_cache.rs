@@ -30,6 +30,7 @@
 //! on any accidental drift.
 
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +145,7 @@ impl TryFrom<TaggedVal> for Val {
                 Ok(Val::vec(vec?))
             }
             TaggedVal::Map { entries } => {
-                let map: Result<IndexMap<Val, Val>, String> = entries
+                let map: Result<ValIndexMap, String> = entries
                     .into_iter()
                     .map(|(k, v)| Ok((Val::try_from(k)?, Val::try_from(v)?)))
                     .collect();
@@ -1499,7 +1500,7 @@ impl TryFrom<CacheableValue> for crate::lang::ast::Value {
                 base_entries,
                 spread_entries,
             } => {
-                let base: Result<indexmap::IndexMap<Val, Val>, String> = base_entries
+                let base: Result<ValIndexMap, String> = base_entries
                     .into_iter()
                     .map(|(k, v)| Ok((Val::try_from(k)?, Val::try_from(v)?)))
                     .collect();
@@ -1715,7 +1716,7 @@ mod tests {
     #[test]
     fn test_tagged_val_map_int_keys() {
         // This is the critical test - maps with non-string keys must preserve key types
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
         assert_val_roundtrip(&Val::map(map), "map with int keys");
@@ -1776,7 +1777,7 @@ mod tests {
     #[test]
     fn test_cacheable_value_with_fn_call() {
         // Create a FnCall that contains a Val::Map with int keys
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
 
@@ -1822,7 +1823,7 @@ mod tests {
         let mut vars = IndexMap::new();
 
         // Add a variable with a Val::Map with integer keys
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
 
@@ -1875,7 +1876,7 @@ mod tests {
         let mut namespaces = IndexMap::new();
 
         let mut vars = IndexMap::new();
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::Int(42), Val::Bool(true));
 
         vars.insert(

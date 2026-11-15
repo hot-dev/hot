@@ -325,6 +325,7 @@ pub fn check_ctx_requirements(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val::ValIndexMap;
 
     #[test]
     fn test_parse_key_config_empty_config() {
@@ -340,7 +341,7 @@ mod tests {
     #[test]
     fn test_parse_key_config_with_default() {
         // {"default": 1000, "secret": false}
-        let config_map: indexmap::IndexMap<Val, Val> = [
+        let config_map: ValIndexMap = [
             (Val::from("default"), Val::Int(1000)),
             (Val::from("secret"), Val::Bool(false)),
         ]

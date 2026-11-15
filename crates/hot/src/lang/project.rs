@@ -1,4 +1,5 @@
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -1152,7 +1153,7 @@ impl PackageMetadata {
     /// The pkg.hot dot-path assignment (e.g. `hot.pkg.foo {name: ...}`) produces
     /// nested wrapper maps. We drill down until we find a map with known metadata
     /// keys like "name" or "version".
-    fn find_metadata_map(map: &indexmap::IndexMap<Val, Val>) -> &indexmap::IndexMap<Val, Val> {
+    fn find_metadata_map(map: &ValIndexMap) -> &ValIndexMap {
         // Check if this map has known metadata keys
         let has_metadata_key = map.keys().any(|k| {
             matches!(
@@ -1178,7 +1179,7 @@ impl PackageMetadata {
     /// Extract metadata fields from a Val::Map
     fn extract_metadata_from_val(
         meta: &mut PackageMetadata,
-        map: &indexmap::IndexMap<Val, Val>,
+        map: &ValIndexMap,
     ) -> Result<(), String> {
         for (key, val) in map.iter() {
             let key_str = Self::val_to_string(key);

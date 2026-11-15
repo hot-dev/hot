@@ -8,6 +8,7 @@
 //! worker activates the new one. One that fails stays as it is, and its
 //! work waits until its project is redeployed.
 
+use crate::val::ValIndexMap;
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
@@ -330,7 +331,7 @@ async fn rebuild(
 /// its source, and each package it carries as a local dependency at the
 /// path the bundle had it, so the new bundle lays them out the same way.
 fn bundle_project_conf(conf: &Val, name: &str, dir: &Path) -> Result<Val, String> {
-    let mut deps = indexmap::IndexMap::new();
+    let mut deps = ValIndexMap::default();
     for (package, path) in bundled_packages(&dir.join("hot/pkg"))? {
         deps.insert(
             Val::from(package),
@@ -343,11 +344,11 @@ fn bundle_project_conf(conf: &Val, name: &str, dir: &Path) -> Result<Val, String
     });
     let mut root = match conf {
         Val::Map(map) => (**map).clone().into_inner(),
-        _ => indexmap::IndexMap::new(),
+        _ => ValIndexMap::default(),
     };
     let mut projects = match root.get(&Val::from("project")) {
         Some(Val::Map(map)) => (**map).clone().into_inner(),
-        _ => indexmap::IndexMap::new(),
+        _ => ValIndexMap::default(),
     };
     projects.insert(Val::from(name), project);
     root.insert(Val::from("project"), Val::map(projects));

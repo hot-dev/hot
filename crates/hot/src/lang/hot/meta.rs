@@ -4,8 +4,8 @@
 
 use crate::lang::hot::r#type::HotResult;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
-use indexmap::IndexMap;
 
 /// Meta written with names (`clock-from: found-at`, `cites: [::text/s4]`)
 /// reads as the values those names have.
@@ -274,7 +274,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 
         // Fallback: return basic shape with name/type if variable exists
         if let Some(val) = lookup_local(vm, var_name) {
-            let mut map = IndexMap::new();
+            let mut map = ValIndexMap::default();
             map.insert(Val::from("name"), Val::from(var_name.clone()));
             let type_name = match &val {
                 Val::Null => "Null",
@@ -444,7 +444,7 @@ pub fn source(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 });
 
                 if let Some(function_info) = function_info {
-                    let mut source_map = indexmap::IndexMap::new();
+                    let mut source_map = ValIndexMap::default();
 
                     // Add the type metadata to indicate this is a Source type
                     source_map.insert(Val::from("$type"), Val::from("::hot::meta/Source"));
@@ -492,7 +492,7 @@ pub fn source(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     );
 
     // Return null source info if function not found
-    let mut source_map = indexmap::IndexMap::new();
+    let mut source_map = ValIndexMap::default();
 
     // Add the type metadata to indicate this is a Source type
     source_map.insert(Val::from("$type"), Val::from("::hot::meta/Source"));
@@ -547,7 +547,7 @@ fn parse_json_to_val(json_str: &str) -> Result<Val, String> {
         }
 
         // Simple object parsing - this is a basic implementation
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
 
         // Split by comma, but be careful about nested structures
         let pairs: Vec<&str> = inner.split(',').collect();

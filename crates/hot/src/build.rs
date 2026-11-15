@@ -2,6 +2,7 @@ use crate::bundle::{BundleFile, calculate_bundle_hash, collect_hot_files_with_pr
 use crate::db::{Build, DatabasePool, Project, get_default_org_and_user_ids};
 use crate::hasher::HotHasher;
 use crate::lang::compiler::{EventHandlers, ScheduledFunctions};
+use crate::val::ValIndexMap;
 use ahash::AHashSet;
 use async_trait::async_trait;
 use std::fs;
@@ -23,9 +24,7 @@ pub struct VersionCheckResult {
 }
 
 /// Validate version compatibility between a build's manifest and the current server version
-pub fn validate_build_version(
-    bundle_map: &indexmap::IndexMap<crate::val::Val, crate::val::Val>,
-) -> VersionCheckResult {
+pub fn validate_build_version(bundle_map: &ValIndexMap) -> VersionCheckResult {
     let server_version = crate::version::current_runtime_version().to_string();
 
     // Extract versions from bundle map
@@ -3286,18 +3285,18 @@ hot.pkg.demo {
         )
         .unwrap();
 
-        let mut dep_spec = indexmap::IndexMap::new();
+        let mut dep_spec = ValIndexMap::default();
         dep_spec.insert(
             Val::from("local"),
             Val::from(pkg_dir.to_string_lossy().as_ref()),
         );
-        let mut deps = indexmap::IndexMap::new();
+        let mut deps = ValIndexMap::default();
         deps.insert(Val::from("hot.dev/demo-pkg"), Val::map(dep_spec));
-        let mut project = indexmap::IndexMap::new();
+        let mut project = ValIndexMap::default();
         project.insert(Val::from("deps"), Val::map(deps));
-        let mut projects = indexmap::IndexMap::new();
+        let mut projects = ValIndexMap::default();
         projects.insert(Val::from("demo"), Val::map(project));
-        let mut conf = indexmap::IndexMap::new();
+        let mut conf = ValIndexMap::default();
         conf.insert(Val::from("project"), Val::map(projects));
         let conf = Val::map(conf);
 

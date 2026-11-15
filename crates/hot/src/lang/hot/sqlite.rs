@@ -18,6 +18,7 @@ use crate::lang::hot::file::{get_file_context, get_file_mode};
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
+use crate::val::ValIndexMap;
 use crate::validate_args;
 use libsqlite3_sys as ffi;
 use std::any::Any;
@@ -631,7 +632,7 @@ fn run_with_limits(
                 ffi::SQLITE_DONE => {
                     let changes = unsafe { ffi::sqlite3_changes64(db) };
                     let last_id = unsafe { ffi::sqlite3_last_insert_rowid(db) };
-                    let mut out = indexmap::IndexMap::new();
+                    let mut out = ValIndexMap::default();
                     out.insert(Val::from("rows-affected"), Val::Int(changes));
                     out.insert(Val::from("last-insert-id"), Val::Int(last_id));
                     return Ok(Val::map(out));
@@ -664,7 +665,7 @@ fn run_with_limits(
                         {
                             return Err("query result exceeds row/cell limit; raise HOT_SQLITE_MAX_QUERY_ROWS or HOT_SQLITE_MAX_QUERY_CELLS".to_string());
                         }
-                        let mut row = indexmap::IndexMap::new();
+                        let mut row = ValIndexMap::default();
                         for c in 0..col_count {
                             let bytes =
                                 unsafe { ffi::sqlite3_column_bytes(stmt.ptr, c) }.max(0) as usize;

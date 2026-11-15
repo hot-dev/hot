@@ -11,8 +11,8 @@
 //! storage paths are identifiers, not capabilities. Callers must mask secrets
 //! on the `Val` BEFORE spilling so secret bytes never reach blob storage.
 
+use crate::val::ValIndexMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use thiserror::Error;
@@ -176,10 +176,10 @@ pub fn omitted_too_deep_val(size: usize) -> Val {
 }
 
 fn omitted_val_because(size: usize, reason: &str) -> Val {
-    let mut inner = IndexMap::new();
+    let mut inner = ValIndexMap::default();
     inner.insert(Val::from("size"), Val::Int(size as i64));
     inner.insert(Val::from("reason"), Val::from(reason));
-    let mut map = IndexMap::new();
+    let mut map = ValIndexMap::default();
     map.insert(Val::from("$type"), Val::from(OMITTED_TYPE));
     map.insert(Val::from("$val"), Val::map(inner));
     Val::map(map)
@@ -369,7 +369,7 @@ pub struct BlobRefVal {
 impl BlobRefVal {
     /// Build the `::hot::blob/BlobRef` typed map with kebab-case keys.
     pub fn to_val(&self) -> Val {
-        let mut inner = IndexMap::new();
+        let mut inner = ValIndexMap::default();
         inner.insert(Val::from("id"), Val::from(self.id.to_string()));
         inner.insert(
             Val::from("object-id"),
@@ -386,7 +386,7 @@ impl BlobRefVal {
         }
         inner.insert(Val::from("encoding"), Val::from(self.encoding.clone()));
 
-        let mut map = IndexMap::new();
+        let mut map = ValIndexMap::default();
         map.insert(Val::from("$type"), Val::from(BLOB_REF_TYPE));
         map.insert(Val::from("$val"), Val::map(inner));
         Val::map(map)
@@ -1456,7 +1456,7 @@ mod tests {
     #[test]
     fn test_forged_blob_ref_map_is_malformed() {
         // Claims the type but has no valid fields: must be an error, not None.
-        let mut m = IndexMap::new();
+        let mut m = ValIndexMap::default();
         m.insert(Val::from("$type"), Val::from(BLOB_REF_TYPE));
         m.insert(Val::from("$val"), val!({"id": "not-a-uuid"}));
         let forged = Val::map(m);

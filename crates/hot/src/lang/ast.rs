@@ -3,6 +3,7 @@
 use crate::val;
 use crate::val::Val;
 use crate::val::ValBox;
+use crate::val::ValIndexMap;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::any::Any;
@@ -971,7 +972,7 @@ pub enum Value {
     MatchArm(Box<MatchArm>),    // Single match arm (for match flow function bodies)
     MapWithSpread {
         // Map literal with spread entries: {...obj, key: val}
-        base_entries: IndexMap<Val, Val>,
+        base_entries: ValIndexMap,
         spread_entries: Vec<(usize, Value)>, // (insertion_index, spread_value)
     },
     Placeholder(usize), // % placeholder, 1-based arg index (desugared to lambda param during parsing)
