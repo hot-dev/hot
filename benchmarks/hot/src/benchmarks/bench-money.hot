@@ -1,0 +1,17 @@
+::benchmarks::money ns
+meta {doc: "Decimal money arithmetic: line totals, discounts and tax rounded to cents"}
+
+// Each line: a unit price, a quantity, a 10% discount from 4 units, and
+// 8.25% tax. Line and tax amounts round to cents half away from zero (Hot's
+// `round`, Python's ROUND_HALF_UP). The result is the total in cents.
+money-dec fn (n: Int): Int {
+    reduce(range(n), (total, i) {
+        unit add(4.99, mul(mod(i, 40), 0.25))
+        qty add(mod(i, 5), 1)
+        line mul(unit, qty)
+        discounted if(gte(qty, 4), mul(line, 0.9), line)
+        line-cents round(mul(discounted, 100))
+        tax-cents round(mul(discounted, 0.0825, 100))
+        add(total, line-cents, tax-cents)
+    }, 0)
+}

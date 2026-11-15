@@ -1,0 +1,28 @@
+::benchmarks::lambdas ns
+meta {
+    doc: "Lambdas the pipeline fusion doesn't cover: captures, functions as values, nested HOFs"
+}
+
+// A lambda that captures two locals.
+closure-capture fn (n: Int): Int {
+    factor add(mod(n, 5), 3)
+    offset 7
+    scaled map(range(n), (x) { add(mul(x, factor), offset) })
+    reduce(scaled, (acc, x) { add(acc, x) }, 0)
+}
+
+twice fn (f: Fn, x: Int): Int { f(f(x)) }
+inc fn (x: Int): Int { add(x, 1) }
+
+// A named function passed as a value and called through a parameter.
+fn-as-value fn (n: Int): Int {
+    reduce(range(n), (acc, i) { add(acc, twice(inc, i)) }, 0)
+}
+
+// A filter and a reduce inside the lambda of a map.
+nested-hof fn (n: Int): Int {
+    rows map(range(n), (r) {
+        reduce(filter(range(100), (c) { gt(mod(add(r, c), 3), 0) }), (a, c) { add(a, c) }, 0)
+    })
+    reduce(rows, (acc, x) { add(acc, x) }, 0)
+}
