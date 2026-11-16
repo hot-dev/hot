@@ -909,6 +909,19 @@ jobs:
             exit 1
         }
 
+    # The signing action installs its module from PSGallery, which some Windows
+    # runners come up without (actions/runner-images#13758). Both signing steps
+    # run on this runner, so registering it once covers them.
+    - name: Register PSGallery for the signing action
+      if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
+      shell: pwsh
+      run: |
+        if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Write-Host "PSGallery is not registered on this runner; registering it."
+            Register-PSRepository -Default
+        }
+        Get-PSRepository -Name PSGallery
+
     - name: Sign binary with Trusted Signing
       if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
       uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
