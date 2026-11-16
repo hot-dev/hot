@@ -1207,20 +1207,22 @@ def write_secret_files(root, files, chown=os.chown, keep_others=False):
     shutil.rmtree(old, ignore_errors=True)
 
 
-def write_atomic(path, text, mode=0o600):
+def write_atomic(path, text):
     """Replace a file whole: the new content is written and flushed beside
     it, then renamed over it. A full disk, a kill, or a power loss leaves
-    the old file, never an empty or partial one."""
+    the old file, never an empty or partial one. Only its owner reads it:
+    everything the agent writes this way is read by root, the agent or the
+    host's root services."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.new")
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
+        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -1492,7 +1494,7 @@ class Agent:
         marker = self.etc / "host-configured"
         marker.unlink(missing_ok=True)
         self.write_host_env()
-        write_atomic(self.etc / "guest-network.env", guest, mode=0o644)
+        write_atomic(self.etc / "guest-network.env", guest)
         self.run_command(["systemctl", "restart", "hot-guest-firewall.service"])
         try:
             self.run_command(["systemctl", "start", "kata-containerd.service"])
@@ -1508,7 +1510,7 @@ class Agent:
         space, which kata-devpool-activate and hot-box-pool-hold read."""
         write_atomic(self.etc / "host.env",
                      f"HOT_BOX_POOL_GB={BOX_POOL_GB[self.config.get('size', 'small')]}\n"
-                     f"HOT_BOX_POOL_PREALLOCATE={int(self.holds_box_pool())}\n", mode=0o644)
+                     f"HOT_BOX_POOL_PREALLOCATE={int(self.holds_box_pool())}\n")
 
     def holds_box_pool(self):
         """Whether Kata's box pool holds its data file's space on the data
@@ -1695,11 +1697,11 @@ class Agent:
         wanted, written = self.guest_network(self.operator_secrets()), path.read_text()
         if wanted == written:
             return
-        write_atomic(path, wanted, mode=0o644)
+        write_atomic(path, wanted)
         try:
             self.run_command(["systemctl", "restart", "hot-guest-firewall.service"])
         except Exception:
-            write_atomic(path, written, mode=0o644)
+            write_atomic(path, written)
             raise
 
     def egress_proxy(self, operator):
@@ -1988,6 +1990,8 @@ class Agent:
             if not copy.stat().st_size:
                 raise AgentError("the copy is empty")
             self.chown(copy, 0, 0)
+            # An executable Kata's shim bind-mounts into every box, as the host
+            # image installs its fallback (install -m 0755); it holds no secret.
             os.chmod(copy, 0o755)
             with open(copy, "rb+") as handle:
                 os.fsync(handle.fileno())

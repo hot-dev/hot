@@ -406,6 +406,9 @@ class DataDisk(AgentHarness):
         etc = Path(self.tmp.name) / "etc"
         self.assertEqual((etc / "host.env").read_text(), "HOT_BOX_POOL_GB=40\nHOT_BOX_POOL_PREALLOCATE=1\n")
         self.assertIn("HOT_GUEST_DENY_CIDRS=", (etc / "guest-network.env").read_text())
+        # Root's services read them; nobody else needs to.
+        for name in ("host.env", "guest-network.env"):
+            self.assertEqual(stat.S_IMODE((etc / name).stat().st_mode), 0o600, name)
         # A failure is retried next cycle, though the disk is mounted by then.
         self.run.commands.clear()
         get_secret = self.cloud.get_secret
