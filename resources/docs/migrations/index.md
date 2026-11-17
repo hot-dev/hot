@@ -36,6 +36,15 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.10 to 3.0.11 {#upgrading-from-3-0-10-to-3-0-11}
+
+**No migrations.** Replace the binaries and restart.
+
+**What to check in a self-hosted installation:**
+
+- On GCP with managed PostgreSQL, 3.0.10 could not migrate: `migrate` exited 101 on its connection to Cloud SQL, and the first release stopped at the scheduler. If that happened, recreate the scheduler's instance, then release 3.0.11.
+- A host image built from 3.0.11 writes the agent's environment files for root only. Hosts on a 3.0.10 image run 3.0.11 as they are.
+
 ## Upgrading from Hot 3.0.9 to 3.0.10 {#upgrading-from-3-0-9-to-3-0-10}
 
 **Migration 040.** Run `hot db migrate` with the 3.0.10 CLI. It adds the partial index `blob_ref_call_active_idx` on `blob_ref(org_id, created_at)` for active refs to spilled call payloads. On Postgres it runs outside a transaction with `CONCURRENTLY`, so writes don't wait. If it is interrupted, Postgres leaves an invalid index behind: drop it and run `hot db migrate` again.
