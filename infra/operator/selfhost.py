@@ -145,12 +145,15 @@ NOT_WRITTEN = re.compile(r"not[ _]?found", re.IGNORECASE)
 DENIED = ("AccessDenied", "PERMISSION_DENIED", "does not have permission")
 # How a read says there is no valid sign-in to make it with, which no number of
 # tries changes either: the AWS CLI's errors, a profile or config file it cannot
-# find among them, then gcloud's.
+# find among them, then gcloud's. gcloud ends other errors, a NOT_FOUND among
+# them, with whom the command ran as ("...which is the active account specified
+# by the [core/account] property"), so only its own sign-in errors match here.
 SIGNED_OUT = ("ExpiredToken", "UnrecognizedClient", "InvalidClientTokenId", "InvalidSignature",
               "Unable to locate credentials", "Partial credentials", "could not be found", "MFA token required",
               "Token has expired", "SSO session", "SSO Token", "aws login", "login session", "login credentials",
-              "problem refreshing", "problem reauthenticating", "active account", "gcloud auth login", "Please run:",
-              "Reauthentication", "UNAUTHENTICATED", "Failed to load credential file", "Failed to impersonate")
+              "problem refreshing", "problem reauthenticating", "have an active account", "current active account",
+              "gcloud auth login", "Please run:", "Reauthentication", "UNAUTHENTICATED", "Failed to load credential file",
+              "Failed to impersonate")
 # A host answers a pointer by acting on it. One that had already acted on this
 # release when its pointer was last written, as when the pointer went away and
 # came back before the host saw it, has nothing new to say.
