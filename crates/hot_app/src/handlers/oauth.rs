@@ -509,10 +509,12 @@ struct PendingEmailSelection {
 
 fn encode_pending_selection(pending: &PendingEmailSelection) -> Result<String, String> {
     let secret = crate::auth::get_session_secret()?;
+    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_ref())
+        .map_err(|e| format!("Failed to encode pending selection: {}", e))?;
     jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         pending,
-        &jsonwebtoken::EncodingKey::from_secret(secret.as_ref()),
+        &key,
     )
     .map_err(|e| format!("Failed to encode pending selection: {}", e))
 }
@@ -521,13 +523,11 @@ fn decode_pending_selection(token: &str) -> Result<PendingEmailSelection, String
     let secret = crate::auth::get_session_secret()?;
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.set_required_spec_claims(&["exp"]);
-    jsonwebtoken::decode::<PendingEmailSelection>(
-        token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_ref()),
-        &validation,
-    )
-    .map(|data| data.claims)
-    .map_err(|e| format!("Invalid or expired email selection session: {}", e))
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_ref())
+        .map_err(|e| format!("Invalid or expired email selection session: {}", e))?;
+    jsonwebtoken::decode::<PendingEmailSelection>(token, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| format!("Invalid or expired email selection session: {}", e))
 }
 
 /// GET /auth/github/select-email — show the verified-email picker for a

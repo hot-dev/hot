@@ -157,5 +157,4 @@ blake3 = { workspace = true }
 [dev-dependencies]
 ahash = { workspace = true }
 tower = { workspace = true, features = ["util"] }
-filetime = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

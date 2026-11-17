@@ -820,7 +820,8 @@ pub fn generate_token(user_id: &Uuid, conf: &Val) -> Result<String, String> {
         iat: now.timestamp() as usize,
     };
 
-    let key = EncodingKey::from_secret(secret.as_ref());
+    let key = EncodingKey::from_secret(secret.as_ref())
+        .map_err(|e| format!("Failed to generate token: {}", e))?;
 
     encode(&Header::new(Algorithm::HS256), &claims, &key)
         .map_err(|e| format!("Failed to generate token: {}", e))
@@ -829,7 +830,8 @@ pub fn generate_token(user_id: &Uuid, conf: &Val) -> Result<String, String> {
 /// Validate a JWT token and extract user_id
 pub fn validate_token(token: &str) -> Result<Uuid, String> {
     let secret = get_session_secret()?;
-    let key = DecodingKey::from_secret(secret.as_ref());
+    let key = DecodingKey::from_secret(secret.as_ref())
+        .map_err(|e| format!("Failed to validate token: {}", e))?;
 
     let token_data = decode::<Claims>(token, &key, &Validation::new(Algorithm::HS256))
         .map_err(|e| format!("Failed to validate token: {}", e))?;
@@ -854,7 +856,7 @@ fn refresh_session_cookie(
 ) -> Option<axum_extra::extract::cookie::Cookie<'static>> {
     let token = cookies.get(jwt_cookie_name())?.value();
     let secret = get_session_secret().ok()?;
-    let key = DecodingKey::from_secret(secret.as_ref());
+    let key = DecodingKey::from_secret(secret.as_ref()).ok()?;
     let claims = decode::<Claims>(token, &key, &Validation::new(Algorithm::HS256))
         .ok()?
         .claims;

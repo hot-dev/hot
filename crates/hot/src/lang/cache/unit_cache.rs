@@ -632,8 +632,8 @@ mod tests {
         let key = disk_key(&cache, &unit);
         let cache_path = cache.cache_path(&unit, &key);
         let old_system = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
-        let old = filetime::FileTime::from_system_time(old_system);
-        filetime::set_file_mtime(&cache_path, old).unwrap();
+        let old = old_system;
+        crate::lang::cache::set_mtime(&cache_path, old).unwrap();
 
         assert!(
             cache

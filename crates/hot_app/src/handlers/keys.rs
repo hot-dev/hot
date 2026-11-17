@@ -62,7 +62,8 @@ fn sign_api_key_handoff(
         key_hash,
         exp,
     };
-    let key = EncodingKey::from_secret(&api_key_handoff_secret()?);
+    let key = EncodingKey::from_secret(&api_key_handoff_secret()?)
+        .map_err(|e| format!("Failed to sign API key handoff: {e}"))?;
     encode(&Header::new(Algorithm::HS256), &claims, &key)
         .map_err(|e| format!("Failed to sign API key handoff: {e}"))
 }
@@ -80,9 +81,10 @@ fn verify_api_key_handoff(
     let secret = api_key_handoff_secret().ok()?;
     let mut validation = Validation::new(Algorithm::HS256);
     validation.leeway = 0;
-    let handoff = decode::<ApiKeyHandoff>(token, &DecodingKey::from_secret(&secret), &validation)
-        .ok()?
-        .claims;
+    let handoff =
+        decode::<ApiKeyHandoff>(token, &DecodingKey::from_secret(&secret).ok()?, &validation)
+            .ok()?
+            .claims;
     // A pending credential belongs to the identity and execution scope that
     // saw its secret. A mismatched request must not redeem it.
     if (
@@ -1220,7 +1222,7 @@ mod tests {
         let token = encode(
             &Header::new(Algorithm::HS256),
             &expired,
-            &EncodingKey::from_secret(&api_key_handoff_secret().unwrap()),
+            &EncodingKey::from_secret(&api_key_handoff_secret().unwrap()).unwrap(),
         )
         .unwrap();
         assert!(verify_api_key_handoff(&token, &key, user, org, env).is_none());
@@ -1233,7 +1235,7 @@ mod tests {
         let session_signed = encode(
             &Header::new(Algorithm::HS256),
             &fresh,
-            &EncodingKey::from_secret(session_key.as_bytes()),
+            &EncodingKey::from_secret(session_key.as_bytes()).unwrap(),
         )
         .unwrap();
         assert!(verify_api_key_handoff(&session_signed, &key, user, org, env).is_none());
