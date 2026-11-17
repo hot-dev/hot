@@ -273,8 +273,9 @@ pub fn init_crypto_provider() {
     INIT_RUSTLS.call_once(|| {
         // Install aws-lc-rs as the default crypto provider for Rustls.
         // Required by clients that build TLS configs from the process
-        // default (rediss://, the GCS SDK's gRPC transport): Hot enables
-        // both the aws-lc-rs and ring backends, so rustls can't pick one.
+        // default (rediss://, the GCS SDK's gRPC transport, and PostgreSQL
+        // under sslmode=verify-ca): Hot enables both the aws-lc-rs and ring
+        // backends, so rustls can't pick one.
         if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
             tracing::warn!("Failed to install default Rustls crypto provider: {:?}", e);
         }

@@ -281,6 +281,12 @@ pub fn main_with_providers(providers: CliProviders) {
     // See `hot::lang::user_code` for the full design.
     hot::lang::user_code::install_panic_hook();
 
+    // Pick rustls's crypto backend before anything opens a TLS connection.
+    // Hot links both aws-lc-rs and ring, so a client that builds its TLS
+    // settings from the process default would otherwise panic, as PostgreSQL
+    // does under sslmode=verify-ca with an sslrootcert (managed Cloud SQL).
+    hot::redis::init_crypto_provider();
+
     // Build a custom Tokio runtime with 64 MB thread stacks. The Hot VM is
     // deeply recursive and overflows the default ~8 MB stack on complex
     // workloads. This applies to both async worker threads and the blocking

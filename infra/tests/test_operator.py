@@ -352,6 +352,9 @@ class ScalableCli:
     GROUPS = {"task-worker": ["i-t1"], "worker": ["i-w1", "i-w2"], "api": ["i-a1"], "app": ["i-p1", "i-p2"],
               "scheduler": ["i-s1"]}
 
+    # What gcloud adds to an error about whom the command ran as.
+    not_found_detail = ""
+
     def __init__(self, fail_role=None, migration="migrated", cloud="aws", groups=None, delay=0):
         self.cloud = cloud
         self.clock = Clock()
@@ -436,7 +439,7 @@ class ScalableCli:
             if role not in self.pointers:
                 raise selfhost.CliError("An error occurred (ParameterNotFound) when calling the GetParameter operation: "
                                         if self.cloud == "aws" else "ERROR: (gcloud.secrets.versions.access) NOT_FOUND: "
-                                        f"Secret [projects/p/secrets/{name}] not found or has no versions.")
+                                        f"Secret [projects/p/secrets/{name}] not found or has no versions.{self.not_found_detail}")
             if self.cloud == "aws":
                 return {"Parameter": {"Value": self.pointers[role], "LastModifiedDate": rfc3339(self.written.get(role, 0))}}
             return {"payload": {"data": base64.b64encode(json.dumps({"release": self.pointers[role]}).encode()).decode()}}
@@ -2149,6 +2152,24 @@ class FailedReads(unittest.TestCase):
             with self.subTest(cloud):
                 cli = ScalableCli(cloud=cloud)
                 self.assertEqual(installation(document, cli).release("3.0.2")["state"], "deployed")
+                self.assertEqual(cli.order(), ["migrate", *selfhost.ROLE_ORDER])
+        self.assertEqual(stderr.getvalue(), "", "not a failed read")
+
+    def test_a_pointer_never_written_is_written_whoever_gcloud_says_ran_the_read(self, stderr):
+        # gcloud 588 ends a NOT_FOUND with the identity it used, in words that
+        # once read as a lapsed sign-in.
+        for detail in (" This command is authenticated as a@b.c which is the active account specified by the "
+                       "[core/account] property.",
+                       " This command is authenticated as a@b.c which is the active account specified by the "
+                       "[core/account] property. Impersonation is used to impersonate r@p.iam.gserviceaccount.com.",
+                       " This command is authenticated as r@p.iam.gserviceaccount.com using the credentials in /k.json, "
+                       "specified by the [auth/credential_file_override] property.",
+                       " This command is authenticated with an access token from /t specified by the "
+                       "[auth/access_token_file] property."):
+            with self.subTest(detail):
+                cli = ScalableCli(cloud="gcp")
+                cli.not_found_detail = detail
+                self.assertEqual(installation(GCP_SCALABLE, cli).release("3.0.2")["state"], "deployed")
                 self.assertEqual(cli.order(), ["migrate", *selfhost.ROLE_ORDER])
         self.assertEqual(stderr.getvalue(), "", "not a failed read")
 

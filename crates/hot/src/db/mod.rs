@@ -594,7 +594,16 @@ pub fn redact_password(uri: &str) -> String {
 }
 
 /// Create a database connection pool
+/// PostgreSQL under `sslmode=verify-ca`, as on managed Cloud SQL, builds its
+/// TLS settings from rustls's process default, which panics while none is
+/// installed. The `hot` binary installs one at start; this covers any other
+/// caller that connects first.
+fn ensure_tls_provider() {
+    crate::redis::init_crypto_provider();
+}
+
 pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
+    ensure_tls_provider();
     let uri = get_db_uri_from_conf(conf);
     let db_type = DatabaseType::from_uri(&uri)?;
 
@@ -950,6 +959,7 @@ pub async fn sqlite_migration_state(uri: &str) -> Result<MigrationState, Databas
 /// SQLite database, or PostgreSQL with `db.migration-uri`, since the runtime
 /// login has no access to the ledger.
 pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, DatabaseError> {
+    ensure_tls_provider();
     let uri = get_db_uri_from_conf(conf);
     match DatabaseType::from_uri(&uri)? {
         DatabaseType::Sqlite => sqlite_migration_state(&uri).await.map(Some),
@@ -1208,6 +1218,7 @@ fn is_hot2_ledger(baseline: Result<Option<String>, sqlx::Error>) -> Option<bool>
 
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
+    ensure_tls_provider();
     let runtime_uri = get_db_uri_from_conf(conf);
     let migration_uri = get_migration_uri_from_conf(conf);
     if !migration_uri.is_empty() {
@@ -1833,6 +1844,66 @@ mod tests {
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/hot").is_ok());
         assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/staging").is_err());
         assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
+    }
+
+    /// A self-signed CA, only for sslrootcert to parse.
+    const TEST_ROOT_CERT: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIBYTCCAQigAwIBAgIUAXrQEuHz07HEBtQWIepXLAoMdrAwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLaG90LXRlc3QtY2EwIBcNMjYxMTE3MTUyNDQ2WhgPMjEyNjEw
+MjQxNTI0NDZaMBYxFDASBgNVBAMMC2hvdC10ZXN0LWNhMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEgq+YJp+DAwnUjyctu/0rV4+bZ6LWYq6bfGDNT4+q70k/GYm7
+zZqjS0x7LWqrnbKDPPt17V7SI/9y39TPkjAHH6MyMDAwHQYDVR0OBBYEFJVSxnOD
+Y+wj9G/3pPoY0GuD8yc7MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDRwAw
+RAIgVLtiEAJqJUn5jcrbBp64dybn2lSZLjwWiOuRu/15XO8CIHYES7qOpXLcobdc
+88NZgKovF2/U+kt5ajCwiwSsps+F
+-----END CERTIFICATE-----
+";
+
+    /// A server that agrees to TLS, then hangs up before the handshake: far
+    /// enough for the driver to build its TLS settings from the root
+    /// certificate.
+    async fn hang_up_after_accepting_tls() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut ssl_request = [0u8; 8];
+                if socket.read_exact(&mut ssl_request).await.is_ok() {
+                    let _ = socket.write_all(b"S").await;
+                }
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_verified_tls_connection_fails_instead_of_panicking() {
+        // Without a crypto provider, verify-ca's TLS settings panic ("Could
+        // not automatically determine the process-level CryptoProvider").
+        // With one, the hang-up is an ordinary error. verify-full is here so
+        // neither mode can start to panic unseen.
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(&ca, TEST_ROOT_CERT).unwrap();
+        let port = hang_up_after_accepting_tls().await;
+        for sslmode in ["verify-ca", "verify-full"] {
+            let uri = format!(
+                "postgres://hot_owner:x@127.0.0.1:{port}/hot?sslmode={sslmode}&sslrootcert={}",
+                ca.display()
+            );
+            let conf = crate::val!({"db": {"uri": uri.clone(), "migration-uri": uri.clone()}});
+            assert!(create_db_pool(&conf).await.is_err(), "{sslmode}: pool");
+            assert!(
+                migration_state(&conf).await.is_err(),
+                "{sslmode}: migration state"
+            );
+            assert!(
+                run_migrations(&conf).await.is_err(),
+                "{sslmode}: migrations"
+            );
+        }
     }
 
     #[tokio::test]
