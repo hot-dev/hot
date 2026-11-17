@@ -1442,11 +1442,9 @@ mod tests {
         for path in [&old, &recent, &configured] {
             std::fs::write(path, "fixture").unwrap();
         }
-        let week_ago = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600),
-        );
-        filetime::set_file_mtime(&old, week_ago).unwrap();
-        filetime::set_file_mtime(&configured, week_ago).unwrap();
+        let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        crate::lang::cache::set_mtime(&old, week_ago).unwrap();
+        crate::lang::cache::set_mtime(&configured, week_ago).unwrap();
         super::PrivateTestArtifacts::sweep(directory.path());
         assert!(!old.exists());
         assert!(recent.exists());
