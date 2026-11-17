@@ -69,13 +69,13 @@ rustyline = "19.0"
 serde_json = "1.0.154"
 serde = { version = "1.0", features = ["derive", "rc"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc", "use-std"] }
-uuid = "1.29.2"
+uuid = "1.29.3"
 async-trait = "0.1.92"
-redis = { version = "1.8.1", features = ["tokio-comp", "cluster-async", "tokio-rustls-comp", "token-based-authentication"] }
+redis = { version = "1.8.2", features = ["tokio-comp", "cluster-async", "tokio-rustls-comp", "token-based-authentication"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
-russh = { version = "0.65.1", default-features = false, features = ["aws-lc-rs", "rsa"] }
+russh = { version = "0.65.2", default-features = false, features = ["aws-lc-rs", "rsa"] }
 russh-sftp = "3.0.1"
 webpki-roots = "1.0.12"
 webpki-root-certs = "1.0.12"
@@ -108,10 +108,10 @@ is-terminal = "0.4"
 tempfile = "3.27"
 url = "2.5"
 percent-encoding = "2.3"
-zip = "9.5"
+zip = "9.6"
 aws-lc-rs = "1.19.0"
 axum-extra = "0.12.6"
-jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs"] }
 jsonschema = { version = "0.61.2", default-features = false }
 time = "0.3.55"
 croner = "4.0"
@@ -179,11 +179,11 @@ tokio-vsock = "0.7"
 # WebSocket client for ::hot::ws functions
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 fastembed = { version = "7", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
-cranelift-codegen = "0.137.1"
-cranelift-frontend = "0.137.1"
-cranelift-jit = "0.137.1"
-cranelift-module = "0.137.1"
-cranelift-native = "0.137.1"
+cranelift-codegen = "0.137.2"
+cranelift-frontend = "0.137.2"
+cranelift-jit = "0.137.2"
+cranelift-module = "0.137.2"
+cranelift-native = "0.137.2"
 # Non-poisoning Mutex/RwLock for shared state held across user-code execution.
 # Avoids std::sync poisoning if user code panics while a lock is held.
 parking_lot = "0.13"
@@ -191,7 +191,6 @@ parking_lot = "0.13"
 # Used by `::hot::internal::tokenizer` and wrapped by `::ai::tokenizer`.
 tiktoken-rs = "0.12"
 ammonia = "4.2.5"
-filetime = "0.2"
 ipnet = "2.12.2"
 libsqlite3-sys = "0.37"
 form_urlencoded = "1"

@@ -283,9 +283,21 @@ pub(crate) fn prune_stale_cache_files_once(dir: &std::path::Path, keep: &std::pa
     }
 }
 
+/// Sets a file's modification time, for tests that age cache files.
+#[cfg(test)]
+pub(crate) fn set_mtime(
+    path: impl AsRef<std::path::Path>,
+    time: std::time::SystemTime,
+) -> std::io::Result<()> {
+    std::fs::File::options()
+        .write(true)
+        .open(path)?
+        .set_modified(time)
+}
+
 #[cfg(test)]
 mod prune_tests {
-    use super::{is_managed_cache_file_name, prune_stale_cache_files};
+    use super::{is_managed_cache_file_name, prune_stale_cache_files, set_mtime};
 
     const BYTECODE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -301,13 +313,10 @@ mod prune_tests {
         }
 
         // Age `old` past the 30-day fuse and `old_tmp` past the 1-day fuse.
-        let days = |n: u64| {
-            filetime::FileTime::from_system_time(
-                std::time::SystemTime::now() - std::time::Duration::from_secs(n * 24 * 3600),
-            )
-        };
-        filetime::set_file_mtime(&old, days(31)).unwrap();
-        filetime::set_file_mtime(&old_tmp, days(2)).unwrap();
+        let days =
+            |n: u64| std::time::SystemTime::now() - std::time::Duration::from_secs(n * 24 * 3600);
+        set_mtime(&old, days(31)).unwrap();
+        set_mtime(&old_tmp, days(2)).unwrap();
 
         prune_stale_cache_files(dir.path(), &kept);
 
@@ -322,11 +331,9 @@ mod prune_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let kept = dir.path().join(format!("{}.bc.zst", BYTECODE_KEY));
         std::fs::write(&kept, b"x").unwrap();
-        filetime::set_file_mtime(
+        set_mtime(
             &kept,
-            filetime::FileTime::from_system_time(
-                std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
-            ),
+            std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
         )
         .unwrap();
 
@@ -346,11 +353,9 @@ mod prune_tests {
         let lock = dir.path().join("pkg-old-0123456789abcdef.lock");
         for path in [&keep, &managed, &unrelated, &unrelated_tmp, &lock] {
             std::fs::write(path, b"x").unwrap();
-            filetime::set_file_mtime(
+            set_mtime(
                 path,
-                filetime::FileTime::from_system_time(
-                    std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
-                ),
+                std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
             )
             .unwrap();
         }
@@ -389,11 +394,9 @@ mod prune_tests {
         let old = |name: &str| {
             let path = dir.path().join(name);
             std::fs::write(&path, b"x").unwrap();
-            filetime::set_file_mtime(
+            set_mtime(
                 &path,
-                filetime::FileTime::from_system_time(
-                    std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
-                ),
+                std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
             )
             .unwrap();
             path
