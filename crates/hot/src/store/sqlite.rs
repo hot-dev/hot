@@ -758,8 +758,10 @@ impl Store for SqliteStore {
         &self,
         store_name: &str,
         entries: Vec<super::StoreWrite>,
-    ) -> Result<usize, String> {
-        Ok(self.write_batch(store_name, entries, false).await?.len())
+    ) -> Result<super::BatchWritten, String> {
+        Ok(super::BatchWritten::of(
+            self.write_batch(store_name, entries, false).await?,
+        ))
     }
 
     async fn search(
@@ -1792,8 +1794,8 @@ mod tests {
             (json!("b"), json!(2), None, None),
             (json!("c"), json!(3), None, None),
         ];
-        let count = store.put_many("t", entries).await.unwrap();
-        assert_eq!(count, 3);
+        let written = store.put_many("t", entries).await.unwrap();
+        assert_eq!(written.count, 3);
         assert_eq!(store.length("t").await.unwrap(), 3);
     }
 

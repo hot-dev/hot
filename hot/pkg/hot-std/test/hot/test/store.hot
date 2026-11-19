@@ -230,6 +230,16 @@ meta ["test"] fn () {
     assert-eq(3, ::store/get(s, "z"), "put-many entries are accessible")
 }
 
+test-put-many-replaces-in-place
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-many-replaces"})
+    ::store/put-many(s, {"z": 1, "y": 2, "x": 3})
+    count ::store/put-many(s, {"x": 30, "w": 4, "z": 10})
+    assert-eq(3, count, "put-many counts replaced entries too")
+    assert-eq(["z", "y", "x", "w"], ::store/keys(s), "an entry keeps its place when put-many replaces it")
+    assert-eq([10, 2, 30, 4], ::store/vals(s), "put-many replaces values in place")
+}
+
 // Add one entry to the map stored at `key`, retrying while another writer
 // changed it between the read and the write. Each retry means another
 // writer won, so the budget only stops a put-if that never matches.

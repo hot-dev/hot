@@ -408,6 +408,7 @@ merge
 meta {
     doc: """
     Merge a map of key-value pairs into the store. Mirrors `::hot::coll/merge`.
+    The entries are written together: if the write fails, none of them is stored.
 
     **Example**
 
@@ -430,6 +431,7 @@ put-many
 meta {
     doc: """
     Batch write from a map of key-value pairs. Returns the count of entries written.
+    The entries are written together: if the write fails, none of them is stored.
 
     **Example**
 

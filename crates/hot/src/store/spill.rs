@@ -15,8 +15,8 @@ use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use super::{
-    ListOptions, SearchInfoPage, SearchOptions, SearchResult, Store, StoreEntry, StoreEntryInfo,
-    StoreMapConfig, StoreMapInfo, StoreWrite,
+    BatchWritten, ListOptions, SearchInfoPage, SearchOptions, SearchResult, Store, StoreEntry,
+    StoreEntryInfo, StoreMapConfig, StoreMapInfo, StoreWrite,
 };
 use crate::blob::{BlobRefVal, BlobScope, BlobStore, MAX_INLINE_HARD_LIMIT_BYTES, RehydrateUsage};
 use crate::db::DatabasePool;
@@ -358,24 +358,41 @@ impl Store for SpillingStore {
         Ok(())
     }
 
-    async fn put_many(&self, store_name: &str, entries: Vec<StoreWrite>) -> Result<usize, String> {
-        let mut replaced = Vec::new();
-        let mut written = Vec::new();
-        for (key, value, embedding, text_content) in &entries {
-            replaced.extend(self.inner.spilled_values(store_name, Some(key)).await?);
-            let stored = self.stored_form(store_name, value).await?;
-            written.push((key.clone(), stored, embedding.clone(), text_content.clone()));
+    async fn put_many(
+        &self,
+        store_name: &str,
+        entries: Vec<StoreWrite>,
+    ) -> Result<BatchWritten, String> {
+        let mut stored = Vec::with_capacity(entries.len());
+        for (_, value, _, _) in &entries {
+            stored.push(self.stored_form(store_name, value).await?);
         }
-        let stored: Vec<JsonValue> = written.iter().map(|write| write.1.clone()).collect();
-        match self.inner.put_many(store_name, written).await {
-            Ok(count) => {
-                self.release(&replaced).await;
-                Ok(count)
+        // Only a value that went to blob storage differs from what was given.
+        let spilled: Vec<JsonValue> = stored
+            .iter()
+            .zip(&entries)
+            .filter(|(stored, (_, value, _, _))| *stored != value)
+            .map(|(stored, _)| stored.clone())
+            .collect();
+        let writes = entries
+            .into_iter()
+            .zip(stored)
+            .map(|((key, _, embedding, text_content), stored)| {
+                (key, stored, embedding, text_content)
+            })
+            .collect();
+        match self.inner.put_many(store_name, writes).await {
+            // The write itself says which references it replaced, one written
+            // earlier in this batch included.
+            Ok(written) => {
+                self.release(&written.replaced).await;
+                Ok(BatchWritten {
+                    count: written.count,
+                    replaced: Vec::new(),
+                })
             }
             Err(e) => {
-                for (stored, (_, value, _, _)) in stored.iter().zip(&entries) {
-                    self.release_unless_same(stored, value).await;
-                }
+                self.release(&spilled).await;
                 Err(e)
             }
         }
@@ -645,6 +662,79 @@ mod tests {
 
         fixture.put(&json!("d"), &large("d")).await;
         store.destroy(NAME).await.unwrap();
+        assert_eq!(fixture.active_refs().await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_batch_releases_the_blobs_it_replaces() {
+        let fixture = fixture().await;
+        let store = &fixture.store;
+        fixture.put(&json!("a"), &large("a")).await;
+        fixture.put(&json!("b"), &large("b")).await;
+        assert_eq!(fixture.active_refs().await, 2);
+
+        let written = store
+            .put_many(
+                NAME,
+                vec![
+                    (json!("a"), large("a2"), None, None),
+                    (json!("b"), json!(1), None, None),
+                    (json!("c"), json!(2), None, None),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(written.count, 3);
+        assert!(is_spilled(&fixture.raw(&json!("a")).await));
+        let got = store.get(NAME, &json!("a")).await.unwrap().unwrap();
+        assert_eq!(got.value["tag"], json!("a2"));
+        assert_eq!(fixture.active_refs().await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_batch_naming_a_key_twice_keeps_only_its_last_blob() {
+        let fixture = fixture().await;
+        let store = &fixture.store;
+        let key = json!("k");
+        let written = store
+            .put_many(
+                NAME,
+                vec![
+                    (key.clone(), large("a"), None, None),
+                    (key.clone(), large("b"), None, None),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(written.count, 2);
+        let got = store.get(NAME, &key).await.unwrap().unwrap();
+        assert_eq!(got.value["tag"], json!("b"));
+        assert_eq!(fixture.active_refs().await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_fails_releases_the_blobs_it_wrote() {
+        let fixture = fixture().await;
+        let DatabasePool::Sqlite(pool) = &fixture.db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("UPDATE org SET features='{\"store_storage_bytes\":64}'")
+            .execute(pool)
+            .await
+            .unwrap();
+        let error = fixture
+            .store
+            .put_many(
+                NAME,
+                vec![
+                    (json!("small"), json!(1), None, None),
+                    (json!("large"), large("a"), None, None),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("limit reached"), "{error}");
+        assert_eq!(fixture.store.length(NAME).await.unwrap(), 0);
         assert_eq!(fixture.active_refs().await, 0);
     }
 

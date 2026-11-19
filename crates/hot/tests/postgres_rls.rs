@@ -1264,6 +1264,26 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?;
     assert_eq!(prefixed.len(), 1);
     assert_eq!(prefixed[0].value, serde_json::json!("w"));
+    // A batch is one statement under the runtime role's policies. It may name
+    // a key twice, and an entry the account has no room for leaves the whole
+    // batch unwritten.
+    let quota_write = |key: &str, value: &str| {
+        (
+            serde_json::json!(key),
+            serde_json::json!(value),
+            Some(vec![1.0]),
+            Some("ab".to_string()),
+        )
+    };
+    let batch = vec![quota_write("k", "x"), quota_write("k", "y")];
+    assert_eq!(winning_store.put_many("quota", batch).await?.count, 2);
+    let batch = vec![quota_write("k", "z"), quota_write("j", "z")];
+    assert!(winning_store.put_many("quota", batch).await.is_err());
+    let stored = winning_store
+        .list("quota", hot::store::ListOptions::default())
+        .await?;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].value, serde_json::json!("y"));
 
     // Files share the account's storage budget the same way, counted by the
     // usage_file triggers (migration 016) rather than a sum over every file.

@@ -694,17 +694,24 @@ pub fn merge(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         Err(e) => return HotResult::Err(e),
     };
 
-    let mut count = 0i64;
-    for ((k, v), embedding) in entries_map.iter().zip(embeddings) {
-        let key_json = key_to_json(k);
-        let value_json = value_to_json(v);
-        let text_content = extract_text_content(v, &config);
-        match block_on(store.put(&config.name, key_json, value_json, embedding, text_content)) {
-            Ok(_) => count += 1,
-            Err(e) => return HotResult::Err(Val::from(e)),
-        }
+    // One batch, so one transaction: an entry of its own costs a transaction
+    // and an admission to the account's storage limit.
+    let writes = entries_map
+        .iter()
+        .zip(embeddings)
+        .map(|((k, v), embedding)| {
+            (
+                key_to_json(k),
+                value_to_json(v),
+                embedding,
+                extract_text_content(v, &config),
+            )
+        })
+        .collect();
+    match block_on(store.put_many(&config.name, writes)) {
+        Ok(written) => HotResult::Ok(Val::Int(written.count as i64)),
+        Err(e) => HotResult::Err(Val::from(e)),
     }
-    HotResult::Ok(Val::Int(count))
 }
 
 pub fn put_many(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
@@ -991,6 +998,67 @@ mod tests {
         let batch = Val::vec(vec![Val::vec(vec![Val::Int(1), Val::Int(2)])]);
         let err = batch_vectors_from_val(batch, 2, Some(2)).unwrap_err();
         assert!(err.contains("expected 2"));
+    }
+
+    /// `::hot::store/put-many` of `entries` into a store that may hold
+    /// `limit` bytes, and the keys the store holds afterwards.
+    async fn put_many_with_limit(limit: i64, entries: Val) -> (HotResult<Val>, Vec<JsonValue>) {
+        use crate::lang::bytecode::BytecodeProgram;
+        use crate::lang::compiler::core_registry::CoreVariableRegistry;
+        use std::sync::Arc;
+
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(format!("{{\"store_storage_bytes\":{limit}}}"))
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let store: Arc<dyn store::Store> = Arc::new(store::sqlite::SqliteStore::new(
+            Arc::new(db),
+            data.org_id,
+            data.env_id,
+        ));
+        let vm_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut vm = VirtualMachine::new(
+                Arc::new(BytecodeProgram::new()),
+                None,
+                Arc::new(indexmap::IndexMap::new()),
+                Arc::new(indexmap::IndexMap::new()),
+                Arc::new(indexmap::IndexMap::new()),
+                Arc::new(CoreVariableRegistry::new()),
+                None,
+            );
+            vm.set_store(vm_store);
+            let map = crate::val!({"$type": "::hot::store/Map", "$val": {"name": "batch"}});
+            put_many(&mut vm, &[map, entries])
+        })
+        .await
+        .unwrap();
+        (result, store.keys("batch").await.unwrap())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_many_writes_its_entries_as_one_batch() {
+        // A one-letter key and a one-digit value are 4 bytes.
+        let entries = || crate::val!({"a": 1, "b": 2, "c": 3});
+        let (written, keys) = put_many_with_limit(12, entries()).await;
+        assert!(matches!(written, HotResult::Ok(Val::Int(3))), "{written:?}");
+        assert_eq!(keys, ["a", "b", "c"]);
+
+        // One transaction holds the batch, so an entry the account has no
+        // room for leaves the entries before it unwritten too.
+        let (refused, keys) = put_many_with_limit(8, entries()).await;
+        let HotResult::Err(error) = refused else {
+            panic!("the batch should not fit: {refused:?}");
+        };
+        assert!(error.to_string().contains("limit reached"), "{error}");
+        assert!(keys.is_empty(), "{keys:?}");
     }
 
     #[test]
