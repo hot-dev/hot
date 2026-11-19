@@ -112,6 +112,28 @@ pub struct StoreEntry {
     pub replaced: Option<serde_json::Value>,
 }
 
+/// What a batch write did.
+#[derive(Debug, Default)]
+pub struct BatchWritten {
+    /// How many entries were written.
+    pub count: usize,
+    /// The blob references the batch replaced: each old value that was large
+    /// enough to have one.
+    pub replaced: Vec<serde_json::Value>,
+}
+
+impl BatchWritten {
+    fn of(entries: Vec<StoreEntry>) -> Self {
+        Self {
+            count: entries.len(),
+            replaced: entries
+                .into_iter()
+                .filter_map(|entry| entry.replaced)
+                .collect(),
+        }
+    }
+}
+
 impl StoreEntry {
     pub fn to_info(&self) -> StoreEntryInfo {
         StoreEntryInfo {
@@ -353,17 +375,14 @@ pub trait Store: Send + Sync {
     /// Delete the store entirely (schema + data).
     async fn destroy(&self, store_name: &str) -> Result<(), String>;
 
-    /// Batch write from a set of key-value pairs.
+    /// Write every entry in one transaction: all of them are stored, or on
+    /// an error none is. An entry later in the batch replaces an earlier one
+    /// with the same key.
     async fn put_many(
         &self,
         store_name: &str,
-        entries: Vec<(
-            serde_json::Value,
-            serde_json::Value,
-            Option<Vec<f32>>,
-            Option<String>,
-        )>,
-    ) -> Result<usize, String>;
+        entries: Vec<StoreWrite>,
+    ) -> Result<BatchWritten, String>;
 
     /// Semantic / keyword / hybrid search. `query_embedding` is pre-computed by the caller.
     async fn search(

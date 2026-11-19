@@ -41,12 +41,56 @@ impl PgStore {
     }
 
     /// All writes in a batch share one account lock and commit together.
+    /// Each statement writes up to [`BATCH_ROWS`] entries, so a batch costs a
+    /// fixed number of round trips for every thousand entries, not two for
+    /// each entry.
     async fn write_batch(
         &self,
         store_name: &str,
         entries: Vec<super::StoreWrite>,
         only_missing: bool,
     ) -> Result<Vec<StoreEntry>, String> {
+        let count = entries.len();
+        let mut statements: Vec<BatchRows> = Vec::new();
+        for write in entries {
+            match statements.last_mut() {
+                Some(rows) if rows.has_room() => rows.push(write)?,
+                _ => {
+                    let mut rows = BatchRows::default();
+                    rows.push(write)?;
+                    statements.push(rows);
+                }
+            }
+        }
+        // A transaction that holds more than one entry can meet another one
+        // in a deadlock, which PostgreSQL breaks by ending one of the two.
+        // That one has written nothing, so it is safe to write again.
+        let mut deadlocks = 0;
+        let outcomes = loop {
+            match self
+                .write_statements(store_name, &statements, only_missing)
+                .await
+            {
+                Err(failed) if failed.deadlock && deadlocks < DEADLOCK_RETRIES => deadlocks += 1,
+                Err(failed) => return Err(failed.message),
+                Ok(outcomes) => break outcomes,
+            }
+        };
+        let mut written = Vec::with_capacity(count);
+        for (rows, outcomes) in statements.into_iter().zip(outcomes) {
+            rows.into_entries(outcomes, &mut written);
+        }
+        Ok(written)
+    }
+
+    /// Write every statement's rows in one transaction, and give what each
+    /// statement reported for its rows.
+    async fn write_statements(
+        &self,
+        store_name: &str,
+        statements: &[BatchRows],
+        only_missing: bool,
+    ) -> Result<Vec<Vec<RowOutcome>>, WriteFailed> {
         let (mut tx, mut budget) = super::quota::begin_postgres(
             &self.pool,
             self.org_id,
@@ -54,26 +98,103 @@ impl PgStore {
             super::quota::QuotaKind::Store,
         )
         .await?;
-        let mut written = Vec::with_capacity(entries.len());
-        for write in entries {
-            let current: Option<(i64, Option<serde_json::Value>)> = sqlx::query_as("SELECT size, CASE WHEN size >= $5 THEN value END FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
-                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&write.0).bind(super::SPILLED_ENTRY_MIN_SIZE).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
-            let (old, replaced) = current.unzip();
-            if only_missing && old.is_some() {
-                continue;
-            }
-            if let Some(mut entry) = self
-                .write_entry(&mut tx, &mut budget, store_name, write, old, only_missing)
-                .await?
-            {
-                entry.replaced = replaced.flatten();
-                written.push(entry);
-            }
+        let now = Utc::now();
+        let mut outcomes = Vec::with_capacity(statements.len());
+        for rows in statements {
+            let reported = self
+                .write_rows(&mut tx, store_name, rows, only_missing, now)
+                .await?;
+            rows.admit(&reported, &mut budget)?;
+            outcomes.push(reported);
         }
         tx.commit()
             .await
             .map_err(|e| format!("store commit failed: {e}"))?;
-        Ok(written)
+        Ok(outcomes)
+    }
+
+    /// Write `rows` with one statement, and give what it reported for each
+    /// row it wrote, in the order of the rows.
+    ///
+    /// The statement reads no entry before it writes: a condition on the
+    /// jsonb key is not leakproof, so under row-level security a read by key
+    /// filters every entry of the store. The insert finds an existing entry
+    /// through the primary key instead, and hands back its old size and value.
+    ///
+    /// One insert cannot touch a row twice, so of the rows naming one key it
+    /// writes only one: the last, or the first with `only_missing`, where the
+    /// others find the key present. PostgreSQL decides which keys are the
+    /// same, since jsonb holds `1` and `1.0` to be one key. An entry keeps the
+    /// key and the place of its first row, as it does when each row is
+    /// written in turn, and every row still gets its own result. With
+    /// `only_missing` a key that exists, here or from a concurrent creator,
+    /// gives no result.
+    ///
+    /// Entries take their `seq` in the order of the rows, but are written,
+    /// and so locked, in the order of their keys: two statements that write
+    /// some of the same keys then never wait for each other in a circle.
+    async fn write_rows(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        store_name: &str,
+        rows: &BatchRows,
+        only_missing: bool,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Vec<RowOutcome>, WriteFailed> {
+        let (chosen, conflict, joined) = if only_missing {
+            ("prev_ord IS NULL", "DO NOTHING", " AND i.prev_ord IS NULL")
+        } else {
+            (
+                "next_ord IS NULL",
+                "DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at",
+                "",
+            )
+        };
+        let statement = format!(
+            "WITH input AS (
+                 SELECT w.*, first_value(w.key) OVER same_key AS first_key,
+                        first_value(w.ord) OVER same_key AS first_ord,
+                        lag(w.ord) OVER same_key AS prev_ord, lead(w.ord) OVER same_key AS next_ord
+                 FROM UNNEST($4::jsonb[], $5::jsonb[], $6::text[], $7::text[], $8::bigint[])
+                      WITH ORDINALITY AS w(key, value, embedding, text_content, size, ord)
+                 WINDOW same_key AS (PARTITION BY w.key ORDER BY w.ord)
+             ), placed AS (
+                 SELECT c.*, nextval((SELECT pg_get_serial_sequence('store_map_entry', 'seq'))::regclass) AS seq
+                 FROM (SELECT * FROM input WHERE {chosen} ORDER BY first_ord) c
+             ), written AS (
+                 INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, seq, created_at, updated_at)
+                 SELECT $1, $2, $3, first_key, value, embedding::vector, text_content, size, seq, $9, $9
+                 FROM placed ORDER BY first_key
+                 ON CONFLICT (org_id,env_id,store_name,key) {conflict}
+                 RETURNING key, seq, created_at, updated_at, old.size AS old_size,
+                           CASE WHEN old.size >= $10 THEN old.value END AS replaced
+             )
+             SELECT i.ord, i.prev_ord, w.seq, w.created_at, w.updated_at, w.old_size, w.replaced
+             FROM input i JOIN written w ON w.key = i.key{joined}
+             ORDER BY i.ord"
+        );
+        let outcomes: Vec<RowOutcome> = sqlx::query_as(sqlx::AssertSqlSafe(statement))
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(store_name)
+            .bind(&rows.keys)
+            .bind(&rows.values)
+            .bind(&rows.embedding_literals)
+            .bind(&rows.text_contents)
+            .bind(&rows.sizes)
+            .bind(now)
+            .bind(super::SPILLED_ENTRY_MIN_SIZE)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| WriteFailed {
+                // 40P01 is deadlock_detected.
+                deadlock: matches!(&e, sqlx::Error::Database(db) if db.code().as_deref() == Some("40P01")),
+                message: format!("store write failed: {e}"),
+            })?;
+        if !only_missing && outcomes.len() != rows.keys.len() {
+            return Err("Store write returned no entry".to_string().into());
+        }
+        Ok(outcomes)
     }
 
     /// Lock the entry at `key` for the rest of `tx` and return its stored
@@ -269,6 +390,159 @@ impl PgStore {
                     .map_err(|e| format!("Invalid pgvector element '{part}': {e}"))
             })
             .collect()
+    }
+}
+
+/// Entries one statement writes at most. Their columns travel as arrays, one
+/// bind each, so the count is not bounded by PostgreSQL's 65,535 binds.
+const BATCH_ROWS: usize = 1000;
+
+/// Entry bytes after which a statement takes no further entry: the arrays of
+/// one statement are one message, which PostgreSQL holds in memory whole.
+const BATCH_BYTES: i64 = 16 * 1024 * 1024;
+
+/// How often a batch is written again after PostgreSQL ended its transaction
+/// to break a deadlock.
+const DEADLOCK_RETRIES: usize = 4;
+
+/// What a statement reports for one row it wrote: the row's place among the
+/// statement's rows, counted from 1, and the place of the row before it with
+/// the same key; then the entry's `seq`, `created_at` and `updated_at`; then
+/// the size of the entry it replaced, and that entry's value when it was
+/// large enough to be a blob reference.
+type RowOutcome = (
+    i64,
+    Option<i64>,
+    i64,
+    chrono::DateTime<Utc>,
+    chrono::DateTime<Utc>,
+    Option<i64>,
+    Option<serde_json::Value>,
+);
+
+/// Why a batch was not written, and whether it only lost a deadlock.
+struct WriteFailed {
+    message: String,
+    deadlock: bool,
+}
+
+impl From<String> for WriteFailed {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            deadlock: false,
+        }
+    }
+}
+
+/// The entries of one statement, a column at a time.
+#[derive(Default)]
+struct BatchRows {
+    keys: Vec<serde_json::Value>,
+    values: Vec<serde_json::Value>,
+    embeddings: Vec<Option<Vec<f32>>>,
+    embedding_literals: Vec<Option<String>>,
+    text_contents: Vec<Option<String>>,
+    sizes: Vec<i64>,
+    bytes: i64,
+}
+
+impl BatchRows {
+    fn has_room(&self) -> bool {
+        self.keys.len() < BATCH_ROWS && self.bytes < BATCH_BYTES
+    }
+
+    fn push(
+        &mut self,
+        (key, value, embedding, text_content): super::StoreWrite,
+    ) -> Result<(), String> {
+        let embedding_bytes = embedding
+            .as_ref()
+            .map_or(Some(0), |e| e.len().checked_mul(4))
+            .ok_or("Store embedding is too large")?;
+        let size = super::quota::entry_size(
+            key.to_string().len(),
+            super::stored_value_size(&value),
+            text_content.as_ref().map_or(0, |s| s.len()),
+            embedding_bytes,
+        )?;
+        // A reference counts for the blob it points at, which stays where it is.
+        if !super::spill::is_spilled(&value) {
+            self.bytes = self.bytes.saturating_add(size);
+        }
+        self.embedding_literals.push(
+            embedding
+                .as_ref()
+                .map(|e| PgStore::embedding_to_pgvector_literal(e)),
+        );
+        self.keys.push(key);
+        self.values.push(value);
+        self.embeddings.push(embedding);
+        self.text_contents.push(text_content);
+        self.sizes.push(size);
+        Ok(())
+    }
+
+    /// The size of the entry that the row reported by `outcome` replaced: what
+    /// the row before it wrote for the same key, or else what was stored.
+    fn replaced_size(&self, outcome: &RowOutcome) -> Option<i64> {
+        match outcome.1 {
+            Some(before) => Some(self.sizes[before as usize - 1]),
+            None => outcome.5,
+        }
+    }
+
+    /// Admit each written row to `budget` in turn, as if it had been written
+    /// alone: a later row for the same key replaces what the row before it
+    /// wrote. A row that was not written is not admitted.
+    fn admit(
+        &self,
+        outcomes: &[RowOutcome],
+        budget: &mut super::quota::Budget,
+    ) -> Result<(), String> {
+        for outcome in outcomes {
+            let old = self.replaced_size(outcome).unwrap_or(0);
+            budget.replace(old, self.sizes[outcome.0 as usize - 1])?;
+        }
+        Ok(())
+    }
+
+    /// Add the entries `outcomes` report as written to `written`, in the
+    /// order of the rows.
+    fn into_entries(self, outcomes: Vec<RowOutcome>, written: &mut Vec<StoreEntry>) {
+        let first = written.len();
+        let mut outcomes = outcomes.into_iter().peekable();
+        let writes = self
+            .keys
+            .into_iter()
+            .zip(self.values)
+            .zip(self.embeddings)
+            .enumerate();
+        for (index, ((key, value), embedding)) in writes {
+            let Some((_, before, seq, created_at, updated_at, _, replaced)) =
+                outcomes.next_if(|outcome| outcome.0 == index as i64 + 1)
+            else {
+                continue;
+            };
+            // Only a batch that replaces writes a key twice, and it writes
+            // every row, so the row before is at its own place in `written`.
+            let replaced = match before.map(|ord| ord as usize - 1) {
+                Some(before) if self.sizes[before] >= super::SPILLED_ENTRY_MIN_SIZE => {
+                    Some(written[first + before].value.clone())
+                }
+                Some(_) => None,
+                None => replaced,
+            };
+            written.push(StoreEntry {
+                key,
+                value,
+                seq,
+                embedding,
+                created_at,
+                updated_at,
+                replaced,
+            });
+        }
     }
 }
 
@@ -744,8 +1018,10 @@ impl Store for PgStore {
         &self,
         store_name: &str,
         entries: Vec<super::StoreWrite>,
-    ) -> Result<usize, String> {
-        Ok(self.write_batch(store_name, entries, false).await?.len())
+    ) -> Result<super::BatchWritten, String> {
+        Ok(super::BatchWritten::of(
+            self.write_batch(store_name, entries, false).await?,
+        ))
     }
 
     async fn search(
@@ -1336,6 +1612,395 @@ mod tests {
                 .value,
             json!("x")
         );
+        Ok(())
+    }
+
+    /// A value that counts as `size` bytes in blob storage, as the spilling
+    /// store writes for a value too large to keep inline.
+    fn blob_reference(size: i64) -> serde_json::Value {
+        json!({"$type": crate::blob::BLOB_REF_TYPE, "$val": {"id": Uuid::now_v7(), "size": size}})
+    }
+
+    async fn listed_keys(store: &PgStore, name: &str) -> Result<Vec<serde_json::Value>, String> {
+        let options = ListOptions {
+            limit: Some(10_000),
+            ..Default::default()
+        };
+        Ok(store
+            .list(name, options)
+            .await?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect())
+    }
+
+    #[tokio::test]
+    async fn postgres_batch_writes_every_field_in_entry_order() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-fields-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let writes: Vec<super::super::StoreWrite> = vec![
+            (
+                json!("zeta"),
+                json!({"n": 1}),
+                Some(vec![1.0, 0.5]),
+                Some("first text".into()),
+            ),
+            (json!("alpha"), serde_json::Value::Null, None, None),
+            (json!(17), json!("int key"), None, Some("third".into())),
+            (
+                json!({"b": 1, "a": [2]}),
+                json!([1, 2]),
+                Some(vec![3.0]),
+                None,
+            ),
+        ];
+        let sizes = [
+            6 + 7 + 10 + 8,
+            7 + 4,
+            2 + 9 + 5,
+            super::super::quota::entry_size(15, 5, 0, 4)?,
+        ];
+        let entries = store.write_batch(&name, writes.clone(), false).await?;
+        assert_eq!(entries.len(), writes.len());
+        for (entry, write) in entries.iter().zip(&writes) {
+            assert_eq!((&entry.key, &entry.value), (&write.0, &write.1));
+            assert_eq!(entry.embedding, write.2);
+            assert_eq!(entry.created_at, entry.updated_at);
+            assert_eq!(entry.replaced, None);
+        }
+        assert!(entries.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+
+        let listed = store.list(&name, ListOptions::default()).await?;
+        for (stored, entry) in listed.iter().zip(&entries) {
+            assert_eq!((&stored.key, &stored.value), (&entry.key, &entry.value));
+            assert_eq!(stored.seq, entry.seq);
+            assert_eq!(stored.embedding, entry.embedding);
+            assert_eq!(stored.created_at, entry.created_at);
+        }
+        let columns: Vec<(Option<String>, i64)> = sqlx::query_as(
+            "SELECT text_content, size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 ORDER BY seq",
+        )
+        .bind(store.org_id)
+        .bind(store.env_id)
+        .bind(&name)
+        .fetch_all(store.pg_pool()?)
+        .await
+        .map_err(|e| e.to_string())?;
+        assert_eq!(
+            columns,
+            writes
+                .iter()
+                .map(|write| write.3.clone())
+                .zip(sizes)
+                .collect::<Vec<_>>()
+        );
+
+        // Writing them again changes each entry in place.
+        let again = store.write_batch(&name, writes, false).await?;
+        for (after, before) in again.iter().zip(&entries) {
+            assert_eq!(after.seq, before.seq);
+            assert_eq!(after.created_at, before.created_at);
+            assert!(after.updated_at > before.updated_at);
+        }
+        assert_eq!(store.length(&name).await?, 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_batch_keeps_entry_order_across_statements() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-order-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        // More than one statement's worth, in an order no index would give,
+        // with one key in the first statement and again in the last.
+        let count = BATCH_ROWS * 2 + 500;
+        let mut writes: Vec<super::super::StoreWrite> = (0..count)
+            .rev()
+            .map(|i| (json!(format!("key:{i:05}")), json!(i), None, None))
+            .collect();
+        let keys: Vec<_> = writes.iter().map(|write| write.0.clone()).collect();
+        writes.push((keys[3].clone(), json!("again"), None, None));
+        assert_eq!(store.put_many(&name, writes).await?.count, count + 1);
+        assert_eq!(listed_keys(&store, &name).await?, keys);
+        assert_eq!(
+            store.get(&name, &keys[3]).await?.ok_or("missing")?.value,
+            json!("again")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_batch_naming_a_key_twice_keeps_its_last_value() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-twice-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let dec_one: serde_json::Value = serde_json::from_str("1.0").map_err(|e| e.to_string())?;
+        let (first, second) = (blob_reference(40 << 20), blob_reference(41 << 20));
+        let entries = store
+            .write_batch(
+                &name,
+                vec![
+                    (json!("a"), first.clone(), None, None),
+                    (json!("b"), json!(2), None, None),
+                    (json!("a"), second.clone(), None, None),
+                    (json!(1), json!("int"), None, None),
+                    // jsonb holds 1 and 1.0 to be the same key.
+                    (dec_one, json!("dec"), None, None),
+                    (json!("a"), json!(4), None, None),
+                ],
+                false,
+            )
+            .await?;
+        assert_eq!(entries.len(), 6);
+        let seqs: Vec<i64> = entries.iter().map(|entry| entry.seq).collect();
+        assert_eq!((seqs[0], seqs[0]), (seqs[2], seqs[5]));
+        assert_eq!(seqs[3], seqs[4]);
+        assert!(seqs[0] < seqs[1] && seqs[1] < seqs[3]);
+        // Each row replaced what the row before it wrote for its key.
+        let replaced: Vec<_> = entries.iter().map(|entry| entry.replaced.clone()).collect();
+        assert_eq!(
+            replaced,
+            [None, None, Some(first), None, None, Some(second)]
+        );
+        assert_eq!(
+            listed_keys(&store, &name).await?,
+            [json!("a"), json!("b"), json!(1)]
+        );
+        assert_eq!(
+            store.get(&name, &json!("a")).await?.ok_or("missing")?.value,
+            json!(4)
+        );
+        assert_eq!(
+            store.get(&name, &json!(1)).await?.ok_or("missing")?.value,
+            json!("dec")
+        );
+        // Three entries are stored, each counted once, as its last row: the
+        // entry at 1 keeps that key and counts the `1.0` it was last given.
+        assert_eq!(store.storage_bytes().await?, (3 + 1) + (3 + 1) + (3 + 5));
+
+        // A later batch gets the stored reference back when it replaces it.
+        let third = blob_reference(40 << 20);
+        store
+            .put(&name, json!("b"), third.clone(), None, None)
+            .await?;
+        let entries = store
+            .write_batch(&name, vec![(json!("b"), json!(0), None, None)], false)
+            .await?;
+        assert_eq!(entries[0].replaced, Some(third));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_batch_of_missing_keys_skips_the_keys_present() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-missing-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let kept = store.put(&name, json!("a"), json!(1), None, None).await?;
+        let entries = store
+            .write_batch(
+                &name,
+                vec![
+                    (json!("a"), json!(2), None, None),
+                    (json!("b"), json!(3), None, None),
+                    (json!("b"), json!(4), None, None),
+                    (json!("c"), json!(5), None, None),
+                ],
+                true,
+            )
+            .await?;
+        let written: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.value.clone()))
+            .collect();
+        assert_eq!(written, [(json!("b"), json!(3)), (json!("c"), json!(5))]);
+        assert!(entries[0].seq < entries[1].seq);
+        let stored = store.list(&name, ListOptions::default()).await?;
+        let stored: Vec<_> = stored
+            .into_iter()
+            .map(|entry| (entry.key, entry.value, entry.seq))
+            .collect();
+        assert_eq!(
+            stored,
+            [
+                (json!("a"), json!(1), kept.seq),
+                (json!("b"), json!(3), entries[0].seq),
+                (json!("c"), json!(5), entries[1].seq),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn postgres_batch_locks_in_key_order_and_is_written_again_after_a_deadlock()
+    -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-deadlock-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let store = Arc::new(store);
+        let write = |key: &str, value: i64| (json!(key), json!(value), None, None);
+        store
+            .put_many(&name, vec![write("a", 0), write("b", 0)])
+            .await?;
+        // Whether a row of this store was locked: `lock` waits for it, and
+        // `SKIP LOCKED` passes over it.
+        let lock = |wait: &str| {
+            format!(
+                "SELECT 1 FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4 FOR UPDATE {wait}"
+            )
+        };
+        let key = |sql: String, key: &'static str| {
+            sqlx::query_scalar::<_, i32>(sqlx::AssertSqlSafe(sql))
+                .bind(store.org_id)
+                .bind(store.env_id)
+                .bind(name.clone())
+                .bind(json!(key))
+        };
+
+        // Another transaction holds `b`, and waits long enough that
+        // PostgreSQL ends the batch, not it, to break the deadlock below.
+        let mut other = store.pg_pool()?.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+            .execute(&mut *other)
+            .await
+            .map_err(|e| e.to_string())?;
+        key(lock(""), "b")
+            .fetch_one(&mut *other)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // The batch names `b` first, but takes `a` first and then waits.
+        let batch = {
+            let (store, name) = (store.clone(), name.clone());
+            tokio::spawn(async move {
+                store
+                    .put_many(&name, vec![write("b", 2), write("a", 1)])
+                    .await
+            })
+        };
+        let waiting = async {
+            loop {
+                let free = key(lock("SKIP LOCKED"), "a")
+                    .fetch_optional(store.pg_pool()?)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if free.is_none() {
+                    return Ok::<_, String>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), waiting)
+            .await
+            .map_err(|_| "the batch should lock `a` before it waits for `b`")??;
+
+        // Now each waits for the other. This returns once PostgreSQL has
+        // ended the batch's transaction, which then starts over and waits.
+        key(lock(""), "a")
+            .fetch_one(&mut *other)
+            .await
+            .map_err(|e| e.to_string())?;
+        other.commit().await.map_err(|e| e.to_string())?;
+
+        assert_eq!(batch.await.map_err(|e| e.to_string())??.count, 2);
+        let stored = store.list(&name, ListOptions::default()).await?;
+        let stored: Vec<_> = stored.into_iter().map(|e| (e.key, e.value)).collect();
+        assert_eq!(stored, [(json!("a"), json!(1)), (json!("b"), json!(2))]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_batch_admits_each_entry_to_the_storage_limit() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("batch-quota-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        sqlx::query("UPDATE org SET features=$1 WHERE org_id=$2")
+            .bind(json!({"store_storage_bytes": 14}))
+            .bind(store.org_id)
+            .execute(store.pg_pool()?)
+            .await
+            .map_err(|e| e.to_string())?;
+        let write = |key: &str, value: serde_json::Value| (json!(key), value, None, None);
+        let value = |key: &'static str| {
+            let (store, name) = (&store, &name);
+            async move { Ok::<_, String>(store.get(name, &json!(key)).await?.map(|e| e.value)) }
+        };
+        // A one-letter string key is 3 bytes; "v" is 3 more.
+        let filled = store
+            .put_many(&name, vec![write("a", json!("v")), write("b", json!("v"))])
+            .await?;
+        assert_eq!(filled.count, 2);
+
+        let refused = |error: Result<super::super::BatchWritten, String>| {
+            assert!(error.unwrap_err().contains("limit reached"));
+        };
+        // 12 bytes are used. Growing one entry by 3 passes the limit.
+        refused(store.put_many(&name, vec![write("a", json!("vvvv"))]).await);
+        // A batch that fails leaves none of its entries, the ones it had
+        // already replaced included.
+        refused(
+            store
+                .put_many(
+                    &name,
+                    vec![write("a", json!(0)), write("c", json!("too large"))],
+                )
+                .await,
+        );
+        assert_eq!(value("a").await?, Some(json!("v")));
+        assert_eq!(value("c").await?, None);
+        // Each row is admitted in turn: the first here needs room the second
+        // would have given back.
+        refused(
+            store
+                .put_many(&name, vec![write("c", json!("vvv")), write("a", json!(0))])
+                .await,
+        );
+        refused(
+            store
+                .put_many(
+                    &name,
+                    vec![write("c", json!("vvvvvv")), write("c", json!(0))],
+                )
+                .await,
+        );
+        // Shrinking an entry first makes the room: 12 - 2, then + 4.
+        let fits = store
+            .put_many(&name, vec![write("a", json!(0)), write("c", json!(0))])
+            .await?;
+        assert_eq!(fits.count, 2);
+        assert_eq!(store.storage_bytes().await?, 14);
+        // A key that exists is skipped before it is admitted.
+        assert!(
+            !store
+                .put_if_missing(&name, json!("a"), json!("much larger"), None, None)
+                .await?
+        );
+        assert!(
+            store
+                .put_if_missing(&name, json!("d"), json!(0), None, None)
+                .await
+                .is_err()
+        );
+        let counted: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(store_bytes),0)::bigint FROM usage_storage WHERE env_id=$1",
+        )
+        .bind(store.env_id)
+        .fetch_one(store.pg_pool()?)
+        .await
+        .map_err(|e| e.to_string())?;
+        assert_eq!(counted, 14);
         Ok(())
     }
 
