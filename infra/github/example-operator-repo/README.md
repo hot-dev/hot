@@ -42,8 +42,11 @@ hand on one fails when it signs in; open a pull request to plan a branch.
    without it.
 3. **Cloud roles.** Create three roles that GitHub's OIDC provider can
    assume, each limited to this repository and, for apply and release, to the
-   `production` environment on `main`. The state bootstrap pins them to the
-   repository's IDs, which it needs as `github_repository_id` and
+   `production` environment on `main`. To deploy from another branch, set the
+   state bootstrap's `github_branch` and use that branch wherever these steps
+   say `main`; GitHub dispatches and schedules workflows only from the default
+   branch, so such a branch starts releases on push. The state bootstrap pins
+   them to the repository's IDs, which it needs as `github_repository_id` and
    `github_repository_owner_id`: `gh api repos/OWNER/REPO --jq '.id, .owner.id'`.
    No long-lived cloud keys are stored in GitHub.
 

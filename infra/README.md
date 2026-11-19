@@ -2159,7 +2159,9 @@ workflows must be dispatched from `main`. They trust the same subject, so a job 
 that environment on `main` can assume either: the separation between them rests on
 the review of `main`. Limit the environment's deployment branches to `main`, turn
 on "Prevent self-review", and protect `main` with required reviews, because anyone
-who can push to it directly reaches both.
+who can push to it directly reaches both. The state bootstrap's `github_branch`
+(default `main`) names another branch in place of `main`, for plans on push and for
+apply and release; protect that branch the same way.
 
 Limits of sharing one release role across installations: on AWS each stack adds an
 inline policy to it, and IAM caps a role's inline policies at 10,240 characters,

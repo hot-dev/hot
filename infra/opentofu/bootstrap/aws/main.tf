@@ -59,9 +59,18 @@ variable "github_repository_owner_id" {
   }
 }
 variable "github_environment" {
-  description = "GitHub Environment whose jobs may apply and release, from main only."
+  description = "GitHub Environment whose jobs may apply and release, from github_branch only."
   type        = string
   default     = "production"
+}
+variable "github_branch" {
+  description = "The branch whose pushes may plan, and the only branch whose environment jobs may apply and release."
+  type        = string
+  default     = "main"
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._/-]+$", var.github_branch)) && !startswith(var.github_branch, "refs/")
+    error_message = "github_branch is a branch name, such as main, without refs/heads/."
+  }
 }
 variable "create_github_oidc_provider" {
   description = "Create the account's GitHub OIDC provider; set false if it already exists."
@@ -189,7 +198,7 @@ locals {
   ] : []
   contexts = {
     # Plans run on pull requests and on the merge before apply.
-    plan    = ["pull_request", "ref:refs/heads/main"]
+    plan    = ["pull_request", "ref:refs/heads/${var.github_branch}"]
     apply   = ["environment:${var.github_environment}"]
     release = ["environment:${var.github_environment}"]
   }
@@ -217,9 +226,10 @@ resource "aws_iam_role" "github" {
         "${local.oidc}:repository_id"       = var.github_repository_id
         "${local.oidc}:repository_owner_id" = var.github_repository_owner_id
         }, each.key == "plan" ? {} : {
-        # Apply and release run only from main: an unmerged branch's
-        # workflow never reaches them, even with the environment's approval.
-        "${local.oidc}:ref" = "refs/heads/main"
+        # Apply and release run only from github_branch: an unmerged
+        # branch's workflow never reaches them, even with the environment's
+        # approval.
+        "${local.oidc}:ref" = "refs/heads/${var.github_branch}"
       })
     }
     }] : [], length(local.operator_roles[each.key]) > 0 ? [{

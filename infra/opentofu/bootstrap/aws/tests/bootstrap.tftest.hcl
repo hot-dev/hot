@@ -181,3 +181,24 @@ run "operators_must_be_iam_arns" {
   }
   expect_failures = [var.operators]
 }
+
+run "github_branch_moves_the_trust" {
+  command = plan
+  variables {
+    github_repository          = "example/hot-infra"
+    github_repository_id       = "456789"
+    github_repository_owner_id = "123456"
+    github_branch              = "deploy/staging"
+    apply_policy_arns          = ["arn:aws:iam::123456789012:policy/hot-apply"]
+  }
+  assert {
+    condition = (jsondecode(aws_iam_role.github["apply"].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:ref"] == "refs/heads/deploy/staging"
+    && jsondecode(aws_iam_role.github["release"].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:ref"] == "refs/heads/deploy/staging")
+    error_message = "Apply and release run only from github_branch."
+  }
+  assert {
+    condition = contains(jsondecode(aws_iam_role.github["plan"].assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"],
+    "repo:example/hot-infra:ref:refs/heads/deploy/staging")
+    error_message = "Plans run for pushes to github_branch."
+  }
+}

@@ -220,3 +220,32 @@ run "operators_must_be_iam_members" {
   }
   expect_failures = [var.operators]
 }
+
+run "github_branch_moves_the_trust" {
+  command = plan
+  variables {
+    github_repository          = "example/hot-infra"
+    github_repository_id       = "456789"
+    github_repository_owner_id = "123456"
+    github_branch              = "deploy/staging"
+    apply_roles                = ["roles/compute.admin"]
+  }
+  assert {
+    condition = (strcontains(google_iam_workload_identity_pool_provider.github[0].attribute_condition, "assertion.ref == 'refs/heads/deploy/staging'")
+    && !strcontains(google_iam_workload_identity_pool_provider.github[0].attribute_condition, "refs/heads/main"))
+    error_message = "Apply and release jobs are accepted only from github_branch."
+  }
+  assert {
+    condition = (contains(keys(google_service_account_iam_member.github), "plan repo:example/hot-infra:ref:refs/heads/deploy/staging")
+    && !contains(keys(google_service_account_iam_member.github), "plan repo:example/hot-infra:ref:refs/heads/main"))
+    error_message = "Plans run for pushes to github_branch, not main."
+  }
+}
+
+run "github_branch_is_a_name" {
+  command = plan
+  variables {
+    github_branch = "refs/heads/main"
+  }
+  expect_failures = [var.github_branch]
+}

@@ -65,9 +65,18 @@ variable "github_repository_owner_id" {
   }
 }
 variable "github_environment" {
-  description = "GitHub Environment whose jobs may apply and release, from main only."
+  description = "GitHub Environment whose jobs may apply and release, from github_branch only."
   type        = string
   default     = "production"
+}
+variable "github_branch" {
+  description = "The branch whose pushes may plan, and the only branch whose environment jobs may apply and release."
+  type        = string
+  default     = "main"
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._/-]+$", var.github_branch)) && !startswith(var.github_branch, "refs/")
+    error_message = "github_branch is a branch name, such as main, without refs/heads/."
+  }
 }
 variable "apply_roles" {
   description = "Project roles for the apply service account. Choose them for your guardrails; there is no default."
@@ -194,13 +203,13 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.workflow_ref"        = "assertion.job_workflow_ref"
   }
   # Only this repository's tokens are accepted at all, by its immutable IDs.
-  # Jobs in an environment (apply and release) are accepted only from main,
-  # so an unmerged branch's workflow never reaches them, even with the
-  # environment's approval.
+  # Jobs in an environment (apply and release) are accepted only from
+  # github_branch, so an unmerged branch's workflow never reaches them, even
+  # with the environment's approval.
   attribute_condition = join(" && ", [
     "assertion.repository_id == '${var.github_repository_id}'",
     "assertion.repository_owner_id == '${var.github_repository_owner_id}'",
-    "(!assertion.sub.contains(':environment:') || assertion.ref == 'refs/heads/main')",
+    "(!assertion.sub.contains(':environment:') || assertion.ref == 'refs/heads/${var.github_branch}')",
   ])
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -228,9 +237,9 @@ locals {
     "repo:${split("/", var.github_repository)[0]}@${var.github_repository_owner_id}/${split("/", var.github_repository)[1]}@${var.github_repository_id}",
   ] : []
   contexts = {
-    # Plans run on pull requests and on main; apply and release only in the
+    # Plans run on pull requests and on github_branch; apply and release only in the
     # approved environment.
-    plan    = ["pull_request", "ref:refs/heads/main"]
+    plan    = ["pull_request", "ref:refs/heads/${var.github_branch}"]
     apply   = ["environment:${var.github_environment}"]
     release = ["environment:${var.github_environment}"]
   }
