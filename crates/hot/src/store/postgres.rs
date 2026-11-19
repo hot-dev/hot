@@ -14,6 +14,22 @@ use super::{
     validate_store_map_compatibility,
 };
 
+/// Bind what [`PgStore::at_key`] names: the store's organization, environment
+/// and name, the key, and for a string key its text.
+macro_rules! bind_at_key {
+    ($query:expr, $store:expr, $name:expr, $key:expr) => {{
+        let query = $query
+            .bind($store.org_id)
+            .bind($store.env_id)
+            .bind($name)
+            .bind($key);
+        match $key.as_str() {
+            Some(text) => query.bind(text),
+            None => query,
+        }
+    }};
+}
+
 pub struct PgStore {
     pool: Arc<DatabasePool>,
     org_id: Uuid,
@@ -37,6 +53,22 @@ impl PgStore {
         match self.pool.as_ref() {
             DatabasePool::Postgres(pg) => Ok(pg),
             _ => Err("PgStore requires a Postgres database pool".to_string()),
+        }
+    }
+
+    /// The condition that finds the entry at `key`, bound by `bind_at_key!`.
+    ///
+    /// jsonb's equality is not leakproof, so under row-level security the
+    /// key cannot be an index condition, and a read by the key alone filters
+    /// every entry of the store. A string key also has its text in
+    /// `key_text`, whose comparison is leakproof and is read from
+    /// `idx_store_map_entry_key_prefix`. A key of any other type has no such
+    /// column, so reading it still filters the store.
+    fn at_key(key: &serde_json::Value) -> &'static str {
+        if key.is_string() {
+            "org_id = $1 AND env_id = $2 AND store_name = $3 AND key_text = $5 AND key = $4"
+        } else {
+            "org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4"
         }
     }
 
@@ -206,16 +238,15 @@ impl PgStore {
         store_name: &str,
         key: &serde_json::Value,
     ) -> Result<Option<(serde_json::Value, i64)>, String> {
-        sqlx::query_as(
-            "SELECT value, size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4 FOR UPDATE",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())
+        let statement = format!(
+            "SELECT value, size FROM store_map_entry WHERE {} FOR UPDATE",
+            Self::at_key(key)
+        );
+        let query = sqlx::query_as(sqlx::AssertSqlSafe(statement));
+        bind_at_key!(query, self, store_name, key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Write one entry whose stored size was `old` (`None` when missing),
@@ -737,18 +768,17 @@ impl Store for PgStore {
     ) -> Result<Option<StoreEntry>, String> {
         let pg = self.pg_pool()?;
 
-        let row = sqlx::query(
+        let statement = format!(
             "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at
              FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(key)
-        .fetch_optional(pg)
-        .await
-        .map_err(|e| format!("store get failed: {e}"))?;
+             WHERE {}",
+            Self::at_key(key)
+        );
+        let query = sqlx::query(sqlx::AssertSqlSafe(statement));
+        let row = bind_at_key!(query, self, store_name, key)
+            .fetch_optional(pg)
+            .await
+            .map_err(|e| format!("store get failed: {e}"))?;
 
         match row {
             Some(r) => Ok(Some(Self::row_to_entry(&r)?)),
@@ -763,20 +793,19 @@ impl Store for PgStore {
     ) -> Result<Option<StoreEntryInfo>, String> {
         let pg = self.pg_pool()?;
 
-        let row = sqlx::query(
+        let statement = format!(
             "SELECT key, seq,
                     CASE WHEN embedding IS NULL THEN NULL ELSE vector_dims(embedding)::bigint END AS embedding_dimensions,
                     created_at, updated_at
              FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(key)
-        .fetch_optional(pg)
-        .await
-        .map_err(|e| format!("store get_info failed: {e}"))?;
+             WHERE {}",
+            Self::at_key(key)
+        );
+        let query = sqlx::query(sqlx::AssertSqlSafe(statement));
+        let row = bind_at_key!(query, self, store_name, key)
+            .fetch_optional(pg)
+            .await
+            .map_err(|e| format!("store get_info failed: {e}"))?;
 
         match row {
             Some(r) => Ok(Some(Self::row_to_entry_info(&r)?)),
@@ -787,17 +816,12 @@ impl Store for PgStore {
     async fn delete(&self, store_name: &str, key: &serde_json::Value) -> Result<bool, String> {
         let pg = self.pg_pool()?;
 
-        let result = sqlx::query(
-            "DELETE FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND key = $4",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(key)
-        .execute(pg)
-        .await
-        .map_err(|e| format!("store delete failed: {e}"))?;
+        let statement = format!("DELETE FROM store_map_entry WHERE {}", Self::at_key(key));
+        let query = sqlx::query(sqlx::AssertSqlSafe(statement));
+        let result = bind_at_key!(query, self, store_name, key)
+            .execute(pg)
+            .await
+            .map_err(|e| format!("store delete failed: {e}"))?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -1306,19 +1330,28 @@ impl Store for PgStore {
         store_name: &str,
         key: Option<&serde_json::Value>,
     ) -> Result<Vec<serde_json::Value>, String> {
-        sqlx::query_scalar(
-            "SELECT value FROM store_map_entry
-             WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND size >= $4
-               AND ($5::jsonb IS NULL OR key = $5)",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(super::SPILLED_ENTRY_MIN_SIZE)
-        .bind(key)
-        .fetch_all(self.pg_pool()?)
-        .await
-        .map_err(|e| format!("store read failed: {e}"))
+        let large = format!("size >= {}", super::SPILLED_ENTRY_MIN_SIZE);
+        let Some(key) = key else {
+            return sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT value FROM store_map_entry
+                 WHERE org_id = $1 AND env_id = $2 AND store_name = $3 AND {large}"
+            )))
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(store_name)
+            .fetch_all(self.pg_pool()?)
+            .await
+            .map_err(|e| format!("store read failed: {e}"));
+        };
+        let statement = format!(
+            "SELECT value FROM store_map_entry WHERE {} AND {large}",
+            Self::at_key(key)
+        );
+        let query = sqlx::query_scalar(sqlx::AssertSqlSafe(statement));
+        bind_at_key!(query, self, store_name, key)
+            .fetch_all(self.pg_pool()?)
+            .await
+            .map_err(|e| format!("store read failed: {e}"))
     }
 
     async fn list_maps(&self) -> Result<Vec<StoreMapInfo>, String> {
@@ -2001,6 +2034,156 @@ mod tests {
         .await
         .map_err(|e| e.to_string())?;
         assert_eq!(counted, 14);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_reads_by_key_tell_a_string_from_what_it_spells() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("key-types-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        // Each string spells the key after it.
+        let keys = [
+            json!("17"),
+            json!(17),
+            json!("true"),
+            json!(true),
+            json!("null"),
+            serde_json::Value::Null,
+            json!("[1]"),
+            json!([1]),
+            json!("\"quoted\""),
+            json!("quoted"),
+            json!(""),
+        ];
+        let writes = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), json!(i), None, None))
+            .collect();
+        store.put_many(&name, writes).await?;
+        for (i, key) in keys.iter().enumerate() {
+            let entry = store.get(&name, key).await?.ok_or("missing")?;
+            assert_eq!((&entry.key, entry.value), (key, json!(i)));
+            assert_eq!(
+                store.get_info(&name, key).await?.ok_or("missing")?.seq,
+                entry.seq
+            );
+            // The stored value is the expected one only at this key.
+            assert!(
+                store
+                    .put_if(&name, key.clone(), json!(i), json!(i + 100), None, None)
+                    .await?
+            );
+        }
+        assert_eq!(store.increment(&name, json!("17"), 1).await?, 101);
+        assert_eq!(store.increment(&name, json!(17), 1).await?, 102);
+        assert_eq!(store.get(&name, &json!("18")).await?.map(|e| e.value), None);
+
+        // A value large enough to be a blob reference is found at its key.
+        let reference = blob_reference(40 << 20);
+        for key in [json!("17"), json!(17)] {
+            assert!(store.spilled_values(&name, Some(&key)).await?.is_empty());
+        }
+        store
+            .put(&name, json!("17"), reference.clone(), None, None)
+            .await?;
+        assert_eq!(
+            store.spilled_values(&name, Some(&json!("17"))).await?,
+            std::slice::from_ref(&reference)
+        );
+        assert!(
+            store
+                .spilled_values(&name, Some(&json!(17)))
+                .await?
+                .is_empty()
+        );
+        assert_eq!(store.spilled_values(&name, None).await?, [reference]);
+
+        // Deleting a key leaves the key it spells.
+        for pair in keys.chunks(2) {
+            assert!(store.delete(&name, &pair[0]).await?);
+            assert!(!store.delete(&name, &pair[0]).await?);
+            if let Some(other) = pair.get(1) {
+                assert!(store.get(&name, other).await?.is_some());
+            }
+        }
+        assert_eq!(store.length(&name).await?, 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_reads_by_a_string_key_use_the_key_text_index() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
+        };
+        let name = format!("key-plan-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await?;
+        let writes: Vec<super::super::StoreWrite> = (0..2000)
+            .map(|i| (json!(format!("case:{i:04}")), json!(i), None, None))
+            .collect();
+        store.put_many(&name, writes).await?;
+
+        let key = json!("case:0042");
+        let found = PgStore::at_key(&key);
+        let mut tx = store.pg_pool()?.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("ANALYZE store_map_entry")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Plan as a runtime login would: one without BYPASSRLS, so forced
+        // row-level security applies. Only leakproof conditions can be index
+        // conditions then. The role is rolled back with the transaction.
+        let role = format!("hot_key_plan_{}", Uuid::now_v7().simple());
+        let schema: String = sqlx::query_scalar(
+            "SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = 'store_map_entry'::regclass",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        // Both interpolated names are identifier-safe: a generated one, and
+        // the fixture schema quoted.
+        for statement in [
+            format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"),
+            format!("GRANT USAGE ON SCHEMA \"{schema}\" TO {role}"),
+            format!("GRANT SELECT, UPDATE, DELETE ON store_map_entry TO {role}"),
+            format!("SET LOCAL ROLE {role}"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        // The read, the locking read and the delete.
+        for statement in [
+            format!("SELECT value FROM store_map_entry WHERE {found}"),
+            format!("SELECT value FROM store_map_entry WHERE {found} FOR UPDATE"),
+            format!("DELETE FROM store_map_entry WHERE {found}"),
+        ] {
+            let query = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {statement}")));
+            let plan: Vec<String> = bind_at_key!(query, store, &name, &key)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("idx_store_map_entry_key_prefix")),
+                "a read by a string key should use the key text index: {plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("Index Cond") && step.contains("key_text =")),
+                "under row-level security the key's text should be an index condition: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|step| step.contains("Filter") && step.contains("key_text")),
+                "the key's text should not be a filter: {plan:?}"
+            );
+        }
         Ok(())
     }
 
