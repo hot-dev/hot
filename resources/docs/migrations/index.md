@@ -36,6 +36,12 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.11 to 3.0.12 {#upgrading-from-3-0-11-to-3-0-12}
+
+**No migrations.** Replace the binaries and restart.
+
+**What to check in your code:** `::hot::store/put-many` and `::hot::store/merge` now store all of their entries or none. On 3.0.11 a call that failed part-way, for example at the account's storage limit, left the entries before the failing one stored. Code that repeats the call after a failure works as before.
+
 ## Upgrading from Hot 3.0.10 to 3.0.11 {#upgrading-from-3-0-10-to-3-0-11}
 
 **No migrations.** Replace the binaries and restart.
