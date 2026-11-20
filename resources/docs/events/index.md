@@ -112,7 +112,7 @@ you define one.
 |-----------------------|------|-------------|
 | `project` | `Str` | Name of the project that was deployed |
 | `build-id` | `Str` | UUID of the build that went live |
-| `carried-schedules` | `Int` | [Dynamic schedules](/docs/schedules#dynamic-schedules-and-deploys) the activation carried to this build from the project's other builds |
+| `carried-schedules` | `Int` | [Dynamic schedules](/docs/schedules#dynamic-schedules-and-deploys) the activation carried to this build from the build it replaced |
 | `cancelled-schedules` | `Int` | Dynamic schedules the activation cancelled because an identical schedule is on this build |
 
 Like any event, it reaches every handler for its type in the environment. In an

@@ -103,7 +103,7 @@ impl ActivationEventSource {
     fn log_schedules(&self, schedules: CarriedSchedules) {
         if schedules.carried > 0 || schedules.cancelled > 0 {
             tracing::info!(
-                "hot.dev: deploy of build {} ({}) carried {} dynamic schedule(s) from replaced builds, and cancelled {} identical to one on the deployed build",
+                "hot.dev: deploy of build {} ({}) carried {} dynamic schedule(s) from the build it replaced, and cancelled {} identical to one on the deployed build",
                 self.build_id,
                 self.project_name,
                 schedules.carried,
@@ -113,8 +113,8 @@ impl ActivationEventSource {
     }
 }
 
-/// What an activation did with its project's active dynamic schedules on the
-/// project's other builds.
+/// What an activation did with the active dynamic schedules of the build it
+/// replaced.
 #[derive(Clone, Copy, Debug, Default)]
 struct CarriedSchedules {
     /// Moved to the activated build, or armed there again as an identical
@@ -128,16 +128,11 @@ struct CarriedSchedules {
 /// one on the activated build.
 const MERGED_SCHEDULE_REASON: &str = "an identical schedule is on the deployed build";
 
-// SQL fragments the carry statements share, as literals for `concat!`.
+// SQL fragments the carry statements share, as literals for `concat!`. `$1`
+// is the activated build and `$2` the build it replaces.
 macro_rules! pg_carried {
     () => {
-        "schedule.active AND schedule.value IS NOT NULL AND schedule.build_id <> $1 AND schedule.build_id IN (SELECT build_id FROM build WHERE project_id = $2)"
-    };
-}
-
-macro_rules! pg_other_carried {
-    () => {
-        "o.active AND o.value IS NOT NULL AND o.build_id <> $1 AND o.build_id IN (SELECT build_id FROM build WHERE project_id = $2)"
+        "schedule.active AND schedule.value IS NOT NULL AND schedule.build_id = $2"
     };
 }
 
@@ -149,13 +144,7 @@ macro_rules! pg_same_call {
 
 macro_rules! sqlite_carried {
     () => {
-        "schedule.active = 1 AND schedule.value IS NOT NULL AND schedule.build_id <> ?1 AND schedule.build_id IN (SELECT build_id FROM build WHERE project_id = ?2)"
-    };
-}
-
-macro_rules! sqlite_other_carried {
-    () => {
-        "o.active = 1 AND o.value IS NOT NULL AND o.build_id <> ?1 AND o.build_id IN (SELECT build_id FROM build WHERE project_id = ?2)"
+        "schedule.active = 1 AND schedule.value IS NOT NULL AND schedule.build_id = ?2"
     };
 }
 
@@ -165,48 +154,54 @@ macro_rules! sqlite_same_call {
     };
 }
 
-/// Carry the project's active dynamic schedules on its other builds to the
-/// activated build, in the activation's transaction. A dynamic schedule calls
-/// a function by name with stored args, so the new build runs it: when the
-/// args no longer fit the function, its run fails and says so, and when the
-/// build no longer defines the function, the schedule is cancelled as it
+/// Carry the active dynamic schedules of the build an activation replaces to
+/// the activated build, in the activation's transaction. A dynamic schedule
+/// calls a function by name with stored args, so the new build runs it: when
+/// the args no longer fit the function, its run fails and says so, and when
+/// the build no longer defines the function, the schedule is cancelled as it
 /// fires (`::hot::schedule/retire`).
+///
+/// Only the replaced build's schedules can fire, so only they are carried.
+/// Schedules still marked active on older builds, as deployments before Hot
+/// 3.0.5 left them, stay where they are and never fire, as before.
 ///
 /// `(build, function, timing, args)` is unique across active and inactive
 /// schedules, and arming an identical schedule again reuses its row unless it
 /// is a one-time schedule that already ran. Carrying follows that rule, so a
 /// rollback to a build that already holds an identical schedule never fails:
 /// that schedule is armed again, and the carried one is cancelled in its
-/// favour. Of identical schedules on several other builds, the oldest is the
-/// one carried.
+/// favour.
 async fn carry_dynamic_schedules_postgres(
     tx: &mut sqlx::PgConnection,
     build_id: &Uuid,
-    project_id: &Uuid,
+    replaced: Option<Uuid>,
 ) -> Result<CarriedSchedules, BuildError> {
-    let reason = serde_json::json!({ "deactivation-reason": MERGED_SCHEDULE_REASON });
-    let duplicates = sqlx::query(concat!("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || $3 \
-         WHERE ", pg_carried!(), " AND EXISTS (SELECT 1 FROM schedule o WHERE ", pg_other_carried!(), " AND o.schedule_id < schedule.schedule_id AND ", pg_same_call!(), ")"))
-    .bind(build_id)
-    .bind(project_id)
-    .bind(&reason)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    let rearmed = sqlx::query(concat!("UPDATE schedule SET active = true, deactivated_at = NULL, meta = NULLIF(meta - 'deactivation-reason', '{}'::jsonb) \
+    let Some(replaced) = replaced else {
+        return Ok(CarriedSchedules::default());
+    };
+    let rearmed = sqlx::query(concat!(
+        "UPDATE schedule SET active = true, deactivated_at = NULL, meta = NULLIF(meta - 'deactivation-reason', '{}'::jsonb) \
          WHERE schedule.build_id = $1 AND NOT schedule.active AND schedule.value IS NOT NULL \
          AND NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)) \
-         AND EXISTS (SELECT 1 FROM schedule o WHERE ", pg_other_carried!(), " AND ", pg_same_call!(), ")"))
+         AND EXISTS (SELECT 1 FROM schedule o WHERE o.active AND o.value IS NOT NULL AND o.build_id = $2 AND ",
+        pg_same_call!(),
+        ")"
+    ))
     .bind(build_id)
-    .bind(project_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    let merged = sqlx::query(concat!("UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || $3 \
-         WHERE ", pg_carried!(), " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = $1 AND ", pg_same_call!(), ")"))
+    let merged = sqlx::query(concat!(
+        "UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || $3 WHERE ",
+        pg_carried!(),
+        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = $1 AND ",
+        pg_same_call!(),
+        ")"
+    ))
     .bind(build_id)
-    .bind(project_id)
-    .bind(&reason)
+    .bind(replaced)
+    .bind(serde_json::json!({ "deactivation-reason": MERGED_SCHEDULE_REASON }))
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -215,13 +210,13 @@ async fn carry_dynamic_schedules_postgres(
         pg_carried!()
     ))
     .bind(build_id)
-    .bind(project_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     Ok(CarriedSchedules {
         carried: moved + rearmed,
-        cancelled: duplicates + merged,
+        cancelled: merged,
     })
 }
 
@@ -229,29 +224,33 @@ async fn carry_dynamic_schedules_postgres(
 async fn carry_dynamic_schedules_sqlite(
     tx: &mut sqlx::SqliteConnection,
     build_id: &Uuid,
-    project_id: &Uuid,
+    replaced: Option<Uuid>,
 ) -> Result<CarriedSchedules, BuildError> {
-    let duplicates = sqlx::query(concat!("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', ?3) \
-         WHERE ", sqlite_carried!(), " AND EXISTS (SELECT 1 FROM schedule o WHERE ", sqlite_other_carried!(), " AND o.schedule_id < schedule.schedule_id AND ", sqlite_same_call!(), ")"))
-    .bind(build_id)
-    .bind(project_id)
-    .bind(MERGED_SCHEDULE_REASON)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    let rearmed = sqlx::query(concat!("UPDATE schedule SET active = 1, deactivated_at = NULL, meta = NULLIF(json_remove(meta, '$.deactivation-reason'), '{}') \
+    let Some(replaced) = replaced else {
+        return Ok(CarriedSchedules::default());
+    };
+    let rearmed = sqlx::query(concat!(
+        "UPDATE schedule SET active = 1, deactivated_at = NULL, meta = NULLIF(json_remove(meta, '$.deactivation-reason'), '{}') \
          WHERE schedule.build_id = ?1 AND schedule.active = 0 AND schedule.value IS NOT NULL \
          AND NOT (schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)) \
-         AND EXISTS (SELECT 1 FROM schedule o WHERE ", sqlite_other_carried!(), " AND ", sqlite_same_call!(), ")"))
+         AND EXISTS (SELECT 1 FROM schedule o WHERE o.active = 1 AND o.value IS NOT NULL AND o.build_id = ?2 AND ",
+        sqlite_same_call!(),
+        ")"
+    ))
     .bind(build_id)
-    .bind(project_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    let merged = sqlx::query(concat!("UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', ?3) \
-         WHERE ", sqlite_carried!(), " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = ?1 AND ", sqlite_same_call!(), ")"))
+    let merged = sqlx::query(concat!(
+        "UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', ?3) WHERE ",
+        sqlite_carried!(),
+        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = ?1 AND ",
+        sqlite_same_call!(),
+        ")"
+    ))
     .bind(build_id)
-    .bind(project_id)
+    .bind(replaced)
     .bind(MERGED_SCHEDULE_REASON)
     .execute(&mut *tx)
     .await?
@@ -261,13 +260,13 @@ async fn carry_dynamic_schedules_sqlite(
         sqlite_carried!()
     ))
     .bind(build_id)
-    .bind(project_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     Ok(CarriedSchedules {
         carried: moved + rearmed,
-        cancelled: duplicates + merged,
+        cancelled: merged,
     })
 }
 
@@ -1490,6 +1489,15 @@ impl Build {
                     return Ok(false);
                 }
 
+                // The build this activation replaces, whose dynamic schedules
+                // it carries.
+                let replaced: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT build_id FROM build WHERE project_id = $1 AND deployed = true AND build_id <> $2 ORDER BY deployment_sequence DESC LIMIT 1",
+                )
+                .bind(build.project_id)
+                .bind(build_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 sqlx::query(
                     "UPDATE build SET deployed = false, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1"
                 )
@@ -1516,7 +1524,7 @@ impl Build {
 
                 // The project's dynamic schedules move with its deployment.
                 let schedules =
-                    carry_dynamic_schedules_postgres(&mut tx, build_id, &build.project_id).await?;
+                    carry_dynamic_schedules_postgres(&mut tx, build_id, replaced).await?;
                 activation
                     .event(schedules)?
                     .insert_postgres(&mut tx)
@@ -1554,6 +1562,15 @@ impl Build {
                     return Ok(false);
                 }
 
+                // The build this activation replaces, whose dynamic schedules
+                // it carries.
+                let replaced: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT build_id FROM build WHERE project_id = ? AND deployed = 1 AND build_id <> ? ORDER BY deployment_sequence DESC LIMIT 1",
+                )
+                .bind(build.project_id)
+                .bind(build_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 sqlx::query(
                     "UPDATE build SET deployed = 0, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
                 )
@@ -1578,8 +1595,7 @@ impl Build {
                 .execute(&mut *tx)
                 .await?;
 
-                let schedules =
-                    carry_dynamic_schedules_sqlite(&mut tx, build_id, &build.project_id).await?;
+                let schedules = carry_dynamic_schedules_sqlite(&mut tx, build_id, replaced).await?;
                 activation.event(schedules)?.insert_sqlite(&mut tx).await?;
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
@@ -1632,6 +1648,15 @@ impl Build {
                 .await?;
 
                 // Set all builds in this bundle to not deployed
+                // The build this activation replaces, whose dynamic schedules
+                // it carries.
+                let replaced: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT build_id FROM build WHERE project_id = $1 AND deployed = true AND build_id <> $2 ORDER BY deployment_sequence DESC LIMIT 1",
+                )
+                .bind(build.project_id)
+                .bind(build_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 sqlx::query(
                     "UPDATE build SET deployed = false, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1"
                 )
@@ -1660,7 +1685,7 @@ impl Build {
 
                 // The project's dynamic schedules move with its deployment.
                 let schedules =
-                    carry_dynamic_schedules_postgres(&mut tx, build_id, &build.project_id).await?;
+                    carry_dynamic_schedules_postgres(&mut tx, build_id, replaced).await?;
                 activation
                     .event(schedules)?
                     .insert_postgres(&mut tx)
@@ -1695,6 +1720,15 @@ impl Build {
                 .await?;
 
                 // Set all builds in this bundle to not deployed
+                // The build this activation replaces, whose dynamic schedules
+                // it carries.
+                let replaced: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT build_id FROM build WHERE project_id = ? AND deployed = 1 AND build_id <> ? ORDER BY deployment_sequence DESC LIMIT 1",
+                )
+                .bind(build.project_id)
+                .bind(build_id)
+                .fetch_optional(&mut *tx)
+                .await?;
                 sqlx::query(
                     "UPDATE build SET deployed = 0, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
                 )
@@ -1722,8 +1756,7 @@ impl Build {
                 .await?;
 
                 // The project's dynamic schedules move with its deployment.
-                let schedules =
-                    carry_dynamic_schedules_sqlite(&mut tx, build_id, &build.project_id).await?;
+                let schedules = carry_dynamic_schedules_sqlite(&mut tx, build_id, replaced).await?;
                 activation.event(schedules)?.insert_sqlite(&mut tx).await?;
 
                 super::schedule::quota::validate_sqlite(&mut tx, root, limit)
@@ -2239,11 +2272,6 @@ mod tests {
             let reactivated = insert_dynamic_schedule(&db, &old, 1).await;
             let duplicate = insert_dynamic_schedule(&db, &old, 2).await;
             let moved = insert_dynamic_schedule(&db, &old, 3).await;
-            // Identical schedules on two of the project's other builds: the
-            // first is carried, and the other merges with it.
-            let older = insert_test_build(&db, &project, &user).await;
-            let first = insert_dynamic_schedule(&db, &older, 4).await;
-            let second = insert_dynamic_schedule(&db, &old, 4).await;
 
             activate(&db, &new, &user, prepared).await;
 
@@ -2265,14 +2293,49 @@ mod tests {
             let moved = get(moved).await;
             assert!(moved.active);
             assert_eq!(moved.build_id, new);
-            let first = get(first).await;
-            assert!(first.active);
-            assert_eq!(first.build_id, new);
-            let second = get(second).await;
-            assert!(!second.active);
+        }
+    }
+
+    /// Only the build an activation replaces holds schedules that can fire.
+    /// A schedule still marked active on an older build, as deployments
+    /// before 3.0.5 left them, stays there and never fires.
+    #[tokio::test]
+    async fn only_the_replaced_builds_schedules_are_carried() {
+        use super::super::Schedule;
+        for prepared in [false, true] {
+            let db = test_db().await;
+            let user = Uuid::now_v7();
+            let (_, project) = insert_test_project(&db, &user).await;
+            let older = insert_test_build(&db, &project, &user).await;
+            let old = insert_test_build(&db, &project, &user).await;
+            let new = insert_test_build(&db, &project, &user).await;
+            activate(&db, &older, &user, prepared).await;
+            activate(&db, &old, &user, prepared).await;
+            // Left behind on a build replaced before.
+            let leftover = insert_dynamic_schedule(&db, &older, 1).await;
+            let pending = insert_dynamic_schedule(&db, &old, 2).await;
+
+            activate(&db, &new, &user, prepared).await;
+
+            let leftover = Schedule::get_schedule(&db, &leftover).await.unwrap();
+            assert_eq!(leftover.build_id, older, "a leftover stays where it is");
+            assert!(leftover.active);
+            let pending = Schedule::get_schedule(&db, &pending).await.unwrap();
+            assert_eq!(pending.build_id, new);
+            assert!(pending.active);
+
+            // A first activation replaces nothing, and carries nothing.
+            let (_, fresh) = insert_test_project(&db, &user).await;
+            let undeployed = insert_test_build(&db, &fresh, &user).await;
+            let first = insert_test_build(&db, &fresh, &user).await;
+            let waiting = insert_dynamic_schedule(&db, &undeployed, 3).await;
+            activate(&db, &first, &user, prepared).await;
             assert_eq!(
-                second.meta.unwrap()["deactivation-reason"],
-                "an identical schedule is on the deployed build"
+                Schedule::get_schedule(&db, &waiting)
+                    .await
+                    .unwrap()
+                    .build_id,
+                undeployed
             );
         }
     }

@@ -244,10 +244,10 @@ Cancelling schedules is useful for:
 ### Dynamic Schedules and Deploys
 
 A dynamic schedule belongs to its project. It is created in the build whose run
-sent `hot:schedule:new`, and activating a new build of the project carries every
-active dynamic schedule to that build, one-time and recurring. A carried
-schedule keeps its ID, its arguments and its next fire time, and fires in the
-new build:
+sent `hot:schedule:new`, and activating a new build of the project carries the
+active dynamic schedules of the build it replaces to the new build, one-time and
+recurring. A carried schedule keeps its ID, its arguments and its next fire
+time, and fires in the new build:
 
 - If the new build still defines the function, the schedule calls it with the
   arguments it was created with. When the arguments no longer fit the function,
