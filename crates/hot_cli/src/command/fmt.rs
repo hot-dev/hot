@@ -147,8 +147,9 @@ pub(crate) fn run_fmt(global: &GlobalOptions, paths: &[String], check: bool) -> 
 ///
 /// Routes through `hot::discovery::discover` so `hot fmt` honors `.gitignore`
 /// / `.hotignore` / default hard-excludes consistently with the rest of the
-/// toolchain. It also skips `.skills/`, the skill snapshots `hot ai add`
-/// manages; name a directory inside `.skills/` to format it anyway.
+/// toolchain. That skips the skill snapshots `hot ai add` manages in
+/// `.agents/skills/` and `.claude/skills/`, and the old `.skills/`; name a
+/// directory inside one of them to format it anyway.
 fn find_hot_files(root: &str) -> Vec<Target> {
     let path = Path::new(root);
     if !path.exists() {
@@ -260,6 +261,13 @@ mod tests {
             ".skills/hot-ai-agents/examples/agent.hot",
             UNFORMATTED.as_bytes(),
         );
+        for snapshot in [".agents/skills", ".claude/skills"] {
+            write(
+                dir.path(),
+                &format!("{snapshot}/hot-ai-agents/examples/agent.hot"),
+                UNFORMATTED.as_bytes(),
+            );
+        }
         assert_eq!(fmt(&[dir.path()], true), 0);
         // Naming the snapshot directory formats it.
         assert_eq!(fmt(&[&dir.path().join(".skills")], true), 1);

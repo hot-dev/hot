@@ -32,13 +32,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// case (no ignore file → don't melt the disk on `node_modules`) is handled.
 ///
 /// `.hot/` is the local Hot build cache. `.git/` is excluded by `ignore`'s
-/// own filtering already, but we list it for clarity. `.skills/` holds the
-/// agent skills `hot ai add` installs: their example and test `.hot` files
-/// document Hot, and compiling them into a project whose source path is the
-/// project root would load their namespaces with the project's.
+/// own filtering already, but we list it for clarity. `.agents/skills/` and
+/// `.claude/skills/` hold the agent skills `hot ai add` installs, and
+/// `.skills/` is where Hot 3.0.12 and earlier put them: their example and
+/// test `.hot` files document Hot, and compiling them into a project whose
+/// source path is the project root would load their namespaces with the
+/// project's.
 pub const DEFAULT_HARD_EXCLUDES: &[&str] = &[
     ".hot/",
     ".skills/",
+    "**/.agents/skills/",
+    "**/.claude/skills/",
     "target/",
     "node_modules/",
     ".git/",
@@ -327,10 +331,24 @@ mod tests {
         touch(tmp.path(), "src/main.hot");
         touch(tmp.path(), ".skills/hot-language/examples/webhooks.hot");
         touch(tmp.path(), ".skills/hot-language/test/flows.hot");
+        touch(
+            tmp.path(),
+            ".agents/skills/hot-language/examples/webhooks.hot",
+        );
+        touch(
+            tmp.path(),
+            ".claude/skills/hot-language/examples/webhooks.hot",
+        );
+        touch(
+            tmp.path(),
+            "nested/.agents/skills/hot-language/examples/basic.hot",
+        );
+        // Only the skills folders are skipped, not all of `.agents`.
+        touch(tmp.path(), ".agents/tools/helper.hot");
 
         let opts = DiscoveryOpts::for_extension("hot");
         let found = rel_paths(&discover(&[tmp.path()], &opts));
-        assert_eq!(found, vec!["src/main.hot"]);
+        assert_eq!(found, vec![".agents/tools/helper.hot", "src/main.hot"]);
 
         // A root inside .skills is still walked when named explicitly.
         let skill = tmp.path().join(".skills/hot-language/examples");

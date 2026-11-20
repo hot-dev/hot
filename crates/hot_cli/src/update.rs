@@ -862,6 +862,64 @@ async fn install_archive(
 
 /// What to suggest after `hot update` fails to install. `brew_command` is
 /// the Homebrew command for this update, when Homebrew can do it.
+/// The `hot` an update just installed. Homebrew's versioned Cellar path can
+/// go away during an upgrade, so its stable link is used instead.
+fn updated_binary(before: &Path) -> PathBuf {
+    if detect_install_method() == InstallMethod::Homebrew
+        && let Ok(output) = Command::new("brew").arg("--prefix").output()
+        && output.status.success()
+    {
+        let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let linked = Path::new(&prefix).join("bin").join("hot");
+        if linked.is_file() {
+            return linked;
+        }
+    }
+    before.to_path_buf()
+}
+
+/// After an update, refresh the Hot skills installed in the home folder. The
+/// new binary does it: this process still carries the old release's skills.
+/// Project files are left for `hot ai update` (and the `hot dev` hint), since
+/// an update can run from any folder.
+pub fn refresh_global_ai_skills(binary_before_update: Option<&Path>, version: &str) {
+    if !crate::command::ai::has_global_managed_skills() {
+        return;
+    }
+    let manual = "Run 'hot ai update --global' to refresh your global Hot skills.";
+    println!();
+    // Under sudo the files would end up owned by root.
+    if std::env::var_os("SUDO_USER").is_some() {
+        println!("{manual}");
+        return;
+    }
+    let Some(before) = binary_before_update else {
+        println!("{manual}");
+        return;
+    };
+    let binary = updated_binary(before);
+    let version = version.trim_start_matches('v');
+    let installed = Command::new(&binary)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    if !installed.is_some_and(|text| text.split_whitespace().any(|word| word == version)) {
+        println!("{manual}");
+        return;
+    }
+
+    println!("Refreshing global Hot skills...");
+    let refreshed = Command::new(&binary)
+        .args(["ai", "update", "--global"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !refreshed {
+        println!("{manual}");
+    }
+}
+
 pub fn print_install_failure_help(
     platform: &PlatformInfo,
     target_version: Option<&str>,

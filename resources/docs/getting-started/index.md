@@ -92,11 +92,11 @@ If you use an AI coding assistant, add Hot language support to help it understan
 
 ```bash
 hot ai add              # Add AGENTS.md + skills to project
-hot ai add --global     # Install skills to ~/.skills/ (available in all projects)
+hot ai add --global     # Install skills in your home folder (available in all projects)
 ```
 
 This creates an `AGENTS.md` file and installs the skills bundled with your Hot
-release under `.skills/`. Current bundles include Hot language guidance and may
+release under `.agents/skills/` and `.claude/skills/`. Current bundles include Hot language guidance and may
 include specialized guidance such as Hot AI agents and SDK integrations. Works
 with Cursor, Claude Code, GitHub Copilot, Windsurf, and many other AI coding
 tools.

@@ -387,6 +387,11 @@ pub(crate) async fn run_dev(
         conf
     };
     let conf = apply_hot_dev_shutdown_defaults(conf, &conf_files);
+    if conf.get_bool_or_default("dev.ai-check", true) {
+        for hint in crate::command::ai::stale_ai_hints() {
+            warn!("hot.dev: {hint}");
+        }
+    }
     let queue_type = QueueType::from_str(&conf.get_str_or_default("queue.type", "sqlite"))
         .unwrap_or(QueueType::Memory);
 

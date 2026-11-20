@@ -280,7 +280,7 @@ The VS Code extension provides these commands:
 | `Hot: Restart Analyzer` | Restart the LSP server | |
 | `Hot: Open Settings` | Open the extension's settings | |
 | `Hot: Show Logs` | Open the output channel | |
-| `Hot: Create AI Coding Hints` | Run `hot ai add` in the workspace folder (`AGENTS.md` and `.skills/`) | |
+| `Hot: Create AI Coding Hints` | Run `hot ai add` in the workspace folder (`AGENTS.md`, `.agents/skills/` and `.claude/skills/`) | |
 | `Hot: Format Document` | Format the active Hot file | |
 | `Hot: Start REPL` | Open a terminal running `hot repl` | |
 | `Hot: Send Selection to REPL` | Send the selection, or the current line, to the REPL terminal | `Alt+Enter` |

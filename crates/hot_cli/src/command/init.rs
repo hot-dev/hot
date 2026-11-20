@@ -321,7 +321,9 @@ async fn run_init_impl(
         println!("  hot dev");
         println!("\nTo add AI coding support (AGENTS.md + skills):");
         println!("  hot ai add               # Add to this project");
-        println!("  hot ai add --global      # Install skills globally (~/.skills/)");
+        println!(
+            "  hot ai add --global      # Install skills globally (~/.agents/skills/, ~/.claude/skills/)"
+        );
     }
 
     Ok(())

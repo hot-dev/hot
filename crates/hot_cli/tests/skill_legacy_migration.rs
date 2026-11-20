@@ -72,8 +72,8 @@ fn hot_ai_installs_raw_files_and_repairs_legacy_stamps() {
 
     run(project, &["ai", "add"]);
 
-    let language_dir = project.join(".skills/hot-language");
-    let agent_dir = project.join(".skills/hot-ai-agents");
+    let language_dir = project.join(".agents/skills/hot-language");
+    let agent_dir = project.join(".agents/skills/hot-ai-agents");
     let language_skill = language_dir.join("SKILL.md");
     let agent_skill = agent_dir.join("SKILL.md");
     let language_yaml = language_dir.join("agents/openai.yaml");
@@ -135,7 +135,7 @@ fn hot_ai_update_preserves_local_edits_when_shipped_source_is_unchanged() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
-    let skill_md = project.join(".skills/hot-language/SKILL.md");
+    let skill_md = project.join(".agents/skills/hot-language/SKILL.md");
     let customized = format!(
         "{}\n<!-- MY LOCAL CUSTOMIZATION -->\n",
         std::fs::read_to_string(&skill_md).unwrap().trim_end()
@@ -157,7 +157,7 @@ fn hot_ai_update_preserves_unmanaged_files() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
-    let notes = project.join(".skills/hot-language/my-notes.md");
+    let notes = project.join(".agents/skills/hot-language/my-notes.md");
     std::fs::write(&notes, "keep me\n").unwrap();
 
     run(project, &["ai", "update"]);
@@ -184,7 +184,7 @@ fn hot_ai_update_does_not_follow_unmanaged_directory_symlinks() {
     run(project, &["ai", "add"]);
     symlink(
         &outside,
-        project.join(".skills/hot-language/linked-outside"),
+        project.join(".agents/skills/hot-language/linked-outside"),
     )
     .unwrap();
 
@@ -213,7 +213,7 @@ fn hot_ai_update_rejects_a_managed_file_symlink() {
     std::fs::write(&agents_path, &stale_agents).unwrap();
     let outside = project.join("outside-skill.md");
     std::fs::write(&outside, "do not replace\n").unwrap();
-    let managed = project.join(".skills/hot-language/SKILL.md");
+    let managed = project.join(".agents/skills/hot-language/SKILL.md");
     std::fs::remove_file(&managed).unwrap();
     symlink(&outside, &managed).unwrap();
 
@@ -250,7 +250,7 @@ fn hot_ai_update_rejects_a_managed_directory_symlink() {
     std::fs::create_dir(&outside).unwrap();
     let sentinel = outside.join("keep.txt");
     std::fs::write(&sentinel, "keep me\n").unwrap();
-    let managed = project.join(".skills/hot-language/references");
+    let managed = project.join(".agents/skills/hot-language/references");
     std::fs::remove_dir_all(&managed).unwrap();
     symlink(&outside, &managed).unwrap();
 
@@ -287,10 +287,14 @@ fn hot_ai_update_refreshes_project_and_global_managed_skills() {
     run_with_home(project, &home, &["ai", "add"]);
     run_with_home(project, &home, &["ai", "add", "--global"]);
 
-    std::fs::remove_dir_all(project.join(".skills/hot-ai-agents")).unwrap();
-    std::fs::remove_dir_all(home.join(".skills/hot-language")).unwrap();
-    let project_manifest = project.join(".skills/hot-language").join(MANIFEST_FILE);
-    let global_manifest = home.join(".skills/hot-ai-agents").join(MANIFEST_FILE);
+    std::fs::remove_dir_all(project.join(".agents/skills/hot-ai-agents")).unwrap();
+    std::fs::remove_dir_all(home.join(".agents/skills/hot-language")).unwrap();
+    let project_manifest = project
+        .join(".agents/skills/hot-language")
+        .join(MANIFEST_FILE);
+    let global_manifest = home
+        .join(".agents/skills/hot-ai-agents")
+        .join(MANIFEST_FILE);
     std::fs::write(&project_manifest, "{not valid json").unwrap();
     std::fs::write(&global_manifest, "{not valid json").unwrap();
 
@@ -309,7 +313,7 @@ fn hot_ai_update_repairs_a_managed_skill_missing_skill_md() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
-    let skill_md = project.join(".skills/hot-language/SKILL.md");
+    let skill_md = project.join(".agents/skills/hot-language/SKILL.md");
     std::fs::remove_file(&skill_md).unwrap();
 
     run(project, &["ai", "update"]);
@@ -327,7 +331,7 @@ fn hot_ai_update_repairs_a_corrupt_manifest_without_clobbering_files() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
-    let skill_dir = project.join(".skills/hot-language");
+    let skill_dir = project.join(".agents/skills/hot-language");
     let skill_md = skill_dir.join("SKILL.md");
     let customized = format!(
         "{}\n<!-- MY LOCAL CUSTOMIZATION -->\n",
@@ -366,16 +370,16 @@ fn hot_ai_update_does_not_reinstall_a_removed_skill() {
 
     run(project, &["ai", "add"]);
     let removed = project.join("removed-hot-ai-agents");
-    std::fs::rename(project.join(".skills/hot-ai-agents"), &removed)
-        .expect("move one installed skill out of .skills");
+    std::fs::rename(project.join(".agents/skills/hot-ai-agents"), &removed)
+        .expect("move one installed skill out of .agents/skills");
 
     run(project, &["ai", "update"]);
 
     assert!(
-        !project.join(".skills/hot-ai-agents").exists(),
+        !project.join(".agents/skills/hot-ai-agents").exists(),
         "update must touch only skills that remain installed"
     );
-    assert!(project.join(".skills/hot-language").is_dir());
+    assert!(project.join(".agents/skills/hot-language").is_dir());
 }
 
 #[test]
@@ -402,11 +406,232 @@ fn hot_ai_list_and_empty_update_tolerate_a_missing_skill_bundle() {
     }
 }
 
+fn hot_output(project: &Path, home: &Path, args: &[&str]) -> (bool, String) {
+    let output = Command::new(hot_binary())
+        .args(args)
+        .current_dir(project)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .output()
+        .unwrap_or_else(|e| panic!("run hot {args:?}: {e}"));
+    (
+        output.status.success(),
+        String::from_utf8(output.stdout).expect("UTF-8 stdout"),
+    )
+}
+
+/// Every file under `dir`, relative to it, with its bytes.
+fn tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, base, out);
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Turn a fresh project install into what Hot 3.0.11 and earlier left: one
+/// managed copy of each skill under `.skills/`.
+fn regress_to_dot_skills(root: &Path) {
+    std::fs::create_dir_all(root.join(".skills")).unwrap();
+    for skill in ["hot-language", "hot-ai-agents"] {
+        std::fs::rename(
+            root.join(".agents/skills").join(skill),
+            root.join(".skills").join(skill),
+        )
+        .unwrap();
+    }
+    std::fs::remove_dir_all(root.join(".agents")).unwrap();
+    std::fs::remove_dir_all(root.join(".claude")).unwrap();
+}
+
+#[test]
+fn hot_ai_add_installs_each_skill_where_agents_read_it() {
+    let project = tempfile::tempdir().expect("project");
+    run(project.path(), &["ai", "add"]);
+
+    for skill in ["hot-language", "hot-ai-agents"] {
+        let shared = project.path().join(".agents/skills").join(skill);
+        let claude = project.path().join(".claude/skills").join(skill);
+        assert!(shared.join(MANIFEST_FILE).is_file());
+        assert_eq!(tree(&shared), tree(&claude), "both copies must match");
+    }
+    assert!(!project.path().join(".skills").exists());
+    let agents = std::fs::read_to_string(project.path().join("AGENTS.md")).unwrap();
+    assert!(agents.contains("`.agents/skills/hot-language/`"));
+}
+
+#[test]
+fn hot_ai_add_global_installs_to_both_home_skill_folders() {
+    let project = tempfile::tempdir().expect("project");
+    let home = project.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+
+    run_with_home(project.path(), &home, &["ai", "add", "--global"]);
+
+    for base in [".agents/skills", ".claude/skills"] {
+        assert!(home.join(base).join("hot-language/SKILL.md").is_file());
+    }
+    assert!(!home.join(".skills").exists());
+    assert!(!project.path().join("AGENTS.md").exists());
+    assert!(!project.path().join(".agents").exists());
+}
+
+#[test]
+fn hot_ai_update_moves_skills_out_of_dot_skills() {
+    let project = tempfile::tempdir().expect("project");
+    let home = project.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    run_with_home(project.path(), &home, &["ai", "add"]);
+    run_with_home(project.path(), &home, &["ai", "add", "--global"]);
+    regress_to_dot_skills(project.path());
+    regress_to_dot_skills(&home);
+
+    let (ok, listed) = hot_output(project.path(), &home, &["ai", "list"]);
+    assert!(ok);
+    assert!(
+        listed.contains(".skills/hot-language/  old location, agents don't read it"),
+        "list must flag the old folder:\n{listed}"
+    );
+
+    run_with_home(project.path(), &home, &["ai", "update"]);
+
+    for root in [project.path(), home.as_path()] {
+        assert!(
+            !root.join(".skills").exists(),
+            "the old folder must be removed once empty"
+        );
+        for base in [".agents/skills", ".claude/skills"] {
+            for skill in ["hot-language", "hot-ai-agents"] {
+                assert_eq!(
+                    std::fs::read(root.join(base).join(skill).join("SKILL.md")).unwrap(),
+                    std::fs::read(source_skill_file(skill, "SKILL.md")).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hot_ai_update_keeps_a_changed_dot_skills_copy() {
+    let project = tempfile::tempdir().expect("project");
+    run(project.path(), &["ai", "add"]);
+    regress_to_dot_skills(project.path());
+    let edited = project.path().join(".skills/hot-language/SKILL.md");
+    std::fs::write(&edited, "my edits\n").unwrap();
+    let notes = project.path().join(".skills/hot-ai-agents/notes.md");
+    std::fs::write(&notes, "mine\n").unwrap();
+
+    run(project.path(), &["ai", "update"]);
+
+    assert_eq!(std::fs::read_to_string(&edited).unwrap(), "my edits\n");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "mine\n");
+    assert!(
+        project
+            .path()
+            .join(".agents/skills/hot-language/SKILL.md")
+            .is_file(),
+        "the new copy is installed even when the old one stays"
+    );
+}
+
+#[test]
+fn hot_ai_update_global_leaves_the_project_alone() {
+    let project = tempfile::tempdir().expect("project");
+    let home = project.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    run_with_home(project.path(), &home, &["ai", "add"]);
+    run_with_home(project.path(), &home, &["ai", "add", "--global"]);
+
+    let agents_path = project.path().join("AGENTS.md");
+    let stale_agents =
+        std::fs::read_to_string(&agents_path)
+            .unwrap()
+            .replacen("hash:", "hash:stale", 1);
+    std::fs::write(&agents_path, &stale_agents).unwrap();
+    let project_manifest = project
+        .path()
+        .join(".agents/skills/hot-language")
+        .join(MANIFEST_FILE);
+    let global_manifest = home.join(".agents/skills/hot-language").join(MANIFEST_FILE);
+    std::fs::write(&project_manifest, "{not valid json").unwrap();
+    std::fs::write(&global_manifest, "{not valid json").unwrap();
+
+    run_with_home(project.path(), &home, &["ai", "update", "--global"]);
+
+    assert_eq!(std::fs::read_to_string(&agents_path).unwrap(), stale_agents);
+    assert_eq!(
+        std::fs::read_to_string(&project_manifest).unwrap(),
+        "{not valid json"
+    );
+    serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&global_manifest).unwrap())
+        .expect("global manifest refreshed");
+}
+
+#[test]
+fn hot_ai_list_reports_out_of_date_files() {
+    let project = tempfile::tempdir().expect("project");
+    let home = project.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    run_with_home(project.path(), &home, &["ai", "add"]);
+
+    let (ok, listed) = hot_output(project.path(), &home, &["ai", "list"]);
+    assert!(ok);
+    assert!(listed.contains("AGENTS.md  up to date"), "{listed}");
+    assert!(
+        listed.contains(".agents/skills/hot-language/  up to date"),
+        "{listed}"
+    );
+    assert!(!listed.contains("hot ai update"), "{listed}");
+
+    // A manifest from another release records other shipped hashes.
+    let manifest_path = project
+        .path()
+        .join(".claude/skills/hot-language")
+        .join(MANIFEST_FILE);
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["files"]["SKILL.md"] = serde_json::Value::from("0".repeat(64));
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    let agents_path = project.path().join("AGENTS.md");
+    let stale_agents =
+        std::fs::read_to_string(&agents_path)
+            .unwrap()
+            .replacen("hash:", "hash:stale", 1);
+    std::fs::write(&agents_path, stale_agents).unwrap();
+
+    let (ok, listed) = hot_output(project.path(), &home, &["ai", "list"]);
+    assert!(ok);
+    assert!(listed.contains("AGENTS.md  out of date"), "{listed}");
+    assert!(
+        listed.contains(".claude/skills/hot-language/  out of date"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(".agents/skills/hot-language/  up to date"),
+        "{listed}"
+    );
+    assert!(listed.contains("Use 'hot ai update'"), "{listed}");
+}
+
 #[test]
 fn hot_ai_list_labels_external_skill_installs_honestly() {
     let project = tempfile::tempdir().expect("project");
     let isolated_home = project.path().join("home");
-    let skill_dir = project.path().join(".skills/hot-language");
+    let skill_dir = project.path().join(".agents/skills/hot-language");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::create_dir(&isolated_home).unwrap();
     std::fs::write(
@@ -415,43 +640,65 @@ fn hot_ai_list_labels_external_skill_installs_honestly() {
     )
     .unwrap();
 
-    let output = Command::new(hot_binary())
-        .args(["ai", "list"])
-        .current_dir(project.path())
-        .env("HOME", &isolated_home)
-        .env("USERPROFILE", &isolated_home)
-        .output()
-        .expect("run hot ai list");
-    assert!(output.status.success());
-
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let (ok, stdout) = hot_output(project.path(), &isolated_home, &["ai", "list"]);
+    assert!(ok);
     assert!(
-        stdout.contains(".skills/hot-language/  (present - project, externally managed)"),
+        stdout.contains(".agents/skills/hot-language/  managed outside Hot"),
         "external skill status should be explicit:\n{stdout}"
     );
     assert!(
-        !stdout.contains(".skills/hot-language/  (installed - project)"),
+        !stdout.contains("hot-language/  up to date"),
         "external skill must not be reported as managed by hot ai:\n{stdout}"
+    );
+}
+
+#[test]
+fn hot_ai_add_skips_an_external_skill_but_fills_the_other_folder() {
+    let project = tempfile::tempdir().expect("project");
+    let skill_dir = project.path().join(".agents/skills/hot-language");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_md = skill_dir.join("SKILL.md");
+    let external = "---\nname: hot-language\ndescription: External install.\n---\n";
+    std::fs::write(&skill_md, external).unwrap();
+
+    run(project.path(), &["ai", "add"]);
+
+    assert_eq!(std::fs::read_to_string(&skill_md).unwrap(), external);
+    assert!(!skill_dir.join(MANIFEST_FILE).exists());
+    assert!(
+        project
+            .path()
+            .join(".claude/skills/hot-language")
+            .join(MANIFEST_FILE)
+            .is_file()
     );
 }
 
 #[test]
 fn hot_ai_add_refuses_to_overwrite_or_adopt_an_external_skill() {
     let project = tempfile::tempdir().expect("project");
-    let skill_dir = project.path().join(".skills/hot-language");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    let skill_md = skill_dir.join("SKILL.md");
     let external = "---\nname: hot-language\ndescription: External install.\n---\n";
-    std::fs::write(&skill_md, external).unwrap();
+    let mut skill_dirs = Vec::new();
+    for base in [".agents/skills", ".claude/skills"] {
+        let skill_dir = project.path().join(base).join("hot-language");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), external).unwrap();
+        skill_dirs.push(skill_dir);
+    }
 
     let status = run_status(project.path(), &["ai", "add"]);
 
     assert!(
         !status.success(),
-        "external skill collision must reject add"
+        "a skill no folder can take must reject add"
     );
-    assert_eq!(std::fs::read_to_string(skill_md).unwrap(), external);
-    assert!(!skill_dir.join(MANIFEST_FILE).exists());
+    for skill_dir in skill_dirs {
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            external
+        );
+        assert!(!skill_dir.join(MANIFEST_FILE).exists());
+    }
     assert!(
         !project.path().join("AGENTS.md").exists(),
         "preflight failure must not leave a partial AGENTS.md install"
@@ -461,7 +708,7 @@ fn hot_ai_add_refuses_to_overwrite_or_adopt_an_external_skill() {
 #[test]
 fn hot_ai_add_uses_an_empty_preexisting_skill_directory() {
     let project = tempfile::tempdir().expect("project");
-    let skill_dir = project.path().join(".skills/hot-language");
+    let skill_dir = project.path().join(".agents/skills/hot-language");
     std::fs::create_dir_all(&skill_dir).unwrap();
 
     run(project.path(), &["ai", "add"]);
@@ -476,7 +723,7 @@ fn hot_ai_update_recovers_when_the_manifest_was_deleted() {
     let project = tempfile::tempdir().expect("project");
     run(project.path(), &["ai", "add"]);
 
-    let skill_dir = project.path().join(".skills/hot-language");
+    let skill_dir = project.path().join(".agents/skills/hot-language");
     let skill_md = skill_dir.join("SKILL.md");
     let customized = format!(
         "{}\n<!-- LOCAL -->\n",
@@ -505,7 +752,7 @@ fn hot_ai_update_rejects_an_unsupported_manifest_before_touching_agents() {
 
     let manifest_path = project
         .path()
-        .join(".skills/hot-language")
+        .join(".agents/skills/hot-language")
         .join(MANIFEST_FILE);
     std::fs::write(&manifest_path, "{\"version\":2,\"files\":{}}\n").unwrap();
 
@@ -524,17 +771,46 @@ fn hot_ai_update_rejects_an_unsupported_manifest_before_touching_agents() {
 
 #[cfg(unix)]
 #[test]
-fn hot_ai_add_rejects_a_symlinked_skills_root_before_writing_agents() {
+fn hot_ai_add_skips_a_symlinked_skills_folder() {
+    use std::os::unix::fs::symlink;
+
+    // A common setup: ~/.claude/skills links to ~/.agents/skills.
+    let project = tempfile::tempdir().expect("project");
+    let home = project.path().join("home");
+    std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    symlink(home.join(".agents/skills"), home.join(".claude/skills")).unwrap();
+
+    let (ok, stdout) = hot_output(project.path(), &home, &["ai", "add", "--global"]);
+
+    assert!(ok, "{stdout}");
+    assert!(stdout.contains("it is a symlink"), "{stdout}");
+    assert!(home.join(".agents/skills/hot-language/SKILL.md").is_file());
+    assert!(
+        std::fs::symlink_metadata(home.join(".claude/skills"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link itself must be left alone"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_add_rejects_symlinked_skills_folders_before_writing_agents() {
     use std::os::unix::fs::symlink;
 
     let project = tempfile::tempdir().expect("project");
     let outside = project.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
-    symlink(&outside, project.path().join(".skills")).unwrap();
+    for parent in [".agents", ".claude"] {
+        std::fs::create_dir(project.path().join(parent)).unwrap();
+        symlink(&outside, project.path().join(parent).join("skills")).unwrap();
+    }
 
     let status = run_status(project.path(), &["ai", "add"]);
 
-    assert!(!status.success(), "symlinked skills root must reject add");
+    assert!(!status.success(), "with no folder to write, add must fail");
     assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
     assert!(
         !project.path().join("AGENTS.md").exists(),
@@ -544,33 +820,23 @@ fn hot_ai_add_rejects_a_symlinked_skills_root_before_writing_agents() {
 
 #[cfg(unix)]
 #[test]
-fn hot_ai_update_rejects_a_symlinked_skills_root_before_touching_agents() {
+fn hot_ai_update_never_writes_through_a_symlinked_skills_folder() {
     use std::os::unix::fs::symlink;
 
     let project = tempfile::tempdir().expect("project");
     run(project.path(), &["ai", "add"]);
 
-    // Make the AGENTS.md managed section stale so a half-completed update
-    // would be observable, then swap .skills for a symlink.
-    let agents_path = project.path().join("AGENTS.md");
-    let agents_before = std::fs::read_to_string(&agents_path).expect("read AGENTS.md");
-    let stale = agents_before.replacen("hash:", "hash:stale", 1);
-    assert_ne!(stale, agents_before, "expected a section hash to perturb");
-    std::fs::write(&agents_path, &stale).unwrap();
+    let real_skills = project.path().join("skills-real");
+    std::fs::rename(project.path().join(".claude/skills"), &real_skills).unwrap();
+    let manifest = real_skills.join("hot-language").join(MANIFEST_FILE);
+    std::fs::write(&manifest, "{not valid json").unwrap();
+    symlink(&real_skills, project.path().join(".claude/skills")).unwrap();
 
-    let real_skills = project.path().join(".skills-real");
-    std::fs::rename(project.path().join(".skills"), &real_skills).unwrap();
-    symlink(&real_skills, project.path().join(".skills")).unwrap();
+    run(project.path(), &["ai", "update"]);
 
-    let status = run_status(project.path(), &["ai", "update"]);
-
-    assert!(
-        !status.success(),
-        "symlinked skills root must reject update"
-    );
     assert_eq!(
-        std::fs::read_to_string(&agents_path).expect("read AGENTS.md"),
-        stale,
-        "update must preflight skill paths before rewriting AGENTS.md"
+        std::fs::read_to_string(&manifest).unwrap(),
+        "{not valid json",
+        "update must not write through the symlinked folder"
     );
 }

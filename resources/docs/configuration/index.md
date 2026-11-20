@@ -342,6 +342,7 @@ These set what a CLI command does when you don't pass the flag.
 | `hot.watch.with-tests` | Make `hot watch` watch the test directories too, so a change to a test file starts a check. Also `--with-tests` | `false` |
 | `hot.watch.debounce` | Milliseconds `hot watch` waits after a change. Also `--watch.debounce` | `200` |
 | `hot.deploy.auto` | Deploy each live build that `hot dev` creates. Also `--deploy.auto` | `true` |
+| `hot.dev.ai-check` | Make `hot dev` say at startup when this project's `AGENTS.md` or Hot skills, or your global Hot skills, are from another Hot release or in the old `.skills/` folder. Also `HOT_DEV_AI_CHECK` | `true` |
 | `hot.deploy.ctx.strict` | Make `hot deploy --local` stop when a required context variable is unset. Also `--strict` | `false` |
 | `hot.build.file.max-bytes` | Largest build the API accepts as an upload, in bytes. `hot build` and `hot deploy` check the bundle against it first | `104857600` |
 
