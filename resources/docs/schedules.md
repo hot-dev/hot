@@ -221,7 +221,8 @@ The `hot:schedule:cancel` event payload supports either:
 At least one of `schedule-id` or `fn` must be provided. When both are present,
 `schedule-id` is used. A `schedule-id` names a schedule in the sender's
 environment. `fn` cancels every active schedule of that function on the build
-whose run handles the event, metadata schedules included. The handler's run
+whose run handles the event, metadata schedules included: sent from Hot code,
+that is the sender's build. The handler's run
 returns `true` if it cancelled a schedule. `send` itself returns an `EventInfo`.
 
 Cancelling schedules is useful for:
@@ -247,6 +248,13 @@ written for that program, so activating a new build of the project cancels every
 active dynamic schedule on the project's other builds, one-time and recurring.
 The cancelled schedule records `build replaced by deployment` as its
 `deactivation-reason`, and the deploy logs how many it cancelled.
+
+Sent from Hot code, `hot:schedule:new` runs in the sender's build, so in an
+environment with several projects the schedule belongs to the sending project:
+another project's deploy leaves it armed, and it fires in the sending project's
+build. A `hot:schedule:new` published through the API names no build, and runs
+in whichever deployed project's build handles it. With more than one project in
+the environment, send it from the project whose function it schedules.
 
 A schedule that has to outlive a deploy needs a record in your own application
 state. After each activation, Hot sends a
