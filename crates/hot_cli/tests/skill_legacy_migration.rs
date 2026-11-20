@@ -414,9 +414,12 @@ fn hot_output(project: &Path, home: &Path, args: &[&str]) -> (bool, String) {
         .env("USERPROFILE", home)
         .output()
         .unwrap_or_else(|e| panic!("run hot {args:?}: {e}"));
+    // Windows prints paths with `\`; compare them in one spelling.
     (
         output.status.success(),
-        String::from_utf8(output.stdout).expect("UTF-8 stdout"),
+        String::from_utf8(output.stdout)
+            .expect("UTF-8 stdout")
+            .replace('\\', "/"),
     )
 }
 
