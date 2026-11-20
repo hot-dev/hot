@@ -22,8 +22,15 @@ hot ai add
 This installs:
 
 - `AGENTS.md` — concise repository instructions and critical Hot syntax rules
-- `.skills/hot-language/` — detailed language guidance, references, and examples
-- `.skills/hot-ai-agents/` — agent, model, tool, memory, and AI SDK integration guidance
+- `.agents/skills/hot-language/` — detailed language guidance, references, and examples
+- `.agents/skills/hot-ai-agents/` — agent, model, tool, memory, and AI SDK integration guidance
+- `.claude/skills/` — the same skills for Claude Code
+
+Codex, Cursor, Gemini CLI, GitHub Copilot, OpenCode and other agents read
+skills from `.agents/skills/`. Claude Code reads only `.claude/skills/`, so Hot
+installs a copy there too. A skill folder another tool manages, or a skills
+folder that is a symlink (such as `.claude/skills` linked to `.agents/skills`),
+is left alone.
 
 Project-local context is the best default. It travels with the repository and
 lets the team review changes to the instructions alongside the code.
@@ -36,8 +43,8 @@ To make the bundled Hot skills available across projects:
 hot ai add --global
 ```
 
-Global skills are installed under `~/.skills/`. The exact skill set can vary by
-Hot release.
+Global skills are installed under `~/.agents/skills/` and `~/.claude/skills/`.
+The exact skill set can vary by Hot release.
 
 Inspect what is installed:
 
@@ -50,6 +57,16 @@ Refresh installed files after upgrading Hot:
 ```bash
 hot ai update
 ```
+
+`hot update` refreshes your global skills itself, by running
+`hot ai update --global` with the new release. Project files are yours to
+review, so it leaves them alone; `hot dev` says at startup when this project's
+`AGENTS.md` or skills, or your global skills, are from another Hot release. Set
+`hot.dev.ai-check false` in `hot.hot` to turn that off.
+
+Hot 3.0.12 and earlier installed skills in `.skills/`, a folder agents don't
+read. `hot ai update` moves skills Hot installed there to the folders above. A
+copy you changed stays where it is, with a note, so you can move your changes.
 
 `hot ai add` and `hot ai update` use snapshots bundled with the installed Hot
 release, so they work offline and stay version-aligned with the compiler.

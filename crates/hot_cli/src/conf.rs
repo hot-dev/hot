@@ -385,7 +385,9 @@ pub(crate) fn create_default_conf() -> Val {
         // "cache": Bytecode caching config can be reintroduced when needed.
         "db": db_conf,
         "dev": {
-            "open": false  // Whether to open browser on `hot dev`
+            "open": false,  // Whether to open browser on `hot dev`
+            // Whether `hot dev` says when installed AI files are from another release
+            "ai-check": true
         },
         "deploy": deploy_conf,
         "build": {

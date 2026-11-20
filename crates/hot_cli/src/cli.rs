@@ -1127,19 +1127,23 @@ pub(crate) enum DepsAction {
 
 #[derive(Subcommand, Debug)]
 #[command(
-    after_help = "Files created:\n  AGENTS.md               - AI agent instructions (passive context)\n  .skills/hot-language/   - Hot language skill with references\n  .skills/hot-ai-agents/  - Hot AI agent and SDK integration skill\n\nExamples:\n  hot ai add           # Add AGENTS.md + bundled skills to project\n  hot ai add --global  # Install bundled skills to ~/.skills/\n  hot ai list          # Show installed files\n  hot ai update        # Update installed files to this Hot version\n\nFor the public skills.sh source, use:\n  npx skills add hot-dev/hot-skills"
+    after_help = "Files created:\n  AGENTS.md                      - AI agent instructions (passive context)\n  .agents/skills/hot-language/   - Hot language skill with references\n  .agents/skills/hot-ai-agents/  - Hot AI agent and SDK integration skill\n  .claude/skills/...             - The same skills, for Claude Code\n\nExamples:\n  hot ai add               # Add AGENTS.md + bundled skills to project\n  hot ai add --global      # Install bundled skills to ~/.agents/skills/ and ~/.claude/skills/\n  hot ai list              # Show installed files and whether they are current\n  hot ai update            # Update installed files to this Hot version\n  hot ai update --global   # Update only the global skills\n\nFor the public skills.sh source, use:\n  npx skills add hot-dev/hot-skills"
 )]
 pub(crate) enum AiAction {
-    /// Add AI coding support (AGENTS.md + .skills/) to the project
+    /// Add AI coding support (AGENTS.md + .agents/skills/ + .claude/skills/) to the project
     Add {
-        /// Install skills to user directory (~/.skills/) instead of project
+        /// Install skills to your home folder (~/.agents/skills/ and ~/.claude/skills/) instead of the project
         #[arg(long)]
         global: bool,
     },
-    /// List installed AI support files and their locations
+    /// List installed AI support files, their locations, and whether they are current
     List,
-    /// Update existing AI support files to the latest version
-    Update,
+    /// Update installed AI support files to this Hot version, moving copies out of the old .skills/ folder
+    Update {
+        /// Update only the skills in your home folder, leaving the current project alone
+        #[arg(long)]
+        global: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

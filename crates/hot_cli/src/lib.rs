@@ -570,6 +570,10 @@ async fn async_main(providers: CliProviders) {
     if let Some(Command::Update { force, version }) = &cli.command {
         let force = *force;
         let target_version = version.as_deref();
+        // Read before installing: on Linux the path of a replaced
+        // executable reads back with " (deleted)" appended.
+        let binary_before_update = std::env::current_exe().ok();
+        let binary_before_update = binary_before_update.as_deref();
         match update::check_for_updates(target_version).await {
             update::UpdateCheckResult::TargetVersion {
                 current_version,
@@ -589,6 +593,7 @@ async fn async_main(providers: CliProviders) {
                     Ok(()) => {
                         println!();
                         println!("Hot updated successfully to version {}!", resolved_version);
+                        update::refresh_global_ai_skills(binary_before_update, &resolved_version);
                     }
                     Err(e) => {
                         eprintln!("Installation failed: {}", e);
@@ -626,6 +631,7 @@ async fn async_main(providers: CliProviders) {
                     Ok(()) => {
                         println!();
                         println!("Hot updated successfully to version {}!", latest_version);
+                        update::refresh_global_ai_skills(binary_before_update, &latest_version);
                     }
                     Err(e) => {
                         eprintln!("Installation failed: {}", e);
@@ -659,6 +665,10 @@ async fn async_main(providers: CliProviders) {
                             println!(
                                 "Hot re-installed successfully (version {})!",
                                 current_version
+                            );
+                            update::refresh_global_ai_skills(
+                                binary_before_update,
+                                target_version.unwrap_or(&current_version),
                             );
                         }
                         Err(e) => {

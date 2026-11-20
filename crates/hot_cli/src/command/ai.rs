@@ -42,144 +42,596 @@ enum InstalledSkillManifestState {
     },
 }
 
+/// Skill folders agents read, relative to a project root or the home folder.
+/// `.agents/skills` is the shared location: Codex, Cursor, Gemini CLI, GitHub
+/// Copilot and OpenCode read it. Claude Code reads only `.claude/skills`.
+pub(crate) const SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
+
+/// Where Hot 3.0.12 and earlier installed skills. No agent reads it, so
+/// `hot ai add` and `hot ai update` move managed skills out of it.
+const LEGACY_SKILL_DIR: &str = ".skills";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    Project,
+    Global,
+}
+
+impl Scope {
+    fn label(self) -> &'static str {
+        match self {
+            Scope::Project => "project",
+            Scope::Global => "global",
+        }
+    }
+
+    /// Project paths stay relative, so messages name them as the user sees them.
+    fn root(self) -> Result<std::path::PathBuf, String> {
+        match self {
+            Scope::Project => Ok(std::path::PathBuf::new()),
+            Scope::Global => {
+                ai_home_dir().ok_or_else(|| "Could not determine home directory".into())
+            }
+        }
+    }
+
+    fn skill_bases(self) -> Result<Vec<std::path::PathBuf>, String> {
+        let root = self.root()?;
+        Ok(SKILL_DIRS.iter().map(|dir| root.join(dir)).collect())
+    }
+
+    fn legacy_base(self) -> Result<std::path::PathBuf, String> {
+        Ok(self.root()?.join(LEGACY_SKILL_DIR))
+    }
+}
+
+/// Who owns a skill folder, which decides whether Hot may write to it.
+#[derive(Debug, PartialEq, Eq)]
+enum SkillDirOwner {
+    /// Missing, or an empty folder Hot may fill.
+    Nobody,
+    /// Installed by `hot ai add`.
+    Hot,
+    /// Anything else, including a symlink: Hot leaves it alone.
+    Other,
+}
+
+fn skill_dir_owner(skill_dir: &std::path::Path) -> SkillDirOwner {
+    match fs::symlink_metadata(skill_dir) {
+        Err(_) => SkillDirOwner::Nobody,
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            SkillDirOwner::Other
+        }
+        Ok(_) if validate_skill_ownership(skill_dir).is_err() => SkillDirOwner::Other,
+        Ok(_) if is_hot_managed_skill_dir(skill_dir) => SkillDirOwner::Hot,
+        Ok(_) => SkillDirOwner::Nobody,
+    }
+}
+
+fn is_hot_managed_skill_dir(skill_dir: &std::path::Path) -> bool {
+    skill_dir.join(SKILL_MANIFEST_FILE).is_file()
+        || skill_dir.join(SKILL_OWNER_FILE).is_file()
+        || has_legacy_skill_stamp(skill_dir)
+}
+
+/// One skill folder Hot will write.
+struct SkillTarget {
+    base: std::path::PathBuf,
+    scope: Scope,
+    skill: String,
+}
+
+impl SkillTarget {
+    fn preflight(&self) -> Result<(), String> {
+        preflight_agent_skill(&self.base, &self.skill)
+    }
+
+    fn install(&self) -> Result<(), String> {
+        setup_agent_skill(&self.base, self.scope, &self.skill)
+    }
+}
+
+fn print_skipped_external(skill_dir: &std::path::Path) {
+    println!(
+        "  Left {} alone: another tool manages it",
+        skill_dir.display()
+    );
+}
+
+/// The skill folders of a scope Hot may write. A folder that is itself a
+/// symlink, such as `~/.claude/skills` linked to `~/.agents/skills`, is
+/// skipped: Hot never writes through a link.
+fn writable_skill_bases(scope: Scope) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut bases = Vec::new();
+    for base in scope.skill_bases()? {
+        if ensure_managed_path_is_not_symlinked(&base, &base).is_err() {
+            println!("  Left {} alone: it is a symlink", base.display());
+            continue;
+        }
+        bases.push(base);
+    }
+    Ok(bases)
+}
+
+/// Every skill folder `hot ai add` writes for one scope. A folder another
+/// tool manages is skipped; a skill no folder can take is an error.
+fn add_targets(scope: Scope, skills: &[String]) -> Result<Vec<SkillTarget>, String> {
+    let bases = writable_skill_bases(scope)?;
+    let mut targets = Vec::new();
+    for skill in skills {
+        let mut placed = false;
+        for base in &bases {
+            let skill_dir = base.join(skill);
+            if skill_dir_owner(&skill_dir) == SkillDirOwner::Other {
+                print_skipped_external(&skill_dir);
+                continue;
+            }
+            placed = true;
+            targets.push(SkillTarget {
+                base: base.clone(),
+                scope,
+                skill: skill.clone(),
+            });
+        }
+        if !placed {
+            return Err(format!(
+                "Refusing to overwrite externally managed skill {skill} in {}. Remove those copies or use a different scope before running hot ai add.",
+                scope
+                    .skill_bases()?
+                    .iter()
+                    .map(|base| base.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ));
+        }
+    }
+    Ok(targets)
+}
+
+/// The skill folders `hot ai update` refreshes for one scope: each managed
+/// install of a bundled skill, plus every location for a skill still in the
+/// old `.skills` folder. A skill the user removed from one location stays
+/// removed there.
+fn update_targets(scope: Scope, bundled: &BTreeSet<String>) -> Result<Vec<SkillTarget>, String> {
+    if !has_managed_skills(scope) {
+        return Ok(Vec::new());
+    }
+    let legacy: BTreeSet<String> = installed_hot_skill_names(&scope.legacy_base()?)
+        .into_iter()
+        .filter(|name| bundled.contains(name))
+        .collect();
+    let mut targets = Vec::new();
+    for base in writable_skill_bases(scope)? {
+        let installed: BTreeSet<String> = installed_hot_skill_names(&base)
+            .into_iter()
+            .filter(|name| bundled.contains(name))
+            .collect();
+        for skill in installed.union(&legacy) {
+            let owner = skill_dir_owner(&base.join(skill));
+            if owner == SkillDirOwner::Other {
+                if legacy.contains(skill) {
+                    print_skipped_external(&base.join(skill));
+                }
+                continue;
+            }
+            targets.push(SkillTarget {
+                base: base.clone(),
+                scope,
+                skill: skill.clone(),
+            });
+        }
+    }
+    Ok(targets)
+}
+
+/// Remove the old `.skills` copy of each skill that now has a Hot-managed
+/// copy where agents read it.
+fn retire_legacy_skills(scope: Scope) -> Result<(), String> {
+    let legacy_base = scope.legacy_base()?;
+    let bases = scope.skill_bases()?;
+    for skill in installed_hot_skill_names(&legacy_base) {
+        let moved = bases
+            .iter()
+            .any(|base| skill_dir_owner(&base.join(&skill)) == SkillDirOwner::Hot);
+        if moved {
+            retire_legacy_skill(&legacy_base, &skill)?;
+        }
+    }
+    // Only succeeds once the folder is empty.
+    let _ = fs::remove_dir(&legacy_base);
+    Ok(())
+}
+
+/// Delete one skill Hot installed under `.skills`, unless it holds anything
+/// Hot didn't write: a changed or added file, or a symlink. Those copies stay
+/// put with a note, so no local edit is lost.
+fn retire_legacy_skill(legacy_base: &std::path::Path, skill: &str) -> Result<(), String> {
+    let skill_dir = legacy_base.join(skill);
+    let keep = |reason: &str| {
+        println!(
+            "  Left {} in place: {reason}. Agents don't read that folder; move anything you need and delete it.",
+            skill_dir.display()
+        );
+        Ok(())
+    };
+
+    if ensure_managed_path_is_not_symlinked(legacy_base, &skill_dir).is_err() {
+        return keep("it is a symlink");
+    }
+    let InstalledSkillManifestState::Valid(manifest) = read_installed_skill_manifest(&skill_dir)?
+    else {
+        return keep("it has no manifest to show it is unchanged");
+    };
+
+    let mut files = Vec::new();
+    collect_skill_files(&skill_dir, &skill_dir, &mut files);
+    for rel_path in &files {
+        let full_path = skill_dir.join(rel_path);
+        let key = skill_manifest_key(rel_path);
+        if key == SKILL_MANIFEST_FILE {
+            continue;
+        }
+        let unchanged = fs::symlink_metadata(&full_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+            && fs::read(&full_path).ok().is_some_and(|content| {
+                manifest.files.get(&key) == Some(&skill_content_hash(&content))
+            });
+        if !unchanged {
+            return keep(&format!("{} was changed or added", full_path.display()));
+        }
+    }
+
+    // The manifest goes last, so an interrupted removal can be retried.
+    files.sort_by_key(|path| skill_manifest_key(path) == SKILL_MANIFEST_FILE);
+    for rel_path in &files {
+        let full_path = skill_dir.join(rel_path);
+        fs::remove_file(&full_path)
+            .map_err(|e| format!("Failed to remove {}: {}", full_path.display(), e))?;
+    }
+    remove_empty_dirs(&skill_dir);
+    println!("  Removed old copy {}", skill_dir.display());
+    Ok(())
+}
+
+/// Remove `dir` and the folders under it, bottom up, while they are empty.
+fn remove_empty_dirs(dir: &std::path::Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                remove_empty_dirs(&entry.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(dir);
+}
+
+fn collect_skill_files(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                collect_skill_files(&path, base, files);
+            } else if (file_type.is_file() || file_type.is_symlink())
+                && let Ok(rel) = path.strip_prefix(base)
+            {
+                files.push(rel.to_path_buf());
+            }
+        }
+    }
+}
+
 pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
     match action {
         AiAction::Add { global } => {
             info!("Adding AI coding support using AGENTS.md + SKILL.md standards...");
+            let scope = if *global {
+                Scope::Global
+            } else {
+                Scope::Project
+            };
 
-            // Validate skill ownership and the destination root before writing
-            // AGENTS.md so a rejected skill install cannot leave a partial add.
-            preflight_agent_skills(*global)?;
+            // Check every destination before writing anything, AGENTS.md
+            // included, so a rejected skill install cannot leave a partial add.
+            let targets = add_targets(scope, &bundled_skill_names()?)?;
+            for target in &targets {
+                target.preflight()?;
+            }
             // AGENTS.md belongs to a project; a global install only adds skills.
-            if !*global {
+            if scope == Scope::Project {
                 setup_agents_md()?;
             }
-            setup_agent_skills(*global)?;
+            for target in &targets {
+                target.install()?;
+            }
+            retire_legacy_skills(scope)?;
 
             Ok(())
         }
         AiAction::List => {
-            println!("AI Coding Support Status:\n");
-
-            let agents_exists = std::path::Path::new("AGENTS.md").exists();
-            let agents_status = if agents_exists { "(installed)" } else { "" };
-            println!("  AGENTS.md     - AI agent instructions {}", agents_status);
-
-            let home = ai_home_dir().unwrap_or_default();
-            let project_skills: BTreeSet<String> =
-                installed_hot_skill_names(std::path::Path::new(".skills"))
-                    .into_iter()
-                    .collect();
-            let global_skills: BTreeSet<String> = installed_hot_skill_names(&home.join(".skills"))
-                .into_iter()
-                .collect();
-            let mut skill_names = BTreeSet::new();
-            if let Ok(bundled) = bundled_skill_names() {
-                skill_names.extend(bundled);
-            }
-            skill_names.extend(project_skills.iter().cloned());
-            skill_names.extend(global_skills.iter().cloned());
-
-            for skill_name in skill_names {
-                let project_skill = std::path::Path::new(".skills").join(&skill_name);
-                let global_skill = home.join(".skills").join(&skill_name);
-                let status = if project_skills.contains(&skill_name) {
-                    "(installed - project)"
-                } else if global_skills.contains(&skill_name) {
-                    "(installed - global)"
-                } else if project_skill.exists() {
-                    "(present - project, externally managed)"
-                } else if global_skill.exists() {
-                    "(present - global, externally managed)"
-                } else {
-                    ""
-                };
-                println!("  .skills/{skill_name}/  {status}");
-            }
-
-            let legacy_files = [
-                ("CLAUDE.md", "Old Claude Code file"),
-                (".cursor/rules/hot.mdc", "Old Cursor rules"),
-                (
-                    ".github/copilot-instructions.md",
-                    "Old Copilot instructions",
-                ),
-                (".windsurfrules", "Old Windsurf rules"),
-                (".claude/skills/hot-language", "Old Claude skills location"),
-                (".codex/skills/hot-language", "Old Codex skills location"),
-            ];
-            let mut has_legacy = false;
-            for (path, _desc) in &legacy_files {
-                if std::path::Path::new(path).exists() {
-                    if !has_legacy {
-                        println!("\n  Legacy files (can be removed):");
-                        has_legacy = true;
-                    }
-                    println!("    {}", path);
-                }
-            }
-
-            println!("\nUse 'hot ai add' to add AI support to this project.");
-            println!("Use 'hot ai add --global' to install skills to ~/.skills/");
-            println!("Use 'npx skills add hot-dev/hot-skills' for the public skills.sh source.");
+            print_ai_status();
             Ok(())
         }
-        AiAction::Update => {
+        AiAction::Update { global } => {
             info!("Updating AI support files...");
-            let mut updated_count = 0;
-
-            let home = ai_home_dir().unwrap_or_default();
-            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
-            let global_skills = installed_hot_skill_names(&home.join(".skills"));
+            let scopes: &[Scope] = if *global {
+                &[Scope::Global]
+            } else {
+                &[Scope::Project, Scope::Global]
+            };
 
             // Resolve the bundle lazily: an update with nothing installed
             // must not require the skill resources to be present.
-            let (project_targets, global_targets): (Vec<String>, Vec<String>) =
-                if project_skills.is_empty() && global_skills.is_empty() {
-                    (Vec::new(), Vec::new())
-                } else {
-                    let bundled: BTreeSet<String> = bundled_skill_names()?.into_iter().collect();
-                    (
-                        project_skills
-                            .into_iter()
-                            .filter(|name| bundled.contains(name))
-                            .collect(),
-                        global_skills
-                            .into_iter()
-                            .filter(|name| bundled.contains(name))
-                            .collect(),
-                    )
-                };
+            let any_installed = scopes.iter().any(|scope| has_managed_skills(*scope));
+            let bundled: BTreeSet<String> = if any_installed {
+                bundled_skill_names()?.into_iter().collect()
+            } else {
+                BTreeSet::new()
+            };
+            let mut targets = Vec::new();
+            for scope in scopes {
+                targets.extend(update_targets(*scope, &bundled)?);
+            }
 
             // Validate every source, destination, and installed manifest this
             // update will touch before refreshing AGENTS.md. The write path
             // repeats the safety checks to narrow the TOCTOU window.
-            preflight_selected_agent_skills(false, &project_targets)?;
-            preflight_selected_agent_skills(true, &global_targets)?;
+            for target in &targets {
+                target.preflight()?;
+            }
 
-            if std::path::Path::new("AGENTS.md").exists() {
+            let mut updated: BTreeSet<String> = BTreeSet::new();
+            if !*global && std::path::Path::new("AGENTS.md").exists() {
                 setup_agents_md()?;
-                updated_count += 1;
+                updated.insert("AGENTS.md".into());
+            }
+            for target in &targets {
+                target.install()?;
+                updated.insert(target.base.display().to_string());
+            }
+            for scope in scopes {
+                retire_legacy_skills(*scope)?;
             }
 
-            if !project_targets.is_empty() {
-                setup_selected_agent_skills(false, &project_targets)?;
-                updated_count += 1;
-            }
-            if !global_targets.is_empty() {
-                setup_selected_agent_skills(true, &global_targets)?;
-                updated_count += 1;
-            }
-
-            if updated_count == 0 {
-                println!("No AI support files found to update.");
-                println!("Use 'hot ai add' to add AI support to this project.");
+            if updated.is_empty() {
+                if *global {
+                    println!("No global Hot skills found to update.");
+                    println!("Use 'hot ai add --global' to install them.");
+                } else {
+                    println!("No AI support files found to update.");
+                    println!("Use 'hot ai add' to add AI support to this project.");
+                }
             } else {
-                println!("\nUpdated {} location(s).", updated_count);
+                println!("\nUpdated {} location(s).", updated.len());
             }
             Ok(())
         }
     }
+}
+
+/// Whether Hot manages any skill for this scope, in a current location or
+/// the old `.skills` folder.
+fn has_managed_skills(scope: Scope) -> bool {
+    let Ok(bases) = scope.skill_bases() else {
+        return false;
+    };
+    let legacy = scope.legacy_base().ok();
+    bases
+        .iter()
+        .chain(legacy.iter())
+        .any(|base| !installed_hot_skill_names(base).is_empty())
+}
+
+/// Whether `hot update` should refresh global skills afterwards.
+pub(crate) fn has_global_managed_skills() -> bool {
+    has_managed_skills(Scope::Global)
+}
+
+/// How an installed AI file compares with what this Hot release bundles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Freshness {
+    Current,
+    /// Installed from another Hot release.
+    Stale,
+    /// In the old `.skills` folder, which agents don't read.
+    Legacy,
+    /// Present but managed outside Hot.
+    External,
+}
+
+impl Freshness {
+    fn describe(self) -> &'static str {
+        match self {
+            Freshness::Current => "up to date",
+            Freshness::Stale => "out of date",
+            Freshness::Legacy => "old location, agents don't read it",
+            Freshness::External => "managed outside Hot",
+        }
+    }
+
+    fn needs_update(self) -> bool {
+        matches!(self, Freshness::Stale | Freshness::Legacy)
+    }
+}
+
+struct InstalledSkill {
+    dir: std::path::PathBuf,
+    freshness: Freshness,
+}
+
+/// The manifest a fresh install of this skill would write.
+fn bundled_skill_manifest(skill: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut files: BTreeMap<String, String> = bundled_skill_files(skill)?
+        .iter()
+        .map(|(path, content)| (skill_manifest_key(path), skill_content_hash(content)))
+        .collect();
+    files.insert(
+        SKILL_OWNER_FILE.to_string(),
+        skill_content_hash(SKILL_OWNER_CONTENT),
+    );
+    Ok(files)
+}
+
+/// The installed copies of Hot skills in one scope, and how each compares
+/// with this release. The manifest records what Hot shipped, so a copy with
+/// local edits still counts as current.
+fn installed_skills(scope: Scope) -> Vec<InstalledSkill> {
+    let (Ok(bases), Ok(legacy_base)) = (scope.skill_bases(), scope.legacy_base()) else {
+        return Vec::new();
+    };
+    let bundled: BTreeSet<String> = bundled_skill_names()
+        .map(|names| names.into_iter().collect())
+        .unwrap_or_default();
+    let mut manifests: BTreeMap<String, Option<BTreeMap<String, String>>> = BTreeMap::new();
+    let mut is_current = |skill: &str, dir: &std::path::Path| {
+        let expected = manifests
+            .entry(skill.to_string())
+            .or_insert_with(|| bundled_skill_manifest(skill).ok());
+        matches!(
+            (expected, read_installed_skill_manifest(dir)),
+            (Some(expected), Ok(InstalledSkillManifestState::Valid(installed)))
+                if installed.files == *expected
+        )
+    };
+
+    let mut found = Vec::new();
+    for base in &bases {
+        let managed: BTreeSet<String> = installed_hot_skill_names(base).into_iter().collect();
+        for skill in bundled.union(&managed) {
+            let dir = base.join(skill);
+            let freshness = match skill_dir_owner(&dir) {
+                SkillDirOwner::Nobody => continue,
+                SkillDirOwner::Other => Freshness::External,
+                SkillDirOwner::Hot if is_current(skill, &dir) => Freshness::Current,
+                SkillDirOwner::Hot => Freshness::Stale,
+            };
+            found.push(InstalledSkill { dir, freshness });
+        }
+    }
+    for skill in installed_hot_skill_names(&legacy_base) {
+        found.push(InstalledSkill {
+            dir: legacy_base.join(skill),
+            freshness: Freshness::Legacy,
+        });
+    }
+    found
+}
+
+/// The Hot section of AGENTS.md in the current folder, if it has one.
+fn agents_md_freshness() -> Option<Freshness> {
+    let existing = fs::read_to_string("AGENTS.md").ok()?;
+    let installed = extract_section_hash(&existing, HOT_SECTION_START)?;
+    let template = hot::resources::read_agents_md().ok()?;
+    Some(if installed == agents_section_hash(&template) {
+        Freshness::Current
+    } else {
+        Freshness::Stale
+    })
+}
+
+fn print_ai_status() {
+    println!("AI Coding Support Status:\n");
+
+    let agents_status = match (
+        std::path::Path::new("AGENTS.md").exists(),
+        agents_md_freshness(),
+    ) {
+        (false, _) => "not installed".to_string(),
+        (true, None) => "present, no Hot section".to_string(),
+        (true, Some(freshness)) => freshness.describe().to_string(),
+    };
+    println!("  AGENTS.md  {agents_status}");
+
+    let mut needs_update = agents_md_freshness().is_some_and(Freshness::needs_update);
+    for scope in [Scope::Project, Scope::Global] {
+        let skills = installed_skills(scope);
+        println!("\n  Skills ({}):", scope.label());
+        if skills.is_empty() {
+            println!("    none installed");
+        }
+        for skill in &skills {
+            needs_update |= skill.freshness.needs_update();
+            println!(
+                "    {}/  {}",
+                skill.dir.display(),
+                skill.freshness.describe()
+            );
+        }
+    }
+
+    let legacy_files = [
+        ("CLAUDE.md", "Old Claude Code file"),
+        (".cursor/rules/hot.mdc", "Old Cursor rules"),
+        (
+            ".github/copilot-instructions.md",
+            "Old Copilot instructions",
+        ),
+        (".windsurfrules", "Old Windsurf rules"),
+        (".codex/skills/hot-language", "Old Codex skills location"),
+    ];
+    let mut has_legacy = false;
+    for (path, _desc) in &legacy_files {
+        if std::path::Path::new(path).exists() {
+            if !has_legacy {
+                println!("\n  Legacy files (can be removed):");
+                has_legacy = true;
+            }
+            println!("    {}", path);
+        }
+    }
+
+    println!();
+    if needs_update {
+        println!("Use 'hot ai update' to refresh out-of-date files and move old copies.");
+    }
+    println!("Use 'hot ai add' to add AI support to this project.");
+    println!(
+        "Use 'hot ai add --global' to install skills to ~/{}/",
+        SKILL_DIRS.join("/ and ~/")
+    );
+    println!("Use 'npx skills add hot-dev/hot-skills' for the public skills.sh source.");
+}
+
+/// One-line hints about installed AI files this release would change, for
+/// `hot dev` to print at startup. Empty when everything is current.
+pub(crate) fn stale_ai_hints() -> Vec<String> {
+    let mut hints = Vec::new();
+
+    let mut project: Vec<String> = Vec::new();
+    if agents_md_freshness().is_some_and(Freshness::needs_update) {
+        project.push("AGENTS.md".into());
+    }
+    let project_skills = installed_skills(Scope::Project);
+    project.extend(
+        project_skills
+            .iter()
+            .filter(|skill| skill.freshness.needs_update())
+            .map(|skill| skill.dir.display().to_string()),
+    );
+    if !project.is_empty() {
+        hints.push(format!(
+            "AI files in this project need updating for this Hot release ({}). Run 'hot ai update'.",
+            project.join(", ")
+        ));
+    }
+
+    let global_stale = installed_skills(Scope::Global)
+        .iter()
+        .any(|skill| skill.freshness.needs_update());
+    if global_stale {
+        hints.push(
+            "Your global Hot skills need updating for this Hot release. Run 'hot ai update --global'."
+                .into(),
+        );
+    }
+    hints
 }
 
 fn installed_hot_skill_names(skills_dir: &std::path::Path) -> Vec<String> {
@@ -208,13 +660,6 @@ fn installed_hot_skill_names(skills_dir: &std::path::Path) -> Vec<String> {
 
     names.sort();
     names
-}
-
-fn setup_selected_agent_skills(global: bool, skill_names: &[String]) -> Result<(), String> {
-    for skill_name in skill_names {
-        setup_agent_skill(global, skill_name)?;
-    }
-    Ok(())
 }
 
 /// Discover every skill bundled under `resources/ai/skills/`.
@@ -254,27 +699,29 @@ fn bundled_skill_names() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+const HOT_SECTION_START: &str = "<!-- HOT_LANGUAGE_SECTION_START -->";
+const HOT_SECTION_END: &str = "<!-- HOT_LANGUAGE_SECTION_END -->";
+
+/// The hash stamped after the start marker of the Hot section in AGENTS.md.
+fn agents_section_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(content.as_bytes()))[..12].to_string()
+}
+
+fn extract_section_hash(content: &str, section_start: &str) -> Option<String> {
+    content.find(section_start).and_then(|start| {
+        let after_marker = &content[start + section_start.len()..];
+        after_marker
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix(" hash:"))
+            .map(|hash_str| hash_str.trim().to_string())
+    })
+}
+
 /// Setup AGENTS.md with the canonical Hot section from resources/ai/AGENTS.md.
 fn setup_agents_md() -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-
-    const HOT_SECTION_START: &str = "<!-- HOT_LANGUAGE_SECTION_START -->";
-    const HOT_SECTION_END: &str = "<!-- HOT_LANGUAGE_SECTION_END -->";
-
-    fn content_hash(content: &str) -> String {
-        hex::encode(Sha256::digest(content.as_bytes()))[..12].to_string()
-    }
-
-    fn extract_section_hash(content: &str, section_start: &str) -> Option<String> {
-        content.find(section_start).and_then(|start| {
-            let after_marker = &content[start + section_start.len()..];
-            after_marker
-                .lines()
-                .next()
-                .and_then(|line| line.strip_prefix(" hash:"))
-                .map(|hash_str| hash_str.trim().to_string())
-        })
-    }
+    use agents_section_hash as content_hash;
 
     fn create_section(template: &str, section_start: &str, section_end: &str) -> String {
         let hash = content_hash(template);
@@ -602,22 +1049,6 @@ fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<boo
     result.map(|_| true)
 }
 
-fn setup_agent_skills(global: bool) -> Result<(), String> {
-    for skill_name in bundled_skill_names()? {
-        setup_agent_skill(global, &skill_name)?;
-    }
-    Ok(())
-}
-
-fn agent_skills_base(global: bool) -> Result<(std::path::PathBuf, &'static str), String> {
-    if global {
-        let home = ai_home_dir().ok_or("Could not determine home directory")?;
-        Ok((home.join(".skills"), "global"))
-    } else {
-        Ok((std::path::PathBuf::from(".skills"), "project"))
-    }
-}
-
 fn has_legacy_skill_stamp(skill_dir: &std::path::Path) -> bool {
     fs::read_to_string(skill_dir.join("SKILL.md"))
         .ok()
@@ -693,9 +1124,9 @@ fn manifest_relative_path(key: &str) -> Result<std::path::PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
-fn preflight_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
+fn preflight_agent_skill(skills_base: &std::path::Path, skill_name: &str) -> Result<(), String> {
     let skill_files = bundled_skill_files(skill_name)?;
-    let (skills_base, _) = agent_skills_base(global)?;
+    let skills_base = skills_base.to_path_buf();
     let skill_dir = skills_base.join(skill_name);
 
     ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
@@ -717,23 +1148,16 @@ fn preflight_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn preflight_selected_agent_skills(global: bool, skill_names: &[String]) -> Result<(), String> {
-    for skill_name in skill_names {
-        preflight_agent_skill(global, skill_name)?;
-    }
-    Ok(())
-}
-
-fn preflight_agent_skills(global: bool) -> Result<(), String> {
-    preflight_selected_agent_skills(global, &bundled_skill_names()?)
-}
-
-/// Install/refresh one bundled skill under `.skills/` (project) or
-/// `~/.skills/` (global).
-fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
+/// Install or refresh one bundled skill under one of [`SKILL_DIRS`].
+fn setup_agent_skill(
+    skills_base: &std::path::Path,
+    scope: Scope,
+    skill_name: &str,
+) -> Result<(), String> {
     use ahash::AHashSet;
 
-    let (skills_base, location_desc) = agent_skills_base(global)?;
+    let skills_base = skills_base.to_path_buf();
+    let location_desc = scope.label();
     let skill_files = bundled_skill_files(skill_name)?;
 
     let skill_dir = skills_base.join(skill_name);
@@ -827,28 +1251,6 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         write_if_changed(path, content)
     }
 
-    fn collect_files(
-        dir: &std::path::Path,
-        base: &std::path::Path,
-        files: &mut Vec<std::path::PathBuf>,
-    ) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_dir() {
-                    collect_files(&path, base, files);
-                } else if (file_type.is_file() || file_type.is_symlink())
-                    && let Ok(rel) = path.strip_prefix(base)
-                {
-                    files.push(rel.to_path_buf());
-                }
-            }
-        }
-    }
-
     fn cleanup_empty_dirs(path: &std::path::Path, skill_root: &std::path::Path) {
         let mut current = path.parent();
         while let Some(dir) = current {
@@ -891,7 +1293,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         && let Some(previous_manifest) = installed_manifest
     {
         let mut existing_files = Vec::new();
-        collect_files(&skill_dir, &skill_dir, &mut existing_files);
+        collect_skill_files(&skill_dir, &skill_dir, &mut existing_files);
 
         for rel_path in existing_files {
             let rel_str = skill_manifest_key(&rel_path);
@@ -951,7 +1353,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
             location_desc
         );
     } else {
-        println!("  .skills/{skill_name}/ is up to date");
+        println!("  {}/ is up to date", skill_dir.display());
     }
 
     Ok(())

@@ -4,6 +4,8 @@
 node_modules/
 .hot/
 .skills/
+.agents/skills/
+.claude/skills/
 hot/ctx.hot
 hot/dev.key
 hot/src-offline/

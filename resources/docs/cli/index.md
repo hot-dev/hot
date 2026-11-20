@@ -341,8 +341,8 @@ hot fmt --check               # Check without writing (CI mode)
 
 With no paths, `hot fmt` formats the `.hot` files under the current directory
 and the project's source paths. It honors `.gitignore` and `.hotignore`, and
-skips the skill snapshots in `.skills/` (pass a path inside `.skills/` to
-format them anyway). It does not load `hot.hot`, so it also works when the
+skips the skill snapshots in `.agents/skills/`, `.claude/skills/` and the old
+`.skills/` (pass a path inside one of them to format them anyway). It does not load `hot.hot`, so it also works when the
 project configuration has an error.
 
 `hot fmt` only changes whitespace: it puts a declaration's name, `meta` and
@@ -719,7 +719,7 @@ Add AI coding support to help AI assistants understand Hot. This uses the open A
 
 ```bash
 hot ai add              # Add AGENTS.md + bundled skills to project
-hot ai add --global     # Install skills to ~/.skills/ (available in all projects)
+hot ai add --global     # Install skills to ~/.agents/skills/ and ~/.claude/skills/ (all projects)
 ```
 
 `hot ai add` installs the skill snapshots bundled with your Hot release, so it
@@ -733,15 +733,25 @@ npx skills add hot-dev/hot-skills
 
 Files created:
 - `AGENTS.md` — AI agent instructions (passive context)
-- `.skills/hot-language/` — Detailed Hot language skill with references
-- `.skills/hot-ai-agents/` — Hot AI agent and SDK integration guidance
+- `.agents/skills/hot-language/` — Detailed Hot language skill with references
+- `.agents/skills/hot-ai-agents/` — Hot AI agent and SDK integration guidance
+- `.claude/skills/` — The same skills for Claude Code, which reads only this folder
+
+Most coding agents (Codex, Cursor, Gemini CLI, GitHub Copilot, OpenCode) read
+`.agents/skills/`. A skill folder another tool manages, or a skills folder that
+is a symlink, is left alone.
 
 Other commands:
 
 ```bash
-hot ai list             # Show installed AI support files
-hot ai update           # Update existing files to latest version
+hot ai list             # Show installed files and whether they are current
+hot ai update           # Update installed files to this Hot version
+hot ai update --global  # Update only the skills in your home folder
 ```
+
+Hot 3.0.12 and earlier installed skills in `.skills/`, which agents don't
+read. `hot ai add` and `hot ai update` move skills Hot installed there to the
+new folders, and leave a copy you changed in place with a note.
 
 ## Info
 
@@ -794,6 +804,12 @@ This downloads and installs the requested version of Hot. If you're already on t
 - A macOS or Debian package install runs the new package with sudo.
 - A Homebrew install runs `brew upgrade hot`.
 - On Windows, a user install (`%LOCALAPPDATA%\Programs\Hot Dev`) runs the per-user installer without administrator rights; a Program Files install runs the machine installer as an administrator.
+
+After updating, `hot update` runs the new `hot ai update --global`, so Hot
+skills you installed with `hot ai add --global` match the new release. Run
+`hot ai update` in each project to refresh its `AGENTS.md` and skills; `hot dev`
+says when they are from another release. On Windows, and when `hot update` runs
+under sudo, run `hot ai update --global` yourself.
 
 To move from a package install to a user install, run the installer script with `--user` (on Windows, set `HOT_INSTALL_SCOPE=user`), then remove the package install.
 
