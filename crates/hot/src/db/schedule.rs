@@ -380,6 +380,10 @@ pub fn validate_recurring_schedule_interval(
 }
 
 /// SQL for whether the `schedule` row is a one-time call that already fired.
+/// The reason a dynamic schedule records when it fires in a build that
+/// doesn't define its function.
+pub const UNDEFINED_FUNCTION_REASON: &str = "function not defined in the deployed build";
+
 macro_rules! spent_call {
     () => {
         "schedule.cron LIKE '@at:%' AND EXISTS (SELECT 1 FROM schedule_log l WHERE l.schedule_id = schedule.schedule_id)"
@@ -2177,6 +2181,46 @@ impl Schedule {
                 Ok(result.rows_affected() > 0)
             }
         }
+    }
+
+    /// Cancel a dynamic schedule on `build_id` whose function that build
+    /// doesn't define, recording why. A deployment carries dynamic schedules
+    /// to its new build, which may no longer have the function; the schedule
+    /// is cancelled the first time it fires there. A one-time schedule is
+    /// already inactive once it fires, and gets the reason too.
+    pub async fn retire_dynamic_schedule(
+        db: &crate::db::DatabasePool,
+        schedule_id: &Uuid,
+        build_id: &Uuid,
+    ) -> Result<bool, ScheduleError> {
+        let now = chrono::Utc::now();
+        let retired = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE schedule SET active = false, deactivated_at = COALESCE(deactivated_at, $1), meta = COALESCE(meta, '{}'::jsonb) || $4 WHERE schedule_id = $2 AND build_id = $3 AND value IS NOT NULL"
+                )
+                .bind(now)
+                .bind(schedule_id)
+                .bind(build_id)
+                .bind(serde_json::json!({ "deactivation-reason": UNDEFINED_FUNCTION_REASON }))
+                .execute(pg_pool)
+                .await?
+                .rows_affected()
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE schedule SET active = 0, deactivated_at = COALESCE(deactivated_at, ?), meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', ?) WHERE schedule_id = ? AND build_id = ? AND value IS NOT NULL"
+                )
+                .bind(now)
+                .bind(UNDEFINED_FUNCTION_REASON)
+                .bind(schedule_id)
+                .bind(build_id)
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+        Ok(retired > 0)
     }
 
     /// Cancel schedules by function name for a build

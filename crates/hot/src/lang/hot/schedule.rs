@@ -388,3 +388,65 @@ pub fn cancel_schedule(
         "cancel expects data with either 'schedule-id' or 'fn' key".to_string(),
     ))
 }
+
+/// Cancel the dynamic schedule that just fired, because the build it fired in
+/// doesn't define its function (called by the hot:schedule event handler).
+///
+/// Arguments:
+/// - data: Map - the hot:schedule event data, with `schedule_id`
+///
+/// Returns: Bool - true if a dynamic schedule on this build was cancelled
+pub fn retire_schedule(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    let [Val::Map(data)] = args else {
+        return HotResult::Err(Val::from(
+            "::hot::schedule/retire expects 1 argument (the hot:schedule event data)",
+        ));
+    };
+    // An event sent with `send("hot:schedule", ...)` names no schedule.
+    let Some(Val::Str(schedule_id)) = data.get(&Val::from("schedule_id")) else {
+        return HotResult::Ok(Val::Bool(false));
+    };
+    let schedule_id = match Uuid::parse_str(schedule_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HotResult::Err(Val::from(format!(
+                "Invalid schedule_id '{}': {}",
+                schedule_id, e
+            )));
+        }
+    };
+    let Some(build_id) = vm
+        .get_execution_context()
+        .as_ref()
+        .and_then(|ctx| ctx.build_id)
+    else {
+        return HotResult::Err(Val::from(
+            "No build_id in execution context - cannot cancel schedule",
+        ));
+    };
+    let Some(db) = vm.get_database_pool().map(|db| (*db).clone()) else {
+        return HotResult::Err(Val::from(
+            "No database connection available - cannot cancel schedule",
+        ));
+    };
+    match tokio::runtime::Handle::current().block_on(Schedule::retire_dynamic_schedule(
+        &db,
+        &schedule_id,
+        &build_id,
+    )) {
+        Ok(retired) => {
+            if retired {
+                tracing::info!(
+                    "Cancelled schedule {}: its function isn't defined in build {}",
+                    schedule_id,
+                    build_id
+                );
+            }
+            HotResult::Ok(Val::Bool(retired))
+        }
+        Err(e) => HotResult::Err(Val::from(format!("Failed to cancel schedule: {}", e))),
+    }
+}

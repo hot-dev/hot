@@ -183,11 +183,22 @@ meta {
     // The handler calls ::myapp::reports/daily("2026-10-14")
     send("hot:schedule", {fn: "::myapp::reports/daily", args: ["2026-10-14"]})
     ```
+
+    A deployment carries a project's dynamic schedules to its new build. When
+    a schedule fires in a build that doesn't define its function, the run
+    fails and the schedule is cancelled, so a recurring one stops.
     """
 }
 fn (event: Map): Any {
-    // event.data.args is always a Vec
-    call(resolve(event.data.fn), event.data.args)
+    target resolve(event.data.fn)
+    cond {
+        // event.data.args is always a Vec
+        is-ok(target) => { call(target, event.data.args) }
+        => {
+            call-lib(::hot::schedule/retire, [event.data])
+            err(`${event.data.fn} isn't defined in this build, so its schedule is cancelled`)
+        }
+    }
 }
 
 

@@ -235,7 +235,7 @@ Cancelling schedules is useful for:
 | Feature | Metadata Schedule | Dynamic Schedule |
 |---------|-------------------|------------------|
 | Defined in | Hot code (`meta {schedule: ...}`) | Runtime via `hot:schedule:new` |
-| Lifecycle | Tied to build/deployment | Created and cancelled at runtime, and cancelled when a new build is activated |
+| Lifecycle | Tied to build/deployment | Created and cancelled at runtime, and carried to each new build of the project |
 | One-time support | No | Yes |
 | Function called with | One argument describing the schedule that fired | The schedule's `args` |
 | Visible in UI | Always | When active |
@@ -243,11 +243,25 @@ Cancelling schedules is useful for:
 
 ### Dynamic Schedules and Deploys
 
-A dynamic schedule belongs to the build whose run created it. Its arguments were
-written for that program, so activating a new build of the project cancels every
-active dynamic schedule on the project's other builds, one-time and recurring.
-The cancelled schedule records `build replaced by deployment` as its
-`deactivation-reason`, and the deploy logs how many it cancelled.
+A dynamic schedule belongs to its project. It is created in the build whose run
+sent `hot:schedule:new`, and activating a new build of the project carries every
+active dynamic schedule to that build, one-time and recurring. A carried
+schedule keeps its ID, its arguments and its next fire time, and fires in the
+new build:
+
+- If the new build still defines the function, the schedule calls it with the
+  arguments it was created with. When the arguments no longer fit the function,
+  the run fails and says why, and follows the function's `retry` meta.
+- If the new build doesn't define the function, the run fails as the schedule
+  fires, and the schedule is cancelled with `function not defined in the
+  deployed build` as its `deactivation-reason`, so a recurring schedule stops.
+- If the new build already holds an identical schedule (same function, timing
+  and arguments), as after a rollback, that one is armed again and the carried
+  one is cancelled with `an identical schedule is on the deployed build`.
+
+To drop a project's pending schedules on deploy instead, cancel them by `fn`
+from a [`hot:deploy:activated`](/docs/events#deploy-events) handler, which runs
+in the new build.
 
 Sent from Hot code, `hot:schedule:new` runs in the sender's build, so in an
 environment with several projects the schedule belongs to the sending project:
@@ -256,26 +270,13 @@ build. A `hot:schedule:new` published through the API names no build, and runs
 in whichever deployed project's build handles it. With more than one project in
 the environment, send it from the project whose function it schedules.
 
-A schedule that has to outlive a deploy needs a record in your own application
-state. After each activation, Hot sends a
-[`hot:deploy:activated`](/docs/events#deploy-events) event: arm your schedules
-again from that record.
-
-```hot
-on-deployed meta {on-event: "hot:deploy:activated"}
-fn (event) {
-  if(eq(event.data.project, "reminders"), rearm-pending-reminders())
-}
-```
-
 ### Example: Scheduled Reminders
 
 Code that sends `hot:schedule:new` doesn't get the schedule's ID back, so this
 example keeps its own record of each pending reminder in a
 [store](/pkg/hot.dev/hot-std/hot/store). Cancelling deletes the record. The
-schedule still fires, finds no record, and sends nothing. The same record is
-what a [`hot:deploy:activated`](#dynamic-schedules-and-deploys) handler needs to
-arm the reminders again after a deploy.
+schedule still fires, finds no record, and sends nothing. A deploy carries the
+pending schedules to the new build, so the reminders still go out.
 
 ```hot
 ::myapp::reminders ns

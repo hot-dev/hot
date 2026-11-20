@@ -36,6 +36,16 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.12 to 3.0.13 {#upgrading-from-3-0-12-to-3-0-13}
+
+**Migration 041.** Run `hot db migrate` with the 3.0.13 CLI. It lets a schedule move between builds of one project, and still refuses moving it anywhere else.
+
+**Behavior change: a deploy carries dynamic schedules.** Since 3.0.5, activating a build cancelled the project's dynamic schedules on its other builds. It now moves them to the new build, which runs them. A schedule whose function the new build doesn't define is cancelled the first time it fires there, and its run fails. `hot:deploy:activated` adds `carried-schedules`, and `cancelled-schedules` now counts only schedules merged into an identical one on the new build. See [Dynamic Schedules and Deploys](/docs/schedules#dynamic-schedules-and-deploys).
+
+**What to check in your code:** a `hot:deploy:activated` handler that arms schedules again after a deploy now finds them already armed. Arming one again with the same function, timing and arguments reuses it, but a relative timing such as `"in 1 hour"` makes a second schedule. Remove the re-arming, or cancel by `fn` first if a deploy should start the project's schedules over.
+
+**Behavior change: `hot:schedule:new` and `hot:schedule:cancel` sent from Hot code run in the sender's build.** In an environment with several projects, the schedule belongs to the sending project, and another project's deploy leaves it alone. The API publishes these events with no build, and they route as before.
+
 ## Upgrading from Hot 3.0.11 to 3.0.12 {#upgrading-from-3-0-11-to-3-0-12}
 
 **No migrations.** Replace the binaries and restart.
