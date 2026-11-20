@@ -1,0 +1,102 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto py-6 space-y-4 sm:space-y-6">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+                <h1 class="text-xl sm:text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ child.name }}</h1>
+                <span class="badge {{ overview.lifecycle_badge }}">{{ overview.lifecycle }}</span>
+            </div>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400 break-all">@{{ child.slug }} · Sub-organization of {{ root.name }}</p>
+        </div>
+        <form action="/switch-org/{{ child.org_id }}" method="post">
+            <button class="btn btn-primary" type="submit">Open Workspace</button>
+        </form>
+    </div>
+
+    <section class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-6" aria-labelledby="details-heading">
+        <h2 id="details-heading" class="text-base font-medium text-gray-900 dark:text-white mb-3 sm:mb-4">Details</h2>
+        <dl class="grid grid-cols-1 gap-x-4 gap-y-3 sm:gap-y-4 sm:grid-cols-2">
+            <div>
+                <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Organization ID</dt>
+                <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100 break-all">
+                    <div class="uuid-container inline-flex items-center gap-1">
+                        <span class="uuid-display font-mono" data-full-uuid="{{ child.org_id }}" title="{{ child.org_id }}">{{ child.org_id }}</span>
+                        <button type="button" class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ child.org_id }}" title="Copy {{ child.org_id }} to clipboard">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </dd>
+            </div>
+            <div>
+                <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Customer reference</dt>
+                <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100 break-all">{% match child.external_id %}{% when Some with (reference) %}{{ reference }}{% when None %}<span class="text-gray-500 dark:text-gray-400">None</span>{% endmatch %}</dd>
+            </div>
+            <div>
+                <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Created</dt>
+                <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ child.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M") }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Last run</dt>
+                <dd class="mt-1 text-xs sm:text-sm text-gray-900 dark:text-gray-100">{{ overview.last_run }}</dd>
+            </div>
+        </dl>
+    </section>
+
+    <section class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-6" aria-labelledby="activity-heading">
+        <h2 id="activity-heading" class="text-base font-medium text-gray-900 dark:text-white mb-3 sm:mb-4">Activity</h2>
+        <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-3">
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Running</dt><dd class="mt-0.5 text-lg font-semibold text-gray-900 dark:text-white tabular-nums">{{ overview.running|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Failed, 24h</dt><dd class="mt-0.5 text-lg font-semibold text-gray-900 dark:text-white tabular-nums">{{ overview.failed_24h|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Runs this month</dt><dd class="mt-0.5 text-lg font-semibold text-gray-900 dark:text-white tabular-nums">{{ overview.month_runs|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">File storage</dt><dd class="mt-0.5 text-lg font-semibold text-gray-900 dark:text-white tabular-nums">{{ overview.file_bytes }}</dd></div>
+        </dl>
+        <h3 class="mt-5 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Environments</h3>
+        {% if overview.envs.is_empty() %}
+        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">No environments.</p>
+        {% else %}
+        <ul class="mt-2 divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-md">
+            {% for env in overview.envs %}
+            <li class="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                <span class="text-sm text-gray-900 dark:text-gray-100">{{ env.name }}{% if !env.active %} <span class="badge badge-neutral ml-1">Inactive</span>{% endif %}</span>
+                <a class="link text-xs font-medium" href="/runs?org_id={{ child.org_id }}&amp;env_id={{ env.env_id }}">View runs</a>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </section>
+
+    <section class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-6" aria-labelledby="status-heading">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="status-heading" class="text-base font-medium text-gray-900 dark:text-white">Status</h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ status_note }}</p>
+            </div>
+            <a href="/@{{ root.slug }}/children/{{ child.org_id }}/lifecycle" class="btn btn-secondary btn-sm">Change status</a>
+        </div>
+    </section>
+
+    <section class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-6" aria-labelledby="access-heading">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+                <h2 id="access-heading" class="text-base font-medium text-gray-900 dark:text-white">Access</h2>
+                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ root.name }} administrators have access through the account. {% if grants.is_empty() %}No other account member has access.{% else %}{{ grants.len() }} other account member{% if grants.len() != 1 %}s have{% else %} has{% endif %} access.{% endif %}</p>
+            </div>
+            <a href="/@{{ root.slug }}/children/{{ child.org_id }}/access" class="btn btn-secondary btn-sm">Manage access</a>
+        </div>
+        {% if !grants.is_empty() %}
+        <ul class="mt-4 divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-md">
+            {% for grant in grants %}
+            <li class="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+                <span class="text-sm text-gray-900 dark:text-gray-100 break-all">{{ grant.email }}</span>
+                <span class="badge badge-neutral">{{ grant.role_label }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

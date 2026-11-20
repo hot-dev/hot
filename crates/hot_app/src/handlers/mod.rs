@@ -240,9 +240,10 @@ pub use files::{
 pub use hierarchy::{get_call_detail_handler, get_hierarchy_handler, search_run_calls_handler};
 pub use invites::{invite_accept_handler, invite_accept_post_handler};
 pub use keys::{
-    create_org_api_key, keys_create_handler, keys_edit_handler, keys_list_handler,
-    keys_new_handler, keys_revoke_handler, keys_rotate_handler, keys_update_handler,
-    revoke_org_api_key, rotate_org_api_key,
+    keys_create_handler, keys_edit_handler, keys_list_handler, keys_new_handler,
+    keys_revoke_handler, keys_rotate_handler, keys_update_handler, org_key_detail_handler,
+    org_key_revoke_handler, org_key_rotate_handler, org_keys_create_handler, org_keys_list_handler,
+    org_keys_new_handler,
 };
 pub use mcp_tools::{mcp_service_detail_handler, mcp_services_list_handler};
 pub use oauth::{

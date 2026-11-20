@@ -126,7 +126,59 @@ async fn key_pages_embed_tool_names_and_permissions_as_script_safe_json() {
     let response = client.get(&format!("/keys/{api_key_id}/edit")).await;
     response.assert_status(StatusCode::OK);
     assert_no_script_breakout(&response);
-    assert!(response.body.contains(r#"{"event:\u003c/script\u003e"#));
+    // The permission editor takes its config in an Alpine attribute, so the
+    // JSON's quotes arrive HTML-encoded and its `<` as a JS escape.
+    assert!(
+        response.body.contains(r"{&#34;event:\u003c/script\u003e"),
+        "{}",
+        response.body
+    );
+}
+
+/// Org key pages put the organization's name and a key's grants into the same
+/// editor config.
+#[tokio::test]
+async fn org_key_pages_embed_names_and_grants_as_script_safe_json() {
+    let (mut client, td) = signed_in().await;
+    sqlx::query("UPDATE org SET org_type='organization', name=? WHERE org_id=?")
+        .bind(format!("Acme {SCRIPT_BREAKOUT} \"quoted\" 'single'"))
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let (key, _) = hot::db::org_api_key::OrgApiKey::create_for_user(
+        client.db(),
+        td.org_id,
+        td.user_id,
+        &hot::db::org_api_key::CreateOrgApiKey {
+            description: format!("key {SCRIPT_BREAKOUT}"),
+            permissions: json!({"org:*": ["read"]}),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    for path in [
+        "/keys".to_string(),
+        "/keys/org".to_string(),
+        "/keys/org/new".to_string(),
+        format!("/keys/org/{}/edit", key.org_api_key_id),
+    ] {
+        let response = client.get(&path).await;
+        response.assert_status(StatusCode::OK);
+        assert_no_script_breakout(&response);
+        // No attribute ends early on a quote from the name.
+        assert!(!response.body.contains("\"quoted\""), "{path}");
+    }
+    let response = client.get("/keys/org/new").await;
+    assert!(
+        response
+            .body
+            .contains(r"rootOrgName: &#34;Acme \u003c/script\u003e"),
+        "{}",
+        response.body
+    );
+    assert!(response.body.contains(r"\u0027single\u0027"));
 }
 
 #[tokio::test]
@@ -150,8 +202,11 @@ async fn a_failed_restricted_key_form_comes_back_restricted() {
         .await;
     let body = &response.body;
     assert!(body.contains("Description is required"));
-    assert!(body.contains(r#"accessLevel: "restricted""#));
-    assert!(body.contains(&format!("const initial = {permissions};")));
+    assert!(body.contains("accessLevel: &#34;restricted&#34;"));
+    assert!(
+        body.contains(&format!("initial: {}", permissions.replace('"', "&#34;"))),
+        "{body}"
+    );
     // The re-render shows a new key: the old secret can't be shown again.
     let retry_id = input_value(body, "api_key_id").to_string();
     assert_ne!(retry_id, submitted_id);
@@ -191,7 +246,7 @@ async fn a_failed_restricted_key_form_comes_back_restricted() {
         )
         .await;
     assert!(response.body.contains("Choose Full Access or Restricted"));
-    assert!(response.body.contains(r#"accessLevel: "restricted""#));
+    assert!(response.body.contains("accessLevel: &#34;restricted&#34;"));
 }
 
 #[tokio::test]
@@ -209,7 +264,7 @@ async fn an_expired_key_form_offers_a_fresh_key() {
         )
         .await;
     assert!(response.body.contains("This form expired"));
-    assert!(response.body.contains(r#"accessLevel: "full""#));
+    assert!(response.body.contains("accessLevel: &#34;full&#34;"));
     let retry_id = input_value(&response.body, "api_key_id");
     assert!(
         response

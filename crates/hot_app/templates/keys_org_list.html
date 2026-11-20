@@ -1,0 +1,158 @@
+{% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
+
+{% block content %}
+<div class="max-w-7xl mx-auto py-6">
+    {% include "keys_tabs.html" %}
+    {% match error_message %}{% when Some with (message) %}
+    <div class="error-box mb-4 sm:mb-6" role="alert">{{ message }}</div>
+    {% when None %}{% endmatch %}
+
+    {% if total_keys > 0 || ended_count > 0 %}
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div class="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
+            {% if show_ended %}
+            Showing every org key.
+            <a class="link" href="/keys/org">Hide ended keys</a>
+            {% else if ended_count > 0 %}
+            Showing working keys.
+            <a class="link" href="/keys/org?show=all">Show {{ ended_count }} revoked or expired</a>
+            {% endif %}
+        </div>
+        <a href="/keys/org/new" class="btn btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            <span class="hidden sm:inline">Create Org Key</span>
+            <span class="sm:hidden">New Key</span>
+        </a>
+    </div>
+    {% endif %}
+
+    {% if rows.len() > 0 %}
+    <!-- Org keys: desktop table -->
+    <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="table-head">
+                    <tr>
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description</th>
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Can manage</th>
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</th>
+                        <th scope="col" class="relative px-4 lg:px-6 py-3"><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for row in rows %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
+                        <td class="px-4 lg:px-6 py-4">
+                            <a href="/keys/org/{{ row.key.org_api_key_id }}/edit" class="text-sm font-medium text-gray-900 dark:text-white hover:underline">{{ row.key.description }}</a>
+                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                <div class="uuid-container inline-flex items-center gap-1">
+                                    <span class="uuid-display font-mono" data-full-uuid="{{ row.key.org_api_key_id }}" title="{{ row.key.org_api_key_id }}">{{ row.key.org_api_key_id|shortuuid }}</span>
+                                    <button type="button" class="uuid-copy-btn text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors" data-uuid="{{ row.key.org_api_key_id }}" title="Copy {{ row.key.org_api_key_id }} to clipboard">
+                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            {% match row.key.issuer_org_api_key_id %}{% when Some with (issuer) %}<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Created by org key <a class="link font-mono" href="/keys/org/{{ issuer }}/edit" title="{{ issuer }}">{{ issuer|shortuuid }}</a></div>{% when None %}{% endmatch %}
+                        </td>
+                        <td class="px-4 lg:px-6 py-4">
+                            <div class="flex flex-wrap gap-1">
+                                {% for label in row.access %}<span class="badge badge-neutral">{{ label }}</span>{% endfor %}
+                                {% if row.access.is_empty() %}<span class="text-xs text-gray-500 dark:text-gray-400">Nothing</span>{% endif %}
+                            </div>
+                        </td>
+                        <td class="px-4 lg:px-6 py-4 whitespace-nowrap">
+                            <span class="badge {{ row.status_badge }}">{{ row.status_label }}</span>
+                            {% match row.expires_at %}{% when Some with (at) %}<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Expires {{ at }}</div>{% when None %}{% endmatch %}
+                            {% match row.previous_secret_expires_at %}{% when Some with (at) %}<div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Old secret works until {{ at }}</div>{% when None %}{% endmatch %}
+                        </td>
+                        <td class="hidden lg:table-cell px-4 lg:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                            <div>{{ row.key.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}</div>
+                            <div>{{ row.key.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
+                        </td>
+                        <td class="px-4 lg:px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
+                            <a href="/keys/org/{{ row.key.org_api_key_id }}/edit" class="link transition-all">Manage<span class="sr-only">, {{ row.key.description }}</span></a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Org keys: mobile cards -->
+    <div class="md:hidden space-y-3">
+        {% for row in rows %}
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+            <div class="flex items-start justify-between mb-3">
+                <div class="flex-1 min-w-0">
+                    <h2 class="text-sm font-semibold text-gray-900 dark:text-white truncate">{{ row.key.description }}</h2>
+                    <div class="mt-1"><span class="badge {{ row.status_badge }}">{{ row.status_label }}</span></div>
+                </div>
+                <a href="/keys/org/{{ row.key.org_api_key_id }}/edit" class="ml-2 link text-xs font-medium">Manage</a>
+            </div>
+            <div class="space-y-2 text-xs text-gray-500 dark:text-gray-400">
+                <div class="flex flex-wrap gap-1">
+                    {% for label in row.access %}<span class="badge badge-neutral">{{ label }}</span>{% endfor %}
+                </div>
+                <div class="font-mono" title="{{ row.key.org_api_key_id }}">{{ row.key.org_api_key_id|shortuuid }}</div>
+                {% match row.expires_at %}{% when Some with (at) %}<div class="flex justify-between"><span>Expires:</span><span>{{ at }}</span></div>{% when None %}{% endmatch %}
+                <div class="flex justify-between">
+                    <span>Created:</span>
+                    <span>{{ row.key.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M") }}</span>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if has_prev_page || has_next_page %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 mt-4">
+        <div class="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
+            {% if show_ended %}
+            {% call ui::pagination("/keys/org?show=all&p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, rows.len(), total_keys, "org keys") %}{% endcall %}
+            {% else %}
+            {% call ui::pagination("/keys/org?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, rows.len(), total_keys, "org keys") %}{% endcall %}
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 sm:p-8">
+        <div class="empty-state">
+            {% if ended_count > 0 %}
+            {% call ui::empty_state_header("M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z", "No working org keys", "Every org key here is revoked or expired.") %}{% endcall %}
+            {% else %}
+            {% call ui::empty_state_header("M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z", "No org keys", "Create one to provision sub-organizations from your own systems.") %}{% endcall %}
+            {% endif %}
+            <a href="/keys/org/new" class="btn btn-primary">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                </svg>
+                Create Org Key
+            </a>
+        </div>
+    </div>
+    {% endif %}
+
+    {% match org_keys_root %}{% when Some with (root) %}
+    <div class="mt-4 sm:mt-6 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 sm:p-6">
+        <h2 class="text-base sm:text-lg font-medium text-gray-900 dark:text-white mb-3 sm:mb-4">Using an org key</h2>
+        <div class="text-gray-600 dark:text-gray-300">
+            <p class="text-xs sm:text-sm">Send the key in the <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">Authorization</code> header. It works on <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">/v1/orgs</code> and <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">/v1/api-keys</code>:</p>
+            <pre class="bg-gray-100 dark:bg-gray-700 p-2 sm:p-3 rounded text-xs font-mono mt-2 text-gray-900 dark:text-gray-100 overflow-x-auto">curl -H "Authorization: Bearer YOUR_ORG_KEY" \
+     {{ page_context.api_url }}/v1/orgs</pre>
+            <p class="mt-3 sm:mt-4 text-xs sm:text-sm">
+                To call a sub-organization's environment, use the org key to create an environment key there, and call the API with that.
+                Manage sub-organizations on the <a class="link" href="/@{{ root.slug }}/children">Sub-orgs</a> page.
+            </p>
+        </div>
+    </div>
+    {% when None %}{% endmatch %}
+</div>
+{% endblock %}

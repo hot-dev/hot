@@ -1667,7 +1667,7 @@ fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
         notices.push(match session.billing_org() {
             Some(root) => notice.with_action(
                 "Manage account status →",
-                format!("/@{}/children", root.slug),
+                format!("/@{}/lifecycle", root.slug),
             ),
             None => notice,
         });
@@ -1790,6 +1790,9 @@ pub struct PrivatePageContext {
     pub docs_path: Option<String>,
     // The selected workspace is suspended or archived (itself or its account); pages skip data loads
     pub workspace_held: bool,
+    /// Whether the user administers the current organization. Navigation uses it
+    /// to leave out pages only administrators can open.
+    pub is_current_org_admin: bool,
 }
 
 impl PrivatePageContext {
@@ -1849,6 +1852,7 @@ impl PrivatePageContext {
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
             workspace_held: session.current_org_hold.is_some(),
+            is_current_org_admin: session.is_current_org_admin,
         }
     }
 
@@ -1913,6 +1917,7 @@ impl PrivatePageContext {
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
             workspace_held: session.current_org_hold.is_some(),
+            is_current_org_admin: session.is_current_org_admin,
         }
     }
 
@@ -1977,6 +1982,7 @@ impl PrivatePageContext {
             web_url: session.product_web_url.clone(),
             docs_path: default_docs_path(current_page).map(|s| s.to_string()),
             workspace_held: session.current_org_hold.is_some(),
+            is_current_org_admin: session.is_current_org_admin,
         }
     }
 
@@ -2642,26 +2648,8 @@ pub struct OrgApiKeyRow {
     /// Whether the key still authenticates, following its issuer chain: a
     /// key whose issuing key was revoked is dead though its own row is not.
     pub revocable: bool,
-}
-
-/// The API Keys page's org key section, for administrators of a parent
-/// organization.
-pub struct OrgKeysSection {
-    pub root: hot::db::org::Org,
-    pub rows: Vec<OrgApiKeyRow>,
-    /// The create form's values: an example, or what a rejected form submitted.
-    pub permissions: String,
-    pub description: String,
-    pub expires_in_days: String,
-    /// Keep the create form open, so a rejected submission stays in view.
-    pub form_open: bool,
-}
-
-/// A secret the page shows once, after a key is created or rotated.
-pub struct IssuedSecret {
-    pub heading: &'static str,
-    pub note: &'static str,
-    pub token: String,
+    /// What the key's grants cover, as short labels for the list.
+    pub access: Vec<&'static str>,
 }
 
 #[derive(Template)]
@@ -2670,8 +2658,11 @@ pub struct ApiKeysList<'a> {
     pub title: &'a str,
     pub page_context: PrivatePageContext,
     pub api_keys: Vec<ApiKeyRow>,
-    pub org_keys: Option<OrgKeysSection>,
-    pub issued_secret: Option<IssuedSecret>,
+    /// Which tab of the API Keys page this is: "env" or "org".
+    pub keys_tab: &'static str,
+    /// The parent organization whose org keys the user may manage, which
+    /// decides whether the page shows its Org keys tab.
+    pub org_keys_root: Option<hot::db::org::Org>,
     pub error_message: Option<String>,
     pub is_admin: bool,
     pub current_page_num: i64,
@@ -2681,6 +2672,70 @@ pub struct ApiKeysList<'a> {
     pub has_next_page: bool,
     pub has_prev_page: bool,
     pub total_keys: i64,
+}
+
+/// The Org keys tab of the API Keys page, for administrators of a parent
+/// organization.
+#[derive(Template)]
+#[template(path = "keys_org_list.html")]
+pub struct OrgKeysList<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub keys_tab: &'static str,
+    pub org_keys_root: Option<hot::db::org::Org>,
+    pub rows: Vec<OrgApiKeyRow>,
+    pub error_message: Option<String>,
+    /// Whether revoked and expired keys are listed too.
+    pub show_ended: bool,
+    /// How many of the organization's keys are revoked or expired.
+    pub ended_count: usize,
+    pub current_page_num: i64,
+    pub start_page: i64,
+    pub end_page: i64,
+    pub has_next_page: bool,
+    pub has_prev_page: bool,
+    pub total_keys: i64,
+}
+
+#[derive(Template)]
+#[template(path = "keys_org_new.html")]
+pub struct OrgKeysNew<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub root: hot::db::org::Org,
+    pub root_org_id: String,
+    pub generated_key: String,
+    pub org_api_key_id: Uuid,
+    pub handoff_token: String,
+    pub error_message: &'a str,
+    pub description: &'a str,
+    pub expires_in_days: &'a str,
+    /// The grants the form starts from: an example, or what a rejected form submitted.
+    pub permissions: serde_json::Value,
+}
+
+#[derive(Template)]
+#[template(path = "keys_org_detail.html")]
+pub struct OrgKeyDetail<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub root: hot::db::org::Org,
+    pub root_org_id: String,
+    pub row: OrgApiKeyRow,
+    pub error_message: &'a str,
+}
+
+/// A secret shown once, after a key is rotated.
+#[derive(Template)]
+#[template(path = "keys_secret.html")]
+pub struct KeySecret<'a> {
+    pub title: &'a str,
+    pub page_context: PrivatePageContext,
+    pub heading: &'a str,
+    pub note: &'a str,
+    pub token: String,
+    pub back_url: String,
+    pub back_label: &'a str,
 }
 
 #[derive(Template)]

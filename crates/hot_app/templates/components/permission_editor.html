@@ -1,0 +1,560 @@
+{# The permission editor shared by environment keys and org keys.
+
+   It edits one grant set two ways: a rule form, and the JSON the API takes.
+   Switching views converts between them, so either can be the starting point.
+
+   Use it inside an Alpine scope made by permissionEditor():
+
+     {%- import "components/permission_editor.html" as perm -%}
+     <div x-data="permissionEditor({ kind: 'env', initial: {...}, accessLevel: 'restricted',
+                                     pathOptions: { mcp: [...], webhook: [...] } })">
+         {% call perm::editor() %}{% endcall %}
+     </div>
+     {% call perm::script() %}{% endcall %}
+
+   Config:
+     kind         'env' (rules are `type:path`) or 'org' (rules are `org:…` URNs)
+     initial      the grants to start from: an object, or submitted text that isn't JSON
+     accessLevel  'full' or 'restricted'; an env key's Full Access submits no rules
+     pathOptions  env keys only: the MCP tool and webhook paths to offer
+     rootOrgId    org keys only: the parent organization, for "This organization"
+     rootOrgName  org keys only
+     readOnly     show stored grants without editing them
+
+   The form posts the grants as JSON text in a field named `permissions`. #}
+{% macro editor() %}
+<div>
+    <template x-if="!readOnly">
+        <input type="hidden" name="permissions" :value="submitValue()">
+    </template>
+
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <span class="block text-xs font-medium text-gray-500 dark:text-gray-400" x-text="readOnly ? 'Permissions' : 'Permission rules'"></span>
+        <div class="inline-flex rounded-md border border-gray-300 dark:border-gray-600 overflow-hidden" role="group" aria-label="Permission view">
+            <button type="button" @click="setView('form')" :aria-pressed="view === 'form'"
+                :class="view === 'form' ? 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
+                class="px-3 py-1 text-xs font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-hot-red-500">Form</button>
+            <button type="button" @click="setView('json')" :aria-pressed="view === 'json'"
+                :class="view === 'json' ? 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white' : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
+                class="px-3 py-1 text-xs font-medium border-l border-gray-300 dark:border-gray-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-hot-red-500">JSON</button>
+        </div>
+    </div>
+
+    <!-- Form view -->
+    <div x-show="view === 'form'">
+        <template x-if="!readOnly">
+            <div class="mb-3">
+                <div class="flex items-center justify-between mb-1.5">
+                    <span class="block text-xs font-medium text-gray-500 dark:text-gray-400">Quick presets</span>
+                    <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
+                </div>
+                <div class="flex flex-wrap gap-1.5">
+                    <template x-for="preset in presets" :key="preset.id">
+                        <button type="button" @click="applyPreset(preset.id)" class="chip" x-text="preset.label"></button>
+                    </template>
+                </div>
+            </div>
+        </template>
+
+        <template x-if="rules.length === 0">
+            <div class="text-sm text-gray-500 dark:text-gray-400 italic border border-dashed border-gray-300 dark:border-gray-600 rounded-md px-4 py-6 text-center"
+                 x-text="readOnly ? 'This key has no permissions.' : 'No permission rules. Add a rule or use a preset above.'"></div>
+        </template>
+
+        <template x-if="rules.length > 0">
+            <div class="border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden">
+                <template x-for="(rule, idx) in rules" :key="idx">
+                    <div class="bg-white dark:bg-gray-800" :class="idx > 0 && 'border-t border-gray-200 dark:border-gray-700'">
+                    <!-- Stored grants read as text, not as a form that can't be used -->
+                    <template x-if="readOnly">
+                        <div class="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-4 px-3 py-2.5">
+                            <div class="sm:w-72 shrink-0 min-w-0">
+                                <div class="text-sm font-medium text-gray-900 dark:text-white" x-text="resourceLabel(rule)"></div>
+                                <div class="text-xs text-gray-500 dark:text-gray-400" x-show="scopeLabel(rule)" x-text="scopeLabel(rule)"></div>
+                            </div>
+                            <div class="flex-1 flex flex-wrap gap-1">
+                                <template x-for="action in (rule.actions.includes('*') ? ['all actions'] : rule.actions)" :key="action">
+                                    <span class="badge badge-neutral" x-text="action"></span>
+                                </template>
+                            </div>
+                            <code class="text-xs font-mono text-gray-500 dark:text-gray-400 break-all sm:text-right" x-text="ruleKey(rule)"></code>
+                        </div>
+                    </template>
+                    <template x-if="!readOnly">
+                    <div class="flex flex-col sm:flex-row sm:items-start gap-2 px-3 py-2.5">
+                        <!-- Org keys: which organizations the rule covers -->
+                        <template x-if="kind === 'org'">
+                            <div class="sm:w-44 shrink-0">
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" :for="uid + '-scope-' + idx">Applies to</label>
+                                <select :id="uid + '-scope-' + idx" x-model="rule.scope" :disabled="readOnly" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                                    <option value="children">All sub-organizations</option>
+                                    <option value="own" x-text="'This organization' + (rootOrgName ? ' (' + rootOrgName + ')' : '')"></option>
+                                    <option value="custom">One organization…</option>
+                                </select>
+                                <input x-show="rule.scope === 'custom'" type="text" x-model="rule.orgId" :disabled="readOnly" placeholder="Organization ID" aria-label="Organization ID" class="mt-1 block w-full px-2 py-1.5 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                            </div>
+                        </template>
+
+                        <div class="shrink-0" :class="kind === 'org' ? 'sm:w-52' : 'sm:w-36'">
+                            <label x-show="labelled(idx)" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" :for="uid + '-type-' + idx">Resource</label>
+                            <template x-if="kind === 'env'">
+                                <select :id="uid + '-type-' + idx" x-model="rule.type" @change="onTypeChange(rule)" :disabled="readOnly" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                                    <option value="*">All (*)</option>
+                                    <template x-for="type in envTypes" :key="type">
+                                        <option :value="type" x-text="type" :selected="rule.type === type"></option>
+                                    </template>
+                                </select>
+                            </template>
+                            <template x-if="kind === 'org'">
+                                <select :id="uid + '-type-' + idx" x-model="rule.target" @change="onTypeChange(rule)" :disabled="readOnly" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                                    <optgroup label="Organization">
+                                        <option value="org" :selected="rule.target === 'org'">The organization</option>
+                                        <option value="env" :selected="rule.target === 'env'">Environments</option>
+                                        <option value="env-key" :selected="rule.target === 'env-key'">Environment API keys</option>
+                                        <option value="org-key" :selected="rule.target === 'org-key'">Org API keys</option>
+                                        <option value="usage" :selected="rule.target === 'usage'">Usage</option>
+                                    </optgroup>
+                                    <optgroup label="Limit for environment keys it creates">
+                                        <option value="res:*" :selected="rule.target === 'res:*'">All resources (*)</option>
+                                        <template x-for="type in envTypes" :key="type">
+                                            <option :value="'res:' + type" x-text="type" :selected="rule.target === 'res:' + type"></option>
+                                        </template>
+                                    </optgroup>
+                                </select>
+                            </template>
+                        </div>
+
+                        <!-- Org keys: which environment, for rules inside one -->
+                        <template x-if="kind === 'org' && inEnv(rule)">
+                            <div class="sm:w-28 shrink-0">
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" :for="uid + '-env-' + idx">Environment</label>
+                                <input :id="uid + '-env-' + idx" type="text" x-model="rule.env" :disabled="readOnly" placeholder="*" title="* for every environment, or an environment ID" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                            </div>
+                        </template>
+
+                        <template x-if="hasPath(rule)">
+                            <div class="shrink-0" :class="kind === 'org' ? 'sm:w-28' : 'sm:w-48'">
+                                <label x-show="labelled(idx)" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1" :for="uid + '-path-' + idx" x-text="pathLabel(rule)"></label>
+                                <template x-if="pathOptions(rule)">
+                                    <select :id="uid + '-path-' + idx" x-model="rule.path" :disabled="readOnly" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-70">
+                                        <option value="*">* (all)</option>
+                                        <template x-for="group in pathOptions(rule)" :key="group.service">
+                                            <optgroup :label="group.service">
+                                                <option :value="group.service + '/*'" x-text="group.service + '/*'" :selected="rule.path === group.service + '/*'"></option>
+                                                <template x-for="item in group.items" :key="item">
+                                                    <option :value="group.service + '/' + item" x-text="group.service + '/' + item" :selected="rule.path === group.service + '/' + item"></option>
+                                                </template>
+                                            </optgroup>
+                                        </template>
+                                    </select>
+                                </template>
+                                <template x-if="!pathOptions(rule)">
+                                    <input :id="uid + '-path-' + idx" type="text" x-model="rule.path" placeholder="*" :disabled="readOnly || pathLocked(rule)" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500 disabled:opacity-50 disabled:cursor-not-allowed">
+                                </template>
+                            </div>
+                        </template>
+
+                        <div class="flex-1 min-w-0">
+                            <span x-show="labelled(idx)" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</span>
+                            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1">
+                                <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300" :class="!readOnly && 'cursor-pointer'">
+                                    <input type="checkbox" :checked="rule.actions.includes('*')" :disabled="readOnly" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                    <span class="text-xs font-medium">All</span>
+                                </label>
+                                <template x-for="action in validActions(rule)" :key="action">
+                                    <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300" :class="!readOnly && 'cursor-pointer'">
+                                        <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="readOnly || rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                        <span class="text-xs" x-text="action"></span>
+                                    </label>
+                                </template>
+                            </div>
+                            <p x-show="kind === 'org'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400 font-mono break-all" x-text="ruleKey(rule)"></p>
+                        </div>
+
+                        <div class="shrink-0 flex items-start" :class="labelled(idx) && 'sm:pt-5'">
+                            <button type="button" @click="rules.splice(idx, 1)" class="p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Remove rule" aria-label="Remove rule">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    </template>
+                    </div>
+                </template>
+            </div>
+        </template>
+
+        <template x-if="!readOnly">
+            <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-700 dark:text-hot-red-400 hover:text-hot-red-800 dark:hover:text-hot-red-300 transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add rule
+                </button>
+                <p x-show="rules.some(r => r.actions.length === 0)" class="text-xs text-amber-700 dark:text-amber-400">Rules with no actions selected are ignored.</p>
+            </div>
+        </template>
+    </div>
+
+    <!-- JSON view -->
+    <div x-show="view === 'json'" x-cloak>
+        <textarea x-model="jsonText" @input="checkJson()" :readonly="readOnly" rows="12" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Permissions as JSON"
+            class="block w-full px-3 py-2 text-xs leading-5 font-mono border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500"
+            :class="jsonError && 'border-red-500 dark:border-red-500'"></textarea>
+        <div class="mt-2 flex flex-wrap items-start justify-between gap-2">
+            <p class="text-xs" role="status" :class="jsonError ? 'text-red-700 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'" x-text="jsonError || jsonHint"></p>
+            <div class="flex items-center gap-2 shrink-0">
+                <button type="button" @click="copyJson()" class="btn btn-secondary btn-sm" x-text="copied ? 'Copied' : 'Copy'"></button>
+                <template x-if="!readOnly">
+                    <button type="button" @click="formatJson()" class="btn btn-secondary btn-sm">Format</button>
+                </template>
+            </div>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{% macro script() %}
+<script>
+function permissionEditor(config) {
+    const kind = config.kind === 'org' ? 'org' : 'env';
+    const ENV_ACTIONS = {
+        '*':       ['create', 'read', 'update', 'delete', 'execute'],
+        'mcp':     ['execute'],
+        'webhook': ['execute'],
+        'stream':  ['read'],
+        'event':   ['create', 'read'],
+        'run':     ['read'],
+        'call':    ['delete'],
+        'project': ['create', 'read', 'update', 'delete'],
+        'build':   ['create', 'read', 'execute'],
+        'context': ['create', 'read', 'update', 'delete'],
+        'key':     ['create', 'read', 'update', 'delete'],
+        'session': ['create', 'read', 'delete'],
+        'env':     ['read'],
+        'file':    ['create', 'read', 'delete'],
+        'blob':    ['read'],
+        'domain':  ['create', 'read', 'update', 'delete'],
+    };
+    const ENV_TYPES = Object.keys(ENV_ACTIONS).filter(type => type !== '*');
+    const ORG_ACTIONS = {
+        'org':     ['create', 'read', 'update'],
+        'env':     ['create', 'read', 'update'],
+        'env-key': ['create', 'read', 'update', 'delete'],
+        'org-key': ['create', 'read', 'update', 'delete'],
+        'usage':   ['read'],
+    };
+
+    const ENV_PRESETS = [
+        { id: 'read-only', label: 'Read Only', rules: [{ type: '*', path: '*', actions: ['read'] }] },
+        { id: 'mcp', label: 'MCP Tools', rules: [{ type: 'mcp', path: '*', actions: ['execute'] }] },
+        { id: 'webhooks', label: 'Webhooks', rules: [{ type: 'webhook', path: '*', actions: ['execute'] }] },
+        { id: 'streams', label: 'Streams', rules: [{ type: 'stream', path: '*', actions: ['read'] }] },
+        { id: 'events', label: 'Events', rules: [{ type: 'event', path: '*', actions: ['create', 'read'] }] },
+        { id: 'runs', label: 'Runs', rules: [{ type: 'run', path: '*', actions: ['read'] }] },
+        { id: 'build-deploy', label: 'Build/Deploy', rules: [{ type: 'build', path: '*', actions: ['create', 'read', 'execute'] }] },
+    ];
+    const orgRule = (scope, target, actions) => ({ scope, orgId: '', target, env: '*', path: '*', actions });
+    const ORG_PRESETS = [
+        { id: 'provision', label: 'Provision sub-orgs', rules: [
+            orgRule('children', 'org', ['create', 'read', 'update']),
+            orgRule('children', 'env', ['create', 'read']),
+            orgRule('children', 'env-key', ['create', 'read', 'update', 'delete']),
+        ] },
+        { id: 'read-only', label: 'Read only', rules: [
+            orgRule('children', 'org', ['read']),
+            orgRule('children', 'env', ['read']),
+            orgRule('children', 'env-key', ['read']),
+            orgRule('children', 'usage', ['read']),
+        ] },
+        { id: 'events', label: 'Keys that send events', rules: [orgRule('children', 'res:event', ['create'])] },
+        { id: 'runs', label: 'Keys that read runs', rules: [orgRule('children', 'res:run', ['read'])] },
+        { id: 'usage', label: 'Usage', rules: [orgRule('children', 'usage', ['read'])] },
+        { id: 'org-keys', label: 'Manage org keys', rules: [orgRule('own', 'org-key', ['create', 'read', 'update', 'delete'])] },
+    ];
+
+    const isPlainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+    // Grants as JSON with one rule per line, which reads better than one action per line.
+    function formatGrants(grants) {
+        const entries = Object.entries(grants);
+        if (entries.length === 0) return '{}';
+        const lines = entries.map(([key, actions]) => {
+            const value = Array.isArray(actions)
+                ? '[' + actions.map(action => JSON.stringify(action)).join(', ') + ']'
+                : JSON.stringify(actions);
+            return '  ' + JSON.stringify(key) + ': ' + value;
+        });
+        return '{\n' + lines.join(',\n') + '\n}';
+    }
+
+    // One grant of an environment key, `type:path`, as a form rule.
+    function envRuleFromKey(key, actions) {
+        const colon = key.indexOf(':');
+        if (colon <= 0) return null;
+        return { type: key.substring(0, colon), path: key.substring(colon + 1) || '*', actions: [...actions] };
+    }
+
+    // One grant of an org key, an `org:…` URN, as a form rule. Null when the
+    // form has no way to show it.
+    function orgRuleFromKey(key, actions) {
+        const match = /^org:([^/]+)(?:\/(.+))?$/.exec(key);
+        if (!match) return null;
+        const rule = { scope: 'custom', orgId: match[1], target: 'org', env: '*', path: '*', actions: [...actions] };
+        if (match[1] === '*') { rule.scope = 'children'; rule.orgId = ''; }
+        else if (config.rootOrgId && match[1] === config.rootOrgId) { rule.scope = 'own'; rule.orgId = ''; }
+        const rest = match[2];
+        if (!rest) return rule;
+        const typed = text => {
+            const colon = text.indexOf(':');
+            return colon > 0 ? [text.substring(0, colon), text.substring(colon + 1)] : null;
+        };
+        if (rest.startsWith('env:')) {
+            const afterEnv = rest.substring(4);
+            const slash = afterEnv.indexOf('/');
+            rule.env = slash < 0 ? afterEnv : afterEnv.substring(0, slash);
+            if (!rule.env) return null;
+            if (slash < 0) { rule.target = 'env'; return rule; }
+            const inner = typed(afterEnv.substring(slash + 1));
+            if (!inner || !inner[1]) return null;
+            if (inner[0] === 'api-key') rule.target = 'env-key';
+            else if (inner[0] === '*' || ENV_ACTIONS[inner[0]]) rule.target = 'res:' + inner[0];
+            else return null;
+            rule.path = inner[1];
+            return rule;
+        }
+        const inner = typed(rest);
+        if (!inner || !inner[1]) return null;
+        if (inner[0] === 'api-key') rule.target = 'org-key';
+        else if (inner[0] === 'usage' && inner[1] === '*') rule.target = 'usage';
+        else return null;
+        rule.path = inner[1];
+        return rule;
+    }
+
+    // Grants as form rules, or the first grant the form can't show.
+    function rulesFromObject(grants) {
+        const rules = [];
+        for (const [key, actions] of Object.entries(grants)) {
+            if (!Array.isArray(actions) || actions.some(action => typeof action !== 'string')) {
+                return { error: 'Each rule needs a list of actions, such as ["read"]. Check ' + JSON.stringify(key) + '.' };
+            }
+            const rule = kind === 'org' ? orgRuleFromKey(key, actions) : envRuleFromKey(key, actions);
+            if (!rule) return { error: 'The form can\'t show ' + JSON.stringify(key) + '. Keep editing it as JSON.' };
+            rules.push(rule);
+        }
+        return { rules };
+    }
+
+    return {
+        kind,
+        uid: 'perm-' + Math.random().toString(36).slice(2, 8),
+        readOnly: config.readOnly === true,
+        accessLevel: config.accessLevel || 'restricted',
+        rootOrgName: config.rootOrgName || '',
+        envTypes: ENV_TYPES,
+        presets: kind === 'org' ? ORG_PRESETS : ENV_PRESETS,
+        view: 'form',
+        rules: [],
+        jsonText: '',
+        jsonError: '',
+        copied: false,
+        jsonHint: kind === 'org'
+            ? 'Keys are org: URNs, such as "org:*/env:*/api-key:*". Values are lists of actions.'
+            : 'Keys are type:path, such as "mcp:weather/*". Values are lists of actions.',
+
+        init() {
+            const initial = config.initial;
+            // Submitted text that isn't JSON comes back as a string: keep it in view to be fixed.
+            if (typeof initial === 'string') {
+                if (initial.trim() !== '') { this.jsonText = initial; this.view = 'json'; this.checkJson(); }
+                return;
+            }
+            if (!isPlainObject(initial)) return;
+            // An env key's Full Access is stored as one grant the form shows as the access level.
+            if (kind === 'env' && this.accessLevel !== 'restricted') return;
+            const parsed = rulesFromObject(initial);
+            if (parsed.rules) { this.rules = parsed.rules; return; }
+            this.jsonText = formatGrants(initial);
+            this.view = 'json';
+        },
+
+        // ---- Reading stored grants ----
+        resourceLabel(rule) {
+            if (kind === 'env') return rule.type === '*' ? 'Everything' : rule.type + ':' + (rule.path || '*');
+            const path = rule.path && rule.path !== '*' ? ' ' + rule.path : '';
+            switch (rule.target) {
+                case 'org': return 'The organization';
+                case 'env': return 'Environments';
+                case 'env-key': return 'Environment API keys' + path;
+                case 'org-key': return 'Org API keys' + path;
+                case 'usage': return 'Usage';
+                default: {
+                    const type = rule.target.substring(4);
+                    return 'Limit for keys it creates: ' + (type === '*' ? 'everything' : type + ':' + (rule.path || '*'));
+                }
+            }
+        },
+        scopeLabel(rule) {
+            if (kind === 'env') return '';
+            const org = rule.scope === 'children' ? 'All sub-organizations'
+                : rule.scope === 'own' ? 'This organization' + (this.rootOrgName ? ' (' + this.rootOrgName + ')' : '')
+                : 'Organization ' + rule.orgId;
+            return this.inEnv(rule) && rule.env && rule.env !== '*' ? org + ', environment ' + rule.env : org;
+        },
+
+        // ---- Form ----
+        // An env key's rows share their columns, so only the first is labelled.
+        // An org key's columns change with the resource, so every row is.
+        labelled(idx) {
+            return kind === 'org' || idx === 0;
+        },
+        inEnv(rule) {
+            return rule.target === 'env' || rule.target === 'env-key' || rule.target.startsWith('res:');
+        },
+        hasPath(rule) {
+            if (kind === 'env') return true;
+            return rule.target === 'env-key' || rule.target === 'org-key' || rule.target.startsWith('res:');
+        },
+        pathLabel(rule) {
+            if (kind === 'org' && (rule.target === 'env-key' || rule.target === 'org-key')) return 'Key';
+            return 'Path';
+        },
+        pathLocked(rule) {
+            return kind === 'env' ? rule.type === '*' : rule.target === 'res:*';
+        },
+        pathOptions(rule) {
+            if (kind !== 'env' || !config.pathOptions) return null;
+            const options = config.pathOptions[rule.type];
+            return Array.isArray(options) && options.length > 0 ? options : null;
+        },
+        validActions(rule) {
+            if (kind === 'env') return ENV_ACTIONS[rule.type] || ENV_ACTIONS['*'];
+            if (rule.target.startsWith('res:')) return ENV_ACTIONS[rule.target.substring(4)] || ENV_ACTIONS['*'];
+            return ORG_ACTIONS[rule.target] || ORG_ACTIONS['org'];
+        },
+        addRule() {
+            this.rules.push(kind === 'org'
+                ? orgRule('children', 'org', ['read'])
+                : { type: 'mcp', path: '*', actions: ['execute'] });
+        },
+        applyPreset(id) {
+            const preset = this.presets.find(candidate => candidate.id === id);
+            if (!preset) return;
+            for (const wanted of preset.rules) {
+                const key = this.ruleKey(wanted);
+                const existing = this.rules.find(rule => this.ruleKey(rule) === key);
+                if (!existing) { this.rules.push({ ...wanted, actions: [...wanted.actions] }); continue; }
+                if (existing.actions.includes('*')) continue;
+                for (const action of wanted.actions) {
+                    if (!existing.actions.includes(action)) existing.actions.push(action);
+                }
+            }
+        },
+        onTypeChange(rule) {
+            rule.actions = [...this.validActions(rule)];
+            rule.path = '*';
+        },
+        toggleAllActions(rule, checked) {
+            rule.actions = checked ? ['*'] : [];
+        },
+        toggleAction(rule, action, checked) {
+            rule.actions = rule.actions.filter(a => a !== '*' && a !== action);
+            if (checked) rule.actions.push(action);
+        },
+        // The grant key a rule stands for.
+        ruleKey(rule) {
+            const path = (rule.path || '').trim() || '*';
+            if (kind === 'env') return rule.type + ':' + (rule.type === '*' ? '*' : path);
+            const org = rule.scope === 'children' ? '*'
+                : rule.scope === 'own' ? (config.rootOrgId || '*')
+                : ((rule.orgId || '').trim() || '*');
+            const env = (rule.env || '').trim() || '*';
+            switch (rule.target) {
+                case 'org': return 'org:' + org;
+                case 'env': return 'org:' + org + '/env:' + env;
+                case 'env-key': return 'org:' + org + '/env:' + env + '/api-key:' + path;
+                case 'org-key': return 'org:' + org + '/api-key:' + path;
+                case 'usage': return 'org:' + org + '/usage:*';
+                default: {
+                    const type = rule.target.substring(4);
+                    return 'org:' + org + '/env:' + env + '/' + type + ':' + (type === '*' ? '*' : path);
+                }
+            }
+        },
+        rulesToObject() {
+            const grants = {};
+            for (const rule of this.rules) {
+                if (rule.actions.length === 0) continue;
+                const key = this.ruleKey(rule);
+                const merged = grants[key] || [];
+                for (const action of rule.actions) {
+                    if (!merged.includes(action)) merged.push(action);
+                }
+                grants[key] = merged.includes('*') ? ['*'] : merged;
+            }
+            return grants;
+        },
+
+        // ---- JSON ----
+        parseJson() {
+            const text = this.jsonText.trim();
+            if (text === '') return { grants: {} };
+            let grants;
+            try {
+                grants = JSON.parse(text);
+            } catch (error) {
+                return { error: 'Not valid JSON: ' + error.message };
+            }
+            if (!isPlainObject(grants)) return { error: 'Permissions must be a JSON object, such as {"run:*": ["read"]}.' };
+            return { grants };
+        },
+        checkJson() {
+            this.jsonError = this.parseJson().error || '';
+        },
+        formatJson() {
+            const parsed = this.parseJson();
+            this.jsonError = parsed.error || '';
+            if (parsed.grants) this.jsonText = formatGrants(parsed.grants);
+        },
+        copyJson() {
+            const done = () => { this.copied = true; setTimeout(() => { this.copied = false; }, 2000); };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(this.jsonText).then(done).catch(() => {});
+            }
+        },
+        setView(view) {
+            if (view === this.view) return;
+            if (view === 'json') {
+                this.jsonText = formatGrants(this.rulesToObject());
+                this.jsonError = '';
+                this.view = 'json';
+                return;
+            }
+            const parsed = this.parseJson();
+            if (parsed.error) { this.jsonError = parsed.error; return; }
+            const converted = rulesFromObject(parsed.grants);
+            if (converted.error) { this.jsonError = converted.error; return; }
+            this.rules = converted.rules;
+            this.jsonError = '';
+            this.view = 'form';
+        },
+
+        // What the form posts: the grants as JSON text. Text that doesn't parse
+        // is sent as it is, so the server can say what is wrong with it.
+        submitValue() {
+            if (kind === 'env' && this.accessLevel !== 'restricted') return '';
+            if (this.view === 'json') {
+                const parsed = this.parseJson();
+                return parsed.grants ? JSON.stringify(parsed.grants) : this.jsonText;
+            }
+            const grants = this.rulesToObject();
+            if (kind === 'env' && Object.keys(grants).length === 0) return '';
+            return JSON.stringify(grants);
+        },
+    };
+}
+</script>
+{% endmacro %}

@@ -1,82 +1,151 @@
 {% extends "private_layout.html" %}
+{%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="max-w-7xl mx-auto py-6 space-y-6">
-    <div>
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Sub-organizations</h1>
-        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">{{ root.name }} manages billing and account members. Each sub-organization has its own environments, deployments, credentials, and data.</p>
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ root.name }}</h1>
+        <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+            {{ root.name }} manages billing and account members. Each sub-organization has its own environments, deployments, credentials and data.
+        </p>
         {% include "org_tabs.html" %}
     </div>
-    {% match form.error %}{% when Some with (error) %}
-    <div class="error-box" role="alert">{{ error }}</div>
-    {% when None %}{% endmatch %}
-    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4" aria-label="Account workspace overview">
-        <h2 class="text-lg font-semibold">Account overview</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Read-only activity across this account and its sub-organizations. Runs this month use the UTC calendar month and retained history; file storage is current active file bytes. Open an environment to work in its explicit scope.</p>
-        <div class="overflow-x-auto">
-            <table class="w-full text-sm text-left">
-                <thead class="table-head"><tr class="border-b border-gray-200 dark:border-gray-700"><th class="p-2">Workspace</th><th class="p-2">Status</th><th class="p-2">Running</th><th class="p-2">Failed · 24h</th><th class="p-2">Runs · month</th><th class="p-2">File storage</th><th class="p-2">Last run</th><th class="p-2">Environments</th></tr></thead>
-                <tbody>{% for row in overview %}
-                    <tr class="border-b border-gray-200 dark:border-gray-700" data-overview-org="{{ row.org_id }}">
-                        <td class="p-2"><a class="link" href="/@{{ row.slug }}">{{ row.name }}</a><div class="text-xs text-gray-500 dark:text-gray-400">@{{ row.slug }}{% if row.root %} · Parent organization{% endif %}</div></td>
-                        <td class="p-2"><span class="badge {{ row.lifecycle_badge }}">{{ row.lifecycle }}</span></td><td class="p-2">{{ row.running|commafy }}</td><td class="p-2">{{ row.failed_24h|commafy }}</td><td class="p-2">{{ row.month_runs|commafy }}</td><td class="p-2 whitespace-nowrap">{{ row.file_bytes }}</td><td class="p-2 whitespace-nowrap">{{ row.last_run }}</td>
-                        <td class="p-2">{% for env in row.envs %}<a class="link block" href="/runs?org_id={{ row.org_id }}&amp;env_id={{ env.env_id }}">{{ env.name }}{% if !env.active %} (inactive){% endif %}</a>{% endfor %}{% if row.envs.is_empty() %}<span class="text-gray-500 dark:text-gray-400">No environments</span>{% endif %}</td>
-                    </tr>
-                {% endfor %}</tbody>
-            </table>
+
+    <!-- The account itself: status and activity of the parent organization -->
+    <section class="mb-4 sm:mb-6 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-5" aria-label="Account" data-overview-org="{{ root.org_id }}">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Account</h2>
+                    <span class="badge {{ account.lifecycle_badge }}">{{ account.lifecycle }}</span>
+                </div>
+                <p class="mt-1 text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+                    {{ total_children|commafy }} sub-organization{% if total_children != 1 %}s{% endif %}. Suspending the account holds new work in all of them.
+                </p>
+            </div>
+            <a href="/@{{ root.slug }}/lifecycle" class="btn btn-secondary btn-sm">Change account status</a>
         </div>
+        <dl class="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-3 text-sm">
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Running in {{ root.name }}</dt><dd class="mt-0.5 font-medium text-gray-900 dark:text-white">{{ account.running|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Failed, 24h</dt><dd class="mt-0.5 font-medium text-gray-900 dark:text-white">{{ account.failed_24h|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Runs this month</dt><dd class="mt-0.5 font-medium text-gray-900 dark:text-white">{{ account.month_runs|commafy }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">File storage</dt><dd class="mt-0.5 font-medium text-gray-900 dark:text-white">{{ account.file_bytes }}</dd></div>
+            <div><dt class="text-xs text-gray-500 dark:text-gray-400">Last run</dt><dd class="mt-0.5 font-medium text-gray-900 dark:text-white">{{ account.last_run }}</dd></div>
+        </dl>
     </section>
-    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-        <h2 class="text-lg font-semibold">Account status: {{ root.lifecycle_state }}</h2>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Suspending the account holds new work in every sub-organization. {{ root.name }} administrators keep recovery and billing access.</p>
-        <form method="post" action="/@{{ root.slug }}/lifecycle" class="flex flex-wrap gap-2">
-            <select class="form-select" name="state" aria-label="Account status"><option value="active" {% if root.lifecycle_state == "active" %}selected{% endif %}>Active</option><option value="suspended" {% if root.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option><option value="archived" {% if root.lifecycle_state == "archived" %}selected{% endif %}>Archived</option></select>
-            <button class="btn btn-secondary" type="submit">Update account status</button>
-        </form>
-    </section>
-    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-        <h2 class="text-lg font-semibold">Create sub-organization</h2>
-        <form method="post" action="/@{{ root.slug }}/children" class="space-y-3 max-w-xl">
-            <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-            <label class="form-label">Name <input class="form-input block w-full mt-1" name="name" value="{{ form.child_name }}" required maxlength="200"></label>
-            <label class="form-label">Handle <input class="form-input block w-full mt-1" name="slug" value="{{ form.child_slug }}" required minlength="2" maxlength="32" pattern="[a-z0-9][a-z0-9-]*" aria-describedby="child-handle-help"></label>
-            <p id="child-handle-help" class="text-xs text-gray-500 dark:text-gray-400">2–32 lowercase letters, numbers and hyphens. The workspace URL is /@handle.</p>
-            <label class="form-label">Customer reference (optional) <input class="form-input block w-full mt-1" name="external_id" value="{{ form.child_external_id }}" maxlength="200"></label>
-            <button class="btn btn-primary" type="submit">Create sub-organization</button>
-        </form>
-    </section>
-    <p class="text-sm text-gray-500 dark:text-gray-400">Provision sub-organizations from your own systems with an org API key. Manage them on the <a class="link" href="/keys?org_id={{ root.org_id }}">API Keys</a> page.</p>
-    {% for child in children %}
-    <section class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-4">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="min-w-0"><h2 class="text-lg font-semibold"><a class="link" href="/@{{ child.slug }}">{{ child.name }}</a></h2><p class="text-sm text-gray-500 dark:text-gray-400 break-all">@{{ child.slug }} · <span class="badge {% if child.lifecycle_state == "active" %}badge-success{% else if child.lifecycle_state == "suspended" %}badge-pending{% else %}badge-neutral{% endif %}">{{ child.lifecycle_state }}</span> · {{ child.org_id }}</p></div>
-            <form action="/switch-org/{{ child.org_id }}" method="post"><button class="btn btn-secondary" type="submit">Open workspace</button></form>
-        </div>
-        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/lifecycle" class="flex flex-wrap items-end gap-2">
+
+    <!-- Find and create -->
+    <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4">
+        <form method="get" action="/@{{ root.slug }}/children" class="flex flex-wrap items-end gap-2" role="search">
+            <label class="form-label w-full sm:w-auto">Find
+                <input class="form-input block mt-1 w-full sm:w-80" type="search" name="search" value="{{ search }}" placeholder="Name, handle or customer reference" maxlength="200">
+            </label>
             <label class="form-label">Status
                 <select class="form-select block mt-1" name="state">
-                    <option value="active" {% if child.lifecycle_state == "active" %}selected{% endif %}>Active</option>
-                    <option value="suspended" {% if child.lifecycle_state == "suspended" %}selected{% endif %}>Suspended</option>
-                    <option value="archived" {% if child.lifecycle_state == "archived" %}selected{% endif %}>Archived</option>
+                    <option value="" {% if state == "" %}selected{% endif %}>Any</option>
+                    <option value="active" {% if state == "active" %}selected{% endif %}>Active</option>
+                    <option value="suspended" {% if state == "suspended" %}selected{% endif %}>Suspended</option>
+                    <option value="archived" {% if state == "archived" %}selected{% endif %}>Archived</option>
                 </select>
             </label>
-            <button class="btn btn-secondary" type="submit">Update status</button>
+            <button class="btn btn-secondary" type="submit">Find</button>
+            {% if filtered %}<a class="link text-sm pb-2" href="/@{{ root.slug }}/children">Clear</a>{% endif %}
         </form>
-        <p class="text-sm text-gray-500 dark:text-gray-400">{{ root.name }} administrators have inherited access. Assign other account members below. Restore an archived sub-organization to suspended before activating it.</p>
-        <form method="post" action="/@{{ root.slug }}/children/{{ child.org_id }}/access" class="flex flex-wrap items-end gap-2">
-            <label class="form-label">Member
-                <select class="form-select block mt-1 max-w-full" name="user_id" required>
-                    {% for member in members %}<option value="{{ member.user_id }}">{{ member.email }}</option>{% endfor %}
-                </select>
-            </label>
-            <label class="form-label">Access
-                <select class="form-select block mt-1" name="role_id"><option value="1">Member</option><option value="2">Administrator</option><option value="0">Remove explicit access</option></select>
-            </label>
-            <button class="btn btn-secondary" type="submit">Save access</button>
-        </form>
-        <a class="link text-sm" href="/@{{ child.slug }}/users">View explicit access</a>
-    </section>
-    {% endfor %}
-    {% if children.is_empty() %}<p class="text-sm text-gray-500 dark:text-gray-400">No sub-organizations yet.</p>{% endif %}
+        <a href="/@{{ root.slug }}/children/new" class="btn btn-primary self-start sm:self-auto">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Create Sub-organization
+        </a>
+    </div>
+
+    {% if rows.len() > 0 %}
+    <!-- Sub-organizations: desktop table -->
+    <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead class="table-head">
+                    <tr>
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Sub-organization</th>
+                        <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                        <th scope="col" class="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Running</th>
+                        <th scope="col" class="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Failed, 24h</th>
+                        <th scope="col" class="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Runs, month</th>
+                        <th scope="col" class="hidden lg:table-cell px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Storage</th>
+                        <th scope="col" class="hidden lg:table-cell px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Last run</th>
+                        <th scope="col" class="relative px-4 lg:px-6 py-3"><span class="sr-only">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for row in rows %}
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150" data-overview-org="{{ row.org_id }}">
+                        <td class="px-4 lg:px-6 py-3">
+                            <a href="/@{{ root.slug }}/children/{{ row.org_id }}" class="text-sm font-medium text-gray-900 dark:text-white hover:underline">{{ row.name }}</a>
+                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 break-all">@{{ row.slug }}{% match row.external_id %}{% when Some with (reference) %} · {{ reference }}{% when None %}{% endmatch %}</div>
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap"><span class="badge {{ row.lifecycle_badge }}">{{ row.lifecycle }}</span></td>
+                        <td class="px-4 py-3 text-right text-sm text-gray-900 dark:text-gray-100 tabular-nums">{{ row.running|commafy }}</td>
+                        <td class="px-4 py-3 text-right text-sm text-gray-900 dark:text-gray-100 tabular-nums">{{ row.failed_24h|commafy }}</td>
+                        <td class="px-4 py-3 text-right text-sm text-gray-900 dark:text-gray-100 tabular-nums">{{ row.month_runs|commafy }}</td>
+                        <td class="hidden lg:table-cell px-4 py-3 text-right text-sm text-gray-900 dark:text-gray-100 whitespace-nowrap tabular-nums">{{ row.file_bytes }}</td>
+                        <td class="hidden lg:table-cell px-4 py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">{{ row.last_run }}</td>
+                        <td class="px-4 lg:px-6 py-3 whitespace-nowrap text-right text-xs font-medium">
+                            <a href="/@{{ root.slug }}/children/{{ row.org_id }}" class="link">Manage<span class="sr-only">, {{ row.name }}</span></a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Sub-organizations: mobile cards -->
+    <div class="md:hidden space-y-3">
+        {% for row in rows %}
+        <a href="/@{{ root.slug }}/children/{{ row.org_id }}" class="block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+            <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                    <h2 class="text-sm font-semibold text-gray-900 dark:text-white truncate">{{ row.name }}</h2>
+                    <div class="text-xs text-gray-500 dark:text-gray-400 break-all">@{{ row.slug }}</div>
+                </div>
+                <span class="badge {{ row.lifecycle_badge }}">{{ row.lifecycle }}</span>
+            </div>
+            <dl class="mt-3 grid grid-cols-3 gap-2 text-xs text-gray-500 dark:text-gray-400">
+                <div><dt>Running</dt><dd class="text-sm text-gray-900 dark:text-gray-100">{{ row.running|commafy }}</dd></div>
+                <div><dt>Failed, 24h</dt><dd class="text-sm text-gray-900 dark:text-gray-100">{{ row.failed_24h|commafy }}</dd></div>
+                <div><dt>Runs, month</dt><dd class="text-sm text-gray-900 dark:text-gray-100">{{ row.month_runs|commafy }}</dd></div>
+            </dl>
+        </a>
+        {% endfor %}
+    </div>
+
+    {% if has_prev_page || has_next_page %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 mt-4">
+        <div class="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
+            {% call ui::pagination(page_prefix, "", current_page_num, start_page, end_page, has_prev_page, has_next_page, rows.len(), matching_children, "sub-organizations") %}{% endcall %}
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 sm:p-8">
+        <div class="empty-state">
+            {% if filtered %}
+            {% call ui::empty_state_header("M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z", "No matches", "No sub-organization matches that search.") %}{% endcall %}
+            <a href="/@{{ root.slug }}/children" class="btn btn-secondary">Clear search</a>
+            {% else if total_children > 0 %}
+            {# A page number past the end of the list, from an old link. #}
+            {% call ui::empty_state_header("M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z", "Nothing on this page", "The list ends before this page.") %}{% endcall %}
+            <a href="/@{{ root.slug }}/children" class="btn btn-secondary">Go to the first page</a>
+            {% else %}
+            {% call ui::empty_state_header("M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21", "No sub-organizations yet", "Create one for each customer or team that needs its own environments and data.") %}{% endcall %}
+            <a href="/@{{ root.slug }}/children/new" class="btn btn-primary">Create Sub-organization</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <p class="mt-4 sm:mt-6 text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+        Runs this month use the UTC calendar month. To create sub-organizations from your own systems, use an <a class="link" href="/keys/org?org_id={{ root.org_id }}">org API key</a>.
+    </p>
 </div>
 {% endblock %}

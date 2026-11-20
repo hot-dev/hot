@@ -1,4 +1,4 @@
-//! The API Keys page: environment key lifecycle, and org keys beside them.
+//! The API Keys page: environment key lifecycle, and org keys on their own tab.
 use axum::http::StatusCode;
 use hot::db::api_key::ApiKey;
 use hot::db::org::{CreateChild, OrgLifecycle};
@@ -44,6 +44,17 @@ async fn env_key(client: &TestClient, td: &TestData) -> (Uuid, String) {
 
 fn in_env(path: &str, td: &TestData) -> String {
     format!("{path}?org_id={}&env_id={}", td.org_id, td.env_id)
+}
+
+/// The value of a hidden form field on a page.
+fn field(body: &str, name: &str) -> String {
+    body.split(&format!("name=\"{name}\" value=\""))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {name} field"))
+        .split('"')
+        .next()
+        .unwrap()
+        .to_owned()
 }
 
 fn issued_secret(body: &str) -> String {
@@ -183,15 +194,6 @@ async fn a_revoked_key_cannot_be_turned_back_on_but_a_disabled_one_can() {
 async fn a_new_key_can_expire_and_shows_when() {
     let (mut client, td) = admin_client().await;
     let new = in_env("/keys/new", &td);
-    let field = |body: &str, name: &str| {
-        body.split(&format!("name=\"{name}\" value=\""))
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap()
-            .to_owned()
-    };
     let page = client.get(&new).await;
     let (key_id, handoff) = (
         field(&page.body, "api_key_id"),
@@ -232,7 +234,7 @@ async fn a_new_key_can_expire_and_shows_when() {
 }
 
 #[tokio::test]
-async fn org_keys_live_on_the_api_keys_page_and_minted_keys_say_so() {
+async fn org_keys_have_their_own_tab_and_minted_keys_say_so() {
     let (mut client, td) = admin_client().await;
     let root = Org::get_org_uncached(client.db(), &td.org_id)
         .await
@@ -267,42 +269,146 @@ async fn org_keys_live_on_the_api_keys_page_and_minted_keys_say_so() {
     .await
     .unwrap();
 
+    // The environment tab lists environment keys only, and links a minted
+    // key to the org key that made it.
     let page = client.get(&in_env("/keys", &td)).await;
     page.assert_status(StatusCode::OK);
-    assert!(page.body.contains("provisioner"), "{}", page.body);
+    assert!(page.body.contains("minted"), "{}", page.body);
+    assert!(!page.body.contains("provisioner"), "{}", page.body);
     assert!(page.body.contains("Created by org key"), "{}", page.body);
-    assert!(page.body.contains(&format!("/@{}/org-api-keys", root.slug)));
+    assert!(
+        page.body
+            .contains(&format!("/keys/org/{}/edit", key.org_api_key_id)),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains("href=\"/keys/org\""), "{}", page.body);
+
+    let page = client.get(&in_env("/keys/org", &td)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains("provisioner"), "{}", page.body);
+    assert!(!page.body.contains("minted"), "{}", page.body);
+    assert!(page.body.contains(">Environment keys<"), "{}", page.body);
 
     let page = client.get(&format!("/@{}/children", root.slug)).await;
     page.assert_status(StatusCode::OK);
     assert!(
-        !page.body.contains("org-api-keys"),
-        "no second place to manage them"
+        page.body
+            .contains(&format!("/keys/org?org_id={}", root.org_id))
     );
-    assert!(page.body.contains(&format!("/keys?org_id={}", root.org_id)));
 
-    // A rejected form comes back to this page with what was entered.
     let page = client
-        .post_form(
-            &format!("/@{}/org-api-keys", root.slug),
-            &[("description", "bad"), ("permissions", "not json")],
-        )
+        .get(&in_env(
+            &format!("/keys/org/{}/edit", key.org_api_key_id),
+            &td,
+        ))
         .await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains("provisioner"), "{}", page.body);
+    // An unknown key is a 404, not a redirect to somewhere else.
+    client
+        .get(&in_env(&format!("/keys/org/{}/edit", Uuid::now_v7()), &td))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+/// The new-org-key page shows the secret, and the form commits its hash: the
+/// secret a person copied is the one that works, and a form posted twice makes
+/// one key.
+#[tokio::test]
+async fn a_new_org_key_works_with_the_secret_its_page_showed() {
+    let (mut client, td) = admin_client().await;
+    let new = in_env("/keys/org/new", &td);
+    let shown = |body: &str| {
+        body.split("<code id=\"generated-key\"")
+            .nth(1)
+            .and_then(|rest| rest.split('>').nth(1))
+            .and_then(|rest| rest.split('<').next())
+            .expect("the page shows the new key")
+            .to_string()
+    };
+
+    // A rejected form comes back with what was entered, and a new key.
+    let page = client.get(&new).await;
+    page.assert_status(StatusCode::OK);
+    let rejected = [
+        ("org_api_key_id", field(&page.body, "org_api_key_id")),
+        ("handoff_token", field(&page.body, "handoff_token")),
+        ("description", "bad".to_string()),
+        ("permissions", "not json".to_string()),
+    ];
+    let rejected: Vec<_> = rejected.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let page = client.post_form(&new, &rejected).await;
     page.assert_status(StatusCode::BAD_REQUEST);
     assert!(page.body.contains("must be a JSON object"), "{}", page.body);
     assert!(page.body.contains("not json"), "{}", page.body);
+    assert!(page.body.contains("value=\"bad\""), "{}", page.body);
 
-    let page = client
-        .post_form(
-            &format!("/@{}/org-api-keys", root.slug),
-            &[
-                ("description", "second"),
-                ("permissions", r#"{"org:*": ["read"]}"#),
-            ],
-        )
-        .await;
-    page.assert_status(StatusCode::OK);
-    assert!(issued_secret(&page.body).starts_with("hot_"));
+    // Environment-key grants aren't org-key grants.
+    let unqualified = [
+        ("org_api_key_id", field(&page.body, "org_api_key_id")),
+        ("handoff_token", field(&page.body, "handoff_token")),
+        ("description", "bad".to_string()),
+        ("permissions", r#"{"run:*": ["read"]}"#.to_string()),
+    ];
+    let unqualified: Vec<_> = unqualified.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let page = client.post_form(&new, &unqualified).await;
+    page.assert_status(StatusCode::BAD_REQUEST);
+    assert!(
+        page.body.contains("Unable to create the org API key"),
+        "{}",
+        page.body
+    );
+
+    let page = client.get(&new).await;
+    let token = shown(&page.body);
+    let id: Uuid = field(&page.body, "org_api_key_id").parse().unwrap();
+    assert!(
+        OrgApiKey::verify_token(client.db(), &token).await.is_err(),
+        "nothing exists until the form is submitted"
+    );
+    let accepted = [
+        ("org_api_key_id", id.to_string()),
+        ("handoff_token", field(&page.body, "handoff_token")),
+        ("description", "second".to_string()),
+        ("expires_in_days", "30".to_string()),
+        ("permissions", r#"{"org:*": ["read"]}"#.to_string()),
+    ];
+    let accepted: Vec<_> = accepted.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let list = format!("/keys/org?org_id={}", td.org_id);
+    client
+        .post_form(&new, &accepted)
+        .await
+        .assert_redirect_to(&list);
+    let verified = OrgApiKey::verify_token(client.db(), &token)
+        .await
+        .expect("the secret the page showed works");
+    assert_eq!(verified.org_api_key_id, id);
+    assert!(verified.expires_at.is_some());
+
+    // The browser's back button and a second submit change nothing.
+    client
+        .post_form(&new, &accepted)
+        .await
+        .assert_redirect_to(&list);
+    let keys = OrgApiKey::list_for_org(client.db(), td.org_id)
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 1, "one key however often the form is posted");
+
+    // A handoff for one key doesn't create another.
+    let mut forged = accepted.clone();
+    let other = Uuid::now_v7().to_string();
+    forged[0] = ("org_api_key_id", other.as_str());
+    client
+        .post_form(&new, &forged)
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    assert!(
+        note_types(&client, &td)
+            .await
+            .contains(&"org-api-key.create".to_string())
+    );
 }
 
 #[tokio::test]
@@ -323,12 +429,20 @@ async fn org_keys_appear_only_for_a_parent_organization() {
     .await
     .unwrap();
     let page = client.get(&format!("/keys?org_id={}", td.org_id)).await;
-    assert!(page.body.contains("id=\"org-api-keys\""), "{}", page.body);
-    let page = client
-        .get(&format!("/keys?org_id={}", child.org.org_id))
-        .await;
+    assert!(page.body.contains("href=\"/keys/org\""), "{}", page.body);
+    let in_child = format!("?org_id={}", child.org.org_id);
+    let page = client.get(&format!("/keys{in_child}")).await;
     page.assert_status(StatusCode::OK);
-    assert!(!page.body.contains("id=\"org-api-keys\""), "{}", page.body);
+    assert!(!page.body.contains("href=\"/keys/org\""), "{}", page.body);
+    // A sub-organization has no org keys: its tab leads back to its own keys,
+    // and nothing there can be created.
+    let page = client.get(&format!("/keys/org{in_child}")).await;
+    assert!(page.is_redirect(), "{}", page.body);
+    assert!(page.location().unwrap().starts_with("/keys?"));
+    client
+        .get(&format!("/keys/org/new{in_child}"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -359,13 +473,34 @@ async fn a_suspended_account_can_still_find_and_revoke_its_keys() {
     .await
     .unwrap();
 
-    let page = client.get(&in_env("/keys", &td)).await;
+    client
+        .get(&in_env("/keys", &td))
+        .await
+        .assert_status(StatusCode::OK);
+    let page = client.get(&in_env("/keys/org", &td)).await;
     page.assert_status(StatusCode::OK);
     assert!(page.body.contains("leaked"), "{}", page.body);
     client
         .get(&in_env(&format!("/keys/{env_key_id}/edit"), &td))
         .await
         .assert_status(StatusCode::OK);
+    let org_key_page = in_env(&format!("/keys/org/{}/edit", org_key.org_api_key_id), &td);
+    client
+        .get(&org_key_page)
+        .await
+        .assert_status(StatusCode::OK);
+    // Issuing a credential waits for reactivation.
+    client
+        .get(&in_env("/keys/org/new", &td))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client
+        .post_form(
+            &in_env(&format!("/keys/org/{}/rotate", org_key.org_api_key_id), &td),
+            &[("overlap_seconds", "0")],
+        )
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
 
     // Rotating adds a credential, so it waits for reactivation.
     client
@@ -387,13 +522,11 @@ async fn a_suspended_account_can_still_find_and_revoke_its_keys() {
     );
     client
         .post_form(
-            &format!(
-                "/@{}/org-api-keys/{}/revoke",
-                root.slug, org_key.org_api_key_id
-            ),
+            &in_env(&format!("/keys/org/{}/revoke", org_key.org_api_key_id), &td),
             &[],
         )
-        .await;
+        .await
+        .assert_redirect_to(&format!("/keys/org?org_id={}", root.org_id));
     let stored = OrgApiKey::get(client.db(), org_key.org_api_key_id)
         .await
         .unwrap();

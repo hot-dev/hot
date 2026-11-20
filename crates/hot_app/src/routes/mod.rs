@@ -281,31 +281,29 @@ pub fn routes(
         .route("/@{org_slug}", get(orgs_detail_handler))
         .route(
             "/@{org_slug}/lifecycle",
-            axum::routing::post(crate::handlers::sub_orgs::root_lifecycle),
+            get(crate::handlers::sub_orgs::root_lifecycle_page)
+                .post(crate::handlers::sub_orgs::root_lifecycle),
         )
         .route(
             "/@{org_slug}/children",
-            get(crate::handlers::sub_orgs::list).post(crate::handlers::sub_orgs::create),
+            get(crate::handlers::sub_orgs::list),
+        )
+        .route(
+            "/@{org_slug}/children/new",
+            get(crate::handlers::sub_orgs::new).post(crate::handlers::sub_orgs::create),
+        )
+        .route(
+            "/@{org_slug}/children/{child_id}",
+            get(crate::handlers::sub_orgs::detail),
         )
         .route(
             "/@{org_slug}/children/{child_id}/lifecycle",
-            axum::routing::post(crate::handlers::sub_orgs::lifecycle),
+            get(crate::handlers::sub_orgs::lifecycle_page)
+                .post(crate::handlers::sub_orgs::lifecycle),
         )
         .route(
             "/@{org_slug}/children/{child_id}/access",
-            axum::routing::post(crate::handlers::sub_orgs::grant),
-        )
-        .route(
-            "/@{org_slug}/org-api-keys",
-            axum::routing::post(create_org_api_key),
-        )
-        .route(
-            "/@{org_slug}/org-api-keys/{key_id}/revoke",
-            axum::routing::post(revoke_org_api_key),
-        )
-        .route(
-            "/@{org_slug}/org-api-keys/{key_id}/rotate",
-            axum::routing::post(rotate_org_api_key),
+            get(crate::handlers::sub_orgs::access_page).post(crate::handlers::sub_orgs::grant),
         )
         .route(
             "/@{org_slug}/edit",
@@ -363,6 +361,20 @@ pub fn routes(
         )
         .route("/keys", get(keys_list_handler))
         .route("/keys/new", get(keys_new_handler).post(keys_create_handler))
+        .route("/keys/org", get(org_keys_list_handler))
+        .route(
+            "/keys/org/new",
+            get(org_keys_new_handler).post(org_keys_create_handler),
+        )
+        .route("/keys/org/{key_id}/edit", get(org_key_detail_handler))
+        .route(
+            "/keys/org/{key_id}/rotate",
+            axum::routing::post(org_key_rotate_handler),
+        )
+        .route(
+            "/keys/org/{key_id}/revoke",
+            axum::routing::post(org_key_revoke_handler),
+        )
         .route(
             "/keys/{key_id}/edit",
             get(keys_edit_handler).post(keys_update_handler),

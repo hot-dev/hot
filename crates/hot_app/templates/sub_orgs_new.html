@@ -1,0 +1,41 @@
+{% extends "private_layout.html" %}
+
+{% block content %}
+<div class="py-6">
+    <div class="max-w-3xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            <h1 class="text-lg sm:text-xl font-bold text-gray-900 dark:text-white">Create sub-organization</h1>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">A sub-organization of {{ root.name }} with its own environments, deployments, credentials and data. {{ root.name }} keeps billing and account members.</p>
+
+            {% match form.error %}{% when Some with (error) %}
+            <div class="error-box mt-4" role="alert">{{ error }}</div>
+            {% when None %}{% endmatch %}
+
+            <form method="post" action="/@{{ root.slug }}/children/new" class="mt-6 space-y-4 sm:space-y-6">
+                <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+                <div>
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Name <span class="text-red-500">*</span></label>
+                    <input class="form-input block w-full" id="name" name="name" value="{{ form.child_name }}" required maxlength="200" placeholder="e.g., Customer One">
+                </div>
+                <div>
+                    <label for="slug" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Handle <span class="text-red-500">*</span></label>
+                    <div class="flex items-center gap-1">
+                        <span class="text-sm text-gray-500 dark:text-gray-400">@</span>
+                        <input class="form-input block w-full font-mono" id="slug" name="slug" value="{{ form.child_slug }}" required minlength="2" maxlength="32" pattern="[a-z0-9][a-z0-9\-]*" aria-describedby="child-handle-help" placeholder="customer-one">
+                    </div>
+                    <p id="child-handle-help" class="mt-1 text-sm text-gray-500 dark:text-gray-400">2 to 32 lowercase letters, numbers and hyphens. The workspace URL is /@handle.</p>
+                </div>
+                <div>
+                    <label for="external_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Customer reference</label>
+                    <input class="form-input block w-full" id="external_id" name="external_id" value="{{ form.child_external_id }}" maxlength="200" aria-describedby="child-reference-help">
+                    <p id="child-reference-help" class="mt-1 text-sm text-gray-500 dark:text-gray-400">Optional. Your own ID for this customer, to find the sub-organization from your systems. Each reference is used once.</p>
+                </div>
+                <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                    <a href="/@{{ root.slug }}/children" class="btn btn-secondary">Cancel</a>
+                    <button class="btn btn-primary" type="submit">Create Sub-organization</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

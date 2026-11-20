@@ -1,4 +1,5 @@
 {% extends "private_layout.html" %}
+{%- import "components/permission_editor.html" as perm -%}
 
 {% block content %}
 <div class="py-6">
@@ -127,7 +128,7 @@
                     </div>
 
                     <!-- Access Level with Permissions Builder -->
-                    <div x-data="permissionBuilder()">
+                    <div x-data="permissionEditor({ kind: 'env', accessLevel: {{ access_level|js }}, initial: {{ permissions|js }}, pathOptions: { mcp: {{ mcp_tool_options|js }}, webhook: {{ webhook_options|js }} } })">
                         <fieldset>
                             <legend class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Access Level</legend>
                             <div class="space-y-3">
@@ -152,124 +153,11 @@
                             </div>
                         </fieldset>
 
-                        <!-- Permissions Builder (shown when restricted) -->
-                        <div x-show="accessLevel === 'restricted'" x-cloak class="mt-4 ml-7">
-                            <input type="hidden" name="permissions" :value="permissionsToJSON()">
-
-                            <!-- Presets -->
-                            <div class="mb-3">
-                                <div class="flex items-center justify-between mb-1.5">
-                                    <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Quick Presets</label>
-                                    <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
-                                </div>
-                                <div class="flex flex-wrap gap-1.5">
-                                    <button type="button" @click="applyPreset('read-only')" class="chip">Read Only</button>
-                                    <button type="button" @click="applyPreset('mcp')" class="chip">MCP Tools</button>
-                                    <button type="button" @click="applyPreset('webhooks')" class="chip">Webhooks</button>
-                                    <button type="button" @click="applyPreset('streams')" class="chip">Streams</button>
-                                    <button type="button" @click="applyPreset('events')" class="chip">Events</button>
-                                    <button type="button" @click="applyPreset('runs')" class="chip">Runs</button>
-                                    <button type="button" @click="applyPreset('build-deploy')" class="chip">Build/Deploy</button>
-                                </div>
-                            </div>
-
-                            <!-- Rule Builder -->
-                            <div class="flex items-center justify-between mb-1">
-                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Permission Rules</label>
-                                <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-700 dark:text-hot-red-400 hover:text-hot-red-800 dark:hover:text-hot-red-300 transition-colors">
-                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
-                                    </svg>
-                                    Add Rule
-                                </button>
-                            </div>
-
-                            <template x-if="rules.length === 0">
-                                <div class="text-sm text-gray-500 dark:text-gray-400 italic border border-dashed border-gray-300 dark:border-gray-600 rounded-md px-4 py-6 text-center">
-                                    No permission rules. Click "Add Rule" or use a preset above.
-                                </div>
-                            </template>
-
-                            <template x-if="rules.length > 0">
-                                <div class="border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden">
-                                    <template x-for="(rule, idx) in rules" :key="idx">
-                                        <div class="flex flex-col sm:flex-row sm:items-start gap-2 px-3 py-2.5 bg-white dark:bg-gray-800" :class="idx > 0 && 'border-t border-gray-200 dark:border-gray-700'">
-                                            <div class="sm:w-36 shrink-0">
-                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Resource</label>
-                                                <select x-model="rule.type" @change="onTypeChange(rule)" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
-                                                    <option value="*">All (*)</option>
-                                                    <option value="mcp">mcp</option>
-                                                    <option value="webhook">webhook</option>
-                                                    <option value="stream">stream</option>
-                                                    <option value="event">event</option>
-                                                    <option value="run">run</option>
-                                                    <option value="call">call</option>
-                                                    <option value="project">project</option>
-                                                    <option value="build">build</option>
-                                                    <option value="context">context</option>
-                                                    <option value="key">key</option>
-                                                    <option value="session">session</option>
-                                                    <option value="env">env</option>
-                                                    <option value="file">file</option>
-                                                    <option value="blob">blob</option>
-                                                    <option value="domain">domain</option>
-                                                </select>
-                                            </div>
-                                            <div class="sm:w-48 shrink-0">
-                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Path</label>
-                                                <template x-if="pathOptions(rule.type)">
-                                                    <select x-model="rule.path" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
-                                                        <option value="*">* (all)</option>
-                                                        <option :value="rule.path" x-text="rule.path + ' (not deployed)'" x-show="rule.path !== '*'" :selected="rule.path !== '*'"></option>
-                                                        <template x-for="group in pathOptions(rule.type)" :key="group.service">
-                                                            <optgroup :label="group.service">
-                                                                <option :value="group.service + '/*'" x-text="group.service + '/*'"></option>
-                                                                <template x-for="item in group.items" :key="item">
-                                                                    <option :value="group.service + '/' + item" x-text="group.service + '/' + item"></option>
-                                                                </template>
-                                                            </optgroup>
-                                                        </template>
-                                                    </select>
-                                                </template>
-                                                <template x-if="!pathOptions(rule.type)">
-                                                    <input type="text" x-model="rule.path" placeholder="*" :disabled="rule.type === '*'" :class="rule.type === '*' && 'opacity-50 cursor-not-allowed'" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
-                                                </template>
-                                            </div>
-                                            <div class="flex-1 min-w-0">
-                                                <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</label>
-                                                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
-                                                    <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
-                                                        <span class="text-xs font-medium">All</span>
-                                                    </label>
-                                                    <template x-for="action in validActions(rule.type)" :key="action">
-                                                        <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-700 focus:ring-hot-red-500 h-3.5 w-3.5">
-                                                            <span class="text-xs" x-text="action"></span>
-                                                        </label>
-                                                    </template>
-                                                </div>
-                                            </div>
-                                            <div class="shrink-0 flex items-start">
-                                                <label x-show="idx === 0" class="block text-xs font-medium text-transparent mb-1 select-none">&nbsp;</label>
-                                                <button type="button" @click="rules.splice(idx, 1)" class="p-1 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors" title="Remove rule">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                                    </svg>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </template>
-                                </div>
-                            </template>
-                            <template x-if="rules.some(r => r.actions.length === 0)">
-                                <p class="mt-1 text-xs text-amber-700 dark:text-amber-400">
-                                    Rules with no actions selected will be ignored.
-                                </p>
-                            </template>
-
-                            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                                Empty means no access. Use <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">*</code> in path for wildcard matching.
+                        <!-- Permission rules (shown when restricted) -->
+                        <div x-show="accessLevel === 'restricted'" x-cloak class="mt-4 sm:ml-7">
+                            {% call perm::editor() %}{% endcall %}
+                            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                                No rules means no access. Use <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">*</code> in a path for wildcard matching.
                             </p>
                         </div>
                     </div>
@@ -321,10 +209,10 @@
                 </div>
             </form>
             {% endif %}
-            <form method="post" action="/keys/{{ row.key.api_key_id }}/revoke">
+            <form method="post" action="/keys/{{ row.key.api_key_id }}/revoke" id="revoke-form">
                 <h3 class="text-base font-medium text-gray-900 dark:text-white">Revoke key</h3>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">The key stops working at once, along with its service keys and sessions. This is permanent. To pause a key instead, set its status to Disabled.</p>
-                <button class="btn btn-secondary mt-3" type="submit">Revoke permanently</button>
+                <button class="btn btn-danger mt-3" type="button" id="revoke-button" data-description="{{ row.key.description }}">Revoke permanently</button>
             </form>
         </div>
         {% endif %}
@@ -352,139 +240,17 @@
         </div>
     </div>
 </div>
+{% if !row.revoked %}
 <script>
-function permissionBuilder() {
-    const VALID_ACTIONS = {
-        '*':       ['create', 'read', 'update', 'delete', 'execute'],
-        'mcp':     ['execute'],
-        'webhook': ['execute'],
-        'stream':  ['read'],
-        'event':   ['create', 'read'],
-        'run':     ['read'],
-        'call':    ['delete'],
-        'project': ['create', 'read', 'update', 'delete'],
-        'build':   ['create', 'read', 'execute'],
-        'context': ['create', 'read', 'update', 'delete'],
-        'key':     ['create', 'read', 'update', 'delete'],
-        'session': ['create', 'read', 'delete'],
-        'env':     ['read'],
-        'file':    ['create', 'read', 'delete'],
-        'blob':    ['read'],
-        'domain':  ['create', 'read', 'update', 'delete'],
-    };
-
-    const PRESETS = {
-        'read-only': [{ type: '*', path: '*', actions: ['read'] }],
-        'mcp': [{ type: 'mcp', path: '*', actions: ['execute'] }],
-        'events': [{ type: 'event', path: '*', actions: ['create', 'read'] }],
-        'streams': [{ type: 'stream', path: '*', actions: ['read'] }],
-        'runs': [{ type: 'run', path: '*', actions: ['read'] }],
-        'build-deploy': [{ type: 'build', path: '*', actions: ['create', 'read', 'execute'] }],
-        'webhooks': [{ type: 'webhook', path: '*', actions: ['execute'] }],
-    };
-
-    const PATH_OPTIONS = {
-        'mcp': {{ mcp_tool_options|js|safe }},
-        'webhook': {{ webhook_options|js|safe }},
-    };
-
-    // Parse existing permissions JSON into rules
-    function parseExistingPermissions(json) {
-        try {
-            const obj = JSON.parse(json);
-            const rules = [];
-            for (const [key, actions] of Object.entries(obj)) {
-                const colonIdx = key.indexOf(':');
-                if (colonIdx < 0) continue;
-                const type = key.substring(0, colonIdx);
-                const path = key.substring(colonIdx + 1);
-                rules.push({ type, path, actions: [...actions] });
-            }
-            return rules;
-        } catch (e) {
-            return [];
-        }
-    }
-
-    return {
-        accessLevel: {{ access_level|js|safe }},
-        rules: [],
-        init() {
-            if (this.accessLevel === 'restricted') {
-                const existingJson = {{ permissions|js|safe }};
-                if (typeof existingJson === 'string') {
-                    this.rules = parseExistingPermissions(existingJson);
-                } else if (typeof existingJson === 'object') {
-                    const rules = [];
-                    for (const [key, actions] of Object.entries(existingJson)) {
-                        const colonIdx = key.indexOf(':');
-                        if (colonIdx < 0) continue;
-                        const type = key.substring(0, colonIdx);
-                        const path = key.substring(colonIdx + 1);
-                        rules.push({ type, path, actions: [...actions] });
-                    }
-                    this.rules = rules;
-                }
-            }
-        },
-        validActions(type) {
-            return VALID_ACTIONS[type] || VALID_ACTIONS['*'];
-        },
-        pathOptions(type) {
-            return PATH_OPTIONS[type] || null;
-        },
-        addRule() {
-            this.rules.push({ type: 'mcp', path: '*', actions: ['execute'] });
-        },
-        applyPreset(name) {
-            const preset = PRESETS[name];
-            if (!preset) return;
-            for (const pr of preset) {
-                const path = pr.type === '*' ? '*' : (pr.path || '*');
-                const existing = this.rules.find(r => r.type === pr.type && r.path === path);
-                if (existing) {
-                    for (const action of pr.actions) {
-                        if (!existing.actions.includes(action) && !existing.actions.includes('*')) {
-                            existing.actions.push(action);
-                        }
-                    }
-                } else {
-                    this.rules.push({ type: pr.type, path: path, actions: [...pr.actions] });
-                }
-            }
-        },
-        onTypeChange(rule) {
-            const valid = this.validActions(rule.type);
-            rule.actions = [...valid];
-            rule.path = '*';
-        },
-        toggleAllActions(rule, checked) {
-            if (checked) {
-                rule.actions = ['*'];
-            } else {
-                rule.actions = [];
-            }
-        },
-        toggleAction(rule, action, checked) {
-            rule.actions = rule.actions.filter(a => a !== '*');
-            if (checked) {
-                if (!rule.actions.includes(action)) rule.actions.push(action);
-            } else {
-                rule.actions = rule.actions.filter(a => a !== action);
-            }
-        },
-        permissionsToJSON() {
-            if (this.accessLevel !== 'restricted') return '';
-            const obj = {};
-            for (const rule of this.rules) {
-                if (rule.actions.length === 0) continue;
-                const path = rule.type === '*' ? '*' : (rule.path.trim() || '*');
-                const key = rule.type + ':' + path;
-                obj[key] = [...rule.actions];
-            }
-            return Object.keys(obj).length > 0 ? JSON.stringify(obj) : '';
-        },
-    };
-}
+document.getElementById('revoke-button').addEventListener('click', function () {
+    showConfirm(
+        'Revoke API key',
+        'Permanently revoke "' + this.dataset.description + '"? It stops working at once, along with its service keys and sessions. This cannot be undone.',
+        function () { document.getElementById('revoke-form').submit(); },
+        { confirmText: 'Revoke', type: 'warning', destructive: true }
+    );
+});
 </script>
+{% endif %}
+{% call perm::script() %}{% endcall %}
 {% endblock %}

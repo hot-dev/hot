@@ -10,11 +10,12 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Duration, Utc};
-use hot::db::api_key::{ApiKey, ApiKeyError};
+use hot::db::api_key::{ApiKey, ApiKeyError, RotatedSecret};
 use hot::db::env::Env;
 use hot::db::org::Org;
 use hot::db::org_api_key::{
     CreateOrgApiKey, KeyStatus, MAX_ROTATION_OVERLAP_SECONDS, OrgApiKey, OrgApiKeyError,
+    PreparedOrgKey,
 };
 use hot::db::org_note::OrgNote;
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
@@ -204,103 +205,48 @@ async fn org_keys_root(db: &DatabasePool, session: &Session) -> Option<Org> {
         .then(|| org.clone())
 }
 
-/// What the org key form submitted, when it comes back rejected.
-#[derive(Default)]
-struct OrgKeyFormValues {
-    description: String,
-    permissions: Option<String>,
-    expires_in_days: String,
+/// A page that shows a key secret: keep it out of caches and Referer headers.
+fn secret_page(status: StatusCode, html: String) -> Response {
+    (
+        status,
+        [
+            ("Cache-Control", "no-store"),
+            ("Referrer-Policy", "no-referrer"),
+        ],
+        Html(html),
+    )
+        .into_response()
 }
 
-async fn org_keys_section(
-    db: &DatabasePool,
-    session: &Session,
-    root: Org,
-    form: OrgKeyFormValues,
-) -> Result<Option<templates::OrgKeysSection>, Response> {
-    let keys = match OrgApiKey::list_for_user(db, root.org_id, session.current_user_id()).await {
-        Ok(keys) => keys,
-        Err(OrgApiKeyError::Unauthorized) => return Ok(None),
-        Err(_) => return Err(keys_load_failed(session)),
+/// The page that shows a rotated key's new secret, once.
+fn rotated_secret_page(
+    page_context: templates::PrivatePageContext,
+    heading: &str,
+    note: &str,
+    token: String,
+    back_url: String,
+    back_label: &str,
+) -> Response {
+    let template = templates::KeySecret {
+        title: "New Secret",
+        page_context,
+        heading,
+        note,
+        token,
+        back_url,
+        back_label,
     };
-    let mut rows = Vec::with_capacity(keys.len());
-    for key in keys {
-        let status = key
-            .status(db)
-            .await
-            .map_err(|_| keys_load_failed(session))?;
-        let (status_label, status_badge) = status_view(status);
-        rows.push(templates::OrgApiKeyRow {
-            status_label,
-            status_badge,
-            expires_at: key
-                .expires_at
-                .map(|at| super::sub_orgs::display_time(session, &at)),
-            previous_secret_expires_at: key
-                .previous_secret_expires_at()
-                .filter(|_| status.is_active())
-                .map(|at| super::sub_orgs::display_time(session, &at)),
-            revocable: status.is_active(),
-            key,
-        });
-    }
-    let form_open = form.permissions.is_some();
-    let example = || {
-        serde_json::to_string_pretty(&serde_json::json!({
-            "org:*": ["create", "read", "update"],
-            "org:*/env:*": ["create", "read"],
-            "org:*/env:*/api-key:*": ["create", "read", "update", "delete"],
-            "org:*/env:*/event:*": ["create"],
-            "org:*/env:*/run:*": ["read"],
-        }))
-        .unwrap_or_default()
-    };
-    Ok(Some(templates::OrgKeysSection {
-        root,
-        rows,
-        permissions: form.permissions.unwrap_or_else(example),
-        description: form.description,
-        expires_in_days: form.expires_in_days,
-        form_open,
-    }))
+    secret_page(StatusCode::OK, template.render().unwrap())
 }
 
-/// What a form handler sends back to the API Keys page.
-#[derive(Default)]
-struct KeysPageState {
-    issued_secret: Option<templates::IssuedSecret>,
-    error: Option<String>,
-    org_form: OrgKeyFormValues,
-}
-
-impl KeysPageState {
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            error: Some(message.into()),
-            ..Self::default()
-        }
-    }
-
-    fn issued(heading: &'static str, note: &'static str, token: String) -> Self {
-        Self {
-            issued_secret: Some(templates::IssuedSecret {
-                heading,
-                note,
-                token,
-            }),
-            ..Self::default()
-        }
-    }
-}
-
-/// Render the API Keys page: the workspace environment's keys and, for
-/// `root`, its org API keys.
+/// Render the Environment keys tab of the API Keys page: the workspace
+/// environment's keys. `root` decides whether the page offers the Org keys tab.
 async fn render_keys_page(
     db: &DatabasePool,
     session: &Session,
     params: &AHashMap<String, String>,
     root: Option<Org>,
-    state: KeysPageState,
+    error: Option<String>,
 ) -> Response {
     // Build breadcrumbs: <org> (<env>) / API Keys
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(session);
@@ -316,27 +262,40 @@ async fn render_keys_page(
     let mut api_keys = Vec::new();
     let mut total_keys = 0;
     if let Some(env) = &session.current_env {
-        let keys = ApiKey::get_api_keys_by_env(db, &env.env_id, Some(KEYS_PER_PAGE), Some(offset))
-            .await
-            .unwrap_or_default();
+        // Read under the environment's own scope: a handler on an organization
+        // route would otherwise see no keys and report an empty environment.
+        let scoped = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let keys = match ApiKey::get_api_keys_by_env(
+            &scoped,
+            &env.env_id,
+            Some(KEYS_PER_PAGE),
+            Some(offset),
+        )
+        .await
+        {
+            Ok(keys) => keys,
+            Err(error) => {
+                tracing::error!(%error, env_id = %env.env_id, "API key list failed");
+                return keys_load_failed(session);
+            }
+        };
         for key in keys {
             match key_row(db, session, env, key).await {
                 Ok(row) => api_keys.push(row),
                 Err(page) => return page,
             }
         }
-        total_keys = ApiKey::count_api_keys_by_env(db, &env.env_id)
-            .await
-            .unwrap_or_default();
+        total_keys = match ApiKey::count_api_keys_by_env(&scoped, &env.env_id).await {
+            Ok(total) => total,
+            Err(error) => {
+                tracing::error!(%error, env_id = %env.env_id, "API key count failed");
+                return keys_load_failed(session);
+            }
+        };
     }
-
-    let org_keys = match root {
-        Some(root) => match org_keys_section(db, session, root, state.org_form).await {
-            Ok(section) => section,
-            Err(page) => return page,
-        },
-        None => None,
-    };
 
     // Calculate pagination info
     let pagination = list_query::PaginationWindow::new(total_keys, &page);
@@ -346,7 +305,7 @@ async fn render_keys_page(
     let start_page = pagination.start_page;
     let end_page = pagination.end_page;
 
-    let status = if state.error.is_some() {
+    let status = if error.is_some() {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::OK
@@ -355,9 +314,9 @@ async fn render_keys_page(
         title: "API Keys",
         page_context: templates::PrivatePageContext::with_breadcrumbs("keys", session, breadcrumbs),
         api_keys,
-        org_keys,
-        issued_secret: state.issued_secret,
-        error_message: state.error,
+        keys_tab: "env",
+        org_keys_root: root,
+        error_message: error,
         is_admin: session.is_current_org_admin,
         current_page_num,
         total_pages,
@@ -368,16 +327,7 @@ async fn render_keys_page(
         total_keys,
     };
 
-    // The page can show a key secret: keep it out of caches and Referer headers.
-    (
-        status,
-        [
-            ("Cache-Control", "no-store"),
-            ("Referrer-Policy", "no-referrer"),
-        ],
-        Html(template.render().unwrap()),
-    )
-        .into_response()
+    (status, Html(template.render().unwrap())).into_response()
 }
 
 pub async fn keys_list_handler(
@@ -386,7 +336,7 @@ pub async fn keys_list_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
     let root = org_keys_root(&db, &session).await;
-    render_keys_page(&db, &session, &params, root, KeysPageState::default()).await
+    render_keys_page(&db, &session, &params, root, None).await
 }
 
 pub async fn keys_new_handler(
@@ -947,6 +897,22 @@ async fn key_action_refused(
     .await
 }
 
+/// What the new-secret page says about the secret it replaced.
+fn rotated_note(
+    session: &Session,
+    rotated: &RotatedSecret,
+    overlap: Duration,
+    tail: &str,
+) -> String {
+    let previous = if overlap.is_zero() {
+        "The previous secret has stopped working.".to_string()
+    } else {
+        let until = super::sub_orgs::display_time(session, &rotated.previous_secret_expires_at);
+        format!("The previous secret works until {until}.")
+    };
+    format!("It will not be shown again. {previous}{tail}")
+}
+
 fn overlap_running_message(session: &Session, until: &DateTime<Utc>) -> String {
     let until = super::sub_orgs::display_time(session, until);
     format!(
@@ -1008,13 +974,24 @@ pub async fn keys_rotate_handler(
     }
     match ApiKey::rotate(&db, &api_key_id, overlap, &session.current_user_id()).await {
         Ok(rotated) => {
-            let root = org_keys_root(&db, &session).await;
-            let state = KeysPageState::issued(
+            let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
+            breadcrumbs.push(templates::BreadcrumbItem::clickable(
+                "API Keys".to_string(),
+                "/keys".to_string(),
+            ));
+            breadcrumbs.push(templates::BreadcrumbItem::clickable(
+                key.description.clone(),
+                format!("/keys/{api_key_id}/edit"),
+            ));
+            breadcrumbs.push(templates::BreadcrumbItem::current("New secret".to_string()));
+            Ok(rotated_secret_page(
+                templates::PrivatePageContext::with_breadcrumbs("keys", &session, breadcrumbs),
                 "Save this API key's new secret now",
-                "It will not be shown again.",
+                &rotated_note(&session, &rotated, overlap, ""),
                 rotated.token,
-            );
-            Ok(render_keys_page(&db, &session, &AHashMap::new(), root, state).await)
+                format!("/keys?org_id={}&env_id={}", env.org_id, env.env_id),
+                "Back to API Keys",
+            ))
         }
         Err(ApiKeyError::OverlapRunning(until)) => {
             let message = overlap_running_message(&session, &until);
@@ -1062,112 +1039,522 @@ pub async fn keys_revoke_handler(
     Ok(keys_list_redirect(&session))
 }
 
+/// The new-org-key page shows a secret and the create form commits its hash,
+/// as the environment key page does. The token binds the hash to the user and
+/// the organization that saw the secret.
+#[derive(Serialize, Deserialize)]
+struct OrgKeyHandoff {
+    org_api_key_id: Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    key_hash: String,
+    exp: usize,
+}
+
+/// A key of its own, so an environment key handoff never redeems as an org
+/// key handoff or the other way round.
+fn org_key_handoff_secret() -> Result<Vec<u8>, String> {
+    let secret = crate::auth::get_session_secret()?;
+    Ok(format!("{secret}:org-api-key-handoff").into_bytes())
+}
+
+fn sign_org_key_handoff(
+    org_api_key_id: Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    key_hash: String,
+) -> Result<String, String> {
+    let claims = OrgKeyHandoff {
+        org_api_key_id,
+        user_id,
+        org_id,
+        key_hash,
+        exp: (Utc::now().timestamp() + API_KEY_HANDOFF_TTL_SECS) as usize,
+    };
+    let key = EncodingKey::from_secret(&org_key_handoff_secret()?)
+        .map_err(|e| format!("Failed to sign org key handoff: {e}"))?;
+    encode(&Header::new(Algorithm::HS256), &claims, &key)
+        .map_err(|e| format!("Failed to sign org key handoff: {e}"))
+}
+
+fn verify_org_key_handoff(
+    token: &str,
+    org_api_key_id: &Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+) -> Option<String> {
+    let secret = org_key_handoff_secret().ok()?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.leeway = 0;
+    let handoff =
+        decode::<OrgKeyHandoff>(token, &DecodingKey::from_secret(&secret).ok()?, &validation)
+            .ok()?
+            .claims;
+    if (handoff.org_api_key_id, handoff.user_id, handoff.org_id)
+        != (*org_api_key_id, user_id, org_id)
+    {
+        return None;
+    }
+    Some(handoff.key_hash)
+}
+
+/// The Org keys tab, bound to the organization that handled the request.
+fn org_keys_list_url(root: &Org) -> String {
+    format!("/keys/org?org_id={}", root.org_id)
+}
+
+/// The parent organization whose org keys the user manages, or the page that
+/// says they can't: org keys belong to a parent organization's administrators.
+async fn org_keys_root_or_refuse(db: &DatabasePool, session: &Session) -> Result<Org, Response> {
+    org_keys_root(db, session).await.ok_or_else(|| {
+        super::error_page(
+            session,
+            StatusCode::FORBIDDEN,
+            "Org API keys are managed by administrators of a parent organization",
+        )
+    })
+}
+
+/// What an org key's grants cover, as short labels for the key list.
+fn org_key_access_labels(permissions: &serde_json::Value) -> Vec<&'static str> {
+    const ORDER: [&str; 6] = [
+        "Organizations",
+        "Environments",
+        "Environment keys",
+        "Org keys",
+        "Usage",
+        "Key limits",
+    ];
+    let mut found = [false; 6];
+    for urn in permissions
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.keys())
+    {
+        let Some(rest) = urn.strip_prefix("org:") else {
+            continue;
+        };
+        let label = match rest.split_once('/') {
+            None => 0,
+            Some((_, rest)) => match rest.strip_prefix("env:") {
+                Some(env) => match env.split_once('/') {
+                    None => 1,
+                    Some((_, inner)) if inner.starts_with("api-key:") => 2,
+                    Some(_) => 5,
+                },
+                None if rest.starts_with("api-key:") => 3,
+                None if rest.starts_with("usage:") => 4,
+                None => continue,
+            },
+        };
+        found[label] = true;
+    }
+    ORDER
+        .into_iter()
+        .zip(found)
+        .filter_map(|(label, found)| found.then_some(label))
+        .collect()
+}
+
+async fn org_key_row(
+    db: &DatabasePool,
+    session: &Session,
+    key: OrgApiKey,
+) -> Result<(templates::OrgApiKeyRow, KeyStatus), Response> {
+    let status = key
+        .status(db)
+        .await
+        .map_err(|_| keys_load_failed(session))?;
+    let (status_label, status_badge) = status_view(status);
+    let row = templates::OrgApiKeyRow {
+        status_label,
+        status_badge,
+        expires_at: key
+            .expires_at
+            .map(|at| super::sub_orgs::display_time(session, &at)),
+        previous_secret_expires_at: key
+            .previous_secret_expires_at()
+            .filter(|_| status.is_active())
+            .map(|at| super::sub_orgs::display_time(session, &at)),
+        revocable: status.is_active(),
+        access: org_key_access_labels(&key.permissions),
+        key,
+    };
+    Ok((row, status))
+}
+
+/// Breadcrumbs for an org key page: API Keys / Org keys, then `tail`.
+fn org_key_breadcrumbs(tail: Vec<templates::BreadcrumbItem>) -> templates::Breadcrumbs {
+    let mut breadcrumbs = vec![
+        templates::BreadcrumbItem::clickable("API Keys".to_string(), "/keys".to_string()),
+        templates::BreadcrumbItem::clickable("Org keys".to_string(), "/keys/org".to_string()),
+    ];
+    breadcrumbs.extend(tail);
+    breadcrumbs
+}
+
+/// The Org keys tab of the API Keys page.
+pub async fn org_keys_list_handler(
+    State(db): State<Arc<DatabasePool>>,
+    Query(params): Query<AHashMap<String, String>>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
+) -> Result<Response, Response> {
+    // Someone without org keys followed a link here: their keys are the environment's.
+    let Some(root) = org_keys_root(&db, &session).await else {
+        return Ok(keys_list_redirect(&session).into_response());
+    };
+    let keys = match OrgApiKey::list_for_user(&db, root.org_id, session.current_user_id()).await {
+        Ok(keys) => keys,
+        Err(OrgApiKeyError::Unauthorized) => {
+            return Ok(keys_list_redirect(&session).into_response());
+        }
+        Err(_) => return Err(keys_load_failed(&session)),
+    };
+    let show_ended = params.get("show").is_some_and(|show| show == "all");
+    let mut rows = Vec::with_capacity(keys.len());
+    let mut ended_count = 0;
+    for key in keys {
+        let (row, status) = org_key_row(&db, &session, key).await?;
+        // Revoked, expired and issuer-revoked keys never work again.
+        let ended = matches!(
+            status,
+            KeyStatus::Revoked | KeyStatus::Expired | KeyStatus::IssuerInactive
+        );
+        ended_count += usize::from(ended);
+        if show_ended || !ended {
+            rows.push(row);
+        }
+    }
+    const KEYS_PER_PAGE: i64 = 25;
+    let page = list_query::PageParams::parse(&params, KEYS_PER_PAGE);
+    let total_keys = rows.len() as i64;
+    let pagination = list_query::PaginationWindow::new(total_keys, &page);
+    let rows: Vec<_> = rows
+        .into_iter()
+        .skip(page.offset as usize)
+        .take(KEYS_PER_PAGE as usize)
+        .collect();
+    let breadcrumbs = vec![
+        templates::BreadcrumbItem::clickable("API Keys".to_string(), "/keys".to_string()),
+        templates::BreadcrumbItem::current("Org keys".to_string()),
+    ];
+    let template = templates::OrgKeysList {
+        title: "Org API Keys",
+        page_context: templates::PrivatePageContext::for_org_page("keys", &session, breadcrumbs),
+        keys_tab: "org",
+        org_keys_root: Some(root),
+        rows,
+        error_message: None,
+        show_ended,
+        ended_count,
+        current_page_num: page.current_page_num,
+        start_page: pagination.start_page,
+        end_page: pagination.end_page,
+        has_next_page: pagination.has_next_page,
+        has_prev_page: pagination.has_prev_page,
+        total_keys,
+    };
+    Ok(Html(template.render().unwrap()).into_response())
+}
+
+/// The grants a new org key form starts from: enough to provision
+/// sub-organizations and hand each an environment key that sends events and
+/// reads runs.
+fn org_key_example_permissions() -> serde_json::Value {
+    serde_json::json!({
+        "org:*": ["create", "read", "update"],
+        "org:*/env:*": ["create", "read"],
+        "org:*/env:*/api-key:*": ["create", "read", "update", "delete"],
+        "org:*/env:*/event:*": ["create"],
+        "org:*/env:*/run:*": ["read"],
+    })
+}
+
+/// Render the new-org-key page with a freshly generated key and handoff
+/// token. An error re-render keeps what was submitted but shows a new key, as
+/// the environment key page does.
+fn render_org_key_new(
+    session: &Session,
+    root: Org,
+    error_message: &str,
+    description: &str,
+    expires_in_days: &str,
+    permissions: serde_json::Value,
+) -> Response {
+    let failed = || {
+        super::error_page(
+            session,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to generate an org API key",
+        )
+    };
+    let org_api_key_id = Uuid::now_v7();
+    let Ok((generated_key, key_hash)) = ApiKey::generate_api_key(&org_api_key_id) else {
+        return failed();
+    };
+    let Ok(handoff_token) = sign_org_key_handoff(
+        org_api_key_id,
+        session.current_user_id(),
+        root.org_id,
+        key_hash,
+    ) else {
+        return failed();
+    };
+    let breadcrumbs =
+        org_key_breadcrumbs(vec![templates::BreadcrumbItem::current("New".to_string())]);
+    let status = if error_message.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    let template = templates::OrgKeysNew {
+        title: "New Org API Key",
+        page_context: templates::PrivatePageContext::for_org_page("keys", session, breadcrumbs),
+        root_org_id: root.org_id.to_string(),
+        root,
+        generated_key,
+        org_api_key_id,
+        handoff_token,
+        error_message,
+        description,
+        expires_in_days,
+        permissions,
+    };
+    secret_page(status, template.render().unwrap())
+}
+
+pub async fn org_keys_new_handler(
+    State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = org_keys_root_or_refuse(&db, &session).await?;
+    Ok(render_org_key_new(
+        &session,
+        root,
+        "",
+        "",
+        "",
+        org_key_example_permissions(),
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct OrgApiKeyForm {
+    org_api_key_id: Uuid,
+    #[serde(default)]
+    handoff_token: String,
     description: String,
+    #[serde(default)]
     permissions: String,
     #[serde(default)]
     expires_in_days: String,
 }
 
-pub async fn create_org_api_key(
-    Path(slug): Path<String>,
+pub async fn org_keys_create_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<OrgApiKeyForm>,
-) -> Result<Response, Response> {
-    let root = super::sub_orgs::root_for_admin(&db, &session, &slug).await?;
-    let rejected = |error: &str| KeysPageState {
-        error: Some(error.to_string()),
-        org_form: OrgKeyFormValues {
-            description: form.description.clone(),
-            permissions: Some(form.permissions.clone()),
-            expires_in_days: form.expires_in_days.clone(),
-        },
-        ..KeysPageState::default()
+) -> Result<Redirect, Response> {
+    let root = org_keys_root_or_refuse(&db, &session).await?;
+    let submitted = submitted_permissions(&form.permissions);
+    let retry = |message: &str| {
+        render_org_key_new(
+            &session,
+            root.clone(),
+            message,
+            &form.description,
+            &form.expires_in_days,
+            submitted.clone(),
+        )
     };
-    let no_params = AHashMap::new();
+    if form.description.trim().is_empty() {
+        return Err(retry("Description is required"));
+    }
     let expires_at = match expiry_from_days(&form.expires_in_days) {
         Ok(expires_at) => expires_at,
-        Err(message) => {
-            let state = rejected(message);
-            return Ok(render_keys_page(&db, &session, &no_params, Some(root), state).await);
-        }
+        Err(message) => return Err(retry(message)),
     };
-    let permissions = match serde_json::from_str(&form.permissions) {
-        Ok(permissions) => permissions,
-        Err(_) => {
-            let state = rejected("Permissions must be a JSON object.");
-            return Ok(render_keys_page(&db, &session, &no_params, Some(root), state).await);
-        }
+    if !submitted.is_object() {
+        return Err(retry("Permissions must be a JSON object."));
+    }
+    let user_id = session.current_user_id();
+    let Some(key_hash) = verify_org_key_handoff(
+        &form.handoff_token,
+        &form.org_api_key_id,
+        user_id,
+        root.org_id,
+    ) else {
+        return Err(retry(
+            "This form expired before it was submitted. A new key was generated below: copy it, then create the key again.",
+        ));
+    };
+    let Ok(key_data) = serde_json::from_str(&key_hash) else {
+        return Err(retry("Failed to process the org API key"));
     };
     let request = CreateOrgApiKey {
         description: form.description.clone(),
-        permissions,
+        permissions: submitted.clone(),
         expires_at,
     };
-    let created =
-        OrgApiKey::create_for_user(&db, root.org_id, session.current_user_id(), &request).await;
-    let state = match created {
-        Ok((_, token)) => KeysPageState::issued(
-            "Save this org API key now",
-            "It will not be shown again. Revoking it also stops every key it created.",
-            token,
-        ),
-        Err(error) => {
-            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rejected");
-            rejected(
-                "Unable to create the org API key. Permissions must use org: URNs such as org:* or org:{org}/env:*/project:*.",
-            )
-        }
+    let prepared = PreparedOrgKey {
+        org_api_key_id: form.org_api_key_id,
+        key_data,
     };
-    Ok(render_keys_page(&db, &session, &no_params, Some(root), state).await)
+    match OrgApiKey::create_prepared_for_user(&db, root.org_id, user_id, &request, prepared).await {
+        Ok(_) => Ok(Redirect::to(&org_keys_list_url(&root))),
+        Err(error) => {
+            // The same form submitted twice: the key ID is the primary key, so
+            // the first submission made the key and this one changed nothing.
+            let scoped = db.with_scope(DatabaseScope::Organization {
+                org_id: root.org_id,
+            });
+            if OrgApiKey::get(&scoped, form.org_api_key_id)
+                .await
+                .is_ok_and(|key| key.org_id == root.org_id)
+            {
+                return Ok(Redirect::to(&org_keys_list_url(&root)));
+            }
+            tracing::info!(root_org_id = %root.org_id, %error, "Org API key rejected");
+            let message = match &error {
+                OrgApiKeyError::Invalid(reason) => {
+                    format!("Unable to create the org API key: {reason}.")
+                }
+                OrgApiKeyError::Unauthorized => {
+                    "Unable to create the org API key. The account must be active, and you must administer it.".to_string()
+                }
+                _ => "Unable to create the org API key.".to_string(),
+            };
+            Err(retry(&message))
+        }
+    }
 }
 
-/// Issue a new secret for an org key. The page shows it once, as it does for a
-/// new key.
-pub async fn rotate_org_api_key(
-    Path((slug, key_id)): Path<(String, Uuid)>,
+/// An org key of `root`, as its page shows it. The list is the App's
+/// authority: it holds exactly the keys the user may manage.
+async fn org_key_for_user(
+    db: &DatabasePool,
+    session: &Session,
+    root: &Org,
+    key_id: Uuid,
+) -> Result<templates::OrgApiKeyRow, Response> {
+    let keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
+        .await
+        .map_err(|_| keys_load_failed(session))?;
+    let Some(key) = keys.into_iter().find(|key| key.org_api_key_id == key_id) else {
+        return Err(super::error_page(
+            session,
+            StatusCode::NOT_FOUND,
+            "Org API key not found",
+        ));
+    };
+    Ok(org_key_row(db, session, key).await?.0)
+}
+
+/// Render an org key's page; `error` explains a refused action, with status 400.
+async fn render_org_key_detail(
+    db: &DatabasePool,
+    session: &Session,
+    root: Org,
+    key_id: Uuid,
+    error: &str,
+) -> Response {
+    let row = match org_key_for_user(db, session, &root, key_id).await {
+        Ok(row) => row,
+        Err(page) => return page,
+    };
+    let breadcrumbs = org_key_breadcrumbs(vec![templates::BreadcrumbItem::current(
+        row.key.description.clone(),
+    )]);
+    let status = if error.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    let template = templates::OrgKeyDetail {
+        title: &format!("Org API Key: {}", row.key.description),
+        page_context: templates::PrivatePageContext::for_org_page("keys", session, breadcrumbs),
+        root_org_id: root.org_id.to_string(),
+        root,
+        row,
+        error_message: error,
+    };
+    (status, Html(template.render().unwrap())).into_response()
+}
+
+pub async fn org_key_detail_handler(
+    Path(key_id): Path<Uuid>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = org_keys_root_or_refuse(&db, &session).await?;
+    Ok(render_org_key_detail(&db, &session, root, key_id, "").await)
+}
+
+/// Issue a new secret for an org key. The page shows it once.
+pub async fn org_key_rotate_handler(
+    Path(key_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Form(form): Form<RotateKeyForm>,
 ) -> Result<Response, Response> {
-    let root = super::sub_orgs::root_for_admin(&db, &session, &slug).await?;
-    let no_params = AHashMap::new();
+    let root = org_keys_root_or_refuse(&db, &session).await?;
     if !(0..=MAX_ROTATION_OVERLAP_SECONDS).contains(&form.overlap_seconds) {
-        let state = KeysPageState::error("Overlap must be between 0 seconds and 7 days.");
-        return Ok(render_keys_page(&db, &session, &no_params, Some(root), state).await);
+        let message = "Overlap must be between 0 seconds and 7 days.";
+        return Err(render_org_key_detail(&db, &session, root, key_id, message).await);
     }
     let overlap = Duration::seconds(form.overlap_seconds);
     let user_id = session.current_user_id();
-    let state = match OrgApiKey::rotate_for_user(&db, root.org_id, user_id, key_id, overlap).await {
-        Ok(rotated) => KeysPageState::issued(
-            "Save this org API key's new secret now",
-            "It will not be shown again. Keys this key created keep working.",
-            rotated.token,
-        ),
+    // Also answers 404 for a key that isn't this organization's.
+    let description = org_key_for_user(&db, &session, &root, key_id)
+        .await?
+        .key
+        .description;
+    match OrgApiKey::rotate_for_user(&db, root.org_id, user_id, key_id, overlap).await {
+        Ok(rotated) => {
+            let breadcrumbs = org_key_breadcrumbs(vec![
+                templates::BreadcrumbItem::clickable(
+                    description,
+                    format!("/keys/org/{key_id}/edit"),
+                ),
+                templates::BreadcrumbItem::current("New secret".to_string()),
+            ]);
+            Ok(rotated_secret_page(
+                templates::PrivatePageContext::for_org_page("keys", &session, breadcrumbs),
+                "Save this org key's new secret now",
+                &rotated_note(
+                    &session,
+                    &rotated,
+                    overlap,
+                    " Keys this key created keep working.",
+                ),
+                rotated.token,
+                format!("/keys/org/{key_id}/edit?org_id={}", root.org_id),
+                "Back to the Org Key",
+            ))
+        }
         Err(OrgApiKeyError::OverlapRunning(until)) => {
-            KeysPageState::error(overlap_running_message(&session, &until))
+            let message = overlap_running_message(&session, &until);
+            Err(render_org_key_detail(&db, &session, root, key_id, &message).await)
         }
         Err(error) => {
             tracing::info!(root_org_id = %root.org_id, %error, "Org API key rotation rejected");
-            KeysPageState::error("Unable to rotate the org API key.")
+            let message = "Unable to rotate the org API key.";
+            Err(render_org_key_detail(&db, &session, root, key_id, message).await)
         }
-    };
-    Ok(render_keys_page(&db, &session, &no_params, Some(root), state).await)
+    }
 }
 
-pub async fn revoke_org_api_key(
-    Path((slug, key_id)): Path<(String, Uuid)>,
+pub async fn org_key_revoke_handler(
+    Path(key_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Redirect, Response> {
-    let root = super::sub_orgs::root_for_admin(&db, &session, &slug).await?;
+    let root = org_keys_root_or_refuse(&db, &session).await?;
     match OrgApiKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id).await {
-        Ok(()) => Ok(Redirect::to(&format!("/keys?org_id={}", root.org_id))),
+        Ok(()) => Ok(Redirect::to(&org_keys_list_url(&root))),
         Err(_) => {
-            let state = KeysPageState::error("Unable to revoke the org API key.");
-            Err(render_keys_page(&db, &session, &AHashMap::new(), Some(root), state).await)
+            let message = "Unable to revoke the org API key.";
+            Err(render_org_key_detail(&db, &session, root, key_id, message).await)
         }
     }
 }

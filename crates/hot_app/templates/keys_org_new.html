@@ -1,0 +1,121 @@
+{% extends "private_layout.html" %}
+{%- import "components/permission_editor.html" as perm -%}
+
+{% block content %}
+<div class="py-6">
+    <div class="max-w-4xl mx-auto">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+            {% if error_message != "" %}
+            <div class="error-box mb-4 sm:mb-6" role="alert">{{ error_message }}</div>
+            {% endif %}
+
+            <!-- Generated org key -->
+            <div class="mb-6 sm:mb-8 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg p-4 sm:p-6">
+                <div class="flex items-start">
+                    <div class="flex-shrink-0">
+                        <svg class="h-6 w-6 text-blue-500 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m0 0a2 2 0 012 2v6a2 2 0 01-2 2H7a2 2 0 01-2-2V9a2 2 0 012-2m0 0V7a2 2 0 012-2h4zm-6 6h6m-6 4h6"></path>
+                        </svg>
+                    </div>
+                    <div class="ml-3 flex-1 min-w-0">
+                        <h2 class="text-base sm:text-lg font-medium text-blue-900 dark:text-blue-100 mb-2">Your New Org Key</h2>
+                        <p class="text-xs sm:text-sm text-blue-700 dark:text-blue-300 mb-3 sm:mb-4">
+                            Copy this key now. For security reasons, you won't be able to see it again after you create it.
+                        </p>
+                        <div class="bg-white dark:bg-gray-800 border border-blue-300 dark:border-blue-600 rounded-md p-2 sm:p-3">
+                            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                <div class="flex-1 min-w-0 overflow-x-auto">
+                                    <code id="generated-key" class="text-xs sm:text-sm font-mono text-gray-900 dark:text-gray-100 break-all">{{ generated_key }}</code>
+                                </div>
+                                <button type="button" id="copy-key" class="flex-shrink-0 self-start sm:self-auto btn btn-secondary btn-sm">Copy</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <form method="POST" action="/keys/org/new">
+                <input type="hidden" name="org_api_key_id" value="{{ org_api_key_id }}">
+                <input type="hidden" name="handoff_token" value="{{ handoff_token }}">
+
+                <div class="space-y-4 sm:space-y-6">
+                    <div>
+                        <label for="description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Description <span class="text-red-500">*</span>
+                        </label>
+                        <input type="text" name="description" id="description" value="{{ description }}" required maxlength="200"
+                            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm text-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white"
+                            placeholder="e.g., Customer provisioning service">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Name the system that will hold this key.</p>
+                    </div>
+
+                    <div>
+                        <label for="expires_in_days" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Expires in days</label>
+                        <input type="number" name="expires_in_days" id="expires_in_days" value="{{ expires_in_days }}" min="1" max="3650"
+                            class="w-40 px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm text-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Optional. Leave empty for a key that doesn't expire.</p>
+                    </div>
+
+                    <div x-data="permissionEditor({ kind: 'org', initial: {{ permissions|js }}, rootOrgId: {{ root_org_id|js }}, rootOrgName: {{ root.name|js }} })">
+                        <h2 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">What this key can manage</h2>
+                        <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">
+                            Each rule names organizations, a resource in them and the actions allowed.
+                            <span class="font-medium">All sub-organizations</span> never includes {{ root.name }} itself: add a rule for <span class="font-medium">This organization</span> to manage its own environments or org keys.
+                        </p>
+                        {% call perm::editor() %}{% endcall %}
+                        <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                            A rule under <span class="font-medium">Limit for environment keys it creates</span> doesn't let this key use that resource. It caps what the environment keys this key creates may do.
+                        </p>
+                    </div>
+
+                    <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
+                        <div class="flex">
+                            <div class="flex-shrink-0">
+                                <svg class="h-5 w-5 text-amber-700 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+                                </svg>
+                            </div>
+                            <div class="ml-3 text-xs sm:text-sm text-yellow-700 dark:text-yellow-300">
+                                An org key can create credentials in every sub-organization its rules cover. Keep it in a secret manager, grant only what the system needs, and revoke it when the system is retired. Revoking it also stops every key it created.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                        <a href="/keys/org" class="btn btn-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                            </svg>
+                            Create Org Key
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+document.getElementById('copy-key').addEventListener('click', function () {
+    var button = this;
+    var key = document.getElementById('generated-key').textContent;
+    var done = function () {
+        button.textContent = 'Copied!';
+        setTimeout(function () { button.textContent = 'Copy'; }, 2000);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(key).then(done).catch(function () {});
+        return;
+    }
+    var area = document.createElement('textarea');
+    area.value = key;
+    area.style.position = 'fixed';
+    area.style.left = '-999999px';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (error) { /* the key stays selectable */ }
+    document.body.removeChild(area);
+});
+</script>
+{% call perm::script() %}{% endcall %}
+{% endblock %}
