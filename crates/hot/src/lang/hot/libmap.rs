@@ -676,6 +676,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::schedule/cancel".to_string(),
             HotLibFn::VmAwareFn(schedule::cancel_schedule),
         );
+        map.insert(
+            "::hot::schedule/retire".to_string(),
+            HotLibFn::VmAwareFn(schedule::retire_schedule),
+        );
 
         // String functions
         map.insert("::hot::str/split".to_string(), HotLibFn::LibFn(str::split));

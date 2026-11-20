@@ -4,7 +4,7 @@ use hot::db::{self, Build, DatabasePool, DatabaseScope, Schedule, SchedulePolicy
 use uuid::Uuid;
 
 #[tokio::test]
-async fn an_activation_writes_its_event_and_cancels_dynamic_schedules() {
+async fn an_activation_writes_its_event_and_carries_dynamic_schedules() {
     let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
         return;
@@ -70,19 +70,32 @@ async fn an_activation_writes_its_event_and_cancels_dynamic_schedules() {
     Build::activate_build_directly(&db, &builds[0], &user)
         .await
         .unwrap();
-    let waiting = Schedule::insert_dynamic_schedule(
-        &db,
-        &Uuid::now_v7(),
-        &builds[0],
-        &ScheduleType::At(chrono::Utc::now() + chrono::Duration::hours(1)),
-        SchedulePolicy::self_hosted_default(),
-        "::app::jobs",
-        "remind",
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let arm = |build: Uuid, at: chrono::DateTime<chrono::Utc>| {
+        let db = db.clone();
+        async move {
+            Schedule::insert_dynamic_schedule(
+                &db,
+                &Uuid::now_v7(),
+                &build,
+                &ScheduleType::At(at),
+                SchedulePolicy::self_hosted_default(),
+                "::app::jobs",
+                "remind",
+                None,
+                Some(&serde_json::json!([1])),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let soon = chrono::Utc::now() + chrono::Duration::hours(1);
+    let later = soon + chrono::Duration::hours(1);
+    let waiting = arm(builds[0], soon).await;
+    // The build about to go live already holds an identical schedule, left
+    // inactive, as after a rollback.
+    let twin = arm(builds[1], later).await;
+    Schedule::deactivate_schedule(&db, &twin).await.unwrap();
+    let merged = arm(builds[0], later).await;
 
     Build::request_bundle_deployment(&db, &builds[1], &user)
         .await
@@ -94,11 +107,50 @@ async fn an_activation_writes_its_event_and_cancels_dynamic_schedules() {
     );
 
     let schedule = Schedule::get_schedule(&db, &waiting).await.unwrap();
-    assert!(!schedule.active);
+    assert!(schedule.active, "the deployment carries it");
+    assert_eq!(schedule.build_id, builds[1]);
+    assert!(Schedule::get_schedule(&db, &twin).await.unwrap().active);
+    let merged = Schedule::get_schedule(&db, &merged).await.unwrap();
+    assert!(!merged.active);
+    assert_eq!(
+        merged.meta.unwrap()["deactivation-reason"],
+        "an identical schedule is on the deployed build"
+    );
 
+    // A schedule moves between builds of its project only.
+    let other_project = Uuid::now_v7();
+    db::Project::insert_project(&db, &other_project, &env, "other", &user)
+        .await
+        .unwrap();
+    let foreign = Uuid::now_v7();
+    Build::insert_build(
+        &db,
+        &foreign,
+        &other_project,
+        "test-hash",
+        1024,
+        Build::BUILD_TYPE_BUNDLE,
+        &user,
+    )
+    .await
+    .unwrap();
     let DatabasePool::Postgres(scoped) = &db else {
         unreachable!();
     };
+    let refused = sqlx::query("UPDATE schedule SET build_id = $1 WHERE schedule_id = $2")
+        .bind(foreign)
+        .bind(waiting)
+        .execute(scoped)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused
+            .as_database_error()
+            .and_then(|e| e.code())
+            .as_deref(),
+        Some("42501"),
+        "{refused}"
+    );
     let events: Vec<(serde_json::Value, bool, i32)> = sqlx::query_as(
         "SELECT e.event_data, e.enqueue_payload IS NOT NULL, s.total_events
          FROM event e JOIN stream s ON s.stream_id = e.stream_id
@@ -109,11 +161,12 @@ async fn an_activation_writes_its_event_and_cancels_dynamic_schedules() {
     .fetch_all(scoped)
     .await
     .unwrap();
-    let expected = |build: &Uuid, cancelled: i64| {
+    let expected = |build: &Uuid, carried: i64, cancelled: i64| {
         (
             serde_json::json!({
                 "project": "reminders",
                 "build-id": build.to_string(),
+                "carried-schedules": carried,
                 "cancelled-schedules": cancelled,
             }),
             true,
@@ -122,6 +175,6 @@ async fn an_activation_writes_its_event_and_cancels_dynamic_schedules() {
     };
     assert_eq!(
         events,
-        vec![expected(&builds[0], 0), expected(&builds[1], 1)]
+        vec![expected(&builds[0], 0, 0), expected(&builds[1], 2, 1)]
     );
 }

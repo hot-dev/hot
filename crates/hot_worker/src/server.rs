@@ -14570,118 +14570,142 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    /// Two projects in one environment: a one-shot that one project arms with
-    /// `send("hot:schedule:new", ...)` is bound to that project's build, so
-    /// the other project's deployment leaves it alone and it fires where its
-    /// function is. A schedule cancelled by function from Hot code is the
-    /// sender's own.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_one_shot_armed_from_hot_code_stays_with_its_project() {
-        let (db, db_path) = migrated_sqlite_file_db().await;
-        let test_data = hot::db::insert_test_data(&db).await.unwrap();
-        let env_id = test_data.env_id;
-        let user_id = test_data.user_id;
-        let program = test_data.project_id;
-        let platform = Uuid::now_v7();
-        hot::db::Project::insert_project(&db, &platform, &env_id, "platform", &user_id)
+    /// Projects deployed as real bundles into one environment, with
+    /// hot-std's schedule handlers registered as a deploy registers them, and
+    /// the worker's routing and execution of their events.
+    struct ScheduledProjects {
+        db: DatabasePool,
+        db_path: PathBuf,
+        test_data: hot::db::TestData,
+        workspace: tempfile::TempDir,
+        build_path_cache: Arc<BuildPathCache>,
+        cache: Arc<hot::lang::cache::bytecode_cache::BytecodeCache>,
+        task_queue: Arc<ProcessingQueue<TaskRequest>>,
+        execution_services: Arc<WorkerExecutionServices>,
+    }
+
+    impl ScheduledProjects {
+        async fn new() -> Self {
+            let (db, db_path) = migrated_sqlite_file_db().await;
+            let test_data = hot::db::insert_test_data(&db).await.unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+                workspace.path().join("cache"),
+            ));
+            let task_queue = Arc::new(
+                ProcessingQueue::<TaskRequest>::new(
+                    QueueType::Memory,
+                    format!("worker-schedule-test-{}", Uuid::new_v4()),
+                    None,
+                    Serialization::Json,
+                )
+                .unwrap(),
+            );
+            let execution_services =
+                Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &val!({})).await);
+            Self {
+                db,
+                db_path,
+                test_data,
+                workspace,
+                build_path_cache: Arc::new(BuildPathCache::new()),
+                cache,
+                task_queue,
+                execution_services,
+            }
+        }
+
+        async fn add_project(&self, name: &str) -> Uuid {
+            let project = Uuid::now_v7();
+            hot::db::Project::insert_project(
+                &self.db,
+                &project,
+                &self.test_data.env_id,
+                name,
+                &self.test_data.user_id,
+            )
             .await
             .unwrap();
+            project
+        }
 
-        let workspace = tempfile::tempdir().unwrap();
-        let build_path_cache = Arc::new(BuildPathCache::new());
-        // A deployed bundle of `source` for `project`, with hot-std's
-        // schedule handlers registered as a deploy registers them.
-        let deploy = |project: Uuid, name: &'static str, source: &'static str| {
-            let (db, workspace, build_path_cache) = (
-                db.clone(),
-                workspace.path().to_path_buf(),
-                Arc::clone(&build_path_cache),
-            );
-            async move {
-                let build_id = Uuid::now_v7();
-                let dir = workspace.join(build_id.to_string());
-                let src_dir = dir.join("src");
-                std::fs::create_dir_all(&src_dir).unwrap();
-                std::fs::write(src_dir.join(format!("{name}.hot")), source).unwrap();
-                let bundle = hot::bundle::create_bundle(
-                    name,
-                    &[src_dir.to_string_lossy().to_string()],
-                    &[],
-                    &[],
-                    true,
-                    &[],
-                )
-                .unwrap();
-                let zip_path = hot::bundle::write_bundle_zip(&bundle, &dir.join("build")).unwrap();
-                Build::insert_build(
-                    &db,
+        /// Deploy `source` as `project`'s new build.
+        async fn deploy(&self, project: Uuid, name: &str, source: &str) -> Uuid {
+            let (db, user_id) = (&self.db, self.test_data.user_id);
+            let build_id = Uuid::now_v7();
+            let dir = self.workspace.path().join(build_id.to_string());
+            let src_dir = dir.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            std::fs::write(src_dir.join(format!("{name}.hot")), source).unwrap();
+            let bundle = hot::bundle::create_bundle(
+                name,
+                &[src_dir.to_string_lossy().to_string()],
+                &[],
+                &[],
+                true,
+                &[],
+            )
+            .unwrap();
+            let zip_path = hot::bundle::write_bundle_zip(&bundle, &dir.join("build")).unwrap();
+            Build::insert_build(
+                db,
+                &build_id,
+                &project,
+                name,
+                0,
+                Build::BUILD_TYPE_BUNDLE,
+                &user_id,
+            )
+            .await
+            .unwrap();
+            let prepared = extract_and_precompile_event_bundle(
+                std::fs::read(&zip_path).unwrap(),
+                dir.join("extracted"),
+                build_id,
+                name.to_string(),
+                true,
+            )
+            .unwrap();
+            self.build_path_cache.insert(build_id, prepared.extract_dir);
+            for (event_type, var) in [
+                ("hot:schedule", "schedule-event-handler"),
+                ("hot:schedule:new", "schedule-new-event-handler"),
+                ("hot:schedule:cancel", "schedule-cancel-event-handler"),
+            ] {
+                EventHandler::insert_event_handler(
+                    db,
+                    &Uuid::now_v7(),
                     &build_id,
-                    &project,
-                    name,
-                    0,
-                    Build::BUILD_TYPE_BUNDLE,
-                    &user_id,
+                    event_type,
+                    "::hot::lang",
+                    var,
+                    Some(&serde_json::json!({"on-event": event_type, "once": true})),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();
-                let prepared = extract_and_precompile_event_bundle(
-                    std::fs::read(&zip_path).unwrap(),
-                    dir.join("extracted"),
-                    build_id,
-                    name.to_string(),
-                    true,
-                )
-                .unwrap();
-                build_path_cache.insert(build_id, prepared.extract_dir);
-                for (event_type, var) in [
-                    ("hot:schedule", "schedule-event-handler"),
-                    ("hot:schedule:new", "schedule-new-event-handler"),
-                    ("hot:schedule:cancel", "schedule-cancel-event-handler"),
-                ] {
-                    EventHandler::insert_event_handler(
-                        &db,
-                        &Uuid::now_v7(),
-                        &build_id,
-                        event_type,
-                        "::hot::lang",
-                        var,
-                        Some(&serde_json::json!({"on-event": event_type, "once": true})),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                }
-                Build::activate_build_directly(&db, &build_id, &user_id)
-                    .await
-                    .unwrap();
-                build_id
             }
-        };
-        const PLATFORM: &str = "::platform::core ns\n\nping fn (): Str { \"pong\" }\n";
-        // The platform deploys first, so its handlers are first in the
-        // environment.
-        let platform_build = deploy(platform, "platform", PLATFORM).await;
-        let program_build = deploy(
-            program,
-            "program",
-            "::program::deadline ns\n\ndue fn (who: Str): Str { `due ${who}` }\n",
-        )
-        .await;
+            Build::activate_build_directly(db, &build_id, &user_id)
+                .await
+                .unwrap();
+            build_id
+        }
 
-        let event = |event_type: &str, event_data: Val, build_id: Option<Uuid>| {
-            let event_id = Uuid::now_v7();
-            let stream_id = Uuid::now_v7();
+        /// An event as `send()` from a run of `build_id` publishes it, or as
+        /// the API does with no build.
+        fn event(&self, event_type: &str, event_data: Val, build_id: Option<Uuid>) -> EventMessage {
+            let (event_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7());
             let mut execution_context = ExecutionContext::new(
                 Uuid::now_v7(),
                 stream_id,
                 hot::db::run::RunType::Event.as_id(),
-                Some(env_id),
-                Some(user_id),
-                Some(test_data.org_id),
+                Some(self.test_data.env_id),
+                Some(self.test_data.user_id),
+                Some(self.test_data.org_id),
                 None,
             );
             execution_context.build_id = build_id;
@@ -14691,7 +14715,7 @@ mod tests {
                 body: hot::lang::event::queue::EventMessageBody {
                     event: hot::lang::event::Event {
                         event_id,
-                        env_id,
+                        env_id: self.test_data.env_id,
                         stream_id,
                         event_type: event_type.to_string(),
                         event_data,
@@ -14702,109 +14726,167 @@ mod tests {
                     execution_context,
                 },
             }
-        };
-        // The handlers the worker may run for an event, as it routes it.
-        let routed = |event_message: &EventMessage| {
-            let db = db.clone();
-            let event_type = event_message.body.event.event_type.clone();
-            let target =
-                exact_target_build(&event_type, event_message.body.execution_context.build_id);
-            async move {
-                let handlers = event_handlers_for(&db, &env_id, &event_type, target)
-                    .await
-                    .unwrap();
-                partition_handlers_by_once_flag(handlers).0
-            }
-        };
-        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
-            workspace.path().join("cache"),
-        ));
-        let task_queue = Arc::new(
-            ProcessingQueue::<TaskRequest>::new(
-                QueueType::Memory,
-                format!("worker-schedule-routing-test-{}", Uuid::new_v4()),
-                None,
-                Serialization::Json,
-            )
-            .unwrap(),
-        );
-        let execution_services =
-            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &val!({})).await);
-        // Run the once handler the worker picks, the first one routed.
-        let execute = |event_message: EventMessage| {
-            let (db, cache, build_path_cache, task_queue, execution_services) = (
-                db.clone(),
-                Arc::clone(&cache),
-                Arc::clone(&build_path_cache),
-                Arc::clone(&task_queue),
-                Arc::clone(&execution_services),
-            );
-            let routed = routed(&event_message);
-            async move {
-                let handler = routed.await.into_iter().next().expect("a once handler");
-                let build = Build::get_build(&db, &handler.build_id).await.unwrap();
-                let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
-                let run_id = Uuid::now_v7();
-                shutdown_coordinator.register_run(run_id);
-                execute_single_event_handler(
-                    &db,
-                    &build,
-                    &env_id,
-                    &val!({}),
-                    &handler,
-                    &event_message,
-                    None,
-                    None,
-                    None,
-                    cache,
-                    shutdown_coordinator,
-                    run_id,
-                    build_path_cache,
-                    None,
-                    None,
-                    task_queue,
-                    execution_services,
-                    Arc::new(Semaphore::new(4)),
-                    None,
-                )
+        }
+
+        /// The event the scheduler sends when `schedule` fires, pinned to its
+        /// build.
+        async fn fired(&self, schedule: &Uuid) -> EventMessage {
+            let schedule = Schedule::get_schedule(&self.db, schedule).await.unwrap();
+            let build = Build::get_build(&self.db, &schedule.build_id)
                 .await
-                .map(|_| handler.build_id)
+                .unwrap();
+            let mut fired = self.event(
+                "hot:schedule",
+                val!({
+                    "fn": format!("{}/{}", schedule.ns, schedule.var),
+                    "args": serde_json::from_value::<Val>(schedule.value.unwrap()).unwrap(),
+                    "schedule_id": schedule.schedule_id.to_string(),
+                }),
+                Some(schedule.build_id),
+            );
+            fired.body.event.target_project_id = Some(build.project_id);
+            fired.body.execution_context.run_type_id = hot::db::run::RunType::Schedule.as_id();
+            fired
+        }
+
+        /// The once handlers the worker may run for an event, as it routes it.
+        async fn routed(&self, event_message: &EventMessage) -> Vec<EventHandler> {
+            let event_type = &event_message.body.event.event_type;
+            let target =
+                exact_target_build(event_type, event_message.body.execution_context.build_id);
+            let handlers = event_handlers_for(&self.db, &self.test_data.env_id, event_type, target)
+                .await
+                .unwrap();
+            partition_handlers_by_once_flag(handlers).0
+        }
+
+        /// Run the once handler the worker picks, the first one routed, and
+        /// name the build it ran in, or say why the run failed.
+        async fn execute(&self, event_message: EventMessage) -> Result<Uuid, String> {
+            #[derive(Default)]
+            struct Collect(std::sync::Mutex<Vec<hot::lang::emitter::EngineEvent>>);
+            impl EngineEventEmitter for Collect {
+                fn emit(&self, event: hot::lang::emitter::EngineEvent) {
+                    self.0.lock().unwrap().push(event);
+                }
             }
-        };
-        let deadlines = |build_id: Uuid| {
-            let db = db.clone();
-            async move {
-                Schedule::get_schedules_by_build(&db, &build_id, None, None)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .filter(|schedule| schedule.ns == "::program::deadline")
-                    .collect::<Vec<_>>()
+            let collect = Arc::new(Collect::default());
+            let handler = self
+                .routed(&event_message)
+                .await
+                .into_iter()
+                .next()
+                .expect("a once handler");
+            let build = Build::get_build(&self.db, &handler.build_id).await.unwrap();
+            let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+            let run_id = Uuid::now_v7();
+            shutdown_coordinator.register_run(run_id);
+            execute_single_event_handler(
+                &self.db,
+                &build,
+                &self.test_data.env_id,
+                &val!({}),
+                &handler,
+                &event_message,
+                Some(Arc::clone(&collect) as Arc<dyn EngineEventEmitter>),
+                None,
+                None,
+                Arc::clone(&self.cache),
+                shutdown_coordinator,
+                run_id,
+                Arc::clone(&self.build_path_cache),
+                None,
+                None,
+                Arc::clone(&self.task_queue),
+                Arc::clone(&self.execution_services),
+                Arc::new(Semaphore::new(4)),
+                None,
+            )
+            .await?;
+            let events = collect.0.lock().unwrap();
+            match events.iter().find(|event| event.event_type == "run:fail") {
+                Some(failed) => Err(format!("{:?}", failed.event_data.get("failure"))),
+                None => Ok(handler.build_id),
             }
-        };
+        }
+
+        /// Arm a schedule from a run of `build_id`, and return its ID.
+        async fn arm(&self, build_id: Uuid, function: &str, args: Val, timing: &str) -> Uuid {
+            let ran_in = self
+                .execute(self.event(
+                    "hot:schedule:new",
+                    val!({"fn": function, "args": args, "schedule": timing}),
+                    Some(build_id),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                ran_in, build_id,
+                "the schedule is armed in the sender's build"
+            );
+            let (ns, var) = function.rsplit_once('/').unwrap();
+            let armed: Vec<_> = Schedule::get_schedules_by_build(&self.db, &build_id, None, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|schedule| schedule.ns == ns && schedule.var == var && schedule.active)
+                .collect();
+            assert_eq!(armed.len(), 1, "one {function} schedule on its build");
+            armed[0].schedule_id
+        }
+
+        async fn close(self) {
+            if let DatabasePool::Sqlite(pool) = &self.db {
+                pool.close().await;
+            }
+            let _ = std::fs::remove_file(&self.db_path);
+        }
+    }
+
+    /// Two projects in one environment: a one-shot that one project arms with
+    /// `send("hot:schedule:new", ...)` is bound to that project's build, so
+    /// the other project's deployment leaves it alone and it fires where its
+    /// function is. A schedule cancelled by function from Hot code is the
+    /// sender's own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_one_shot_armed_from_hot_code_stays_with_its_project() {
+        let projects = ScheduledProjects::new().await;
+        let program = projects.test_data.project_id;
+        let platform = projects.add_project("platform").await;
+        const PLATFORM: &str = "::platform::core ns\n\nping fn (): Str { \"pong\" }\n";
+        // The platform deploys first, so its handlers are first in the
+        // environment.
+        let platform_build = projects.deploy(platform, "platform", PLATFORM).await;
+        let program_build = projects
+            .deploy(
+                program,
+                "program",
+                "::program::deadline ns\n\ndue fn (who: Str): Str { `due ${who}` }\n",
+            )
+            .await;
 
         // The program arms a one-shot of its own function from Hot code: it
         // is bound to the program's build.
-        let armed_in = execute(event(
-            "hot:schedule:new",
-            val!({"fn": "::program::deadline/due", "args": ["a"], "schedule": "in 1 hour"}),
-            Some(program_build),
-        ))
-        .await
-        .unwrap();
-        assert_eq!(armed_in, program_build);
-        let armed = deadlines(program_build).await;
-        assert_eq!(
-            armed.len(),
-            1,
-            "the one-shot is bound to the program's build"
+        let schedule_id = projects
+            .arm(
+                program_build,
+                "::program::deadline/due",
+                val!(["a"]),
+                "in 1 hour",
+            )
+            .await;
+        assert!(
+            Schedule::get_schedules_by_build(&projects.db, &platform_build, None, None)
+                .await
+                .unwrap()
+                .is_empty()
         );
-        assert!(deadlines(platform_build).await.is_empty());
-        let schedule_id = armed[0].schedule_id;
 
         // The platform deploys again, and the program's one-shot stays.
-        let platform_redeploy = deploy(platform, "platform", PLATFORM).await;
-        let schedule = Schedule::get_schedule(&db, &schedule_id).await.unwrap();
+        let platform_redeploy = projects.deploy(platform, "platform", PLATFORM).await;
+        let schedule = Schedule::get_schedule(&projects.db, &schedule_id)
+            .await
+            .unwrap();
         assert!(
             schedule.active,
             "another project's deployment leaves it armed"
@@ -14813,31 +14895,22 @@ mod tests {
 
         // It fires as the scheduler sends it, pinned to its build, and runs
         // the program's function there.
-        let mut fired = event(
-            "hot:schedule",
-            val!({
-                "fn": "::program::deadline/due",
-                "args": ["a"],
-                "schedule_id": schedule_id.to_string(),
-            }),
-            Some(schedule.build_id),
-        );
-        fired.body.event.target_project_id = Some(program);
-        fired.body.execution_context.run_type_id = hot::db::run::RunType::Schedule.as_id();
-        assert_eq!(execute(fired).await.unwrap(), program_build);
+        let fired = projects.fired(&schedule_id).await;
+        assert_eq!(projects.execute(fired).await.unwrap(), program_build);
 
         // Cancelled by function from the program, it is the program's own
         // schedule that goes.
-        let cancelled_in = execute(event(
-            "hot:schedule:cancel",
-            val!({"fn": "::program::deadline/due"}),
-            Some(program_build),
-        ))
-        .await
-        .unwrap();
+        let cancelled_in = projects
+            .execute(projects.event(
+                "hot:schedule:cancel",
+                val!({"fn": "::program::deadline/due"}),
+                Some(program_build),
+            ))
+            .await
+            .unwrap();
         assert_eq!(cancelled_in, program_build);
         assert!(
-            !Schedule::get_schedule(&db, &schedule_id)
+            !Schedule::get_schedule(&projects.db, &schedule_id)
                 .await
                 .unwrap()
                 .active
@@ -14845,24 +14918,91 @@ mod tests {
 
         // An event the API publishes names no build, and may run in any
         // project's build, as before.
-        let mut published = routed(&event(
-            "hot:schedule:new",
-            val!({"fn": "::program::deadline/due", "args": ["a"], "schedule": "in 1 hour"}),
-            None,
-        ))
-        .await
-        .into_iter()
-        .map(|handler| handler.build_id)
-        .collect::<Vec<_>>();
+        let mut published = projects
+            .routed(&projects.event(
+                "hot:schedule:new",
+                val!({"fn": "::program::deadline/due", "args": ["a"], "schedule": "in 1 hour"}),
+                None,
+            ))
+            .await
+            .into_iter()
+            .map(|handler| handler.build_id)
+            .collect::<Vec<_>>();
         published.sort();
         let mut deployed = vec![platform_redeploy, program_build];
         deployed.sort();
         assert_eq!(published, deployed);
 
-        if let DatabasePool::Sqlite(pool) = &db {
-            pool.close().await;
+        projects.close().await;
+    }
+
+    /// A project's own deployment carries its dynamic schedules to the new
+    /// build. One whose function the new build still defines fires there; one
+    /// whose function it dropped fails as it fires, and is cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_projects_deploy_carries_its_dynamic_schedules() {
+        let projects = ScheduledProjects::new().await;
+        let program = projects.test_data.project_id;
+        let first = projects
+            .deploy(
+                program,
+                "program",
+                "::program::deadline ns\n\n\
+                 due fn (who: Str): Str { `due ${who}` }\n\n\
+                 tick fn (n: Int): Int { n }\n",
+            )
+            .await;
+        let deadline = projects
+            .arm(first, "::program::deadline/due", val!(["a"]), "in 1 hour")
+            .await;
+        let ticking = projects
+            .arm(
+                first,
+                "::program::deadline/tick",
+                val!([1]),
+                "every day at 9am",
+            )
+            .await;
+
+        // The program deploys a build that still defines `due`, and no
+        // longer `tick`.
+        let second = projects
+            .deploy(
+                program,
+                "program",
+                "::program::deadline ns\n\ndue fn (who: Str): Str { `still due ${who}` }\n",
+            )
+            .await;
+        for carried in [deadline, ticking] {
+            let carried = Schedule::get_schedule(&projects.db, &carried)
+                .await
+                .unwrap();
+            assert!(carried.active, "the deployment carries it");
+            assert_eq!(carried.build_id, second);
         }
-        let _ = std::fs::remove_file(db_path);
+
+        // The one-shot fires in the new build.
+        let fired = projects.fired(&deadline).await;
+        assert_eq!(projects.execute(fired).await.unwrap(), second);
+
+        // The recurring schedule's function is gone: its run fails, and the
+        // schedule is cancelled with the reason, so it doesn't fail again.
+        let fired = projects.fired(&ticking).await;
+        let error = projects.execute(fired).await.unwrap_err();
+        assert!(
+            error.contains("isn't defined in this build, so its schedule is cancelled"),
+            "{error}"
+        );
+        let retired = Schedule::get_schedule(&projects.db, &ticking)
+            .await
+            .unwrap();
+        assert!(!retired.active);
+        assert_eq!(
+            retired.meta.unwrap()["deactivation-reason"],
+            hot::db::schedule::UNDEFINED_FUNCTION_REASON
+        );
+
+        projects.close().await;
     }
 
     #[tokio::test]
