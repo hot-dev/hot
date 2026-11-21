@@ -1137,6 +1137,7 @@ pub(crate) async fn run_dev_file_watcher(
                 &project_name,
                 &global_options.resource_paths,
                 global_options.no_gitignore,
+                hot::project::DependencyResources::Include,
             );
             // A resource edit may have touched a `*.skill.md` source —
             // regenerate the corresponding `*.skill.hot` stubs so the

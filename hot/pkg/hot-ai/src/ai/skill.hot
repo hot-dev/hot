@@ -1366,7 +1366,7 @@ meta {
     maps sorted by `path`. Excludes `SKILL.md`, dot-prefixed segments,
     files inside nested skill directories, and anything rejected by
     the optional `filter-fn(skill, rel-path)`. Returns `[]` when
-    `skill.resource-root` is `null`.
+    `skill.resource-root` is `null` or empty.
     """
 }
 fn
@@ -1374,21 +1374,16 @@ fn
 (skill: Skill, filter-fn: Fn?): Vec<Map> {
     root skill.resource-root
     cond {
-        is-null(root) => { [] }
+        // An empty root would match every resource in the project.
+        or(is-null(root), is-empty(root)) => { [] }
         => {
-            prefix if(is-empty(root), "", `${root}/`)
+            prefix `${root}/`
             prefix-len length(prefix)
             all-refs ::res/list()
             all-refs
-                |> filter((ref) {
-                    cond {
-                        is-empty(prefix) => { true }
-                        => { starts-with(ref.path, prefix) }
-                    }
-                })
+                |> filter((ref) { starts-with(ref.path, prefix) })
                 |> map((ref) {
-                    rel if(is-empty(prefix), ref.path, slice(ref.path, prefix-len, length(ref.path)))
-                    {path: rel, size: ref.size}
+                    {path: slice(ref.path, prefix-len, length(ref.path)), size: ref.size}
                 })
                 |> filter((item) {
                     norm normalize-skill-rel-path(item.path)
@@ -1426,7 +1421,7 @@ fn
 (skill: Skill, rel-path: Str, opts: Map): Str {
     root skill.resource-root
     cond {
-        is-null(root) => { `Skill '${skill.name}' has no bundled resources.` }
+        or(is-null(root), is-empty(root)) => { `Skill '${skill.name}' has no bundled resources.` }
         => {
             norm normalize-skill-rel-path(rel-path)
             cond {
@@ -1530,9 +1525,13 @@ meta {
     doc: """
     Load a single `Skill` from `::hot::resource` at `rel-path`.
 
-    - For `<dir>/SKILL.md` (or `"SKILL.md"`), sets `resource-root` to
-      the parent directory (unless `opts.expose-resources` is `false`)
-      and uses the directory basename as `default-name` and `dir-name`.
+    - For `<dir>/SKILL.md`, sets `resource-root` to the parent
+      directory (unless `opts.expose-resources` is `false`) and uses
+      the directory basename as `default-name` and `dir-name`.
+    - A `SKILL.md` at the top of a resource root has no directory of
+      its own: its siblings are every other resource in the project.
+      It loads as a skill with no `resource-root`, so it exposes no
+      bundled files, unless `opts.resource-root` names a directory.
     - For `*.skill.md`, derives `default-name` from the filename stem
       and leaves `resource-root` unset unless provided in `opts`.
     """
@@ -1548,10 +1547,13 @@ fn
         is-skill-md => {
             parent path-parent(rel-path)
             dir-name if(is-empty(parent), null, path-basename(parent))
+            // An empty parent is the top of the resource roots, not a
+            // directory this skill owns, so it is never a resource root.
+            own-dir if(is-empty(parent), null, parent)
             opts
                 |> assoc-some("default-name", or(get(opts, "default-name"), dir-name))
                 |> assoc-some("dir-name", or(get(opts, "dir-name"), dir-name))
-                |> assoc-some("resource-root", if(expose-res, or(get(opts, "resource-root"), parent), null))
+                |> assoc-some("resource-root", if(expose-res, or(get(opts, "resource-root"), own-dir), null))
         }
 
         ends-with(base, ".skill.md") => {

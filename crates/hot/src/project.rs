@@ -210,13 +210,25 @@ pub fn get_project_respect_gitignore(conf: &Val, project_name: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Collect `resource-paths` declared by resolved non-`hot-std` dependencies
-/// of `project_name`, in dependency order.
+/// Whether dependency packages' `resource-paths` join a project's resource
+/// roots.
+///
+/// Finding them means resolving every dependency, which evaluates each
+/// package's `pkg.hot` and downloads any package not yet in the cache. Only
+/// commands that run project code need that; the rest ask for `Skip` so
+/// `hot version`, `hot fmt`, the LSP and the like start without touching
+/// dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyResources {
+    Include,
+    Skip,
+}
+
+/// Collect `resource-paths` declared by already-resolved dependencies, in
+/// dependency order, skipping `hot-std`.
 pub fn collect_dependency_resource_roots(
-    conf: &Val,
-    project_name: &str,
+    resolved_deps: &[crate::lang::project::ResolvedDependency],
 ) -> Result<Vec<std::path::PathBuf>, String> {
-    let resolved_deps = get_resolved_project_dependencies(conf, project_name).unwrap_or_default();
     let mut roots = Vec::new();
     for dep in resolved_deps {
         if dep.name == "hot-std" || dep.name == "hot.dev/hot-std" {
@@ -240,7 +252,8 @@ pub fn collect_dependency_resource_roots(
 ///
 /// 1. `hot.project.<name>.resources.paths`
 /// 2. `extra_paths` (typically `--resource.path` CLI flags)
-/// 3. Resolved dependency `resource-paths` (skipping `hot-std`), matching
+/// 3. With `DependencyResources::Include`, resolved dependency
+///    `resource-paths` (skipping `hot-std`), matching
 ///    `crate::build::collect_build_inputs`.
 ///
 /// On a relative-path collision the registry keeps the first root's file, so
@@ -249,6 +262,7 @@ pub fn resolve_project_resource_roots(
     conf: &Val,
     project_name: &str,
     extra_paths: &[String],
+    dependency_resources: DependencyResources,
 ) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = get_project_resource_paths(conf, project_name)
         .into_iter()
@@ -257,14 +271,29 @@ pub fn resolve_project_resource_roots(
     for p in extra_paths {
         paths.push(std::path::PathBuf::from(p));
     }
-    match collect_dependency_resource_roots(conf, project_name) {
-        Ok(dep_roots) => paths.extend(dep_roots),
-        Err(error) => {
-            tracing::warn!(
-                "Failed to collect dependency resource roots for project '{}': {}",
-                project_name,
-                error
-            );
+    if dependency_resources == DependencyResources::Include {
+        // A project whose dependencies do not resolve reports that when it is
+        // compiled; here it only means no dependency resources.
+        let resolved = match get_resolved_project_dependencies(conf, project_name) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::debug!(
+                    "No dependency resources for project '{}': {}",
+                    project_name,
+                    error
+                );
+                Vec::new()
+            }
+        };
+        match collect_dependency_resource_roots(&resolved) {
+            Ok(dep_roots) => paths.extend(dep_roots),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to collect dependency resource roots for project '{}': {}",
+                    project_name,
+                    error
+                );
+            }
         }
     }
     paths
@@ -274,16 +303,39 @@ pub fn resolve_project_resource_roots(
 /// process-globally so that `::hot::resource/*` bindings can read from it.
 ///
 /// `extra_paths` are appended after the project-config paths (typically
-/// from `--resource.path` CLI flags), followed by any resolved dependency
-/// `resource-paths`. When `force_no_gitignore` is true it overrides the
-/// project's `respect-gitignore` setting.
+/// from `--resource.path` CLI flags), followed by resolved dependency
+/// `resource-paths` when `dependency_resources` asks for them. When
+/// `force_no_gitignore` is true it overrides the project's
+/// `respect-gitignore` setting.
 pub fn install_resource_registry(
     conf: &Val,
     project_name: &str,
     extra_paths: &[String],
     force_no_gitignore: bool,
+    dependency_resources: DependencyResources,
 ) -> crate::lang::hot::resource::ResourceRegistry {
-    let paths = resolve_project_resource_roots(conf, project_name, extra_paths);
+    let registry = build_project_resource_registry(
+        conf,
+        project_name,
+        extra_paths,
+        force_no_gitignore,
+        dependency_resources,
+    );
+    crate::lang::hot::resource::set_registry(registry.clone());
+    registry
+}
+
+/// Build the registry `install_resource_registry` installs, without
+/// installing it.
+fn build_project_resource_registry(
+    conf: &Val,
+    project_name: &str,
+    extra_paths: &[String],
+    force_no_gitignore: bool,
+    dependency_resources: DependencyResources,
+) -> crate::lang::hot::resource::ResourceRegistry {
+    let paths =
+        resolve_project_resource_roots(conf, project_name, extra_paths, dependency_resources);
     let respect = if force_no_gitignore {
         false
     } else {
@@ -291,9 +343,7 @@ pub fn install_resource_registry(
     };
     let mut excludes = get_project_ignore_excludes(conf, project_name);
     excludes.extend(get_project_resource_excludes(conf, project_name));
-    let registry = crate::lang::hot::resource::build_registry(&paths, respect, &excludes);
-    crate::lang::hot::resource::set_registry(registry.clone());
-    registry
+    crate::lang::hot::resource::build_registry(&paths, respect, &excludes)
 }
 
 /// Project-level ignore excludes applied to all file discovery (sources, tests, resources).
@@ -547,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn install_resource_registry_includes_dependency_resources_with_project_priority() {
+    fn project_resource_registry_includes_dependency_resources_with_project_priority() {
         let dir = tempfile::tempdir().unwrap();
         let pkg_dir = dir.path().join("dep-skills");
         let pkg_src = pkg_dir.join("src");
@@ -583,12 +633,23 @@ mod tests {
         );
         let conf = resolved(&conf_src);
 
-        let roots = resolve_project_resource_roots(&conf, "app", &[]);
+        let roots = resolve_project_resource_roots(&conf, "app", &[], DependencyResources::Include);
         assert_eq!(roots.len(), 2, "expected project root + dependency root");
         assert_eq!(roots[0], proj_res_root);
         assert_eq!(roots[1], pkg_dir.join("resources"));
 
-        let registry = install_resource_registry(&conf, "app", &[], true);
+        let project_only =
+            resolve_project_resource_roots(&conf, "app", &[], DependencyResources::Skip);
+        assert_eq!(
+            project_only,
+            vec![proj_res_root.clone()],
+            "Skip leaves dependencies unresolved"
+        );
+
+        // Built, not installed: the process-global registry belongs to the
+        // resource tests, which serialize it behind their own lock.
+        let registry =
+            build_project_resource_registry(&conf, "app", &[], true, DependencyResources::Include);
         assert!(registry.entries.contains_key("dep-pack/only-in-dep.md"));
         let skill_entry = registry
             .entries

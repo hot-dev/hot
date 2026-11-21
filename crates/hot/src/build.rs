@@ -416,7 +416,7 @@ pub fn collect_build_inputs(
         let resolved_deps =
             crate::project::get_resolved_project_dependencies(c, &build_context.project_name)
                 .unwrap_or_default();
-        for dep in resolved_deps {
+        for dep in &resolved_deps {
             if dep.name == "hot-std" || dep.name == "hot.dev/hot-std" {
                 tracing::debug!(
                     "Skipping hot-std from bundle (will use system hot-std at runtime)"
@@ -434,8 +434,7 @@ pub fn collect_build_inputs(
             all_files.extend(dep_files);
         }
         resource_paths.extend(crate::project::collect_dependency_resource_roots(
-            c,
-            &build_context.project_name,
+            &resolved_deps,
         )?);
     }
 

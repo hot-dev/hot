@@ -1989,6 +1989,30 @@ pub(crate) fn get_log_format_for_command(command: &Option<Command>) -> hot::log:
     }
 }
 
+/// Whether `command` needs dependency packages' resources in the resource
+/// registry.
+///
+/// Only the commands that run project code in this process do. They resolve
+/// the project's dependencies to compile it anyway; every other command
+/// skips that work, so it neither evaluates each dependency's `pkg.hot` nor
+/// downloads a package that is not yet in the cache. `hot build` and
+/// `hot deploy` collect dependency resources themselves, from the
+/// dependencies they bundle.
+pub(crate) fn dependency_resources_for_command(
+    command: &Option<Command>,
+) -> hot::project::DependencyResources {
+    match command {
+        Some(Command::Run { .. })
+        | Some(Command::Eval { .. })
+        | Some(Command::Repl { .. })
+        | Some(Command::Dev { .. })
+        | Some(Command::Test { .. })
+        | Some(Command::Worker { .. })
+        | Some(Command::TaskWorker { .. }) => hot::project::DependencyResources::Include,
+        _ => hot::project::DependencyResources::Skip,
+    }
+}
+
 pub(crate) fn apply_command_specific_defaults(mut conf: Val, command: &Option<Command>) -> Val {
     if let Some(cmd) = command {
         match cmd {
