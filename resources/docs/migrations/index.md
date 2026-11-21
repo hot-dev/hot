@@ -36,6 +36,16 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.13 to 3.0.14 {#upgrading-from-3-0-13-to-3-0-14}
+
+**No database migrations.** 3.0.14 runs on a 3.0.13 database as is.
+
+**Behavior change: JSON requests are limited to 10 MB.** The API's 300 MB body limit now applies only to file and build uploads. Other `/v1/*` routes reject larger bodies, and `/data/*` clamps `limit` to 1–1000.
+
+**Behavior change: some app actions need an organization administrator.** Adding, verifying or deleting a custom domain, deploying a project from the app, and turning a project on or off now answer 403 for other members. Org keys moved to `/keys/org`, and the `/@org/org-api-keys` routes are gone.
+
+**Behavior change: installers and `hot update` fail closed.** A download without a valid `.sha256` checksum, or over plain HTTP to anything but localhost, is refused.
+
 ## Upgrading from Hot 3.0.12 to 3.0.13 {#upgrading-from-3-0-12-to-3-0-13}
 
 **Migration 041.** Run `hot db migrate` with the 3.0.13 CLI. It lets a schedule move between builds of one project, and still refuses moving it anywhere else.
