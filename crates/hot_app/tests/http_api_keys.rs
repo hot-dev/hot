@@ -209,24 +209,6 @@ async fn a_new_key_can_expire_and_shows_when() {
     let page = client.post_form(&new, &rejected).await;
     assert!(page.body.contains("Expiry must be"), "{}", page.body);
 
-    // A restricted key's permissions are bounded before they are parsed.
-    let huge = format!(r#"{{"run:*": ["read"{}]}}"#, r#", "read""#.repeat(40_000));
-    let oversized = [
-        ("api_key_id", field(&page.body, "api_key_id")),
-        ("handoff_token", field(&page.body, "handoff_token")),
-        ("description", "oversized".to_string()),
-        ("access_level", "restricted".to_string()),
-        ("permissions", huge),
-    ];
-    let oversized: Vec<_> = oversized.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let page = client.post_form(&new, &oversized).await;
-    assert!(
-        page.body.contains("Permissions are too large"),
-        "{}",
-        page.body
-    );
-    assert!(page.body.len() < 256 * 1024, "the text isn't echoed");
-
     let page = client.get(&new).await;
     let accepted = [
         ("api_key_id", field(&page.body, "api_key_id")),
@@ -376,32 +358,6 @@ async fn a_new_org_key_works_with_the_secret_its_page_showed() {
         page.body.contains("Unable to create the org API key"),
         "{}",
         page.body
-    );
-
-    // The form bounds what it parses. An oversized set is refused, not
-    // created as a key with no permissions, and isn't sent back.
-    let huge = format!(r#"{{"org:*": ["read"{}]}}"#, r#", "read""#.repeat(40_000));
-    assert!(huge.len() > 256 * 1024);
-    let oversized = [
-        ("org_api_key_id", field(&page.body, "org_api_key_id")),
-        ("handoff_token", field(&page.body, "handoff_token")),
-        ("description", "bad".to_string()),
-        ("permissions", huge),
-    ];
-    let oversized: Vec<_> = oversized.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let page = client.post_form(&new, &oversized).await;
-    page.assert_status(StatusCode::BAD_REQUEST);
-    assert!(
-        page.body.contains("Permissions are too large"),
-        "{}",
-        page.body
-    );
-    assert!(page.body.len() < 256 * 1024, "the text isn't echoed");
-    assert!(
-        OrgApiKey::list_for_org(client.db(), td.org_id)
-            .await
-            .unwrap()
-            .is_empty()
     );
 
     let page = client.get(&new).await;

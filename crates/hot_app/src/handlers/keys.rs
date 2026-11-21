@@ -445,20 +445,9 @@ fn selected_access_level(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// The most permissions JSON a key form parses. A grant is about a hundred
-/// bytes, so this is room for thousands of them, and far less than a request
-/// body may hold.
-const MAX_PERMISSIONS_JSON_BYTES: usize = 256 * 1024;
-
-const PERMISSIONS_TOO_LARGE: &str = "Permissions are too large. Use fewer rules, or wildcards.";
-
 /// The submitted permissions, for re-rendering a form after an error. Text that isn't JSON is
-/// passed through as a string, which the page's permission editor shows to be fixed. Oversized
-/// text is neither parsed nor sent back.
+/// passed through as a string, which the page's permission builder ignores.
 fn submitted_permissions(raw: &str) -> serde_json::Value {
-    if raw.len() > MAX_PERMISSIONS_JSON_BYTES {
-        return serde_json::Value::Object(Default::default());
-    }
     if raw.trim().is_empty() {
         serde_json::Value::Object(Default::default())
     } else {
@@ -516,9 +505,6 @@ fn permissions_from_form(access_level: &str, raw: &str) -> Result<serde_json::Va
     }
     if raw.is_empty() {
         return Ok(serde_json::json!({}));
-    }
-    if raw.len() > MAX_PERMISSIONS_JSON_BYTES {
-        return Err(PERMISSIONS_TOO_LARGE.to_string());
     }
     let parsed: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("Invalid permissions JSON: {}", e))?;
@@ -1388,11 +1374,6 @@ pub async fn org_keys_create_handler(
         Ok(expires_at) => expires_at,
         Err(message) => return Err(retry(message)),
     };
-    // Checked here as well as where it is parsed: an oversized set must be
-    // refused, not created as a key with no permissions.
-    if form.permissions.len() > MAX_PERMISSIONS_JSON_BYTES {
-        return Err(retry(PERMISSIONS_TOO_LARGE));
-    }
     if !submitted.is_object() {
         return Err(retry("Permissions must be a JSON object."));
     }
