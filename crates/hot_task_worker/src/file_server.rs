@@ -41,8 +41,10 @@ const MAX_LIST_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const GLOBAL_TRANSFER_LIMIT: usize = 4;
 const PER_TASK_TRANSFER_LIMIT: usize = 2;
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const PRE_AUTH_HEADER_DEADLINE: Duration = Duration::from_secs(5);
 const TRANSFER_QUEUE_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+const MAX_TRANSFER_DURATION: Duration = Duration::from_secs(600);
 static GLOBAL_CONNECTIONS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_CONNECTION_LIMIT)));
 static GLOBAL_TRANSFERS: LazyLock<Arc<Semaphore>> =
@@ -92,12 +94,33 @@ pub enum FileServerTransport {
     },
 }
 
-/// Handle to a running file server. Dropping it signals shutdown.
+/// Handle to a running file server. Dropping it signals shutdown and cleans up
+/// any per-task socket directory.
 pub struct FileServerHandle {
     pub transport: FileServerTransport,
     auth_token: String,
-    shutdown_tx: oneshot::Sender<()>,
-    join_handle: tokio::task::JoinHandle<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Per-task Unix socket directory owned by this handle and removed on
+    /// shutdown/drop.
+    cleanup_dir: Option<PathBuf>,
+}
+
+impl Drop for FileServerHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(dir) = self.cleanup_dir.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        #[cfg(all(target_os = "linux", feature = "kata"))]
+        if self.join_handle.is_some()
+            && let FileServerTransport::VsockUds { uds_path, .. } = &self.transport
+        {
+            let _ = std::fs::remove_file(uds_path);
+        }
+    }
 }
 
 impl FileServerHandle {
@@ -157,10 +180,18 @@ impl FileServerHandle {
         &self.auth_token
     }
 
-    /// Shut down the file server and wait for it to finish.
-    pub async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(());
-        let _ = self.join_handle.await;
+    /// Shut down the file server, abort in-flight connections, and clean up its
+    /// socket/directory.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.await;
+        }
+        if let Some(dir) = self.cleanup_dir.take() {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
         match &self.transport {
             FileServerTransport::Unix(path) => {
                 let _ = tokio::fs::remove_file(path).await;
@@ -178,33 +209,38 @@ impl FileServerHandle {
 
 /// Start a per-task file server on a unix socket.
 ///
-/// Creates a unix socket at `socket_dir/hotbox-{task_id}.sock` and starts
-/// serving HTTP requests. Returns a handle for lifecycle management.
+/// Creates a per-task directory `socket_dir/{task_id}` containing `hotbox.sock`
+/// and starts serving HTTP requests. Only that per-task directory is
+/// bind-mounted into the container, isolating each container from sibling tasks'
+/// sockets. Permissions (`0o755` dir, `0o666` socket) allow non-root container
+/// users (e.g. `nobody` when `writable: false`) to connect while authentication
+/// is enforced via the per-task bearer token.
 #[cfg(unix)]
 pub async fn start(
     task_id: &Uuid,
     socket_dir: &Path,
     ctx: FileServerContext,
 ) -> Result<FileServerHandle, std::io::Error> {
-    let socket_path = socket_dir.join(format!("hotbox-{}.sock", task_id));
+    let task_socket_dir = socket_dir.join(task_id.to_string());
+    let socket_path = task_socket_dir.join("hotbox.sock");
 
-    // Remove stale socket if it exists
-    let _ = tokio::fs::remove_file(&socket_path).await;
-
-    // Ensure directory exists and is accessible to container user
-    tokio::fs::create_dir_all(socket_dir).await?;
+    // Ensure per-task directory exists and is traversable by non-root container users.
+    tokio::fs::create_dir_all(&task_socket_dir).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o770));
+        std::fs::set_permissions(&task_socket_dir, std::fs::Permissions::from_mode(0o755))?;
     }
+
+    // Remove stale socket if it exists
+    let _ = tokio::fs::remove_file(&socket_path).await;
 
     let listener = UnixListener::bind(&socket_path)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o770));
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
     }
 
     tracing::debug!(task_id = %task_id, socket = %socket_path.display(), "File server started on unix socket");
@@ -221,8 +257,9 @@ pub async fn start(
     Ok(FileServerHandle {
         transport: FileServerTransport::Unix(socket_path),
         auth_token,
-        shutdown_tx,
-        join_handle,
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+        cleanup_dir: Some(task_socket_dir),
     })
 }
 
@@ -313,8 +350,9 @@ pub async fn start_vsock_af(
     FileServerHandle {
         transport: FileServerTransport::VsockAf { port },
         auth_token,
-        shutdown_tx,
-        join_handle,
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+        cleanup_dir: None,
     }
 }
 
@@ -327,9 +365,11 @@ async fn serve_vsock_af(
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _addr)) => {
@@ -341,7 +381,7 @@ async fn serve_vsock_af(
                         };
                         let ctx = ctx.clone();
                         let task_transfers = Arc::clone(&task_transfers);
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) =
                                 handle_vsock_af_connection(stream, ctx, task_transfers).await
@@ -357,6 +397,7 @@ async fn serve_vsock_af(
             }
         }
     }
+    connections.shutdown().await;
 }
 
 /// Handle a single connection from a VsockStream (AF_VSOCK).
@@ -413,8 +454,9 @@ pub async fn start_vsock_uds(
             uds_path: listener_path.to_path_buf(),
         },
         auth_token,
-        shutdown_tx,
-        join_handle,
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+        cleanup_dir: None,
     })
 }
 
@@ -426,9 +468,11 @@ async fn serve_unix(
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _)) => {
@@ -440,7 +484,7 @@ async fn serve_unix(
                         };
                         let ctx = ctx.clone();
                         let task_transfers = Arc::clone(&task_transfers);
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) = handle_connection(stream, ctx, task_transfers).await {
                                 tracing::debug!("File server connection error: {}", e);
@@ -454,6 +498,7 @@ async fn serve_unix(
             }
         }
     }
+    connections.shutdown().await;
 }
 
 /// Start a per-task file server on a TCP port (for macOS Docker where unix socket
@@ -476,8 +521,9 @@ pub async fn start_tcp(
     Ok(FileServerHandle {
         transport: FileServerTransport::Tcp(port),
         auth_token,
-        shutdown_tx,
-        join_handle,
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+        cleanup_dir: None,
     })
 }
 
@@ -488,9 +534,11 @@ async fn serve_tcp(
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _)) => {
@@ -502,7 +550,7 @@ async fn serve_tcp(
                         };
                         let ctx = ctx.clone();
                         let task_transfers = Arc::clone(&task_transfers);
-                        tokio::spawn(async move {
+                        connections.spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) =
                                 handle_tcp_connection(stream, ctx, task_transfers).await
@@ -518,6 +566,7 @@ async fn serve_tcp(
             }
         }
     }
+    connections.shutdown().await;
 }
 
 async fn handle_tcp_connection(
@@ -543,8 +592,8 @@ async fn handle_connection(
 
 /// Handle a single HTTP/1.1 request. Generic over transport (Unix socket, TCP, vsock).
 async fn handle_request<R, W>(
-    mut reader: BufReader<R>,
-    mut write_half: W,
+    reader: BufReader<R>,
+    write_half: W,
     ctx: FileServerContext,
     task_transfers: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -552,11 +601,41 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let request_deadline = tokio::time::Instant::now() + REQUEST_DEADLINE;
+    handle_request_with_deadlines(
+        reader,
+        write_half,
+        ctx,
+        task_transfers,
+        PRE_AUTH_HEADER_DEADLINE,
+        REQUEST_DEADLINE,
+        READ_IDLE_TIMEOUT,
+        MAX_TRANSFER_DURATION,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_request_with_deadlines<R, W>(
+    mut reader: BufReader<R>,
+    mut write_half: W,
+    ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
+    pre_auth_header_deadline: Duration,
+    request_deadline: Duration,
+    idle_timeout: Duration,
+    max_transfer_duration: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // Enforce a tight deadline for request line + headers before auth so
+    // unauthenticated connections cannot tie up connection slots.
+    let header_deadline = tokio::time::Instant::now() + pre_auth_header_deadline;
 
     // Read request line
     let request_line = match tokio::time::timeout_at(
-        request_deadline,
+        header_deadline,
         read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES),
     )
     .await
@@ -584,7 +663,7 @@ where
     let mut headers = HashMap::new();
     loop {
         let line = match tokio::time::timeout_at(
-            request_deadline,
+            header_deadline,
             read_bounded_line(&mut reader, MAX_HEADER_BYTES),
         )
         .await
@@ -683,9 +762,18 @@ where
         let mut buf = Vec::with_capacity(content_length.min(64 * 1024));
         let mut remaining = content_length;
         let mut chunk = [0u8; 64 * 1024];
+        let body_deadline = tokio::time::Instant::now() + request_deadline;
         while remaining > 0 {
             let count = remaining.min(chunk.len());
-            tokio::time::timeout(READ_IDLE_TIMEOUT, reader.read_exact(&mut chunk[..count]))
+            let step_timeout = idle_timeout
+                .min(body_deadline.saturating_duration_since(tokio::time::Instant::now()));
+            if step_timeout.is_zero() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "body read exceeded deadline",
+                )));
+            }
+            tokio::time::timeout(step_timeout, reader.read_exact(&mut chunk[..count]))
                 .await
                 .map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::TimedOut, "body read idle")
@@ -716,7 +804,7 @@ where
         let prefix = uri.strip_prefix("/files?prefix=").unwrap_or("");
         let prefix = urlencoding_decode(prefix);
         match tokio::time::timeout(
-            REQUEST_DEADLINE,
+            request_deadline,
             handle_list(&mut write_half, &ctx.storage, &file_ctx, &prefix),
         )
         .await
@@ -735,10 +823,21 @@ where
     } else if let Some(path) = uri.strip_prefix("/files/") {
         let path = urlencoding_decode(path);
         match method {
-            "GET" => handle_read(&mut write_half, &ctx.storage, &file_ctx, &path).await?,
+            "GET" => {
+                handle_read_with_timeouts(
+                    &mut write_half,
+                    &ctx.storage,
+                    &file_ctx,
+                    &path,
+                    request_deadline,
+                    idle_timeout,
+                    max_transfer_duration,
+                )
+                .await?
+            }
             "PUT" => {
                 match tokio::time::timeout(
-                    REQUEST_DEADLINE,
+                    request_deadline,
                     handle_write(&mut write_half, &ctx.storage, &file_ctx, &path, body),
                 )
                 .await
@@ -757,8 +856,14 @@ where
             }
             "HEAD" => {
                 match tokio::time::timeout(
-                    REQUEST_DEADLINE,
-                    handle_head(&mut write_half, &ctx.storage, &file_ctx, &path),
+                    request_deadline,
+                    handle_head_with_timeout(
+                        &mut write_half,
+                        &ctx.storage,
+                        &file_ctx,
+                        &path,
+                        idle_timeout,
+                    ),
                 )
                 .await
                 {
@@ -776,7 +881,7 @@ where
             }
             "DELETE" => {
                 match tokio::time::timeout(
-                    REQUEST_DEADLINE,
+                    request_deadline,
                     handle_delete(&mut write_half, &ctx.storage, &file_ctx, &path),
                 )
                 .await
@@ -864,14 +969,17 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
+async fn handle_read_with_timeouts<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     storage: &Arc<dyn FileStorage>,
     ctx: &hot::file_storage::FileStorageContext,
     path: &str,
+    request_deadline: Duration,
+    idle_timeout: Duration,
+    max_transfer_duration: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stream_result =
-        match tokio::time::timeout(REQUEST_DEADLINE, storage.open_file_stream(path, ctx)).await {
+        match tokio::time::timeout(request_deadline, storage.open_file_stream(path, ctx)).await {
             Ok(result) => result,
             Err(_) => {
                 write_http_response(writer, 504, "text/plain", b"File operation timed out").await?;
@@ -888,17 +996,19 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
                     return Ok(());
                 }
             };
-            write_streaming_response(
+            write_streaming_response_with_timeouts(
                 writer,
                 "application/octet-stream",
                 size,
                 stream.reader.as_mut(),
+                idle_timeout,
+                max_transfer_duration,
             )
             .await?;
         }
         Ok(None) => {
             let metadata =
-                match tokio::time::timeout(REQUEST_DEADLINE, storage.get_file_metadata(path, ctx))
+                match tokio::time::timeout(request_deadline, storage.get_file_metadata(path, ctx))
                     .await
                 {
                     Ok(Ok(metadata)) => metadata,
@@ -925,7 +1035,7 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
                 return Ok(());
             }
             let data =
-                match tokio::time::timeout(REQUEST_DEADLINE, storage.read_file(path, ctx)).await {
+                match tokio::time::timeout(request_deadline, storage.read_file(path, ctx)).await {
                     Ok(result) => result?,
                     Err(_) => {
                         write_http_response(writer, 504, "text/plain", b"File operation timed out")
@@ -966,11 +1076,12 @@ async fn handle_write<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn handle_head<W: tokio::io::AsyncWrite + Unpin>(
+async fn handle_head_with_timeout<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     storage: &Arc<dyn FileStorage>,
     ctx: &hot::file_storage::FileStorageContext,
     path: &str,
+    idle_timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match storage.get_file_metadata(path, ctx).await {
         Ok(meta) => {
@@ -989,7 +1100,7 @@ async fn handle_head<W: tokio::io::AsyncWrite + Unpin>(
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-File-Meta: {}\r\nConnection: close\r\n\r\n",
                 meta_str
             );
-            writer.write_all(header.as_bytes()).await?;
+            write_all_with_timeout(writer, header.as_bytes(), idle_timeout).await?;
         }
         Err(e) => {
             let msg = format!("File not found: {}", e);
@@ -1111,54 +1222,49 @@ async fn write_http_response_with_headers<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-async fn write_streaming_response<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    content_type: &str,
-    size: usize,
-    reader: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
-) -> Result<(), std::io::Error> {
-    write_streaming_response_with_idle_timeout(
-        writer,
-        content_type,
-        size,
-        reader,
-        READ_IDLE_TIMEOUT,
-    )
-    .await
-}
-
-async fn write_streaming_response_with_idle_timeout<W: tokio::io::AsyncWrite + Unpin>(
+async fn write_streaming_response_with_timeouts<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     content_type: &str,
     size: usize,
     mut reader: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
     idle_timeout: Duration,
+    max_transfer_duration: Duration,
 ) -> Result<(), std::io::Error> {
-    let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        content_type, size
-    );
-    write_all_with_timeout(writer, header.as_bytes(), idle_timeout).await?;
+    tokio::time::timeout(max_transfer_duration, async {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            content_type, size
+        );
+        write_all_with_timeout(writer, header.as_bytes(), idle_timeout).await?;
 
-    let mut remaining = size;
-    let mut buffer = [0u8; 64 * 1024];
-    while remaining > 0 {
-        let count = remaining.min(buffer.len());
-        let read = tokio::time::timeout(idle_timeout, reader.as_mut().read(&mut buffer[..count]))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "file stream read idle")
-            })??;
-        if read == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "file ended before recorded size",
-            ));
+        let mut remaining = size;
+        let mut buffer = [0u8; 64 * 1024];
+        while remaining > 0 {
+            let count = remaining.min(buffer.len());
+            let read =
+                tokio::time::timeout(idle_timeout, reader.as_mut().read(&mut buffer[..count]))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "file stream read idle")
+                    })??;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "file ended before recorded size",
+                ));
+            }
+            write_all_with_timeout(writer, &buffer[..read], idle_timeout).await?;
+            remaining -= read;
         }
-        write_all_with_timeout(writer, &buffer[..read], idle_timeout).await?;
-        remaining -= read;
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "file transfer exceeded maximum duration",
+        )
+    })?
 }
 
 async fn write_all_with_idle_timeout<W: tokio::io::AsyncWrite + Unpin>(
@@ -1287,16 +1393,123 @@ mod tests {
         let mut output = tokio::io::sink();
         let reader = std::pin::Pin::new(&mut source_reader);
 
-        write_streaming_response_with_idle_timeout(
+        write_streaming_response_with_timeouts(
             &mut output,
             "application/octet-stream",
             2,
             reader,
             idle_timeout,
+            Duration::from_secs(10),
         )
         .await
         .expect("steady streaming progress should not hit an absolute request deadline");
         producer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_transfer_enforces_total_duration_ceiling() {
+        let idle_timeout = Duration::from_secs(1);
+        let max_transfer = Duration::from_millis(250);
+        let (mut source_writer, mut source_reader) = tokio::io::duplex(1);
+        let _producer = tokio::spawn(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                if source_writer.write_all(b"x").await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut output = tokio::io::sink();
+        let reader = std::pin::Pin::new(&mut source_reader);
+
+        let err = write_streaming_response_with_timeouts(
+            &mut output,
+            "application/octet-stream",
+            10,
+            reader,
+            idle_timeout,
+            max_transfer,
+        )
+        .await
+        .expect_err("slow reader making steady progress must still hit total transfer ceiling");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn handle_head_enforces_write_idle_timeout() {
+        let storage = Arc::new(MockFileStorage::new());
+        storage
+            .files
+            .lock()
+            .await
+            .insert("meta.txt".to_string(), b"hello".to_vec());
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let file_ctx = hot::file_storage::FileStorageContext {
+            db: Arc::new(hot::db::DatabasePool::Sqlite(pool)),
+            org_id: Uuid::nil(),
+            env_id: Some(Uuid::nil()),
+            user_id: Uuid::nil(),
+            run_id: None,
+            run_provenance: None,
+            file_max_bytes_conf: None,
+        };
+        let storage_dyn: Arc<dyn FileStorage> = storage;
+
+        // Duplex with 1-byte buffer and no reader causes write_all to stall.
+        let (mut stalled_writer, _unpolled_reader) = tokio::io::duplex(1);
+        let result = handle_head_with_timeout(
+            &mut stalled_writer,
+            &storage_dyn,
+            &file_ctx,
+            "meta.txt",
+            Duration::from_millis(80),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "HEAD write to stalled client must time out"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_auth_header_deadline_rejects_slow_unauthenticated_connection() {
+        let storage: Arc<dyn FileStorage> = Arc::new(MockFileStorage::new());
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let ctx = FileServerContext {
+            org_id: Uuid::nil(),
+            env_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            run_id: None,
+            auth_token: "secret".to_string(),
+            db: Arc::new(hot::db::DatabasePool::Sqlite(pool)),
+            storage,
+        };
+        let (mut client_w, server_r) = tokio::io::duplex(64);
+        let (server_w, mut client_r) = tokio::io::duplex(256);
+
+        // Send partial request line without newline and stall past pre-auth deadline.
+        client_w.write_all(b"GET /health ").await.unwrap();
+        let started = tokio::time::Instant::now();
+        handle_request_with_deadlines(
+            BufReader::new(server_r),
+            server_w,
+            ctx,
+            Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT)),
+            Duration::from_millis(100),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "pre-auth header deadline must abort promptly"
+        );
+        let mut response = Vec::new();
+        client_r.read_to_end(&mut response).await.unwrap();
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 400"));
+        assert_eq!(PRE_AUTH_HEADER_DEADLINE, Duration::from_secs(5));
     }
 
     // -- Integration tests with MockFileStorage --
@@ -1777,5 +1990,178 @@ mod tests {
         assert_eq!(status, 401);
 
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_per_task_socket_directory_permissions_and_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let task_id = Uuid::new_v4();
+        let base_dir = PathBuf::from(format!("/tmp/hbx-c7-{}", task_id.simple()));
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let ctx = FileServerContext {
+            org_id: Uuid::nil(),
+            env_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            run_id: None,
+            auth_token: "tok".to_string(),
+            db: Arc::new(hot::db::DatabasePool::Sqlite(pool)),
+            storage: Arc::new(MockFileStorage::new()),
+        };
+
+        let handle = start(&task_id, &base_dir, ctx.clone()).await.unwrap();
+        let expected_dir = base_dir.join(task_id.to_string());
+        let expected_socket = expected_dir.join("hotbox.sock");
+        assert_eq!(handle.socket_path(), expected_socket);
+
+        let dir_mode = std::fs::metadata(&expected_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let sock_mode = std::fs::metadata(&expected_socket)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o755, "per-task socket dir must be 0o755");
+        assert_eq!(
+            sock_mode, 0o666,
+            "per-task socket must be 0o666 for non-root users"
+        );
+
+        handle.shutdown().await;
+        assert!(
+            !expected_dir.exists(),
+            "per-task socket directory must be removed on shutdown"
+        );
+
+        // Also verify cleanup on Drop without calling shutdown().
+        let task_id_2 = Uuid::new_v4();
+        let handle_2 = start(&task_id_2, &base_dir, ctx).await.unwrap();
+        let expected_dir_2 = base_dir.join(task_id_2.to_string());
+        assert!(expected_dir_2.exists());
+        drop(handle_2);
+        assert!(
+            !expected_dir_2.exists(),
+            "per-task socket directory must be removed on Drop"
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    struct HangingStreamStorage {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl hot::file_storage::FileStorage for HangingStreamStorage {
+        async fn write_file(
+            &self,
+            _path: &str,
+            _content: &[u8],
+            _content_type: Option<&str>,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<hot::file_storage::FileMetadata, String> {
+            Err("unused".into())
+        }
+        async fn write_file_if(
+            &self,
+            _path: &str,
+            _content: &[u8],
+            _content_type: Option<&str>,
+            _expected_etag: Option<&str>,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Option<hot::file_storage::FileMetadata>, String> {
+            Err("unused".into())
+        }
+        async fn read_file(
+            &self,
+            _path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Vec<u8>, String> {
+            Err("unused".into())
+        }
+        async fn open_file_stream(
+            &self,
+            path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Option<hot::file_storage::FileReadStream>, String> {
+            self.started.notify_one();
+            // Never sends bytes; reader stays pending until aborted.
+            let (_tx, rx) = tokio::io::duplex(16);
+            std::mem::forget(_tx);
+            Ok(Some(hot::file_storage::FileReadStream {
+                metadata: mock_metadata(path, 1024),
+                reader: Box::pin(rx),
+            }))
+        }
+        async fn delete_file(
+            &self,
+            _path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<bool, String> {
+            Err("unused".into())
+        }
+        async fn file_exists(
+            &self,
+            _path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn get_file_metadata(
+            &self,
+            _path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<hot::file_storage::FileMetadata, String> {
+            Err("unused".into())
+        }
+        async fn list_files(
+            &self,
+            _prefix: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Vec<hot::file_storage::FileMetadata>, String> {
+            Ok(vec![])
+        }
+        fn storage_type(&self) -> &str {
+            "hanging"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_aborts_active_in_flight_transfer() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let storage: Arc<dyn FileStorage> = Arc::new(HangingStreamStorage {
+            started: Arc::clone(&started),
+        });
+        let (handle, socket) = start_test_server_with_storage(storage).await;
+
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut read_half, mut write_half) = stream.into_split();
+        write_half
+            .write_all(
+                b"GET /files/slow.bin HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer test-token\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("transfer should start");
+
+        // Shutdown must abort the active connection promptly without waiting
+        // for the 5s read idle timeout or 30s request deadline.
+        let shutdown_start = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
+            .await
+            .expect("shutdown should abort active transfer promptly");
+        assert!(shutdown_start.elapsed() < Duration::from_secs(1));
+
+        // Client sees connection closed once the server aborts the connection task.
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(1), read_half.read_to_end(&mut buf))
+            .await
+            .expect("client stream should close after shutdown");
     }
 }

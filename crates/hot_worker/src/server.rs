@@ -675,28 +675,44 @@ fn alert_http_client() -> reqwest::Client {
         .clone()
 }
 
+const CONSUMER_UNREGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CONSUMER_UNREGISTER_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn unregister_idle_consumer(queue_name: &str, queue: &ProcessingQueue<Message>) {
-    match queue.consumer_has_pending().await {
-        Ok(false) => {
-            if let Err(e) = queue.unregister_consumer().await {
+    let op = async {
+        match queue.consumer_has_pending().await {
+            Ok(false) => {
+                if let Err(e) = queue.unregister_consumer().await {
+                    warn!(
+                        "hot.dev: WORKER failed to unregister {} consumer: {}",
+                        queue_name, e
+                    );
+                }
+            }
+            Ok(true) => {
                 warn!(
-                    "hot.dev: WORKER failed to unregister {} consumer: {}",
+                    "hot.dev: WORKER leaving {} consumer registered because it still has pending messages",
+                    queue_name
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "hot.dev: WORKER could not inspect {} consumer pending state before unregister: {}",
                     queue_name, e
                 );
             }
         }
-        Ok(true) => {
-            warn!(
-                "hot.dev: WORKER leaving {} consumer registered because it still has pending messages",
-                queue_name
-            );
-        }
-        Err(e) => {
-            warn!(
-                "hot.dev: WORKER could not inspect {} consumer pending state before unregister: {}",
-                queue_name, e
-            );
-        }
+    };
+    if tokio::time::timeout(CONSUMER_UNREGISTER_TIMEOUT, op)
+        .await
+        .is_err()
+    {
+        warn!(
+            "hot.dev: WORKER timed out unregistering {} consumer after {}s",
+            queue_name,
+            CONSUMER_UNREGISTER_TIMEOUT.as_secs()
+        );
     }
 }
 
@@ -1445,7 +1461,7 @@ mod graceful_shutdown {
                 reason
             );
             for token in tokens {
-                token.store(true, Ordering::Relaxed);
+                token.store(true, Ordering::Release);
             }
         }
 
@@ -1543,24 +1559,50 @@ mod graceful_shutdown {
         /// Fail all active runs due to shutdown timeout
         /// Marks runs as Failed (not Cancelled) so retry logic can kick in for functions with retry meta
         async fn fail_active_runs(&self, db: &DatabasePool) -> Result<usize, String> {
+            const FAIL_ACTIVE_RUNS_TIMEOUT: Duration = Duration::from_secs(10);
+            const FAIL_SINGLE_RUN_TIMEOUT: Duration = Duration::from_secs(3);
+
             let active_runs: Vec<Uuid> = self
                 .active_runs
                 .read()
                 .map(|runs| runs.iter().copied().collect())
                 .unwrap_or_default();
 
+            let deadline = Instant::now() + FAIL_ACTIVE_RUNS_TIMEOUT;
             let mut failed_count = 0;
 
             for run_id in active_runs {
-                match Run::fail_run(db, &run_id, "Run interrupted by worker shutdown").await {
-                    Ok(_) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    warn!(
+                        "Timed out failing remaining active runs during shutdown after {}s ({} failed)",
+                        FAIL_ACTIVE_RUNS_TIMEOUT.as_secs(),
+                        failed_count
+                    );
+                    break;
+                }
+                let step_timeout = remaining.min(FAIL_SINGLE_RUN_TIMEOUT);
+                match timeout(
+                    step_timeout,
+                    Run::fail_run(db, &run_id, "Run interrupted by worker shutdown"),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
                         warn!("Failed run {} due to shutdown timeout", run_id);
                         failed_count += 1;
                         // Unregister the run
                         self.unregister_run(&run_id);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!("Failed to mark run {} as failed: {}", run_id, e);
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Timed out marking run {} as failed during shutdown after {}s",
+                            run_id,
+                            step_timeout.as_secs()
+                        );
                     }
                 }
             }
@@ -1650,7 +1692,13 @@ impl BuildPathCache {
                 if let Ok(mut paths) = paths.write() {
                     paths.remove(&build_id);
                 }
-                locks.lock().remove(&build_id);
+                let mut locks = locks.lock();
+                if locks
+                    .get(&build_id)
+                    .is_some_and(|lock| Arc::strong_count(lock) == 1)
+                {
+                    locks.remove(&build_id);
+                }
             })
             .await;
     }
@@ -1672,11 +1720,11 @@ impl BuildPathCache {
     }
 
     /// Remove cache entries for builds that are no longer deployed.
-    /// Called periodically to prevent unbounded memory growth.
     ///
-    /// Only the in-memory entries: `valid_build_ids` covers one environment, so
-    /// a build missing from it can still be deployed in another. See
-    /// `evict_unneeded_extractions` for the directories.
+    /// Never evicts `extraction_locks` entries where `Arc::strong_count(lock) > 1`
+    /// (currently held by an active extractor), so a concurrent extraction
+    /// cannot lose mutual exclusion.
+    #[allow(dead_code)]
     fn retain_only(&self, valid_build_ids: &ahash::AHashSet<Uuid>) {
         // Clean up paths cache
         if let Ok(mut paths) = self.paths.write() {
@@ -1692,11 +1740,14 @@ impl BuildPathCache {
             }
         }
 
-        // Clean up extraction locks for old builds
+        // Clean up extraction locks for old builds, preserving any lock
+        // currently held by an active extractor (`strong_count > 1`).
         {
             let mut locks = self.extraction_locks.lock();
             let before_count = locks.len();
-            locks.retain(|build_id, _| valid_build_ids.contains(build_id));
+            locks.retain(|build_id, lock| {
+                valid_build_ids.contains(build_id) || Arc::strong_count(lock) > 1
+            });
             let removed = before_count - locks.len();
             if removed > 0 {
                 tracing::debug!(
@@ -1751,6 +1802,86 @@ impl BuildPathCache {
             .open(&lock_path)?;
 
         Ok(fd_lock::RwLock::new(file))
+    }
+}
+
+/// Owned cross-process exclusive file lock acquired via `File::try_lock()`
+/// (same OS `flock` mechanism as `fd_lock::RwLock`, interoperable with
+/// `BundleExtractions` and `BytecodeCache`). Released on drop.
+struct CrossProcessFileLock(std::fs::File);
+
+impl Drop for CrossProcessFileLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+const FILE_LOCK_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const FILE_LOCK_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+const FILE_LOCK_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Acquire an exclusive cross-process write lock asynchronously with bounded
+/// exponential backoff on `WouldBlock`, instead of immediately proceeding
+/// unlocked when another process holds the lock.
+async fn acquire_file_write_lock_async(
+    lock: fd_lock::RwLock<std::fs::File>,
+    timeout: std::time::Duration,
+) -> Option<CrossProcessFileLock> {
+    let file = lock.into_inner();
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut backoff = FILE_LOCK_INITIAL_BACKOFF;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(CrossProcessFileLock(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        timeout_ms = timeout.as_millis(),
+                        "Timed out waiting for cross-process file lock"
+                    );
+                    return None;
+                }
+                tokio::time::sleep(backoff.min(remaining)).await;
+                backoff = backoff.saturating_mul(2).min(FILE_LOCK_MAX_BACKOFF);
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                tracing::debug!(error = %err, "Failed to acquire cross-process file lock");
+                return None;
+            }
+        }
+    }
+}
+
+/// Synchronous bounded-backoff version for callers already running inside
+/// `spawn_blocking`.
+fn acquire_file_write_lock_blocking(
+    lock: fd_lock::RwLock<std::fs::File>,
+    timeout: std::time::Duration,
+) -> Option<CrossProcessFileLock> {
+    let file = lock.into_inner();
+    let deadline = std::time::Instant::now() + timeout;
+    let mut backoff = FILE_LOCK_INITIAL_BACKOFF;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(CrossProcessFileLock(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        timeout_ms = timeout.as_millis(),
+                        "Timed out waiting for cross-process file lock"
+                    );
+                    return None;
+                }
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(FILE_LOCK_MAX_BACKOFF);
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                tracing::debug!(error = %err, "Failed to acquire cross-process file lock");
+                return None;
+            }
+        }
     }
 }
 
@@ -4924,8 +5055,10 @@ async fn prepare_bundle_runtime(
         existing_path = get_completed_bundle_extracted_path(build, build_path_cache);
         if existing_path.is_none() {
             let extract_dir = bundle_extract_dir(&build.build_id);
-            let mut file_lock = BuildPathCache::acquire_file_lock(&build.build_id).ok();
-            let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+            let _file_lock_guard = match BuildPathCache::acquire_file_lock(&build.build_id) {
+                Ok(lock) => acquire_file_write_lock_async(lock, FILE_LOCK_WAIT_TIMEOUT).await,
+                Err(_) => None,
+            };
 
             if BuildPathCache::is_extraction_complete(&extract_dir) {
                 let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
@@ -5845,11 +5978,6 @@ async fn find_build_for_function(
     let (target_build_id, target_project_id) = target;
     let deployed_builds = find_all_deployed_builds_for_env(db, env_id).await?;
 
-    // Clean up memory cache: remove entries for builds that are no longer deployed
-    let deployed_build_ids: ahash::AHashSet<Uuid> =
-        deployed_builds.iter().map(|b| b.build_id).collect();
-    build_path_cache.retain_only(&deployed_build_ids);
-
     // Find ALL builds that have this function
     let mut matching_builds: Vec<(Build, String)> = Vec::new();
     // Builds that could not be inspected; the function may be in one.
@@ -6238,6 +6366,10 @@ async fn find_build_for_function(
     }))
 }
 
+fn is_schedule_mutation_event(event_type: &str) -> bool {
+    matches!(event_type, "hot:schedule:new" | "hot:schedule:cancel")
+}
+
 /// The build an event must run in, when it names one: the sender's build, for
 /// the event types bound to a build. A call or schedule fire runs a function
 /// of that build. A schedule is created in, and cancelled by function from,
@@ -6254,6 +6386,60 @@ fn exact_target_build(event_type: &str, build_id: Option<Uuid>) -> Option<Uuid> 
     })
 }
 
+/// Resolve the effective target build for an exact-target event.
+///
+/// For `hot:schedule:new` and `hot:schedule:cancel`, if the sender's build is
+/// no longer deployed/active/ready (superseded by a newer deployment of the
+/// same project while the event was queued), fall back to the project's
+/// currently deployed active build instead of dropping the event into the DLQ.
+async fn resolve_exact_target_build(
+    db: &DatabasePool,
+    event_type: &str,
+    exact_target_build: Option<Uuid>,
+) -> Result<Option<Uuid>, hot::db::EventHandlerError> {
+    let Some(build_id) = exact_target_build else {
+        return Ok(None);
+    };
+    if !is_schedule_mutation_event(event_type) {
+        return Ok(Some(build_id));
+    }
+    let sender_build = match Build::get_build(db, &build_id).await {
+        Ok(build) => build,
+        Err(hot::db::BuildError::NotFound) => return Ok(Some(build_id)),
+        Err(hot::db::BuildError::Database(err)) => {
+            return Err(hot::db::EventHandlerError::Database(err));
+        }
+        Err(err) => {
+            return Err(hot::db::EventHandlerError::RuntimeRevision(err.to_string()));
+        }
+    };
+    if sender_build.deployed
+        && sender_build.active
+        && sender_build.runtime_status == Build::RUNTIME_STATUS_READY
+    {
+        return Ok(Some(build_id));
+    }
+    let deployed = match Build::get_deployed_build_by_project(db, &sender_build.project_id).await {
+        Ok(deployed) => deployed,
+        Err(hot::db::BuildError::Database(err)) => {
+            return Err(hot::db::EventHandlerError::Database(err));
+        }
+        Err(err) => {
+            return Err(hot::db::EventHandlerError::RuntimeRevision(err.to_string()));
+        }
+    };
+    if let Some(deployed) = deployed
+        && deployed.active
+    {
+        debug!(
+            "hot.dev: schedule mutation '{}' sender build {} superseded by deployed build {} for project {}",
+            event_type, build_id, deployed.build_id, sender_build.project_id
+        );
+        return Ok(Some(deployed.build_id));
+    }
+    Ok(Some(build_id))
+}
+
 /// The handlers an event may run: an exact target build's own, or else every
 /// deployed build's in the environment.
 async fn event_handlers_for(
@@ -6262,7 +6448,7 @@ async fn event_handlers_for(
     event_type: &str,
     exact_target_build: Option<Uuid>,
 ) -> Result<Vec<EventHandler>, hot::db::EventHandlerError> {
-    match exact_target_build {
+    match resolve_exact_target_build(db, event_type, exact_target_build).await? {
         Some(build_id) => {
             EventHandler::get_event_handlers_by_build_and_event_type_cached(
                 db, &build_id, event_type,
@@ -6774,10 +6960,12 @@ async fn execute_single_event_handler_inner(
             let extract_dir =
                 std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.as_simple()));
 
-            // Create file lock - must live for duration of extraction
+            // Acquire cross-process file lock - must live for duration of extraction
             // The lock file itself provides cross-process synchronization
-            let mut file_lock = BuildPathCache::acquire_file_lock(&build.build_id).ok();
-            let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+            let file_lock_guard = match BuildPathCache::acquire_file_lock(&build.build_id) {
+                Ok(lock) => acquire_file_write_lock_async(lock, FILE_LOCK_WAIT_TIMEOUT).await,
+                Err(_) => None,
+            };
 
             // Check if another process already extracted (via marker file)
             if BuildPathCache::is_extraction_complete(&extract_dir) {
@@ -6810,13 +6998,15 @@ async fn execute_single_event_handler_inner(
                 .await?;
                 let prep_build_id = build.build_id;
                 let prep_project_name = project.name.clone();
-                let holds_file_lock = _file_lock_guard.is_some();
-                // The run's own lease and the file lock go if the setup watchdog
-                // cancels this future, while the closure keeps writing.
+                let holds_file_lock = file_lock_guard.is_some();
+                // Move both the lease and the cross-process file lock into the
+                // blocking closure so if the setup watchdog cancels this future
+                // while extraction is still writing, neither is released early.
                 let prep_lease = build_path_cache.lease(build.build_id);
                 let prepared = tokio::task::spawn_blocking(move || {
                     let _prep_permit = prep_permit;
                     let _prep_lease = prep_lease;
+                    let _prep_file_lock = file_lock_guard;
                     extract_and_precompile_event_bundle(
                         build_data,
                         extract_dir,
@@ -7351,9 +7541,12 @@ async fn execute_single_event_handler_inner(
                     } else {
                         // Cross-process file lock (prevents process races)
                         let file_lock_wait_started = std::time::Instant::now();
-                        let mut file_lock = cache_for_locking.acquire_file_lock(&cache_key).ok();
-                        let _file_lock_guard =
-                            file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+                        let _file_lock_guard = cache_for_locking
+                            .acquire_file_lock(&cache_key)
+                            .ok()
+                            .and_then(|lock| {
+                                acquire_file_write_lock_blocking(lock, FILE_LOCK_WAIT_TIMEOUT)
+                            });
                         debug!(
                             "TIMING [{}]: bytecode_file_lock_wait: {:?}",
                             run_id_for_timing.as_simple(),
@@ -7590,7 +7783,7 @@ async fn execute_single_event_handler_inner(
             // The detached VM may still start the run: never run it again.
             run_has_started.store(true, std::sync::atomic::Ordering::Release);
             if let Some(token) = &external_cancel {
-                token.store(true, std::sync::atomic::Ordering::Relaxed);
+                token.store(true, std::sync::atomic::Ordering::Release);
             }
             let stop_error = stop.error();
             error!(
@@ -8115,7 +8308,7 @@ async fn run_must_stop(
     };
     let _ = stopped.set(stop);
     if let Some(token) = cancel {
-        token.store(true, std::sync::atomic::Ordering::Relaxed);
+        token.store(true, std::sync::atomic::Ordering::Release);
         tokio::time::sleep(RUN_TIMEOUT_HARD_GRACE).await;
     }
     stop
@@ -10516,11 +10709,42 @@ pub async fn run_with_components_shared_context_and_db(
                                                         let mut admitted_handlers = Vec::new();
                                                         // Handlers of a deployment this runtime can't run.
                                                         let mut awaiting_redeploy = Vec::new();
-                                                        for event_handler in handlers_to_execute {
-                                                            let handler_build = Build::get_build(db, &event_handler.build_id).await
+                                                        for mut event_handler in handlers_to_execute {
+                                                            let mut handler_build = Build::get_build(db, &event_handler.build_id).await
                                                                 .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve handler build: {e}"), infra_retry_backoff_ms.max(5_000)))?;
                                                             if !handler_build.deployed || !handler_build.active || handler_build.runtime_status != Build::RUNTIME_STATUS_READY {
-                                                                continue;
+                                                                // If a deploy superseded a schedule-mutation sender build
+                                                                // between handler lookup and admission, fall back to the
+                                                                // project's currently deployed active build.
+                                                                if exact_target_build.is_some()
+                                                                    && is_schedule_mutation_event(&event_message.body.event.event_type)
+                                                                {
+                                                                    let deployed = Build::get_deployed_build_by_project(db, &handler_build.project_id)
+                                                                        .await
+                                                                        .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve deployed build for schedule mutation: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                                    if let Some(deployed) = deployed
+                                                                        && deployed.active
+                                                                        && deployed.build_id != handler_build.build_id
+                                                                    {
+                                                                        let replacement_handlers = EventHandler::get_event_handlers_by_build_and_event_type_cached(
+                                                                            db,
+                                                                            &deployed.build_id,
+                                                                            &event_message.body.event.event_type,
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve replacement schedule handler: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                                        if let Some(replacement) = replacement_handlers.into_iter().next() {
+                                                                            event_handler = replacement;
+                                                                            handler_build = deployed;
+                                                                        } else {
+                                                                            continue;
+                                                                        }
+                                                                    } else {
+                                                                        continue;
+                                                                    }
+                                                                } else {
+                                                                    continue;
+                                                                }
                                                             }
                                                             // Another project's handler can share the retried handler's name.
                                                             if event_message.retried_handler().is_some()
@@ -11024,8 +11248,10 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             let extract_dir = std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.as_simple()));
 
                                                                                             // Cross-process file lock
-                                                                                            let mut file_lock = BuildPathCache::acquire_file_lock(&build.build_id).ok();
-                                                                                            let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+                                                                                            let _file_lock_guard = match BuildPathCache::acquire_file_lock(&build.build_id) {
+                                                                                                Ok(lock) => acquire_file_write_lock_async(lock, FILE_LOCK_WAIT_TIMEOUT).await,
+                                                                                                Err(_) => None,
+                                                                                            };
 
                                                                                             // Check if another process already extracted
                                                                                             if BuildPathCache::is_extraction_complete(&extract_dir) {
@@ -11684,32 +11910,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 org_ids.dedup();
                                                                 for org_id in &org_ids {
                                                                     let days = hot::db::subscription::call_deletion_days_for_org_or(db, org_id, no_plan_days).await;
-                                                                    if days < 0 { continue; }
-
-                                                                    let env_ids = hot::db::Env::get_ids_for_org(db, org_id)
-                                                                        .await
-                                                                        .unwrap_or_default();
-
-                                                                    match hot::db::call::Call::delete_older_than_for_org(db, &env_ids, days, 10_000).await {
-                                                                        Ok(count) if count > 0 => {
-                                                                            info!("hot.dev: WORKER {} maintenance: call retention cleanup for org {} deleted {} rows (>{} days)", worker_id, org_id, count, days);
-                                                                        }
-                                                                        Ok(_) => {}
-                                                                        Err(e) => {
-                                                                            error!("hot.dev: WORKER {} maintenance: call retention cleanup for org {} failed: {}", worker_id, org_id, e);
-                                                                        }
-                                                                    }
-
-                                                                    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_call_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), *org_id, cutoff, 10_000).await {
-                                                                        Ok(n) if n > 0 => {
-                                                                            info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}", worker_id, n, org_id);
-                                                                        }
-                                                                        Ok(_) => {}
-                                                                        Err(e) => {
-                                                                            error!("hot.dev: WORKER {} maintenance: call blob ref deactivation for org {} failed: {}", worker_id, org_id, e);
-                                                                        }
-                                                                    }
+                                                                    apply_org_call_retention(db, worker_id, org_id, days, 10_000).await;
                                                                 }
                                                             }
                                                         }
@@ -12034,60 +12235,77 @@ pub async fn run_with_components_shared_context_and_db(
             "hot.dev: WORKER ran out of time handing deliveries back; the rest stay pending until reclaimed"
         );
     }
-    unregister_idle_consumer(
-        "hot:event",
-        &event_queue
-            .clone()
-            .with_consumer_name(admin_event_name.clone()),
-    )
-    .await;
-    unregister_idle_consumer(
-        "hot:request",
-        &request_queue
-            .clone()
-            .with_consumer_name(admin_request_name.clone()),
-    )
-    .await;
-    unregister_idle_consumer(
-        "hot:response",
-        &response_queue
-            .clone()
-            .with_consumer_name(admin_response_name.clone()),
-    )
-    .await;
-    if db.is_some() {
+    let unregister_all = async {
         unregister_idle_consumer(
-            "hot:alert",
-            &alert_queue
+            "hot:event",
+            &event_queue
                 .clone()
-                .with_consumer_name(admin_alert_name.clone()),
+                .with_consumer_name(admin_event_name.clone()),
         )
         .await;
         unregister_idle_consumer(
-            "hot:email",
-            &email_queue
+            "hot:request",
+            &request_queue
                 .clone()
-                .with_consumer_name(admin_email_name.clone()),
+                .with_consumer_name(admin_request_name.clone()),
         )
         .await;
+        unregister_idle_consumer(
+            "hot:response",
+            &response_queue
+                .clone()
+                .with_consumer_name(admin_response_name.clone()),
+        )
+        .await;
+        if db.is_some() {
+            unregister_idle_consumer(
+                "hot:alert",
+                &alert_queue
+                    .clone()
+                    .with_consumer_name(admin_alert_name.clone()),
+            )
+            .await;
+            unregister_idle_consumer(
+                "hot:email",
+                &email_queue
+                    .clone()
+                    .with_consumer_name(admin_email_name.clone()),
+            )
+            .await;
+        }
+    };
+    if tokio::time::timeout(CONSUMER_UNREGISTER_TOTAL_TIMEOUT, unregister_all)
+        .await
+        .is_err()
+    {
+        warn!(
+            "hot.dev: WORKER timed out unregistering idle consumers after {}s",
+            CONSUMER_UNREGISTER_TOTAL_TIMEOUT.as_secs()
+        );
     }
 
     // Phase 3: Flush emitter/publisher after workers have stopped
     if let Some(emitter) = &emitter {
         debug!("hot.dev: WORKER shutting down emitter to flush remaining events");
-        if let Err(e) = emitter.shutdown().await {
-            error!("hot.dev: WORKER emitter shutdown error: {}", e);
-        } else {
-            debug!("hot.dev: WORKER emitter shutdown complete");
+        match tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, emitter.shutdown()).await {
+            Ok(Ok(())) => debug!("hot.dev: WORKER emitter shutdown complete"),
+            Ok(Err(e)) => error!("hot.dev: WORKER emitter shutdown error: {}", e),
+            Err(_) => warn!(
+                "hot.dev: WORKER emitter shutdown timed out after {}s",
+                SHUTDOWN_FLUSH_TIMEOUT.as_secs()
+            ),
         }
     }
 
     if let Some(publisher) = &event_publisher {
         debug!("hot.dev: WORKER shutting down event publisher");
-        if let Err(e) = publisher.shutdown().await {
-            error!("hot.dev: WORKER event publisher shutdown error: {}", e);
-        } else {
-            debug!("hot.dev: WORKER event publisher shutdown complete");
+        match tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, publisher.shutdown()).await {
+            Ok(Ok(())) => debug!("hot.dev: WORKER event publisher shutdown complete"),
+            Ok(Err(e)) => error!("hot.dev: WORKER event publisher shutdown error: {}", e),
+            Err(_) => warn!(
+                "hot.dev: WORKER event publisher shutdown timed out after {}s",
+                SHUTDOWN_FLUSH_TIMEOUT.as_secs()
+            ),
         }
     }
 
@@ -12095,14 +12313,23 @@ pub async fn run_with_components_shared_context_and_db(
     // may take its time (the consumers above, the flushes) is done. The
     // deliveries stay this consumer's pending entries until another worker
     // takes them over, which is why its consumer stayed registered.
-    if hands_back_interrupted(hand_back, workers_drained, standalone_process) {
-        hand_back_interrupted_deliveries(
-            &event_queue
-                .clone()
-                .with_consumer_name(admin_event_name.clone()),
-            &interrupted_event_deliveries,
+    if hands_back_interrupted(hand_back, workers_drained, standalone_process)
+        && tokio::time::timeout(
+            UNSTARTED_HAND_BACK_TIMEOUT,
+            hand_back_interrupted_deliveries(
+                &event_queue
+                    .clone()
+                    .with_consumer_name(admin_event_name.clone()),
+                &interrupted_event_deliveries,
+            ),
         )
-        .await;
+        .await
+        .is_err()
+    {
+        warn!(
+            "hot.dev: WORKER timed out handing back interrupted deliveries after {}s",
+            UNSTARTED_HAND_BACK_TIMEOUT.as_secs()
+        );
     }
 
     info!("hot.dev: WORKER shutdown complete");
@@ -12111,6 +12338,83 @@ pub async fn run_with_components_shared_context_and_db(
     }
 
     Ok(())
+}
+
+/// Apply call retention and corresponding blob-ref deactivation for one org.
+///
+/// Guards `days <= 0`, captures the retention cutoff *before* deleting calls
+/// (so calls created while deletion runs never lose their blob refs), and skips
+/// blob-ref deactivation if env lookup or call deletion fails.
+async fn apply_org_call_retention(
+    db: &DatabasePool,
+    worker_id: usize,
+    org_id: &Uuid,
+    days: i32,
+    batch_size: i64,
+) {
+    if days <= 0 {
+        return;
+    }
+
+    let env_ids = match hot::db::Env::get_ids_for_org(db, org_id).await {
+        Ok(env_ids) => env_ids,
+        Err(e) => {
+            error!(
+                "hot.dev: WORKER {} maintenance: failed to list envs for org {} during call retention: {}",
+                worker_id, org_id, e
+            );
+            return;
+        }
+    };
+
+    // Capture cutoff *before* deleting calls so a call written after deletion
+    // starts is never left pointing at a deactivated blob ref.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+
+    match hot::db::call::Call::delete_older_than_for_org(db, &env_ids, days, batch_size).await {
+        Ok(count) if count > 0 => {
+            info!(
+                "hot.dev: WORKER {} maintenance: call retention cleanup for org {} deleted {} rows (>{} days)",
+                worker_id, org_id, count, days
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!(
+                "hot.dev: WORKER {} maintenance: call retention cleanup for org {} failed: {}",
+                worker_id, org_id, e
+            );
+            // Do NOT deactivate call blob refs when call deletion failed;
+            // surviving call rows still reference those blobs.
+            return;
+        }
+    }
+
+    match hot::db::blob::deactivate_call_refs_older_than(
+        &db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::BlobGc,
+            org_id: None,
+        }),
+        *org_id,
+        cutoff,
+        batch_size,
+    )
+    .await
+    {
+        Ok(n) if n > 0 => {
+            info!(
+                "hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}",
+                worker_id, n, org_id
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!(
+                "hot.dev: WORKER {} maintenance: call blob ref deactivation for org {} failed: {}",
+                worker_id, org_id, e
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -18006,5 +18310,277 @@ fn (event) {{ "{name}" }}
         let _shared = tokio::time::timeout(short, quarantine.enter(false, None, 0))
             .await
             .expect("deliveries run again once the recovered one is done");
+    }
+
+    #[test]
+    fn build_path_cache_retain_only_preserves_actively_held_extraction_locks() {
+        let cache = BuildPathCache::new();
+        let active_build = Uuid::now_v7();
+        let idle_build = Uuid::now_v7();
+
+        let held_lock = cache.get_extraction_lock(&active_build);
+        let _idle_lock_dropped = cache.get_extraction_lock(&idle_build);
+        drop(_idle_lock_dropped);
+
+        // Pruning with an empty valid set must evict idle locks but NEVER
+        // evict a lock still held by an active extractor (strong_count > 1).
+        cache.retain_only(&ahash::AHashSet::new());
+
+        assert!(
+            cache.extraction_locks.lock().contains_key(&active_build),
+            "active extraction lock must be preserved"
+        );
+        assert!(
+            !cache.extraction_locks.lock().contains_key(&idle_build),
+            "idle extraction lock should be pruned"
+        );
+
+        // A second extractor looking up the same build must get the SAME Arc.
+        let second_ref = cache.get_extraction_lock(&active_build);
+        assert!(
+            Arc::ptr_eq(&held_lock, &second_ref),
+            "second extractor must share the exact same extraction mutex"
+        );
+
+        // Once all external references drop, retain_only prunes it.
+        drop(second_ref);
+        drop(held_lock);
+        cache.retain_only(&ahash::AHashSet::new());
+        assert!(cache.extraction_locks.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn acquire_file_write_lock_waits_for_contended_fd_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("test.lock");
+        let f1 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        let f2 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Acquire and hold the fd_lock::RwLock in a background thread, then
+        // release it after 60ms so the async waiter must wait for it.
+        let release_handle = std::thread::spawn(move || {
+            let mut holder = fd_lock::RwLock::new(f1);
+            let holder_guard = holder.write().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(holder_guard);
+        });
+        rx.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let acquired = acquire_file_write_lock_async(
+            fd_lock::RwLock::new(f2),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            acquired.is_some(),
+            "should acquire cross-process lock once holder releases"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(40),
+            "should have waited instead of proceeding unlocked immediately"
+        );
+
+        // While we hold CrossProcessFileLock, another fd_lock::try_write must see WouldBlock.
+        let f3 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let mut contender = fd_lock::RwLock::new(f3);
+        assert!(
+            contender.try_write().is_err(),
+            "CrossProcessFileLock must exclude fd_lock::RwLock::try_write"
+        );
+
+        drop(acquired);
+        assert!(
+            contender.try_write().is_ok(),
+            "lock must be released on drop"
+        );
+        release_handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn schedule_mutations_fall_back_to_deployed_build_when_sender_build_superseded() {
+        let projects = ScheduledProjects::new().await;
+        let program = projects.test_data.project_id;
+        let platform = projects.add_project("platform").await;
+
+        let _platform_build = projects
+            .deploy(
+                platform,
+                "platform",
+                "::platform::core ns\n\nping fn (): Str { \"pong\" }\n",
+            )
+            .await;
+
+        const PROGRAM_SRC: &str =
+            "::program::deadline ns\n\ndue fn (who: Str): Str { `due ${who}` }\n";
+        let superseded_build = projects.deploy(program, "program", PROGRAM_SRC).await;
+        let current_build = projects.deploy(program, "program", PROGRAM_SRC).await;
+
+        // A queued `hot:schedule:new` carrying the superseded sender build must
+        // fall back to `current_build` (the project's currently deployed build)
+        // instead of dropping into the DLQ or crossing to `platform`.
+        let armed_in = projects
+            .execute(projects.event(
+                "hot:schedule:new",
+                val!({
+                    "fn": "::program::deadline/due",
+                    "args": ["late-event"],
+                    "schedule": "in 1 hour",
+                }),
+                Some(superseded_build),
+            ))
+            .await
+            .expect("superseded sender build should fall back to current deployed build");
+        assert_eq!(armed_in, current_build);
+
+        let schedules = Schedule::get_schedules_by_build(&projects.db, &current_build, None, None)
+            .await
+            .unwrap();
+        let armed: Vec<_> = schedules
+            .into_iter()
+            .filter(|s| s.ns == "::program::deadline" && s.var == "due" && s.active)
+            .collect();
+        assert_eq!(
+            armed.len(),
+            1,
+            "schedule must be armed on the current build"
+        );
+
+        // A queued `hot:schedule:cancel` carrying the superseded sender build
+        // must likewise fall back to `current_build` and cancel the schedule.
+        let cancelled_in = projects
+            .execute(projects.event(
+                "hot:schedule:cancel",
+                val!({"fn": "::program::deadline/due"}),
+                Some(superseded_build),
+            ))
+            .await
+            .expect("superseded cancel should fall back to current deployed build");
+        assert_eq!(cancelled_in, current_build);
+        assert!(
+            !Schedule::get_schedule(&projects.db, &armed[0].schedule_id)
+                .await
+                .unwrap()
+                .active,
+            "schedule on current build must be cancelled"
+        );
+
+        projects.close().await;
+    }
+
+    #[tokio::test]
+    async fn apply_org_call_retention_guards_zero_days_and_skips_refs_on_delete_error() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+
+        let call_id = Uuid::now_v7();
+        let old_time = chrono::Utc::now() - chrono::Duration::days(30);
+        sqlx::query(
+            "INSERT INTO call(call_id, run_id, env_id, function_name, static_scope, runtime_path, call_depth, start_time, size) \
+             VALUES (?, ?, ?, '::ret/test', 'root', 'root', 0, ?, 1)",
+        )
+        .bind(call_id)
+        .bind(data.run_id)
+        .bind(data.env_id)
+        .bind(old_time)
+        .execute(pool)
+        .await
+        .unwrap();
+        let object = hot::db::blob::insert_pending_object(
+            &db,
+            data.org_id,
+            Some(data.env_id),
+            "blake3",
+            &call_id.to_string(),
+            1,
+            None,
+            "local",
+            &call_id.to_string(),
+        )
+        .await
+        .unwrap();
+        let blob_ref = hot::db::blob::insert_ref(
+            &db,
+            object.blob_object_id,
+            data.org_id,
+            Some(data.env_id),
+            "call_args",
+            Some(&call_id.to_string()),
+            None,
+            Some(data.run_id),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE blob_ref SET created_at = ? WHERE blob_ref_id = ?")
+            .bind(old_time)
+            .bind(blob_ref.blob_ref_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // 1) days == 0 must be a complete no-op.
+        apply_org_call_retention(&db, 0, &data.org_id, 0, 100).await;
+        let active: i64 = sqlx::query_scalar("SELECT active FROM blob_ref WHERE blob_ref_id = ?")
+            .bind(blob_ref.blob_ref_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(active, 1, "days == 0 must not deactivate blob refs");
+
+        // 2) If call deletion errors (simulated with a BEFORE DELETE trigger),
+        // blob ref deactivation must NOT run.
+        sqlx::query(
+            "CREATE TRIGGER fail_call_delete BEFORE DELETE ON call \
+             BEGIN SELECT RAISE(ABORT, 'simulated delete failure'); END;",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        apply_org_call_retention(&db, 0, &data.org_id, 7, 100).await;
+        let active: i64 = sqlx::query_scalar("SELECT active FROM blob_ref WHERE blob_ref_id = ?")
+            .bind(blob_ref.blob_ref_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            active, 1,
+            "blob_ref must remain active when Call::delete_older_than_for_org fails"
+        );
+
+        // 3) Once deletion succeeds, both call and blob_ref are cleaned up.
+        sqlx::query("DROP TRIGGER fail_call_delete")
+            .execute(pool)
+            .await
+            .unwrap();
+        apply_org_call_retention(&db, 0, &data.org_id, 7, 100).await;
+        let active: i64 = sqlx::query_scalar("SELECT active FROM blob_ref WHERE blob_ref_id = ?")
+            .bind(blob_ref.blob_ref_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            active, 0,
+            "blob_ref should be deactivated after successful delete"
+        );
     }
 }

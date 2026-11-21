@@ -201,7 +201,6 @@ impl LogAccumulator {
 
 #[cfg(all(target_os = "linux", feature = "kata"))]
 fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
-    use std::io::Read;
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) => {
@@ -212,33 +211,54 @@ fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
             return;
         }
     };
+    read_stream_to_eof(&mut file, &buf, stream_name, path);
+}
 
+#[cfg(any(all(target_os = "linux", feature = "kata"), test))]
+fn read_stream_to_eof<R: std::io::Read>(
+    reader: &mut R,
+    buf: &Mutex<String>,
+    stream_name: &str,
+    path: &str,
+) {
     let mut chunk = [0u8; 4096];
     let mut stream = LogStream::default();
+    let mut truncated = false;
     loop {
-        match file.read(&mut chunk) {
+        match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
+                if truncated {
+                    // Keep draining and discarding bytes until EOF so the
+                    // container/shim writer never blocks on a full pipe or
+                    // dies from SIGPIPE/EPIPE.
+                    continue;
+                }
                 let mut locked = buf.blocking_lock();
                 stream.push(&mut locked, &chunk[..n]);
                 // Output that only fills the budget may be all there is:
-                // read on, and stop once more arrives and is cut.
+                // read on, and once truncated, keep draining until EOF without
+                // appending further bytes or re-locking the buffer.
                 if locked.ends_with(TRUNCATION_NOTICE) {
-                    return;
+                    truncated = true;
                 }
             }
             Err(e) => {
-                let mut locked = buf.blocking_lock();
-                stream.finish(&mut locked);
-                locked.push_str(&format!(
-                    "[hot-task-worker] failed reading {} fifo '{}': {}\n",
-                    stream_name, path, e
-                ));
+                if !truncated {
+                    let mut locked = buf.blocking_lock();
+                    stream.finish(&mut locked);
+                    locked.push_str(&format!(
+                        "[hot-task-worker] failed reading {} fifo '{}': {}\n",
+                        stream_name, path, e
+                    ));
+                }
                 return;
             }
         }
     }
-    stream.finish(&mut buf.blocking_lock());
+    if !truncated {
+        stream.finish(&mut buf.blocking_lock());
+    }
 }
 
 #[cfg(test)]
@@ -311,5 +331,42 @@ mod tests {
         assert_eq!(buf, "a\u{fffd}b\u{fffd}cd");
         stream.finish(&mut buf);
         assert_eq!(buf, "a\u{fffd}b\u{fffd}cd\u{fffd}");
+    }
+
+    #[test]
+    fn fifo_reader_drains_until_eof_after_truncation() {
+        struct CountingReader {
+            remaining: usize,
+            total_read: usize,
+        }
+
+        impl std::io::Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Ok(0);
+                }
+                let n = self.remaining.min(buf.len());
+                buf[..n].fill(b'x');
+                self.remaining -= n;
+                self.total_read += n;
+                Ok(n)
+            }
+        }
+
+        let total_bytes = MAX_LOG_BYTES + 128 * 1024;
+        let mut reader = CountingReader {
+            remaining: total_bytes,
+            total_read: 0,
+        };
+        let buf = Mutex::new(String::new());
+        read_stream_to_eof(&mut reader, &buf, "stdout", "/tmp/test.fifo");
+
+        assert_eq!(
+            reader.total_read, total_bytes,
+            "reader must drain all bytes to EOF after truncation instead of closing early"
+        );
+        let collected = buf.blocking_lock().clone();
+        assert!(collected.ends_with(TRUNCATION_NOTICE));
+        assert_eq!(collected.len(), MAX_LOG_BYTES + TRUNCATION_NOTICE.len());
     }
 }

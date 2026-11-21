@@ -59,6 +59,13 @@ impl ResourceBudget {
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
+            // Pin and enable the waiter *before* reading the allocated atomics
+            // so a concurrent `release()` cannot fire `notify_waiters()` in the
+            // gap between the check and `.await` and cause a lost wakeup.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             let cur_mem = self.allocated_memory_mb.load(Ordering::Acquire);
             let cur_disk = self.allocated_disk_mb.load(Ordering::Acquire);
 
@@ -112,9 +119,7 @@ impl ResourceBudget {
                 });
             }
 
-            tokio::time::timeout(remaining, self.notify.notified())
-                .await
-                .ok();
+            tokio::time::timeout(remaining, notified).await.ok();
         }
     }
 
@@ -296,5 +301,35 @@ mod tests {
         assert_eq!(disk_admission_mb(0), 2_048);
         assert_eq!(disk_admission_mb(4_096), 7_168);
         assert!(disk_admission_mb(u64::MAX).eq(&u64::MAX));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_acquire_and_release_does_not_lose_wakeups() {
+        // Stress the check-then-wait race across OS threads: if notified()
+        // were not enabled before loading the atomics, releases between the
+        // atomic load and await would lose wakeups and hit the tight timeout.
+        let budget = ResourceBudget::new(512, 5120);
+        for _ in 0..200 {
+            let guard = budget
+                .acquire(512, 5120, std::time::Duration::from_secs(1))
+                .await
+                .unwrap();
+            let b = Arc::clone(&budget);
+            let waiter = tokio::spawn(async move {
+                b.acquire(512, 5120, std::time::Duration::from_millis(500))
+                    .await
+            });
+            // Release immediately on another thread without sleeping so release
+            // races directly against waiter's check-and-park path.
+            tokio::task::yield_now().await;
+            drop(guard);
+            let acquired = waiter
+                .await
+                .unwrap()
+                .expect("waiter must not lose wakeup on concurrent release");
+            drop(acquired);
+        }
+        assert_eq!(budget.available_memory_mb(), 512);
+        assert_eq!(budget.available_disk_mb(), 5120);
     }
 }

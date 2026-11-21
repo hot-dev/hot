@@ -31,6 +31,31 @@ fn state(result: Result<Option<i64>, executor::ExecutorError>) -> RuntimeState {
     }
 }
 
+fn supports_inspect_status(executor: &executor::BoxExecutor) -> bool {
+    match executor {
+        executor::BoxExecutor::Docker(_) => true,
+        #[cfg(all(target_os = "linux", feature = "kata"))]
+        executor::BoxExecutor::Kata(_) => false,
+    }
+}
+
+/// Resolve post-cleanup state for a reaped container. When the backend does not
+/// support `inspect_status` (Kata), confirming that no local container remains
+/// labelled for the task proves termination.
+fn resolve_reaped_state(
+    inspect_supported: bool,
+    inspect_state: RuntimeState,
+    no_local: bool,
+) -> RuntimeState {
+    if inspect_supported {
+        inspect_state
+    } else if no_local {
+        RuntimeState::Stopped
+    } else {
+        RuntimeState::Unknown
+    }
+}
+
 pub(super) async fn runtime_state(
     executor: &executor::BoxExecutor,
     container_id: &str,
@@ -193,14 +218,25 @@ pub(super) async fn reap(
         });
         let state = match container_id {
             Some(container_id) => {
-                if runtime_state(executor, &container_id).await != RuntimeState::Stopped {
+                if supports_inspect_status(executor) {
+                    if runtime_state(executor, &container_id).await != RuntimeState::Stopped {
+                        let _ = tokio::time::timeout(
+                            CONTAINER_KILL_TIMEOUT,
+                            executor.cleanup_orphan(&container_id),
+                        )
+                        .await;
+                    }
+                    let post = runtime_state(executor, &container_id).await;
+                    Some(resolve_reaped_state(true, post, false))
+                } else {
                     let _ = tokio::time::timeout(
                         CONTAINER_KILL_TIMEOUT,
                         executor.cleanup_orphan(&container_id),
                     )
                     .await;
+                    let no_local = no_local_container(executor, &task.task_id).await;
+                    Some(resolve_reaped_state(false, RuntimeState::Unknown, no_local))
                 }
-                Some(runtime_state(executor, &container_id).await)
             }
             // This generation ran the task, never recorded a container for
             // it, and has none labelled for it: setup failed before one
@@ -569,6 +605,29 @@ mod tests {
         assert_eq!(
             Task::get(&db, &id).await.unwrap().result.unwrap()["compute-units"],
             60
+        );
+    }
+
+    #[test]
+    fn reaped_state_uses_no_local_container_when_inspect_is_unsupported() {
+        // Kata does not support inspect_status; confirming no local container
+        // remains after cleanup_orphan proves termination.
+        assert_eq!(
+            resolve_reaped_state(false, RuntimeState::Unknown, true),
+            RuntimeState::Stopped
+        );
+        assert_eq!(
+            resolve_reaped_state(false, RuntimeState::Unknown, false),
+            RuntimeState::Unknown
+        );
+        // Backends that support inspect_status trust its result directly.
+        assert_eq!(
+            resolve_reaped_state(true, RuntimeState::Running, true),
+            RuntimeState::Running
+        );
+        assert_eq!(
+            resolve_reaped_state(true, RuntimeState::Stopped, false),
+            RuntimeState::Stopped
         );
     }
 }
