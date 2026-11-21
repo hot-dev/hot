@@ -42,7 +42,7 @@ pub async fn event_timeline_handler(
         }
     };
 
-    let limit = params.limit.unwrap_or(500);
+    let limit = params.limit.unwrap_or(500).clamp(1, 1000);
 
     // Get recent events
     let events = match Event::get_events_by_env(&db, &env_id, Some(limit), None).await {

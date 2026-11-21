@@ -11,6 +11,7 @@ pub struct PageParams {
 
 impl PageParams {
     pub fn parse(params: &AHashMap<String, String>, page_size: i64) -> Self {
+        let page_size = page_size.max(1);
         let current_page_num = params
             .get("p")
             .and_then(|p| p.parse::<i64>().ok())
@@ -20,7 +21,7 @@ impl PageParams {
         Self {
             current_page_num,
             page_size,
-            offset: (current_page_num - 1) * page_size,
+            offset: current_page_num.saturating_sub(1).saturating_mul(page_size),
         }
     }
 }
@@ -36,15 +37,16 @@ pub struct PaginationWindow {
 
 impl PaginationWindow {
     pub fn new(total_items: i64, page: &PageParams) -> Self {
+        let page_size = page.page_size.max(1);
         let total_pages = if total_items > 0 {
-            (total_items + page.page_size - 1) / page.page_size
+            total_items.saturating_sub(1) / page_size + 1
         } else {
             1
         };
         let has_next_page = page.current_page_num < total_pages;
         let has_prev_page = page.current_page_num > 1;
-        let start_page = std::cmp::max(1, page.current_page_num - 2);
-        let end_page = std::cmp::min(total_pages, page.current_page_num + 2);
+        let start_page = std::cmp::max(1, page.current_page_num.saturating_sub(2));
+        let end_page = std::cmp::min(total_pages, page.current_page_num.saturating_add(2));
 
         Self {
             total_pages,
@@ -290,5 +292,22 @@ mod tests {
             SearchAndTimeRange::parse(&params(&[("time_range", "x',a:alert(1),b:'")]), now);
         assert_eq!(hostile.selected_time_range, "all");
         assert!(hostile.time_range_cutoff.is_none());
+    }
+
+    #[test]
+    fn pagination_handles_i64_max_without_overflow() {
+        let max_p = i64::MAX.to_string();
+        let page = PageParams::parse(&params(&[("p", &max_p)]), 20);
+        assert_eq!(page.current_page_num, i64::MAX);
+        assert_eq!(page.offset, i64::MAX);
+
+        let window = PaginationWindow::new(100, &page);
+        assert_eq!(window.total_pages, 5);
+        assert!(!window.has_next_page);
+        assert!(window.has_prev_page);
+        assert_eq!(window.end_page, 5);
+
+        let huge_window = PaginationWindow::new(i64::MAX, &page);
+        assert_eq!(huge_window.total_pages, (i64::MAX - 1) / 20 + 1);
     }
 }

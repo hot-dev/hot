@@ -109,20 +109,22 @@ pub fn is_valid_timezone(timezone_str: &str) -> bool {
 /// Get the current UTC offset for a timezone as SQLite-compatible modifiers
 /// Returns a string for use in SQLite datetime()
 ///
+/// Uses minute precision so half-hour and 45-minute zones (e.g. Asia/Kolkata,
+/// Australia/Adelaide, Asia/Kathmandu) align accurately with Rust bucket labels.
+///
 /// Examples:
-/// - "America/New_York" in winter → "-5 hours"
-/// - "America/New_York" in summer → "-4 hours"
-/// - "Asia/Kolkata" → "+5 hours" (note: SQLite doesn't handle fractional hours well)
-/// - "UTC" → "+0 hours"
+/// - "America/New_York" in winter → "-300 minutes"
+/// - "America/New_York" in summer → "-240 minutes"
+/// - "Asia/Kolkata" → "+330 minutes"
+/// - "UTC" → "+0 minutes"
 pub fn get_sqlite_offset_modifier(timezone_str: &str) -> String {
-    let offset_seconds = get_utc_offset_seconds(timezone_str);
-    let hours = offset_seconds / 3600;
+    let offset_minutes = get_utc_offset_seconds(timezone_str) / 60;
 
     // SQLite datetime() modifier format
-    if hours >= 0 {
-        format!("+{} hours", hours)
+    if offset_minutes >= 0 {
+        format!("+{} minutes", offset_minutes)
     } else {
-        format!("{} hours", hours)
+        format!("{} minutes", offset_minutes)
     }
 }
 
@@ -225,10 +227,26 @@ pub fn sqlite_date_format(time_unit: &str) -> &'static str {
 /// # Returns
 /// Vec of formatted date strings representing each bucket, in chronological order
 pub fn generate_time_buckets(time_unit: &str, days: i64, timezone: &str) -> Vec<String> {
-    use chrono::{Datelike, Duration, Timelike};
+    generate_time_buckets_at(time_unit, days, timezone, Utc::now())
+}
+
+fn truncate_to_hour_instant(dt: DateTime<Tz>) -> DateTime<Tz> {
+    use chrono::{Duration, Timelike};
+
+    dt - Duration::minutes(i64::from(dt.minute()))
+        - Duration::seconds(i64::from(dt.second()))
+        - Duration::nanoseconds(i64::from(dt.nanosecond()))
+}
+
+pub fn generate_time_buckets_at(
+    time_unit: &str,
+    days: i64,
+    timezone: &str,
+    now_utc: DateTime<Utc>,
+) -> Vec<String> {
+    use chrono::{Datelike, Duration};
 
     let tz = parse_timezone(timezone);
-    let now_utc = Utc::now();
     let now_local = now_utc.with_timezone(&tz);
 
     // Calculate start time (days ago) and truncate to bucket boundary
@@ -245,26 +263,22 @@ pub fn generate_time_buckets(time_unit: &str, days: i64, timezone: &str) -> Vec<
 
     match time_unit {
         "hour" => {
-            // Start from the hour of (now - days)
-            let mut current = start_local
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap();
-            let end = now_local
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap();
+            // Subtract along the instant timeline rather than using local wall-clock
+            // `.with_minute(0)` so ambiguous fall-back hours and half-hour DST jumps
+            // never panic. Deduplicate consecutive repeated local hours so bucket
+            // labels match SQL's merged local-hour grouping.
+            let mut current = truncate_to_hour_instant(start_local);
+            let end = truncate_to_hour_instant(now_local);
 
             while current <= end {
                 buckets.push(current.format(format_str).to_string());
                 current += Duration::hours(1);
             }
+            // Ensure the current partial hour is always present (e.g. during a
+            // 30-minute spring-forward like Australia/Lord_Howe where subtracting
+            // local minutes can step back across the transition).
+            buckets.push(now_local.format(format_str).to_string());
+            buckets.dedup();
         }
         "month" => {
             // Start from the first of the month of (now - days)
@@ -289,30 +303,18 @@ pub fn generate_time_buckets(time_unit: &str, days: i64, timezone: &str) -> Vec<
             }
         }
         _ => {
-            // day
-            // Start from midnight of (now - days)
-            let mut current = start_local
-                .with_hour(0)
-                .unwrap()
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap();
-            let end = now_local
-                .with_hour(0)
-                .unwrap()
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap();
+            // Step calendar dates directly via NaiveDate so midnight-DST zones
+            // (e.g. America/Havana, Asia/Beirut) never panic and 23/25-hour DST
+            // days never duplicate or skip a date.
+            let mut current_date = start_local.date_naive();
+            let end_date = now_local.date_naive();
 
-            while current <= end {
-                buckets.push(current.format(format_str).to_string());
-                current += Duration::days(1);
+            while current_date <= end_date {
+                buckets.push(current_date.format(format_str).to_string());
+                match current_date.succ_opt() {
+                    Some(next) => current_date = next,
+                    None => break,
+                }
             }
         }
     }
@@ -432,5 +434,83 @@ mod tests {
 
         // Invalid timezone falls back to UTC
         assert_eq!(parse_timezone("Invalid").name(), "UTC");
+    }
+
+    #[test]
+    fn test_hour_buckets_chicago_fall_back_no_panic_and_deduped() {
+        // 2026-11-01 in America/Chicago: 01:00..01:59 occurs twice (CDT -05:00 then CST -06:00)
+        for iso in ["2026-11-01T06:30:00Z", "2026-11-01T07:30:00Z"] {
+            let now: DateTime<Utc> = iso.parse().unwrap();
+            let buckets = generate_time_buckets_at("hour", 1, "America/Chicago", now);
+            assert!(!buckets.is_empty());
+            assert_eq!(buckets.last().map(String::as_str), Some("2026-11-01 01:00"));
+            // Ambiguous 01:00 hour must not appear twice consecutively
+            for pair in buckets.windows(2) {
+                assert_ne!(pair[0], pair[1], "duplicate consecutive hour for {iso}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hour_and_day_buckets_chicago_spring_forward() {
+        // 2026-03-08 in America/Chicago: 02:00 jumps to 03:00 (23-hour day)
+        let now: DateTime<Utc> = "2026-03-08T12:30:00Z".parse().unwrap();
+        let hour_buckets = generate_time_buckets_at("hour", 1, "America/Chicago", now);
+        assert!(hour_buckets.contains(&"2026-03-08 01:00".to_string()));
+        assert!(!hour_buckets.contains(&"2026-03-08 02:00".to_string()));
+        assert!(hour_buckets.contains(&"2026-03-08 03:00".to_string()));
+
+        let day_buckets = generate_time_buckets_at("day", 3, "America/Chicago", now);
+        assert_eq!(
+            day_buckets,
+            vec!["2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08"]
+        );
+    }
+
+    #[test]
+    fn test_day_buckets_midnight_dst_zones_do_not_panic() {
+        // America/Havana springs forward at 00:00 -> 01:00 on 2026-03-08
+        let havana_now: DateTime<Utc> = "2026-03-08T12:00:00Z".parse().unwrap();
+        let havana_days = generate_time_buckets_at("day", 2, "America/Havana", havana_now);
+        assert_eq!(havana_days, vec!["2026-03-06", "2026-03-07", "2026-03-08"]);
+
+        // Asia/Beirut springs forward at 00:00 -> 01:00 on 2026-03-29
+        let beirut_now: DateTime<Utc> = "2026-03-29T12:00:00Z".parse().unwrap();
+        let beirut_days = generate_time_buckets_at("day", 2, "Asia/Beirut", beirut_now);
+        assert_eq!(beirut_days, vec!["2026-03-27", "2026-03-28", "2026-03-29"]);
+    }
+
+    #[test]
+    fn test_hour_buckets_australia_lord_howe_half_hour_dst() {
+        // Australia/Lord_Howe springs forward 30 min at 2026-10-04 02:00 (+10:30) -> 02:30 (+11:00)
+        // 2026-10-03T15:45:00Z is 2026-10-04 02:45+11:00
+        let now: DateTime<Utc> = "2026-10-03T15:45:00Z".parse().unwrap();
+        let buckets = generate_time_buckets_at("hour", 1, "Australia/Lord_Howe", now);
+        assert!(!buckets.is_empty());
+        assert_eq!(buckets.last().map(String::as_str), Some("2026-10-04 02:00"));
+        for pair in buckets.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+
+        // Fall-back: 2026-04-05 02:00 (+11:00) -> 01:30 (+10:30)
+        let fall_now: DateTime<Utc> = "2026-04-04T15:15:00Z".parse().unwrap();
+        let fall_buckets = generate_time_buckets_at("hour", 1, "Australia/Lord_Howe", fall_now);
+        assert!(!fall_buckets.is_empty());
+        for pair in fall_buckets.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn test_sqlite_offset_modifier_minute_precision() {
+        // Asia/Kolkata has no DST and is always UTC+05:30 (+330 minutes)
+        assert_eq!(get_sqlite_offset_modifier("Asia/Kolkata"), "+330 minutes");
+        assert_eq!(get_sqlite_offset_modifier("UTC"), "+0 minutes");
+        // Asia/Kathmandu has no DST and is always UTC+05:45 (+345 minutes)
+        assert_eq!(get_sqlite_offset_modifier("Asia/Kathmandu"), "+345 minutes");
+        assert_eq!(
+            sqlite_date_bucket("hour", "e.created_at", "Asia/Kolkata"),
+            "strftime('%Y-%m-%d %H:00', datetime(e.created_at, '+330 minutes'))"
+        );
     }
 }

@@ -692,7 +692,14 @@ pub async fn contexts_edit_handler(
         error: None,
     };
 
-    Html(template.render().unwrap()).into_response()
+    (
+        [
+            ("Cache-Control", "no-store"),
+            ("Referrer-Policy", "no-referrer"),
+        ],
+        Html(template.render().unwrap()),
+    )
+        .into_response()
 }
 
 pub async fn contexts_update_handler(
@@ -802,7 +809,14 @@ pub async fn contexts_update_handler(
                 context,
                 error: Some(format!("Invalid Hot code: {}", e)),
             };
-            return Html(template.render().unwrap()).into_response();
+            return (
+                [
+                    ("Cache-Control", "no-store"),
+                    ("Referrer-Policy", "no-referrer"),
+                ],
+                Html(template.render().unwrap()),
+            )
+                .into_response();
         }
     };
 

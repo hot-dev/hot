@@ -568,6 +568,10 @@ pub async fn env_subscribe_handler(
         let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
         let start_time = tokio::time::Instant::now();
 
+        const FAST_NONE_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+        const MAX_CONSECUTIVE_FAST_NONES: u32 = 3;
+        let mut consecutive_fast_nones: u32 = 0;
+
         loop {
             // Check for timeout
             if start_time.elapsed() > stream_timeout {
@@ -577,6 +581,7 @@ pub async fn env_subscribe_handler(
 
             // Receive push event from pub/sub, or shutdown signal
             if let Some(ref mut sub) = subscriber {
+                let poll_start = tokio::time::Instant::now();
                 tokio::select! {
                     _ = revalidate.tick() => {
                         let allowed = hot::db::Org::resolve_user_access(&auth_db, &org_id, &user_id).await
@@ -595,6 +600,7 @@ pub async fn env_subscribe_handler(
                     event = sub.next() => {
                         match event {
                             Some(event) => {
+                                consecutive_fast_nones = 0;
                                 // Convert pub/sub event to SSE event
                                 let (event_type, sse_event) = convert_pubsub_to_sse(event);
                                 if let Ok(json) = serde_json::to_string(&sse_event) {
@@ -603,7 +609,18 @@ pub async fn env_subscribe_handler(
                                 }
                             }
                             None => {
-                                // Subscriber returned None - could be timeout or closed
+                                // Redis Streams idle timeout returns None after ~30s; an
+                                // immediately-returning None indicates a closed channel.
+                                if poll_start.elapsed() < FAST_NONE_THRESHOLD {
+                                    consecutive_fast_nones += 1;
+                                    if consecutive_fast_nones >= MAX_CONSECUTIVE_FAST_NONES {
+                                        tracing::debug!("Dashboard SSE env subscription closed for env {}", env_id);
+                                        break;
+                                    }
+                                    tokio::time::sleep(FAST_NONE_THRESHOLD).await;
+                                } else {
+                                    consecutive_fast_nones = 0;
+                                }
                                 tracing::trace!("Dashboard SSE env subscription poll returned None for env {}", env_id);
                                 continue;
                             }

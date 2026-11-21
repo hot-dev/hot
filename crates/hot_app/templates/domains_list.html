@@ -46,7 +46,7 @@
     {% endif %}
 
     <!-- Header -->
-    {% if domains.len() > 0 %}
+    {% if domains.len() > 0 && page_context.is_current_org_admin %}
     <div class="flex items-center justify-end mb-4 sm:mb-6">
         <a href="/domains/new" class="btn btn-primary">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -197,6 +197,7 @@
         <p class="empty-state-message max-w-sm mx-auto px-4">
             Map your own domains to this environment's API endpoints. Use domains like <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">mcp.example.com</code> for white-label access.
         </p>
+        {% if page_context.is_current_org_admin %}
         <div class="mt-6">
             <a href="/domains/new" class="btn btn-primary">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 sm:mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -205,6 +206,7 @@
                 Add Domain
             </a>
         </div>
+        {% endif %}
     </div>
     {% endif %}
     {% endif %}

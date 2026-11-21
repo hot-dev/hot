@@ -541,6 +541,14 @@ pub async fn keys_edit_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
+    if !session.is_current_org_admin {
+        return super::error_page(
+            &session,
+            StatusCode::FORBIDDEN,
+            "Only organization admins can manage API keys",
+        );
+    }
+
     // Get current env_id for access check
     let current_env = match &session.current_env {
         Some(env) => env,
@@ -1455,23 +1463,26 @@ pub async fn org_keys_create_handler(
     }
 }
 
-/// An org key of `root`, as its page shows it. The list is the App's
-/// authority: it holds exactly the keys the user may manage.
+/// An org key of `root`, fetched directly by ID and verified to belong to `root`.
 async fn org_key_for_user(
     db: &DatabasePool,
     session: &Session,
     root: &Org,
     key_id: Uuid,
 ) -> Result<templates::OrgApiKeyRow, Response> {
-    let keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
-        .await
-        .map_err(|_| keys_load_failed(session))?;
-    let Some(key) = keys.into_iter().find(|key| key.org_api_key_id == key_id) else {
-        return Err(super::error_page(
-            session,
-            StatusCode::NOT_FOUND,
-            "Org API key not found",
-        ));
+    let scoped = db.with_scope(DatabaseScope::Organization {
+        org_id: root.org_id,
+    });
+    let key = match OrgApiKey::get(&scoped, key_id).await {
+        Ok(key) if key.org_id == root.org_id => key,
+        Ok(_) | Err(OrgApiKeyError::NotFound) => {
+            return Err(super::error_page(
+                session,
+                StatusCode::NOT_FOUND,
+                "Org API key not found",
+            ));
+        }
+        Err(_) => return Err(keys_load_failed(session)),
     };
     Ok(org_key_row(db, session, key).await?.0)
 }

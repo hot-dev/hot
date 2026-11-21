@@ -180,16 +180,20 @@
                                                 <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-yellow-700 bg-yellow-100 dark:bg-yellow-900/30 dark:text-yellow-300 cursor-not-allowed" title="Deployment is being prepared by a worker">
                                                     Deploying
                                                 </button>
-                                                {% else if project.active %}
-                                                <form method="post" action="/projects/{{ project.name }}/builds/{{ build.build_id }}/deploy" class="inline">
-                                                    <button type="submit" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors duration-200">
+                                                {% else if page_context.is_current_org_admin %}
+                                                    {% if project.active %}
+                                                    <form method="post" action="/projects/{{ project.name }}/builds/{{ build.build_id }}/deploy" class="inline">
+                                                        <button type="submit" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors duration-200">
+                                                            Deploy
+                                                        </button>
+                                                    </form>
+                                                    {% else %}
+                                                    <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-gray-400 bg-gray-200 dark:bg-gray-700 dark:text-gray-500 cursor-not-allowed" title="Activate project to deploy builds">
                                                         Deploy
                                                     </button>
-                                                </form>
+                                                    {% endif %}
                                                 {% else %}
-                                                <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-gray-400 bg-gray-200 dark:bg-gray-700 dark:text-gray-500 cursor-not-allowed" title="Activate project to deploy builds">
-                                                    Deploy
-                                                </button>
+                                                <span class="text-xs text-gray-400 dark:text-gray-500">—</span>
                                                 {% endif %}
                                             {% else %}
                                                 <span class="text-xs text-gray-500 dark:text-gray-400">Currently Deployed</span>
@@ -244,16 +248,18 @@
                                             <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-yellow-700 bg-yellow-100 dark:bg-yellow-900/30 dark:text-yellow-300 cursor-not-allowed" title="Deployment is being prepared by a worker">
                                                 Deploying
                                             </button>
-                                            {% else if project.active %}
-                                            <form method="post" action="/projects/{{ project.name }}/builds/{{ build.build_id }}/deploy" class="inline">
-                                                <button type="submit" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors duration-200">
+                                            {% else if page_context.is_current_org_admin %}
+                                                {% if project.active %}
+                                                <form method="post" action="/projects/{{ project.name }}/builds/{{ build.build_id }}/deploy" class="inline">
+                                                    <button type="submit" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors duration-200">
+                                                        Deploy
+                                                    </button>
+                                                </form>
+                                                {% else %}
+                                                <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-gray-400 bg-gray-200 dark:bg-gray-700 dark:text-gray-500 cursor-not-allowed" title="Activate project to deploy builds">
                                                     Deploy
                                                 </button>
-                                            </form>
-                                            {% else %}
-                                            <button type="button" disabled class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md text-gray-400 bg-gray-200 dark:bg-gray-700 dark:text-gray-500 cursor-not-allowed" title="Activate project to deploy builds">
-                                                Deploy
-                                            </button>
+                                                {% endif %}
                                             {% endif %}
                                         {% else %}
                                             <span class="text-xs text-gray-500 dark:text-gray-400">Currently Deployed</span>

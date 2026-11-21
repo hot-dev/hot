@@ -390,8 +390,10 @@ fn decode_routing_header(value: &HeaderValue) -> Result<String, String> {
         .to_str()
         .map_err(|_| "header is not valid visible ASCII".to_string())?;
 
-    if value.starts_with("=?base64?") && value.ends_with("?=") {
-        let encoded = &value[9..value.len() - 2];
+    if let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|s| s.strip_suffix("?="))
+    {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map_err(|_| "header contains invalid Base64".to_string())?;
@@ -1260,7 +1262,7 @@ const MCP_EVENT_QUEUE_NAME: &str = "hot:event";
 /// The event data key for the function name.
 use super::request::{
     bind_call_event_to_build, build_call_event_data, build_request_val,
-    hash_sensitive_request_fields,
+    hash_sensitive_request_fields, redact_event_data_for_persistence,
 };
 
 // ============================================================================
@@ -2364,23 +2366,28 @@ async fn handle_tools_call_streaming(
     // Pre-compute secret value hashes for targeted masking.
     // Only sensitive fields (auth subtree, known sensitive headers, user-declared
     // secret-headers from meta) are hashed — not the entire hot.request.
+    let extra_secret_headers = tool.secret_headers();
     {
-        let extra_secret_headers = tool.secret_headers();
         let sensitive_hashes = hash_sensitive_request_fields(&caller_val, &extra_secret_headers);
         for h in sensitive_hashes {
             execution_context.secret_value_hashes.insert(h);
         }
     }
 
-    // Build the event data Val (used for both the event and the DB insert)
+    // Build the event data Val (raw for the transient queue payload, redacted for DB persistence)
     let mut event_data_val = build_call_event_data(&function_name, args_val, Some(caller_val));
     bind_call_event_to_build(&mut event_data_val, tool.build_id);
 
-    // Insert event into database BEFORE enqueueing.
+    // Insert redacted event into database BEFORE enqueueing.
     // The worker verifies that events exist in the database for security
     // (prevents spoofed messages with fake env_ids).
-    let event_data_json =
-        serde_json::to_value(event_data_val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+    let persisted_event_data = redact_event_data_for_persistence(
+        &event_data_val,
+        ctx.auth.is_some(),
+        &extra_secret_headers,
+    );
+    let event_data_json = serde_json::to_value(persisted_event_data.to_hot_data_repr())
+        .unwrap_or(serde_json::Value::Null);
 
     // Create call event for the worker queue
     let call_event = hot::lang::event::Event {
@@ -6644,5 +6651,17 @@ mod tests {
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_decode_routing_header_overlapping_base64_sentinel_does_not_panic() {
+        let header = HeaderValue::from_static("=?base64?=");
+        assert_eq!(decode_routing_header(&header).unwrap(), "=?base64?=");
+
+        let empty_b64 = HeaderValue::from_static("=?base64??=");
+        assert_eq!(decode_routing_header(&empty_b64).unwrap(), "");
+
+        let valid_b64 = HeaderValue::from_static("=?base64?aGVsbG8=?=");
+        assert_eq!(decode_routing_header(&valid_b64).unwrap(), "hello");
     }
 }

@@ -36,7 +36,7 @@ use crate::rate_limit::{self, PublicRateLimitMode};
 
 use super::request::{
     RequestBody, bind_call_event_to_build, build_call_event_data, build_request_val,
-    hash_sensitive_request_fields,
+    hash_sensitive_request_fields, redact_event_data_for_persistence,
 };
 
 /// The queue name that webhooks publish events to.
@@ -654,8 +654,8 @@ async fn webhook_handler_inner(
 
     // Pre-compute secret value hashes for targeted masking of sensitive headers
     // and the auth subtree in run logs.
+    let extra_secret_headers = endpoint.secret_headers();
     {
-        let extra_secret_headers = endpoint.secret_headers();
         let sensitive_hashes = hash_sensitive_request_fields(&http_request, &extra_secret_headers);
         for h in sensitive_hashes {
             execution_context.secret_value_hashes.insert(h);
@@ -668,11 +668,14 @@ async fn webhook_handler_inner(
     let args_val = Val::vec(vec![http_request.clone()]);
     let mut event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
     bind_call_event_to_build(&mut event_data_val, endpoint.build_id);
-    // The persisted copy must not retain the webhook capability token that
-    // original-url carries: store it token-redacted. The raw value rides only
-    // in the queue message below and is re-attached by the worker at
-    // delivery (hot::webhook_url::restore_event_data_original_urls).
-    let persisted_event_data = hot::webhook_url::redact_event_data_original_urls(&event_data_val);
+    // The persisted copy must not retain webhook capability tokens, sensitive
+    // HTTP headers, or decrypted service-key metadata: store a redacted copy
+    // while keeping raw values only in the transient call_event queue payload.
+    let persisted_event_data = redact_event_data_for_persistence(
+        &event_data_val,
+        auth_result.is_some(),
+        &extra_secret_headers,
+    );
     let event_data_json = serde_json::to_value(persisted_event_data.to_hot_data_repr())
         .unwrap_or(serde_json::Value::Null);
 

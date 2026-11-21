@@ -23,6 +23,18 @@ pub const SENSITIVE_HEADERS: &[&str] = &[
     "set-cookie",
 ];
 
+/// Placeholder stored in persisted event rows in place of redacted credentials.
+pub const REDACTED_VALUE: &str = "[redacted]";
+
+fn is_sensitive_header(name: &str, extra_secret_headers: &[String]) -> bool {
+    SENSITIVE_HEADERS
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(name))
+        || extra_secret_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(name))
+}
+
 /// Compute secret value hashes for only the sensitive parts of a request Val.
 ///
 /// Instead of hashing every leaf (which masks innocuous values like "POST"),
@@ -58,11 +70,7 @@ pub fn hash_sensitive_request_fields(
         for (key, value) in headers_map.iter() {
             if let Val::Str(key_str) = key {
                 let k = key_str.as_ref();
-                if SENSITIVE_HEADERS.contains(&k)
-                    || extra_secret_headers
-                        .iter()
-                        .any(|h| h.eq_ignore_ascii_case(k))
-                {
+                if is_sensitive_header(k, extra_secret_headers) {
                     hash_secret_value_recursive(value, &mut hashes);
                 }
             }
@@ -70,6 +78,93 @@ pub fn hash_sensitive_request_fields(
     }
 
     hashes
+}
+
+/// Headers carrying Hot's own authentication credentials when Hot authenticated
+/// the incoming request (`auth.is_some()`). Because Hot already validated these
+/// credentials and populated `req.auth`, handlers do not need the raw token or
+/// cookie and they must never be persisted to Postgres `event.event_data`.
+const HOT_AUTH_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+];
+
+/// Clone `event_data` (a `hot:call` payload) before persisting it to the `event`
+/// table:
+/// - Always redacts webhook capability tokens in `original-url` (restored
+///   transiently by `hot_worker` from the queue envelope).
+/// - When `hot_authenticated` is `true`, redacts Hot's own authentication
+///   headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`)
+///   so `hot_*` API keys, service keys, and session tokens are never persisted
+///   to Postgres.
+/// - Preserves endpoint-declared `extra_secret_headers` and
+///   `auth.service-key.meta` in Postgres so `hot_worker` (which hydrates from
+///   DB on thin queue envelopes) can still deliver them to handlers, while
+///   recording `extra_secret_headers` names under `_hot_secret_headers` so
+///   `/v1/events` and dashboard reads redact them before returning responses.
+pub fn redact_event_data_for_persistence(
+    event_data: &Val,
+    hot_authenticated: bool,
+    extra_secret_headers: &[String],
+) -> Val {
+    let mut out = hot::webhook_url::redact_event_data_original_urls(event_data);
+    let Val::Map(map) = &mut out else {
+        return out;
+    };
+    let map = Arc::make_mut(map);
+    if !extra_secret_headers.is_empty() {
+        let names = extra_secret_headers
+            .iter()
+            .map(|h| Val::from(h.as_str()))
+            .collect();
+        map.insert(
+            Val::from(hot::webhook_url::SECRET_HEADERS_META_KEY),
+            Val::vec(names),
+        );
+    }
+    if hot_authenticated {
+        if let Some(Val::Vec(args)) = map.get_mut(&Val::from("args")) {
+            for arg in Arc::make_mut(args).iter_mut() {
+                if is_http_request_val(arg) {
+                    redact_hot_auth_headers(arg);
+                }
+            }
+        }
+        if let Some(caller) = map.get_mut(&Val::from("caller")) {
+            redact_hot_auth_headers(caller);
+        }
+    }
+    out
+}
+
+fn is_http_request_val(value: &Val) -> bool {
+    matches!(
+        value,
+        Val::Map(map)
+            if map.get(&Val::from("$type")) == Some(&Val::from("::hot::http/HttpRequest"))
+    )
+}
+
+fn redact_hot_auth_headers(request: &mut Val) {
+    let Val::Map(request_map) = request else {
+        return;
+    };
+    let request_map = Arc::make_mut(request_map);
+
+    if let Some(Val::Map(headers_map)) = request_map.get_mut(&Val::from("headers")) {
+        let headers_map = Arc::make_mut(headers_map);
+        for (key, value) in headers_map.iter_mut() {
+            if let Val::Str(key_str) = key
+                && HOT_AUTH_HEADERS
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(key_str.as_ref()))
+            {
+                *value = Val::from(REDACTED_VALUE);
+            }
+        }
+    }
 }
 
 /// Build the event data Val for a hot:call event.
@@ -545,6 +640,132 @@ mod tests {
         assert!(
             !hashes.contains(&hasher.finish()),
             "Body content should not be hashed as a secret"
+        );
+    }
+
+    #[test]
+    fn test_redact_event_data_for_persistence_strips_credentials_and_keeps_queue_copy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer sk_live_secret".parse().unwrap());
+        headers.insert("cookie", "session=super_secret_cookie".parse().unwrap());
+        headers.insert("proxy-authorization", "Basic cHJveHk=".parse().unwrap());
+        headers.insert("x-webhook-secret", "whsec_custom_123".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let mut request = build_request_val(
+            "POST",
+            "/webhook/org/env/svc/hook",
+            Some("https://hooks.example.com/webhook/org/env/svc/hook/tok_cap123/"),
+            &headers,
+            None,
+            &HashMap::new(),
+            None,
+            None,
+            &Uuid::nil(),
+        );
+        if let Val::Map(ref mut map) = request {
+            Arc::make_mut(map).insert(
+                Val::from("auth"),
+                hot::val!({
+                    "type": "service-key",
+                    "service-key": {
+                        "id": "sk_1",
+                        "name": "tenant-a",
+                        "meta": {
+                            "oauth_token": "tok_customer_secret",
+                            "tenant_id": "t_1"
+                        }
+                    }
+                }),
+            );
+        }
+
+        // Webhook shape: HttpRequest in both args[0] and caller
+        let queue_event_data = build_call_event_data(
+            "::app/handle",
+            Val::vec(vec![request.clone()]),
+            Some(request),
+        );
+        let extra = vec!["X-Webhook-Secret".to_string()];
+        let persisted = redact_event_data_for_persistence(&queue_event_data, true, &extra);
+
+        let mut persisted_json = serde_json::to_value(persisted.to_hot_data_repr()).unwrap();
+        let persisted_str = persisted_json.to_string();
+        // Hot's own auth headers and webhook URL tokens are never persisted
+        assert!(!persisted_str.contains("sk_live_secret"));
+        assert!(!persisted_str.contains("super_secret_cookie"));
+        assert!(!persisted_str.contains("cHJveHk="));
+        assert!(!persisted_str.contains("tok_cap123"));
+        // Handler-needed custom secret-headers & service-key.meta stay for worker hydration...
+        assert_eq!(
+            persisted_json["caller"]["headers"]["x-webhook-secret"],
+            "whsec_custom_123"
+        );
+        assert_eq!(
+            persisted_json["caller"]["auth"]["service-key"]["meta"]["oauth_token"],
+            "tok_customer_secret"
+        );
+
+        // ...and are redacted when served via /v1/events or dashboard UI
+        hot::webhook_url::redact_event_data_json_for_display(&mut persisted_json);
+        let display_str = persisted_json.to_string();
+        assert!(!display_str.contains("whsec_custom_123"));
+        assert!(!display_str.contains("tok_customer_secret"));
+        assert!(display_str.contains("application/json"));
+        assert!(display_str.contains("tenant-a"));
+        assert!(
+            display_str.contains("https://hooks.example.com/webhook/org/env/svc/hook/[redacted]/")
+        );
+
+        for slot in [&persisted_json["args"][0], &persisted_json["caller"]] {
+            assert_eq!(slot["headers"]["authorization"], "[redacted]");
+            assert_eq!(slot["headers"]["cookie"], "[redacted]");
+            assert_eq!(slot["headers"]["proxy-authorization"], "[redacted]");
+            assert_eq!(slot["headers"]["x-webhook-secret"], "[redacted]");
+            assert_eq!(slot["headers"]["content-type"], "application/json");
+            assert!(slot["auth"]["service-key"].get("meta").is_none());
+            assert_eq!(slot["auth"]["service-key"]["id"], "sk_1");
+        }
+
+        // Queue payload retains all raw credentials untouched
+        let queue_json = serde_json::to_value(queue_event_data.to_hot_data_repr()).unwrap();
+        assert_eq!(
+            queue_json["caller"]["headers"]["authorization"],
+            "Bearer sk_live_secret"
+        );
+        assert_eq!(
+            queue_json["caller"]["headers"]["cookie"],
+            "session=super_secret_cookie"
+        );
+        assert_eq!(
+            queue_json["caller"]["headers"]["x-webhook-secret"],
+            "whsec_custom_123"
+        );
+        assert_eq!(
+            queue_json["caller"]["auth"]["service-key"]["meta"]["oauth_token"],
+            "tok_customer_secret"
+        );
+    }
+
+    #[test]
+    fn test_redact_event_data_preserves_non_http_request_mcp_tool_args() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer mcp_secret".parse().unwrap());
+        let caller = simple_request(&headers, "/mcp/org/env/svc");
+        let tool_arg = hot::val!({
+            "headers": {
+                "authorization": "user-arg-value"
+            }
+        });
+        let event_data =
+            build_call_event_data("::app/tool", Val::vec(vec![tool_arg]), Some(caller));
+        let persisted = redact_event_data_for_persistence(&event_data, true, &[]);
+        let json = serde_json::to_value(persisted.to_hot_data_repr()).unwrap();
+        assert_eq!(json["caller"]["headers"]["authorization"], "[redacted]");
+        // Non-HttpRequest MCP tool argument is untouched
+        assert_eq!(
+            json["args"][0]["headers"]["authorization"],
+            "user-arg-value"
         );
     }
 }

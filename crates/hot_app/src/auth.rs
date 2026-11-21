@@ -1085,6 +1085,8 @@ fn is_org_control_path(path: &str) -> bool {
         || path.starts_with("/orgs/")
         || path == "/envs"
         || path.starts_with("/envs/")
+        || path == "/keys/org"
+        || path.starts_with("/keys/org/")
         || path == "/account"
         || path.starts_with("/account/")
         || path.starts_with("/settings/alerts")
@@ -1817,5 +1819,17 @@ mod scope_contract_tests {
             Err(StatusCode::FORBIDDEN)
         );
         assert!(is_personal_path(&format!("/switch-org/{}", root.org_id)));
+    }
+
+    #[test]
+    fn org_key_paths_are_org_control_paths() {
+        assert!(is_org_control_path("/keys/org"));
+        assert!(is_org_control_path("/keys/org/new"));
+        assert!(is_org_control_path(&format!(
+            "/keys/org/{}/revoke",
+            Uuid::now_v7()
+        )));
+        assert!(!is_org_control_path("/keys"));
+        assert!(!is_org_control_path("/keys/new"));
     }
 }

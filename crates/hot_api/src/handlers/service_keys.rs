@@ -212,7 +212,25 @@ pub async fn create_service_key(
                 )),
             ));
         }
-        Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in))
+        let delta = chrono::TimeDelta::try_seconds(expires_in).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::bad_request(
+                    "expires_in is out of valid range",
+                )),
+            )
+        })?;
+        let expires_at = chrono::Utc::now()
+            .checked_add_signed(delta)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiErrorResponse::bad_request(
+                        "expires_in is out of valid range",
+                    )),
+                )
+            })?;
+        Some(expires_at)
     } else {
         None // Never expires
     };
@@ -541,4 +559,63 @@ pub async fn revoke_all_service_keys(
             timestamp: chrono::Utc::now(),
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Extension, Json, extract::State};
+    use hot::db::insert_test_data;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn create_service_key_rejects_overflowing_expires_in() {
+        let db = Arc::new(hot::db::test_db().await);
+        let td = insert_test_data(&db).await.unwrap();
+        let api_key_id = Uuid::now_v7();
+        let (_token, hash) = ApiKey::generate_api_key(&api_key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &api_key_id,
+            &td.env_id,
+            "parent",
+            &serde_json::from_str(&hash).unwrap(),
+            &td.user_id,
+            &serde_json::json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+        let api_key = ApiKey::get_api_key(&db, &api_key_id).await.unwrap();
+
+        let conf = hot::val!({});
+        let storage = Arc::new(
+            hot::storage::build_storage_from_config(&conf)
+                .await
+                .unwrap(),
+        );
+        let state: ApiStateData = (db, storage, Arc::new(conf), None);
+
+        for bad_expires_in in [i64::MAX, 1_000_000_000_000_000_000, 0, -5] {
+            let result = create_service_key(
+                State(state.clone()),
+                Extension(AuthContext::ApiKey(api_key.clone())),
+                Extension(api_key.clone()),
+                Json(CreateServiceKeyRequest {
+                    name: Some("test".to_string()),
+                    description: None,
+                    permissions: serde_json::json!({"webhook:*": ["execute"]}),
+                    metadata: None,
+                    expires_in: Some(bad_expires_in),
+                }),
+            )
+            .await;
+
+            let err = result.expect_err("overflow/non-positive expires_in must be rejected");
+            assert_eq!(
+                err.0,
+                StatusCode::BAD_REQUEST,
+                "expires_in={bad_expires_in}"
+            );
+        }
+    }
 }

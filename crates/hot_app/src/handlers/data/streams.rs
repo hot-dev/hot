@@ -70,8 +70,8 @@ pub async fn stream_flow_handler(
         }
     }
 
-    // Get all runs for this stream
-    let runs = match Run::get_runs_by_stream(&db, &stream_id, &env_id, None, None).await {
+    // Get runs for this stream (bounded to prevent unbounded memory growth)
+    let runs = match Run::get_runs_by_stream(&db, &stream_id, &env_id, Some(1000), None).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Failed to get runs for stream {}: {}", stream_id, e);
@@ -80,8 +80,9 @@ pub async fn stream_flow_handler(
         }
     };
 
-    // Get all events for this stream
-    let events = match Event::get_events_by_stream(&db, &stream_id, &env_id, None, None).await {
+    // Get events for this stream (bounded to prevent unbounded memory growth)
+    let events = match Event::get_events_by_stream(&db, &stream_id, &env_id, Some(1000), None).await
+    {
         Ok(e) => e,
         Err(e) => {
             tracing::error!("Failed to get events for stream {}: {}", stream_id, e);
@@ -219,7 +220,7 @@ pub async fn stream_timeline_handler(
         }
     };
 
-    let limit = params.limit.unwrap_or(10);
+    let limit = params.limit.unwrap_or(10).clamp(1, 1000);
 
     // Get recent streams
     let streams = match Stream::get_streams_by_env(&db, &env_id, Some(limit), None).await {

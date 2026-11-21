@@ -202,7 +202,15 @@ pub async fn service_keys_create_handler(
 
     // Parse expiration
     let expires_at = if form.expires_in_days > 0 {
-        Some(chrono::Utc::now() + chrono::Duration::days(form.expires_in_days))
+        let delta = chrono::TimeDelta::try_days(form.expires_in_days).ok_or((
+            StatusCode::BAD_REQUEST,
+            "Expiration days is out of valid range.".to_string(),
+        ))?;
+        let expires_at = chrono::Utc::now().checked_add_signed(delta).ok_or((
+            StatusCode::BAD_REQUEST,
+            "Expiration days is out of valid range.".to_string(),
+        ))?;
+        Some(expires_at)
     } else {
         None // No expiration
     };

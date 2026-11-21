@@ -626,6 +626,9 @@ pub async fn handle_oauth_user(
         let user = User::get_user(db, &auth.user_id)
             .await
             .map_err(|e| format!("Failed to load user for OAuth login: {}", e))?;
+        if !user.active {
+            return Err("Your account has been deactivated.".to_string());
+        }
         tracing::debug!(
             "User {} logged in with {} (matched by provider_user_id)",
             user.email,
@@ -637,9 +640,29 @@ pub async fn handle_oauth_user(
     // Check if user already exists with this email
     match User::get_user_by_email(db, email).await {
         Ok(user) => {
+            if !user.active {
+                return Err("Your account has been deactivated.".to_string());
+            }
             // User exists, check if they have this OAuth provider linked
             match UserAuth::get_user_auth(db, &user.user_id, provider).await {
-                Ok(_) => {
+                Ok(existing_auth) => {
+                    if let Some(stored_id) = existing_auth
+                        .auth_data
+                        .as_ref()
+                        .and_then(|data| data.get("provider_user_id"))
+                        .and_then(|value| value.as_str())
+                        && stored_id != provider_user_id
+                    {
+                        tracing::warn!(
+                            provider,
+                            user_id = %user.user_id,
+                            "Rejected OAuth login: email matches account linked to a different provider_user_id"
+                        );
+                        return Err(
+                            "This email is already linked to a different account with this provider."
+                                .to_string(),
+                        );
+                    }
                     // OAuth already linked, just log them in
                     tracing::debug!("User {} logged in with {}", email, provider);
                     Ok(existing(user))
@@ -933,8 +956,8 @@ mod tests {
             &db,
             &conf,
             "dana@corp.com",
-            "google",
-            "google-dana-lower",
+            "github",
+            "github-dana-lower",
             None,
             None,
         )
@@ -1144,5 +1167,110 @@ mod tests {
             false,
         );
         assert_eq!(result, "/@acme/billing");
+    }
+
+    #[tokio::test]
+    async fn oauth_rejects_mismatched_provider_user_id_for_same_email() {
+        let db = hot::db::test_db().await;
+        let conf = hot::val!({});
+
+        // First sign-in creates the user and links google-owner
+        let first = handle_oauth_user(
+            &db,
+            &conf,
+            "victim@example.com",
+            "google",
+            "google-owner",
+            Some("Victim"),
+            None,
+        )
+        .await
+        .expect("initial OAuth signup succeeds");
+
+        // Second sign-in with the same email + provider but different provider_user_id MUST fail
+        let err = handle_oauth_user(
+            &db,
+            &conf,
+            "victim@example.com",
+            "google",
+            "google-attacker",
+            Some("Attacker"),
+            None,
+        )
+        .await
+        .err()
+        .expect("mismatched provider_user_id must be rejected");
+        assert!(err.contains("different account"), "{err}");
+
+        // Original provider_user_id still succeeds
+        let ok = handle_oauth_user(
+            &db,
+            &conf,
+            "victim@example.com",
+            "google",
+            "google-owner",
+            Some("Victim"),
+            None,
+        )
+        .await
+        .expect("matching provider_user_id succeeds");
+        assert_eq!(ok.user.user_id, first.user.user_id);
+    }
+
+    #[tokio::test]
+    async fn oauth_rejects_deactivated_user() {
+        let db = hot::db::test_db().await;
+        let conf = hot::val!({});
+
+        let created = handle_oauth_user(
+            &db,
+            &conf,
+            "deactivated@example.com",
+            "google",
+            "google-deactivated",
+            Some("Deactivated"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db is SQLite");
+        };
+        sqlx::query("UPDATE \"user\" SET active = 0 WHERE user_id = ?")
+            .bind(created.user.user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // Rejected via provider_user_id lookup
+        assert!(
+            handle_oauth_user(
+                &db,
+                &conf,
+                "deactivated@example.com",
+                "google",
+                "google-deactivated",
+                Some("Deactivated"),
+                None,
+            )
+            .await
+            .is_err()
+        );
+
+        // Also rejected via email lookup (e.g. a different provider)
+        assert!(
+            handle_oauth_user(
+                &db,
+                &conf,
+                "deactivated@example.com",
+                "github",
+                "github-deactivated",
+                Some("Deactivated"),
+                None,
+            )
+            .await
+            .is_err()
+        );
     }
 }
