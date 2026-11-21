@@ -904,3 +904,117 @@ fn shared_code_is_taken_only_where_its_facts_hold() {
         "this VM's namespace binds the name"
     );
 }
+
+#[test]
+fn jit_special_type_path_strings_match_interpreter_without_crashing() {
+    // Regression test for C3: string literals matching primitive type paths
+    // (::hot::type/Null, Int, Bool, Dec) are tagged as StringConst tokens in
+    // JIT registers and must decode as their string values across eq, map/vec
+    // literals, spreads, templates, dot-set, and core functions instead of
+    // being dereferenced as OwnedVal pointers or returning wrong values.
+    let source = r#"
+::t ns
+
+is-int-path fn (tp: Str): Bool { ::hot::cmp/eq(tp, "::hot::type/Int") }
+
+exercise-loop fn (): Int {
+    ::hot::coll/length(::hot::coll/filter(::hot::coll/range(0, 300), (i) {
+        tp cond {
+            ::hot::cmp/eq(::hot::math/mod(i, 2), 0) => { "::hot::type/Int" }
+            => { "other" }
+        }
+        is-int-path(tp)
+    }))
+}
+
+exercise-ops fn (x: Int): Map {
+    t "::hot::type/Int"
+    d "::hot::type/Dec"
+    n "::hot::type/Null"
+    b "::hot::type/Bool"
+    dyn-map {"$type": t, "$val": x, d: n}
+    dyn-vec [t, d, x]
+    spread-vec [...dyn-vec, b]
+    tmpl `${t}:${x}`
+    upper ::hot::str/uppercase(d)
+    associated ::hot::coll/assoc({v: x}, "t", t)
+    ew ::hot::str/ends-with(t, "/Int")
+    sw ::hot::str/starts-with(t, "::hot::type/")
+    {
+        dyn-map,
+        dyn-vec,
+        spread-vec,
+        tmpl,
+        upper,
+        associated,
+        ew,
+        sw,
+        is-int: ::hot::type/is-type(x, "::hot::type/Int"),
+        is-null: ::hot::type/is-type(null, "::hot::type/Null"),
+    }
+}
+"#;
+    let run = |jit: Val| {
+        let mut vm = source_vm(source, jit);
+        let count = call(&mut vm, "::t/exercise-loop", &[]).expect("loop ok");
+        let ops1 = call(&mut vm, "::t/exercise-ops", &[Val::Int(2)]).expect("ops 1 ok");
+        let ops2 = call(&mut vm, "::t/exercise-ops", &[Val::Int(2)]).expect("ops 2 ok");
+        assert_eq!(ops1, ops2);
+        (count, ops2)
+    };
+    let interpreted = run(val!({"mode": "disabled"}));
+    let compiled = run(val!({"mode": "enabled", "threshold": 1}));
+    assert_eq!(compiled.0, Val::Int(150));
+    assert_eq!(compiled, interpreted);
+}
+
+#[test]
+fn jit_lambda_calling_local_function_does_not_move_outer_binding_prematurely() {
+    // Regression test for H2: moves.rs must not move an outer variable on its
+    // last direct load when a nested lambda invokes a local function that reads
+    // that outer variable from the outer frame.
+    let source = r#"
+::t ns
+
+run-it fn (n: Int): Map {
+    xs [1, 2, n]
+    read-xs fn (): Int { ::hot::coll/length(xs) }
+    f () { read-xs() }
+    first-copy ::hot::coll/assoc({a: 1}, "items", xs)
+    {len: f(), items: first-copy.items}
+}
+"#;
+    let run = |jit: Val| {
+        let mut vm = source_vm(source, jit);
+        let first = call(&mut vm, "::t/run-it", &[Val::Int(3)]).expect("first ok");
+        let second = call(&mut vm, "::t/run-it", &[Val::Int(4)]).expect("second ok");
+        (first, second)
+    };
+    let interpreted = run(val!({"mode": "disabled"}));
+    let compiled = run(val!({"mode": "enabled", "threshold": 1}));
+    assert_eq!(compiled, interpreted);
+}
+
+#[test]
+fn jit_make_map_invalid_key_halts_like_interpreter() {
+    // Regression test for H3: MakeMap with an invalid key (e.g. a Map or Vec
+    // exceeding key shape constraints) must halt like the interpreter.
+    let source = r#"
+::t ns
+
+bad-map fn (x: Int): Map {
+    k ok(x)
+    {k: x, other: [x, 2]}
+}
+"#;
+    let run = |jit: Val| {
+        let mut vm = source_vm(source, jit);
+        let first = call(&mut vm, "::t/bad-map", &[Val::Int(1)]);
+        let second = call(&mut vm, "::t/bad-map", &[Val::Int(2)]);
+        (first.is_err(), second.is_err())
+    };
+    let interpreted = run(val!({"mode": "disabled"}));
+    let compiled = run(val!({"mode": "enabled", "threshold": 1}));
+    assert_eq!(interpreted, (true, true));
+    assert_eq!(compiled, interpreted);
+}
