@@ -123,7 +123,7 @@ impl Operands {
     }
 
     /// Every register the instruction reads, the updated one included.
-    fn all_reads(&self) -> impl Iterator<Item = RegisterId> + '_ {
+    pub(crate) fn all_reads(&self) -> impl Iterator<Item = RegisterId> + '_ {
         let range = self
             .range
             .into_iter()
@@ -362,7 +362,13 @@ struct Named<'a> {
 impl<'a> Named<'a> {
     /// Add the names the code inside `value` can read. A string held as
     /// data names nothing: only an instruction's own operand is looked up.
-    fn add_value(&mut self, value: &'a Val, constants: &'a [Constant], depth: usize) {
+    fn add_value(
+        &mut self,
+        value: &'a Val,
+        constants: &'a [Constant],
+        is_local_function: &impl Fn(FunctionId) -> bool,
+        depth: usize,
+    ) {
         // Constants nest a few levels at most; anything deeper is treated
         // as unlistable rather than walked.
         if depth > 64 {
@@ -372,19 +378,19 @@ impl<'a> Named<'a> {
         match value {
             Val::Vec(items) => {
                 for item in items.iter() {
-                    self.add_value(item, constants, depth + 1);
+                    self.add_value(item, constants, is_local_function, depth + 1);
                 }
             }
             Val::Map(entries) => {
                 for (key, item) in entries.iter() {
-                    self.add_value(key, constants, depth + 1);
-                    self.add_value(item, constants, depth + 1);
+                    self.add_value(key, constants, is_local_function, depth + 1);
+                    self.add_value(item, constants, is_local_function, depth + 1);
                 }
             }
             Val::Box(boxed) => {
                 let any = boxed.as_any();
                 if let Some(lambda) = any.downcast_ref::<LambdaInfo>() {
-                    self.add_body(lambda, constants, depth + 1);
+                    self.add_body(lambda, constants, is_local_function, depth + 1);
                 } else if let Some(function) =
                     any.downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
                 {
@@ -405,29 +411,59 @@ impl<'a> Named<'a> {
 
     /// Add every name a nested body can read: its parameters, captures and
     /// each string its instructions refer to, to any depth.
-    fn add_body(&mut self, lambda: &'a LambdaInfo, constants: &'a [Constant], depth: usize) {
+    fn add_body(
+        &mut self,
+        lambda: &'a LambdaInfo,
+        constants: &'a [Constant],
+        is_local_function: &impl Fn(FunctionId) -> bool,
+        depth: usize,
+    ) {
         self.names
             .extend(lambda.parameters.iter().map(String::as_str));
         self.names
             .extend(lambda.capture_vars.iter().map(String::as_str));
         for (name, value) in &lambda.closure_env {
             self.names.insert(name);
-            self.add_value(value, constants, depth + 1);
+            self.add_value(value, constants, is_local_function, depth + 1);
         }
         for instruction in &lambda.instructions {
+            match instruction {
+                Instruction::DeferredVarExpr { .. }
+                | Instruction::LoadScoped { .. }
+                | Instruction::StoreScoped { .. }
+                | Instruction::CaptureVar { .. }
+                | Instruction::DefineFunction { .. } => {
+                    self.opaque = true;
+                    return;
+                }
+                Instruction::CallUserFunction { function_id, .. }
+                | Instruction::TailCall { function_id, .. }
+                    if is_local_function(*function_id) =>
+                {
+                    self.opaque = true;
+                    return;
+                }
+                _ => {}
+            }
             for id in constant_operands(instruction).into_iter().flatten() {
-                self.add_constant(id, constants, depth + 1);
+                self.add_constant(id, constants, is_local_function, depth + 1);
             }
         }
     }
 
-    fn add_constant(&mut self, id: ConstantId, constants: &'a [Constant], depth: usize) {
+    fn add_constant(
+        &mut self,
+        id: ConstantId,
+        constants: &'a [Constant],
+        is_local_function: &impl Fn(FunctionId) -> bool,
+        depth: usize,
+    ) {
         match constants.get(id as usize) {
             // An instruction's own string operand is a name it can look up
             // (the variable a `LoadVar` reads is one), unlike a string held
             // inside a collection.
             Some(Constant::Val(value)) if !matches!(value, Val::Str(_)) => {
-                self.add_value(value, constants, depth)
+                self.add_value(value, constants, is_local_function, depth)
             }
             Some(_) => {
                 if let Some(name) = constant_name(constants, id) {
@@ -939,7 +975,7 @@ fn plan_variables<'a>(
                 // A collection or a nested body: whatever it names is read
                 // at a time this pass can't place.
                 Some(Constant::Val(value)) if !matches!(value, Val::Str(_)) => {
-                    nested.add_value(value, constants, 0);
+                    nested.add_value(value, constants, &is_local_function, 0);
                 }
                 Some(_) => {
                     let Some(name) = constant_name(constants, id) else {

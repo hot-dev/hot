@@ -225,7 +225,11 @@ pub fn replace(args: &[Val]) -> HotResult<Val> {
                 Ok(re) => re,
                 Err(e) => return HotResult::Err(e),
             };
-            HotResult::Ok(Val::from(re.replace(val, &**rep).to_string()))
+            let out = match bounded_regex_replace("replace", &re, val, rep, Some(1)) {
+                Ok(out) => out,
+                Err(e) => return HotResult::Err(e),
+            };
+            HotResult::Ok(Val::from(out))
         }
         (Val::Str(_), Val::Str(_), _) => {
             HotResult::Err(Val::from("replace replacement must be a string"))
@@ -233,6 +237,44 @@ pub fn replace(args: &[Val]) -> HotResult<Val> {
         (Val::Str(_), _, _) => HotResult::Err(Val::from("replace pattern must be a string")),
         _ => HotResult::Err(Val::from("replace value must be a string")),
     }
+}
+
+/// Replace matches of `re` in `haystack` incrementally, checking
+/// `limits::check_string_bytes` as each match expands so pathological
+/// replacements cannot allocate unbounded memory before the limit fires.
+fn bounded_regex_replace(
+    op: &str,
+    re: &Regex,
+    haystack: &str,
+    replacement: &str,
+    limit: Option<usize>,
+) -> Result<String, Val> {
+    let mut out = String::new();
+    let mut last_end = 0usize;
+    let mut expanded = String::new();
+    for (count, caps) in re.captures_iter(haystack).enumerate() {
+        if let Some(max) = limit
+            && count >= max
+        {
+            break;
+        }
+        let m = caps.get(0).expect("capture group 0 always exists");
+        let literal_len = m.start() - last_end;
+        expanded.clear();
+        caps.expand(replacement, &mut expanded);
+        let next_len = out
+            .len()
+            .saturating_add(literal_len)
+            .saturating_add(expanded.len());
+        limits::check_string_bytes(op, next_len)?;
+        out.push_str(&haystack[last_end..m.start()]);
+        out.push_str(&expanded);
+        last_end = m.end();
+    }
+    let tail_len = haystack.len() - last_end;
+    limits::check_string_bytes(op, out.len().saturating_add(tail_len))?;
+    out.push_str(&haystack[last_end..]);
+    Ok(out)
 }
 
 /// Replace all matches of a pattern in a string
@@ -248,13 +290,12 @@ pub fn replace_all(args: &[Val]) -> HotResult<Val> {
                 Ok(re) => re,
                 Err(e) => return HotResult::Err(e),
             };
-            // The output of `replace_all` can be larger than the input when the
-            // replacement is longer than each match. Bound the produced string.
-            let out = re.replace_all(val, &**rep);
-            if let Err(e) = limits::check_string_bytes("replace-all", out.len()) {
-                return HotResult::Err(e);
+            // Bound output incrementally so a large replacement over many matches
+            // fails before allocating unbounded heap memory.
+            match bounded_regex_replace("replace-all", &re, val, rep, None) {
+                Ok(out) => HotResult::Ok(Val::from(out)),
+                Err(e) => HotResult::Err(e),
             }
-            HotResult::Ok(Val::from(out.to_string()))
         }
         (Val::Str(_), Val::Str(_), _) => HotResult::Err(Val::from(
             "replace-all replacement must be a string".to_string(),
@@ -384,5 +425,41 @@ pub fn escape(args: &[Val]) -> HotResult<Val> {
     match &args[0] {
         Val::Str(s) => HotResult::Ok(Val::from(regex::escape(s))),
         _ => HotResult::Err(Val::from("escape requires a string input")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_and_replace_all_preserve_capture_expansion() {
+        let out = replace(&[
+            Val::from("foo-123 foo-456"),
+            Val::from(r"foo-(\d+)"),
+            Val::from("bar-$1"),
+        ])
+        .ok()
+        .unwrap();
+        assert_eq!(out, Val::from("bar-123 foo-456"));
+
+        let all = replace_all(&[
+            Val::from("foo-123 foo-456"),
+            Val::from(r"foo-(\d+)"),
+            Val::from("bar-$1"),
+        ])
+        .ok()
+        .unwrap();
+        assert_eq!(all, Val::from("bar-123 bar-456"));
+    }
+
+    #[test]
+    fn replace_all_enforces_string_limit_incrementally() {
+        let chunk = 1024 * 1024;
+        let count = (limits::max_string_bytes() / chunk) + 2;
+        let rep = "x".repeat(chunk);
+        let input = "a".repeat(count);
+        let result = replace_all(&[Val::from(input), Val::from("a"), Val::from(rep)]);
+        assert!(matches!(result, HotResult::Err(_)));
     }
 }

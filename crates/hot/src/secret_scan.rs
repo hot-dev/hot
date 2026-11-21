@@ -170,38 +170,66 @@ fn scan_bytes(path: &str, bytes: &[u8], out: &mut Vec<SecretMatch>) {
         return;
     };
     for (line_idx, line) in text.lines().enumerate() {
+        let mut matched_kinds = Vec::new();
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
         for det in &*DETECTORS {
-            if let Some(m) = det.regex.find(line) {
+            let mut found = false;
+            for m in det.regex.find_iter(line) {
+                found = true;
+                ranges.push((m.start(), m.end()));
+            }
+            if found {
+                matched_kinds.push(det.kind);
+            }
+        }
+        if !matched_kinds.is_empty() {
+            let snippet = redact_ranges(line, &mut ranges);
+            for kind in matched_kinds {
                 out.push(SecretMatch {
                     path: path.to_string(),
-                    kind: det.kind,
+                    kind,
                     line: line_idx + 1,
-                    snippet: redact(line, m.start(), m.end()),
+                    snippet: snippet.clone(),
                 });
             }
         }
     }
 }
 
-/// Replace the middle of a matched range with `***` so the secret itself
-/// doesn't end up in build logs / CI output. Show the first and last 4
-/// chars only, which is enough to identify the issue without leaking it.
-fn redact(line: &str, start: usize, end: usize) -> String {
-    let prefix = &line[..start];
-    let matched = &line[start..end];
-    let suffix = &line[end..];
-    let redacted = if matched.chars().count() > 12 {
-        let head: String = matched.chars().take(4).collect();
-        let tail: String = matched.chars().rev().take(4).collect::<String>();
-        let tail: String = tail.chars().rev().collect();
-        format!("{}***{}", head, tail)
-    } else {
-        "***".to_string()
-    };
-    let combined = format!("{}{}{}", prefix, redacted, suffix);
-    // Trim very long lines to keep the message readable.
+/// Replace the middle of every matched range on `line` with `***` so no secret
+/// ends up in build logs / CI output, even when multiple secrets share a line.
+fn redact_ranges(line: &str, ranges: &mut [(usize, usize)]) -> String {
+    ranges.sort_by_key(|&(start, end)| (start, std::cmp::Reverse(end)));
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for &(start, end) in ranges.iter() {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
+        }
+        merged.push((start, end));
+    }
+    let mut combined = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        combined.push_str(&line[cursor..start]);
+        let matched = &line[start..end];
+        if matched.chars().count() > 12 {
+            let head: String = matched.chars().take(4).collect();
+            let tail: String = matched.chars().rev().take(4).collect::<String>();
+            let tail: String = tail.chars().rev().collect();
+            combined.push_str(&format!("{}***{}", head, tail));
+        } else {
+            combined.push_str("***");
+        }
+        cursor = end;
+    }
+    combined.push_str(&line[cursor..]);
+    // Trim very long lines on a UTF-8 char boundary to keep the message readable.
     if combined.len() > 160 {
-        format!("{}…", &combined[..160])
+        let end = combined.floor_char_boundary(160);
+        format!("{}…", &combined[..end])
     } else {
         combined
     }
@@ -409,5 +437,25 @@ mod tests {
         assert!(msg.contains("a.hot"));
         assert!(msg.contains("aws-access-key"));
         assert!(msg.contains("--allow-secret-shape"));
+    }
+
+    #[test]
+    fn redact_handles_multibyte_utf8_at_160_bytes_and_multiple_secrets_on_one_line() {
+        // Place a 4-byte emoji right across byte offset 160 so byte slicing
+        // would panic without floor_char_boundary.
+        let line = format!(
+            "{}🚀 AKIAIOSFODNN7EXAMPLE and AKIA1234567890ABCDEF",
+            "a".repeat(158)
+        );
+        let hits = scan_bundle(&[bf("u.hot", &line)], &[], &SecretScanOpts::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].snippet.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!hits[0].snippet.contains("AKIA1234567890ABCDEF"));
+
+        let two = "first AKIAIOSFODNN7EXAMPLE second AKIA1234567890ABCDEF";
+        let hits2 = scan_bundle(&[bf("two.hot", two)], &[], &SecretScanOpts::default()).unwrap();
+        assert_eq!(hits2.len(), 1);
+        assert!(!hits2[0].snippet.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!hits2[0].snippet.contains("AKIA1234567890ABCDEF"));
     }
 }
