@@ -162,6 +162,14 @@ pub struct CreateOrgApiKey {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// An org key ID and the stored hash of a secret generated before the key
+/// exists, as `ApiKey::generate_api_key` returns them.
+#[derive(Debug, Clone)]
+pub struct PreparedOrgKey {
+    pub org_api_key_id: Uuid,
+    pub key_data: serde_json::Value,
+}
+
 /// A new environment key minted by an org key.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MintEnvApiKey {
@@ -417,12 +425,21 @@ impl OrgApiKey {
         created_by_user_id: Uuid,
         request: &CreateOrgApiKey,
         expires_at: Option<DateTime<Utc>>,
+        prepared: Option<PreparedOrgKey>,
     ) -> Result<(Self, String), OrgApiKeyError> {
-        let id = Uuid::now_v7();
-        let (token, hash) =
-            ApiKey::generate_api_key(&id).map_err(|_| OrgApiKeyError::Unauthorized)?;
-        let key_data: serde_json::Value =
-            serde_json::from_str(&hash).map_err(|_| OrgApiKeyError::Unauthorized)?;
+        // A prepared key's secret was already shown to its creator, so no token
+        // comes back for it.
+        let (id, token, key_data) = match prepared {
+            Some(prepared) => (prepared.org_api_key_id, String::new(), prepared.key_data),
+            None => {
+                let id = Uuid::now_v7();
+                let (token, hash) =
+                    ApiKey::generate_api_key(&id).map_err(|_| OrgApiKeyError::Unauthorized)?;
+                let key_data: serde_json::Value =
+                    serde_json::from_str(&hash).map_err(|_| OrgApiKeyError::Unauthorized)?;
+                (id, token, key_data)
+            }
+        };
         let scoped = db.with_scope(DatabaseScope::Organization { org_id });
         let description = request.description.trim();
         match &scoped {
@@ -470,7 +487,39 @@ impl OrgApiKey {
         validate_description(&request.description)?;
         Permissions::from_json(&request.permissions)?.validate_org_key()?;
         let expires_at = validate_expiry(request.expires_at, None)?;
-        Self::insert(db, root_id, None, user_id, request, expires_at).await
+        Self::insert(db, root_id, None, user_id, request, expires_at, None).await
+    }
+
+    /// Create an org key whose secret the App already showed its creator: the
+    /// new-key page generates the secret and the form commits its hash. The
+    /// key ID is the primary key, so a form submitted twice creates one key.
+    pub async fn create_prepared_for_user(
+        db: &DatabasePool,
+        root_id: Uuid,
+        user_id: Uuid,
+        request: &CreateOrgApiKey,
+        prepared: PreparedOrgKey,
+    ) -> Result<Self, OrgApiKeyError> {
+        if !require_root_admin(db, root_id, user_id)
+            .await?
+            .is_admitting()
+        {
+            return Err(OrgApiKeyError::Unauthorized);
+        }
+        validate_description(&request.description)?;
+        Permissions::from_json(&request.permissions)?.validate_org_key()?;
+        let expires_at = validate_expiry(request.expires_at, None)?;
+        let (key, _) = Self::insert(
+            db,
+            root_id,
+            None,
+            user_id,
+            request,
+            expires_at,
+            Some(prepared),
+        )
+        .await?;
+        Ok(key)
     }
 
     /// Mint an org key in this key's org. Its grants must fit inside this
@@ -505,6 +554,7 @@ impl OrgApiKey {
             self.created_by_user_id,
             request,
             expires_at,
+            None,
         )
         .await
     }
@@ -988,6 +1038,72 @@ mod tests {
             permissions,
             expires_at: None,
         }
+    }
+
+    /// The App shows an org key's secret before the key exists, then commits
+    /// the hash. The secret it showed must be the one that authenticates.
+    #[tokio::test]
+    async fn prepared_org_key_authenticates_with_the_secret_already_shown() {
+        let (db, data) = fixture().await;
+        let id = Uuid::now_v7();
+        let (shown, hash) = ApiKey::generate_api_key(&id).unwrap();
+        let prepared = || PreparedOrgKey {
+            org_api_key_id: id,
+            key_data: serde_json::from_str(&hash).unwrap(),
+        };
+        let grants = request(json!({"org:*": ["create", "read"]}));
+        let key = OrgApiKey::create_prepared_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &grants,
+            prepared(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(key.org_api_key_id, id);
+        assert_eq!(
+            OrgApiKey::verify_token(&db, &shown)
+                .await
+                .unwrap()
+                .org_api_key_id,
+            id
+        );
+        // The same form submitted twice makes one key: the ID is the primary key.
+        assert!(
+            OrgApiKey::create_prepared_for_user(
+                &db,
+                data.org_id,
+                data.user_id,
+                &grants,
+                prepared()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            OrgApiKey::list_for_org(&db, data.org_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // The same rules as a generated key: grants are validated.
+        let unqualified = PreparedOrgKey {
+            org_api_key_id: Uuid::now_v7(),
+            key_data: serde_json::from_str(&hash).unwrap(),
+        };
+        assert!(
+            OrgApiKey::create_prepared_for_user(
+                &db,
+                data.org_id,
+                data.user_id,
+                &request(json!({"run:*": ["read"]})),
+                unqualified,
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]

@@ -1045,7 +1045,11 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
         return true;
     }
     // A held workspace can still find its keys, to revoke them.
-    if read && (path == "/keys" || (path.starts_with("/keys/") && path.ends_with("/edit"))) {
+    if read
+        && (path == "/keys"
+            || path == "/keys/org"
+            || (path.starts_with("/keys/") && path.ends_with("/edit")))
+    {
         return true;
     }
     // Revoking a credential only removes access.
@@ -1060,11 +1064,14 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
     };
     let segments: Vec<_> = tail.split('/').collect();
     if read {
+        // The account status page is where a suspended account is reactivated.
         return segments.len() == 1
-            || matches!(segments.get(1), Some(&"children" | &"billing" | &"usage"));
+            || matches!(
+                segments.get(1),
+                Some(&"children" | &"billing" | &"usage" | &"lifecycle")
+            );
     }
     segments.last() == Some(&"lifecycle")
-        || (segments.get(1) == Some(&"org-api-keys") && segments.last() == Some(&"revoke"))
         || (segments.get(1) == Some(&"billing")
             && matches!(
                 segments.last(),
@@ -1753,6 +1760,31 @@ mod scope_contract_tests {
             &axum::http::Method::POST
         ));
         assert!(!is_recovery_path("/keys/new", &axum::http::Method::GET));
+        // Org keys follow the same rule: find them and revoke them, nothing else.
+        assert!(is_recovery_path("/keys/org", &axum::http::Method::GET));
+        assert!(is_recovery_path(
+            &format!("/keys/org/{}/edit", Uuid::now_v7()),
+            &axum::http::Method::GET
+        ));
+        assert!(is_recovery_path(
+            &format!("/keys/org/{}/revoke", Uuid::now_v7()),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path(
+            &format!("/keys/org/{}/rotate", Uuid::now_v7()),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path("/keys/org/new", &axum::http::Method::GET));
+        // The account status form is its own page, and a suspended account
+        // must still reach it to reactivate.
+        assert!(is_recovery_path(
+            &format!("/@{}/lifecycle", child.slug),
+            &axum::http::Method::GET
+        ));
+        assert!(is_recovery_path(
+            &format!("/@{}/children/{}/lifecycle", child.slug, Uuid::now_v7()),
+            &axum::http::Method::GET
+        ));
         assert!(is_recovery_path("/", &axum::http::Method::GET));
     }
 

@@ -266,7 +266,14 @@ Source locations shown on workflow, agent, schedule, event handler, and MCP serv
 
 Administrators can give a key an expiry when they create it, and rotate, disable, or revoke it later. Rotating issues a new secret and can keep the previous one working for up to 7 days. Disabling can be undone. Revoking is permanent.
 
-Administrators of a parent organization also manage **org API keys** on this page. An org API key lets your own systems create and manage sub-organizations, their environments, and their API keys through [`/v1/orgs`](/docs/api/management). Give it a description, its permissions as `org:` URNs, and an optional expiry. The key is shown once. Revoking it also stops every key it created.
+Administrators of a parent organization see two tabs on this page:
+
+- **Environment keys** call the API for the selected environment. Your apps, the CLI, and the SDKs use them.
+- **Org keys** manage the organization's sub-organizations. Your own systems use one to create sub-organizations, their environments, and their environment keys through [`/v1/orgs`](/docs/api/management). An org key can't call an environment's API.
+
+To create an org key, give it a description, an optional expiry, and its permissions. The key is shown once, before you create it. Open a key to rotate or revoke it. Revoking it also stops every key it created. An org key's permissions are set when it is created.
+
+Both kinds of key use the same permission editor. Build the rules in the form, or switch to **JSON** to edit the same permissions as the JSON the API takes. Switching converts between the two.
 
 ## Service Keys
 
@@ -314,20 +321,24 @@ account has. A key for one sub-organization can't reach the parent or another
 sub-organization.
 
 Administrators of the parent organization manage sub-organizations from its
-**Sub-orgs** tab:
+**Sub-orgs** tab. The tab lists them a page at a time, with each one's status,
+runs, failures, and file storage. Find one by name, handle, or customer
+reference, or filter by status.
 
 - **Create a sub-organization.** Enter a name, a handle, and an optional
   customer reference. Handles are unique across Hot.
-- **Grant access.** Administrators of the parent organization can open every
+- **Open a sub-organization** to see its details, activity, and environments,
+  and to open its workspace.
+- **Manage access.** Administrators of the parent organization can open every
   sub-organization. Give other account members access to a sub-organization
   as a Member or an Administrator, or remove their access.
 - **Change status.** A sub-organization is active, suspended, or archived.
   Suspending a sub-organization holds its new work. Restore an archived
-  sub-organization to suspended before you activate it. Suspending the account
-  itself holds new work in every sub-organization.
+  sub-organization to suspended before you activate it.
 
-The tab also shows an account overview: runs, failures, file bytes, and
-environments for the parent organization and each sub-organization.
+The tab also shows the account's own status and activity. **Change account
+status** suspends or archives the account itself, which holds new work in
+every sub-organization.
 
 ### Usage and Billing
 

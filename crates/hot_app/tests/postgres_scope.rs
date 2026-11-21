@@ -129,7 +129,7 @@ async fn lifecycle_and_browser_scope(postgres: &PrivilegedDb) -> TestResult {
         ];
         for _ in 0..2 {
             client
-                .post_form(&children_path, &form)
+                .post_form(&format!("{children_path}/new"), &form)
                 .await
                 .assert_status(StatusCode::SEE_OTHER);
         }
@@ -328,7 +328,8 @@ async fn lifecycle_and_browser_scope(postgres: &PrivilegedDb) -> TestResult {
             .body
             .contains(&format!("data-overview-org=\"{}\"", b.org))
     );
-    // Each child's one seeded run is still running and started this month.
+    // Each child's one seeded run is still running and started this month:
+    // status, then running, failed in 24h and runs this month.
     for workspace in [&a, &b] {
         let marker = format!("data-overview-org=\"{}\"", workspace.org);
         let row = overview
@@ -337,11 +338,59 @@ async fn lifecycle_and_browser_scope(postgres: &PrivilegedDb) -> TestResult {
             .nth(1)
             .and_then(|row| row.split("</tr>").next())
             .unwrap_or_default();
-        assert!(
-            row.contains(r#"<td class="p-2"><span class="badge badge-success">active</span></td><td class="p-2">1</td><td class="p-2">0</td><td class="p-2">1</td>"#),
-            "{row}"
-        );
+        let cells: Vec<String> = row
+            .split("<td")
+            .skip(1)
+            .map(|cell| {
+                let mut text = String::new();
+                let mut in_tag = true; // the rest of the opening tag
+                for c in cell.split("</td>").next().unwrap_or_default().chars() {
+                    match c {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        c if !in_tag => text.push(c),
+                        _ => {}
+                    }
+                }
+                text.trim().to_string()
+            })
+            .collect();
+        assert_eq!(cells[1..5], ["active", "1", "0", "1"], "{row}");
     }
+    // The list finds one sub-organization by handle, and each has pages of
+    // its own for details, status and access.
+    let found = client
+        .get(&format!("{children_path}?search=alpha-{}", &suffix[..16]))
+        .await;
+    found.assert_status(StatusCode::OK);
+    assert!(
+        found
+            .body
+            .contains(&format!("data-overview-org=\"{}\"", a.org))
+    );
+    assert!(
+        !found
+            .body
+            .contains(&format!("data-overview-org=\"{}\"", b.org))
+    );
+    let detail = client.get(&format!("{children_path}/{}", a.org)).await;
+    detail.assert_status(StatusCode::OK);
+    assert!(detail.body.contains(&format!("env_id={}", a.env)));
+    assert!(!detail.body.contains(&format!("env_id={}", b.env)));
+    for form in ["lifecycle", "access"] {
+        client
+            .get(&format!("{children_path}/{}/{form}", a.org))
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    client
+        .get(&format!("/@{root_slug}/lifecycle"))
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .get(&format!("{children_path}/{root}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
 
     let scope_a = format!("org_id={}&env_id={}", a.org, a.env);
     let scope_b = format!("org_id={}&env_id={}", b.org, b.env);
@@ -584,6 +633,16 @@ async fn lifecycle_and_browser_scope(postgres: &PrivilegedDb) -> TestResult {
         )
         .await
         .assert_status(StatusCode::SEE_OTHER);
+    // The access page lists the grant, read through the restricted login.
+    let granted = client.get(&grant_path).await;
+    granted.assert_status(StatusCode::OK);
+    let member_email = format!("member-{suffix}@example.test");
+    assert_eq!(
+        granted.body.matches(&member_email).count(),
+        2,
+        "once to choose and once as granted: {}",
+        granted.body
+    );
     client.login_as(&member);
     client.get(&page_a).await.assert_status(StatusCode::OK);
     client

@@ -1,0 +1,38 @@
+{# The API Keys page header: what each kind of key is for, and the tabs between
+   them. Org keys exist only for administrators of a parent organization, so
+   everyone else sees environment keys with no tabs.
+
+   The including template provides `keys_tab` ("env" or "org") and
+   `org_keys_root` (the parent organization, when the user may manage its keys). #}
+<div class="mb-4 sm:mb-6">
+    <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">API Keys</h1>
+    {% match org_keys_root %}{% when Some with (root) %}
+    <div class="mt-4 border-b border-gray-200 dark:border-gray-700">
+        <nav class="-mb-px flex gap-4 overflow-x-auto sm:gap-8" aria-label="Kinds of API key">
+            <a href="/keys" {% if keys_tab == "env" %}aria-current="page"{% endif %}
+               class="{% if keys_tab == "env" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600{% endif %} whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                Environment keys
+            </a>
+            <a href="/keys/org" {% if keys_tab == "org" %}aria-current="page"{% endif %}
+               class="{% if keys_tab == "org" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600{% endif %} whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
+                Org keys
+            </a>
+        </nav>
+    </div>
+    {% if keys_tab == "org" %}
+    <p class="mt-4 max-w-4xl text-sm text-gray-600 dark:text-gray-300">
+        <span class="font-medium text-gray-900 dark:text-white">Org keys manage {{ root.name }}'s sub-organizations.</span>
+        Your own systems use one to create sub-organizations, their environments and their environment keys. An org key can't call an environment's API.
+    </p>
+    {% else %}
+    <p class="mt-4 max-w-4xl text-sm text-gray-600 dark:text-gray-300">
+        <span class="font-medium text-gray-900 dark:text-white">Environment keys call the API for one environment{% match page_context.current_env %}{% when Some with (env) %}, here <span class="font-mono">{{ env.name }}</span>{% when None %}{% endmatch %}.</span>
+        Your apps, the CLI and the SDKs use one to run functions, send events, read streams and deploy.
+    </p>
+    {% endif %}
+    {% when None %}
+    <p class="mt-2 max-w-4xl text-sm text-gray-600 dark:text-gray-300">
+        An API key calls the API for one environment{% match page_context.current_env %}{% when Some with (env) %}, here <span class="font-mono">{{ env.name }}</span>{% when None %}{% endmatch %}. Your apps, the CLI and the SDKs use one to run functions, send events, read streams and deploy.
+    </p>
+    {% endmatch %}
+</div>

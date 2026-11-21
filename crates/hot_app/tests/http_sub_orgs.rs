@@ -31,15 +31,33 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     client.login_as(&td.user_id);
     let path = format!("/@{}/children", root.slug);
     client.get(&path).await.assert_status(StatusCode::OK);
+    let new = format!("{path}/new");
+    client.get(&new).await.assert_status(StatusCode::OK);
     for slug in ["customer-alpha", "customer-beta"] {
-        client
+        let created = client
             .post_form(
-                &path,
+                &new,
                 &[("name", slug), ("slug", slug), ("idempotency_key", slug)],
             )
-            .await
-            .assert_status(StatusCode::SEE_OTHER);
+            .await;
+        // A new sub-organization opens on its own page.
+        created.assert_status(StatusCode::SEE_OTHER);
+        assert!(created.location().unwrap().starts_with(&format!("{path}/")));
     }
+    // A taken handle comes back to the form with what was entered.
+    let taken = client
+        .post_form(
+            &new,
+            &[
+                ("name", "Again"),
+                ("slug", "customer-alpha"),
+                ("idempotency_key", "again"),
+            ],
+        )
+        .await;
+    taken.assert_status(StatusCode::BAD_REQUEST);
+    assert!(taken.body.contains("already in use"), "{}", taken.body);
+    assert!(taken.body.contains("value=\"Again\""), "{}", taken.body);
     let children = Org::list_children(client.db(), &td.org_id).await.unwrap();
     assert_eq!(children.len(), 2);
     let a = children
@@ -61,7 +79,7 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     assert_ne!(env_a, env_b);
     let overview = client.get(&path).await;
     overview.assert_status(StatusCode::OK);
-    assert!(overview.body.contains("Account overview"));
+    assert!(overview.body.contains("Change account status"));
     for child in [a, b] {
         assert!(
             overview
@@ -69,8 +87,26 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
                 .contains(&format!("data-overview-org=\"{}\"", child.org_id))
         );
     }
-    assert!(overview.body.contains(&format!("env_id={env_a}")));
-    assert!(overview.body.contains(&format!("env_id={env_b}")));
+    // Each sub-organization's page links its own environments, and no other's.
+    for (child, own, other) in [(a, env_a, env_b), (b, env_b, env_a)] {
+        let page = client.get(&format!("{path}/{}", child.org_id)).await;
+        page.assert_status(StatusCode::OK);
+        assert!(page.body.contains(&format!("env_id={own}")));
+        assert!(!page.body.contains(&format!("env_id={other}")));
+        for form in ["lifecycle", "access"] {
+            client
+                .get(&format!("{path}/{}/{form}", child.org_id))
+                .await
+                .assert_status(StatusCode::OK);
+        }
+    }
+    // An organization that isn't this account's sub-organization has no page here.
+    for tail in ["", "/lifecycle", "/access"] {
+        client
+            .get(&format!("{path}/{}{tail}", td.org_id))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
 
     // Page A remains authoritative after the navigation cookie switches to B.
     let page_a = format!("/stores?org_id={}&env_id={env_a}", a.org_id);
@@ -105,6 +141,22 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
         .assert_status(StatusCode::BAD_REQUEST);
 
     let lifecycle = format!("/@{}/children/{}/lifecycle", root.slug, a.org_id);
+    // An archived sub-organization can't go straight back to active: the
+    // status page says so and keeps the choice.
+    client
+        .post_form(&lifecycle, &[("state", "archived")])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    let refused = client.post_form(&lifecycle, &[("state", "active")]).await;
+    refused.assert_status(StatusCode::BAD_REQUEST);
+    assert!(refused.body.contains("error-box"), "{}", refused.body);
+    assert!(
+        refused
+            .body
+            .contains("id=\"state-active\" name=\"state\" type=\"radio\" value=\"active\" checked"),
+        "{}",
+        refused.body
+    );
     client
         .post_form(&lifecycle, &[("state", "suspended")])
         .await
@@ -148,14 +200,38 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     )
     .await
     .unwrap();
+    let access = format!("/@{}/children/{}/access", root.slug, a.org_id);
     client
         .post_form(
-            &format!("/@{}/children/{}/access", root.slug, a.org_id),
+            &access,
+            &[("user_id", &member.to_string()), ("role_id", "9")],
+        )
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    client
+        .post_form(
+            &access,
             &[("user_id", &member.to_string()), ("role_id", "1")],
         )
         .await
-        .assert_status(StatusCode::SEE_OTHER);
+        .assert_redirect_to(&access);
+    // The access page lists who was given access, and the other one doesn't.
+    let granted = client.get(&access).await;
+    let granted_badge = "<span class=\"badge badge-neutral\">Member</span>";
+    assert!(granted.body.contains(granted_badge), "{}", granted.body);
+    let other = client
+        .get(&format!("/@{}/children/{}/access", root.slug, b.org_id))
+        .await;
+    assert!(!other.body.contains(granted_badge), "{}", other.body);
     client.login_as(&member);
+    // A member who can't open the Sub-orgs tab isn't shown it.
+    let org_page = client.get(&format!("/@{}/users", root.slug)).await;
+    org_page.assert_status(StatusCode::OK);
+    assert!(
+        !org_page.body.contains(&format!("href=\"{path}\"")),
+        "{}",
+        org_page.body
+    );
     client.get(&page_a).await.assert_status(StatusCode::OK);
     client
         .get(&format!("/stores?org_id={}&env_id={env_b}", b.org_id))
@@ -177,6 +253,15 @@ async fn child_workspaces_have_explicit_scope_and_root_admin_recovery() {
     recovery.assert_status(StatusCode::OK);
     assert!(recovery.body.contains("Manage account status"));
     assert!(recovery.body.contains("data-workspace-held=\"true\""));
+    // The notice leads to the form that reactivates the account.
+    assert!(
+        recovery
+            .body
+            .contains(&format!("href=\"{root_lifecycle}\""))
+    );
+    let status_page = client.get(&root_lifecycle).await;
+    status_page.assert_status(StatusCode::OK);
+    assert!(status_page.body.contains("value=\"suspended\" checked"));
     client
         .post_form(&root_lifecycle, &[("state", "active")])
         .await
@@ -616,24 +701,147 @@ async fn the_account_overview_counts_each_environments_runs() {
 
     let page = client.get(&format!("/@{}/children", root.slug)).await;
     page.assert_status(StatusCode::OK);
-    let row = |org_id: Uuid| {
+    // The text of each `tag` element in an organization's part of the page.
+    let texts = |org_id: Uuid, end: &str, tag: &str| -> Vec<String> {
         let marker = format!("data-overview-org=\"{org_id}\"");
-        let rest = page.body.split(&marker).nth(1).expect("overview row");
-        rest.split("</tr>").next().unwrap().to_owned()
+        let rest = page.body.split(&marker).nth(1).expect("overview");
+        rest.split(end)
+            .next()
+            .unwrap()
+            .split(&format!("<{tag}"))
+            .skip(1)
+            .map(|cell| {
+                let inner = cell.split(&format!("</{tag}>")).next().unwrap();
+                let mut text = String::new();
+                let mut in_tag = true; // the rest of the opening tag
+                for c in inner.chars() {
+                    match c {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        c if !in_tag => text.push(c),
+                        _ => {}
+                    }
+                }
+                text.trim().to_string()
+            })
+            .collect()
     };
-    // Status badge, then running, failed in 24h and runs this month.
-    let cells = |values: [&str; 3]| {
-        let counts: String = values
-            .iter()
-            .map(|value| format!("<td class=\"p-2\">{value}</td>"))
-            .collect();
-        format!("<td class=\"p-2\"><span class=\"badge badge-success\">active</span></td>{counts}")
-    };
-    let root_row = row(td.org_id);
-    assert!(root_row.contains(&cells(["1", "1", "2"])), "{root_row}");
-    let child_row = row(child.org.org_id);
-    assert!(child_row.contains(&cells(["0", "0", "0"])), "{child_row}");
-    assert!(child_row.contains(&long_ago.format("%Y-%m-%d %H:%M UTC").to_string()));
+    // The parent organization: running, failed in 24h and runs this month.
+    let root_counts = texts(td.org_id, "</section>", "dd");
+    assert_eq!(root_counts[..3], ["1", "1", "2"], "{root_counts:?}");
+    // A sub-organization's row: name, status, then the same three counts.
+    let child_row = texts(child.org.org_id, "</tr>", "td");
+    assert_eq!(child_row[1..5], ["active", "0", "0", "0"], "{child_row:?}");
+    let last_run = long_ago.format("%Y-%m-%d %H:%M UTC").to_string();
+    assert!(child_row.contains(&last_run), "{child_row:?}");
+    // Its own page reports the same activity.
+    let detail = client
+        .get(&format!("/@{}/children/{}", root.slug, child.org.org_id))
+        .await;
+    detail.assert_status(StatusCode::OK);
+    assert!(detail.body.contains(&last_run), "{}", detail.body);
+}
+
+/// An account can hold thousands of sub-organizations: the list is a page at a
+/// time, and found by name, handle or customer reference.
+#[tokio::test]
+async fn the_sub_org_list_pages_searches_and_filters() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    for n in 1..=30 {
+        Org::create_child(
+            client.db(),
+            &td.org_id,
+            &td.user_id,
+            &CreateChild {
+                name: format!("Customer {n:02}"),
+                slug: format!("paged-{n:02}"),
+                external_id: Some(format!("ref-{n:02}")),
+                idempotency_key: format!("paged-{n:02}"),
+                hosted: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let suspended = Org::get_org_by_slug(client.db(), "paged-07").await.unwrap();
+    Org::set_lifecycle(
+        client.db(),
+        &suspended.org_id,
+        &td.user_id,
+        hot::db::org::OrgLifecycle::Suspended,
+    )
+    .await
+    .unwrap();
+    client.login_as(&td.user_id);
+    let path = format!("/@{}/children", root.slug);
+    let rows = |body: &str| body.matches("<tr class=\"hover:").count();
+
+    let page = client.get(&path).await;
+    page.assert_status(StatusCode::OK);
+    assert_eq!(rows(&page.body), 25);
+    assert!(page.body.contains("30 sub-organizations"), "{}", page.body);
+    assert!(page.body.contains(">Customer 01<"));
+    assert!(!page.body.contains(">Customer 26<"));
+    let page = client.get(&format!("{path}?p=2")).await;
+    assert_eq!(rows(&page.body), 5);
+    assert!(page.body.contains(">Customer 26<"));
+
+    // By name, by handle and by customer reference.
+    for (search, found) in [("customer+1", 10), ("PAGED-2", 10), ("ref-30", 1)] {
+        let page = client.get(&format!("{path}?search={search}")).await;
+        page.assert_status(StatusCode::OK);
+        assert_eq!(rows(&page.body), found, "{search}");
+    }
+    // The page links keep the search.
+    for n in 31..=60 {
+        Org::create_child(
+            client.db(),
+            &td.org_id,
+            &td.user_id,
+            &CreateChild {
+                name: format!("Customer {n:02}"),
+                slug: format!("paged-{n:02}"),
+                external_id: None,
+                idempotency_key: format!("paged-{n:02}"),
+                hosted: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let page = client.get(&format!("{path}?search=customer")).await;
+    let next = page
+        .body
+        .split("href=\"")
+        .map(|rest| rest.split('"').next().unwrap())
+        .find(|href| href.ends_with("p=2"))
+        .expect("a link to the second page");
+    assert!(next.starts_with(&path), "{next}");
+    assert!(next.contains("search=customer"), "{next}");
+
+    let page = client.get(&format!("{path}?state=suspended")).await;
+    assert_eq!(rows(&page.body), 1);
+    assert!(page.body.contains(">Customer 07<"));
+    let page = client
+        .get(&format!("{path}?state=suspended&search=customer+08"))
+        .await;
+    assert_eq!(rows(&page.body), 0);
+    assert!(page.body.contains("No matches"), "{}", page.body);
+
+    // A page past the end doesn't claim the account is empty.
+    let page = client.get(&format!("{path}?p=99")).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains("Nothing on this page"), "{}", page.body);
+    assert!(!page.body.contains("No sub-organizations yet"));
 }
 
 #[tokio::test]
@@ -787,13 +995,28 @@ async fn org_keys_show_their_issuer_chain_status() {
         .unwrap();
     client.login_as(&td.user_id);
 
-    let page = client.get(&format!("/keys?org_id={}", root.org_id)).await;
+    // Keys that will never work again stay out of the way until asked for.
+    let list = format!("/keys/org?org_id={}", root.org_id);
+    let page = client.get(&list).await;
+    page.assert_status(StatusCode::OK);
+    assert!(!page.body.contains(">Revoked<"), "{}", page.body);
+    assert!(
+        page.body.contains("Show 2 revoked or expired"),
+        "{}",
+        page.body
+    );
+    let page = client.get(&format!("{list}&show=all")).await;
     page.assert_status(StatusCode::OK);
     assert!(page.body.contains(">Revoked<"), "{}", page.body);
     // The minted key's own row is active, but it no longer authenticates.
     assert!(page.body.contains(">Issuer inactive<"), "{}", page.body);
+    let page = client
+        .get(&format!("/keys/org/{minted}/edit?org_id={}", root.org_id))
+        .await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(">Issuer inactive<"), "{}", page.body);
     assert!(
-        !page.body.contains(&format!("org-api-keys/{minted}/revoke")),
+        !page.body.contains(&format!("/keys/org/{minted}/revoke")),
         "a dead key offers no revoke: {}",
         page.body
     );
@@ -828,12 +1051,14 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
     .unwrap();
     let id = key.org_api_key_id;
     client.login_as(&td.user_id);
-    let page_path = format!("/keys?org_id={}", root.org_id);
-    let rotate = format!("/@{}/org-api-keys/{id}/rotate", root.slug);
+    let page_path = format!("/keys/org/{id}/edit?org_id={}", root.org_id);
+    // A form that changes an environment-scoped page names its workspace.
+    let rotate_path = format!("/keys/org/{id}/rotate");
+    let rotate = format!("{rotate_path}?org_id={}&env_id={}", root.org_id, td.env_id);
 
     let page = client.get(&page_path).await;
-    assert!(page.body.contains(&rotate), "{}", page.body);
-    assert!(!page.body.contains("the previous secret works until"));
+    assert!(page.body.contains(&rotate_path), "{}", page.body);
+    assert!(!page.body.contains("Previous secret works until"));
 
     let page = client
         .post_form(&rotate, &[("overlap_seconds", "3600")])
@@ -858,13 +1083,13 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
     );
     assert!(OrgApiKey::verify_token(client.db(), &first).await.is_ok());
     assert!(
-        page.body.contains("the previous secret works until"),
+        page.body.contains("The previous secret works until"),
         "{}",
         page.body
     );
     let page = client.get(&page_path).await;
     assert!(!page.body.contains(&token), "shown only once");
-    assert!(page.body.contains("the previous secret works until"));
+    assert!(page.body.contains("Previous secret works until"));
 
     // Another rotation would stop the secret the page just promised.
     let page = client
@@ -879,7 +1104,14 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
     page.assert_status(StatusCode::OK);
     assert!(OrgApiKey::verify_token(client.db(), &first).await.is_err());
     assert!(OrgApiKey::verify_token(client.db(), &token).await.is_err());
-    assert!(!page.body.contains("the previous secret works until"));
+    assert!(
+        page.body
+            .contains("The previous secret has stopped working"),
+        "{}",
+        page.body
+    );
+    let page = client.get(&page_path).await;
+    assert!(!page.body.contains("Previous secret works until"));
 
     client
         .post_form(&rotate, &[("overlap_seconds", "999999")])
@@ -889,7 +1121,10 @@ async fn an_administrator_rotates_an_org_key_and_sees_the_overlap() {
         .await
         .unwrap();
     let page = client.get(&page_path).await;
-    assert!(!page.body.contains(&rotate), "a dead key offers no rotate");
+    assert!(
+        !page.body.contains(&rotate_path),
+        "a dead key offers no rotate"
+    );
     client
         .post_form(&rotate, &[("overlap_seconds", "0")])
         .await

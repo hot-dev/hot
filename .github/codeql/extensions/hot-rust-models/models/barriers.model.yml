@@ -1,0 +1,12 @@
+extensions:
+  # rust/unsafe-deserialization ("Deserialization of user-controlled data")
+  # reports any user input that reaches a serde deserializer, and asks for the
+  # input's size to be validated first. It can't see a size check in the code,
+  # so each function below is named as one: it returns its input only when the
+  # input is within a fixed size limit.
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      # Key forms: permissions JSON, at most MAX_PERMISSIONS_JSON_BYTES.
+      - ["hot_app::handlers::keys::bounded_permissions", "ReturnValue", "unsafe-deserialization", "manual"]

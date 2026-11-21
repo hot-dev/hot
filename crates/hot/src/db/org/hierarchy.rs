@@ -265,6 +265,80 @@ impl Org {
         }
     }
 
+    /// One page of a root's sub-organizations, for an account with many. `search`
+    /// matches name, handle or customer reference; `state` is a lifecycle state.
+    /// Returns the page, the matching total and the unfiltered total.
+    pub async fn list_children_page(
+        db: &DatabasePool,
+        root_id: &Uuid,
+        search: &str,
+        state: Option<OrgLifecycle>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Self>, i64, i64), OrgError> {
+        let db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
+        // Escape LIKE wildcards so a search for "50%" or "a_b" matches literally.
+        let search = search.trim().to_lowercase();
+        let pattern = (!search.is_empty()).then(|| {
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        });
+        let state = state.map(|state| state.as_str());
+        macro_rules! page {
+            ($pool:expr, $kind:ty, $columns:literal) => {{
+                let filters = |query: &mut sqlx::QueryBuilder<$kind>| {
+                    query
+                        .push(" FROM org WHERE parent_org_id = ")
+                        .push_bind(*root_id);
+                    if let Some(pattern) = &pattern {
+                        query
+                            .push(" AND (lower(name) LIKE ")
+                            .push_bind(pattern.clone())
+                            .push(" ESCAPE '\\' OR lower(slug) LIKE ")
+                            .push_bind(pattern.clone())
+                            .push(" ESCAPE '\\' OR lower(COALESCE(external_id, '')) LIKE ")
+                            .push_bind(pattern.clone())
+                            .push(" ESCAPE '\\')");
+                    }
+                    if let Some(state) = state {
+                        query.push(" AND lifecycle_state = ").push_bind(state);
+                    }
+                };
+                let mut rows = sqlx::QueryBuilder::<$kind>::new(concat!("SELECT ", $columns));
+                filters(&mut rows);
+                rows.push(" ORDER BY lower(name), org_id LIMIT ")
+                    .push_bind(limit)
+                    .push(" OFFSET ")
+                    .push_bind(offset);
+                let orgs = rows.build_query_as::<Self>().fetch_all($pool).await?;
+                let mut matching = sqlx::QueryBuilder::<$kind>::new("SELECT COUNT(*)");
+                filters(&mut matching);
+                let matching: i64 = matching.build_query_scalar().fetch_one($pool).await?;
+                let mut total = sqlx::QueryBuilder::<$kind>::new(
+                    "SELECT COUNT(*) FROM org WHERE parent_org_id = ",
+                );
+                total.push_bind(*root_id);
+                let total: i64 = total.build_query_scalar().fetch_one($pool).await?;
+                Ok((orgs, matching, total))
+            }};
+        }
+        match &db {
+            DatabasePool::Postgres(pool) => page!(
+                pool,
+                sqlx::Postgres,
+                "org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id"
+            ),
+            DatabasePool::Sqlite(pool) => page!(
+                pool,
+                sqlx::Sqlite,
+                "org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id"
+            ),
+        }
+    }
+
     /// Atomic fixed one-second account request budget, shared by all API
     /// replicas and child organizations. Unlimited budgets allocate no counter.
     pub async fn try_acquire_account_request(
@@ -1053,6 +1127,90 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn children_page_searches_filters_and_pages() {
+        let (db, root, admin, _) = fixture().await;
+        // Handles are plain, so the wildcard characters go in a name and a
+        // customer reference.
+        for (slug, name, reference) in [
+            ("alpha", "Alpha", "cust-1"),
+            ("beta", "Beta", "cust-2"),
+            ("delta", "Delta", "ref_x"),
+            ("gamma", "Gamma 50%", "cust-4"),
+        ] {
+            let mut child = request(slug);
+            child.name = name.into();
+            child.external_id = Some(reference.into());
+            Org::create_child(&db, &root, &admin, &child).await.unwrap();
+        }
+        let names = |orgs: Vec<Org>| orgs.into_iter().map(|org| org.slug).collect::<Vec<_>>();
+
+        // Ordered by name, a page at a time, with both totals.
+        let (page, matching, total) = Org::list_children_page(&db, &root, "", None, 3, 0)
+            .await
+            .unwrap();
+        assert_eq!(names(page), ["alpha", "beta", "delta"]);
+        assert_eq!((matching, total), (4, 4));
+        let (page, ..) = Org::list_children_page(&db, &root, "", None, 3, 3)
+            .await
+            .unwrap();
+        assert_eq!(names(page), ["gamma"]);
+
+        // Search matches name, handle or customer reference, ignoring case.
+        let (page, matching, total) = Org::list_children_page(&db, &root, " ALPHA ", None, 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(names(page), ["alpha"]);
+        assert_eq!((matching, total), (1, 4));
+
+        // LIKE wildcards in a search are literal text.
+        let (page, ..) = Org::list_children_page(&db, &root, "50%", None, 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(names(page), ["gamma"]);
+        let (page, ..) = Org::list_children_page(&db, &root, "f_x", None, 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(names(page), ["delta"]);
+        let (page, matching, _) = Org::list_children_page(&db, &root, "%", None, 25, 0)
+            .await
+            .unwrap();
+        assert_eq!((names(page), matching), (vec!["gamma".to_string()], 1));
+        // "_" would match any character of "cust-1" if it were a wildcard.
+        let (page, ..) = Org::list_children_page(&db, &root, "cust_1", None, 25, 0)
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+
+        // Status filter, alone and with a search.
+        let beta = Org::get_org_by_slug(&db, "beta").await.unwrap();
+        Org::set_lifecycle(&db, &beta.org_id, &admin, OrgLifecycle::Suspended)
+            .await
+            .unwrap();
+        let (page, matching, total) =
+            Org::list_children_page(&db, &root, "", Some(OrgLifecycle::Suspended), 25, 0)
+                .await
+                .unwrap();
+        assert_eq!(names(page), ["beta"]);
+        assert_eq!((matching, total), (1, 4));
+        let (page, ..) =
+            Org::list_children_page(&db, &root, "alpha", Some(OrgLifecycle::Suspended), 25, 0)
+                .await
+                .unwrap();
+        assert!(page.is_empty());
+
+        // Another account's sub-organizations never appear.
+        let other = Uuid::now_v7();
+        Org::insert_org(&db, &other, "Other", "other", "organization", &admin)
+            .await
+            .unwrap();
+        let (page, matching, total) = Org::list_children_page(&db, &other, "", None, 25, 0)
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+        assert_eq!((matching, total), (0, 0));
     }
 
     #[tokio::test]

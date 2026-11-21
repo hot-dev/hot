@@ -2,9 +2,11 @@
 #![allow(clippy::result_large_err)]
 
 use crate::auth::Session;
+use crate::handlers::list_query;
 use crate::templates::{self, PrivatePageContext, filters};
+use ahash::AHashMap;
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
@@ -61,15 +63,6 @@ struct FormState {
     child_external_id: String,
 }
 
-impl FormState {
-    fn error(message: impl Into<String>) -> Self {
-        Self {
-            error: Some(message.into()),
-            ..Self::default()
-        }
-    }
-}
-
 /// A user-facing reason for a rejected org operation. Database details stay in the log.
 fn org_error_message(error: &hot::db::org::OrgError, fallback: &str) -> String {
     use hot::db::org::OrgError;
@@ -107,20 +100,105 @@ struct SubOrgsPage {
     title: &'static str,
     page_context: PrivatePageContext,
     root: Org,
-    children: Vec<Org>,
-    overview: Vec<OrgOverview>,
-    members: Vec<hot::db::org::OrgUserWithRole>,
+    /// The parent organization's own status and activity.
+    account: OrgOverview,
+    /// One page of sub-organizations.
+    rows: Vec<OrgOverview>,
+    total_children: i64,
+    matching_children: i64,
+    search: String,
+    state: &'static str,
+    /// Whether a search or status filter narrows the list.
+    filtered: bool,
+    /// The list URL up to its page number, keeping the search and filter.
+    page_prefix: String,
+    current_page_num: i64,
+    start_page: i64,
+    end_page: i64,
+    has_next_page: bool,
+    has_prev_page: bool,
+}
+
+#[derive(Template)]
+#[template(path = "sub_orgs_new.html")]
+struct SubOrgNewPage {
+    title: &'static str,
+    page_context: PrivatePageContext,
+    root: Org,
     idempotency_key: Uuid,
     form: FormState,
+}
+
+#[derive(Template)]
+#[template(path = "sub_org_detail.html")]
+struct SubOrgDetailPage {
+    title: String,
+    page_context: PrivatePageContext,
+    root: Org,
+    child: Org,
+    overview: OrgOverview,
+    /// What the sub-organization's status means for its work right now.
+    status_note: String,
+    grants: Vec<ExplicitGrant>,
+}
+
+/// One choice on a status page.
+struct LifecycleOption {
+    value: &'static str,
+    label: &'static str,
+    note: &'static str,
+}
+
+/// The status page of the account or of one sub-organization.
+#[derive(Template)]
+#[template(path = "sub_org_lifecycle.html")]
+struct LifecyclePage {
+    title: String,
+    page_context: PrivatePageContext,
+    heading: String,
+    intro: String,
+    /// The organization's name, for the confirmation prompt.
+    subject: String,
+    confirm_note: &'static str,
+    current_state: String,
+    current_badge: &'static str,
+    /// The choice to preselect: the current state, or what a rejected form asked for.
+    selected_state: String,
+    options: [LifecycleOption; 3],
+    rule: &'static str,
+    action: String,
+    back_url: String,
+    error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "sub_org_access.html")]
+struct SubOrgAccessPage {
+    title: String,
+    page_context: PrivatePageContext,
+    root: Org,
+    child: Org,
+    members: Vec<hot::db::org::OrgUserWithRole>,
+    grants: Vec<ExplicitGrant>,
+    /// The member a rejected form chose.
+    selected_user: String,
+    error: Option<String>,
+}
+
+/// An account member given access to a sub-organization directly, rather than
+/// through administering the account.
+struct ExplicitGrant {
+    email: String,
+    role_label: &'static str,
 }
 
 struct OrgOverview {
     org_id: Uuid,
     name: String,
     slug: String,
+    external_id: Option<String>,
     lifecycle: String,
     lifecycle_badge: &'static str,
-    root: bool,
     envs: Vec<OverviewEnv>,
     running: i64,
     failed_24h: i64,
@@ -156,15 +234,18 @@ type OverviewRows = (Vec<RunActivity>, Vec<(Uuid, i64)>);
 
 /// The administrator gate runs before this function. Construct authority from
 /// discovered ownership, never a client-supplied list of org/environment IDs.
+///
+/// Reports on exactly `orgs`, in order: each must be `root` or one of its
+/// sub-organizations. A page passes the few organizations it shows, so the
+/// cost follows the page and not the size of the account.
 async fn account_overview(
     db: &DatabasePool,
     session: &Session,
     root: &Org,
-    children: &[Org],
+    orgs: &[Org],
 ) -> Result<Vec<OrgOverview>, PageError> {
     let metadata = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
-    let mut orgs = vec![root.clone()];
-    orgs.extend_from_slice(children);
+    let orgs = orgs.to_vec();
     let mut envs = HashMap::new();
     let mut env_ids = Vec::new();
     for org in &orgs {
@@ -243,9 +324,9 @@ async fn account_overview(
             let lifecycle_badge = lifecycle_badge(&org.lifecycle_state, held);
             OrgOverview {
                 org_id: org.org_id,
-                root: org.org_id == root.org_id,
                 name: org.name,
                 slug: org.slug,
+                external_id: org.external_id,
                 lifecycle,
                 lifecycle_badge,
                 running: rows.iter().map(|row| row.running).sum(),
@@ -282,76 +363,41 @@ pub(super) fn display_time(session: &Session, time: &DateTime<Utc>) -> String {
     )
 }
 
-pub async fn list(
-    Path(slug): Path<String>,
-    State(db): State<Arc<DatabasePool>>,
-    axum::Extension(session): axum::Extension<Session>,
-) -> Result<Response, Response> {
-    let root = root_for_admin(&db, &session, &slug).await?;
-    render_page(&db, &session, root, FormState::default()).await
+/// How many sub-organizations a page of the list shows.
+const CHILDREN_PER_PAGE: i64 = 25;
+
+fn children_url(root: &Org) -> String {
+    format!("/@{}/children", root.slug)
 }
 
-/// Render the page; a [`FormState`] with an error renders with status 400.
-async fn render_page(
-    db: &DatabasePool,
-    session: &Session,
-    root: Org,
-    form: FormState,
-) -> Result<Response, Response> {
-    render_page_inner(db, session, root, form)
-        .await
-        .map_err(|error| page_error(session, error))
+fn child_url(root: &Org, child_id: &Uuid) -> String {
+    format!("/@{}/children/{child_id}", root.slug)
 }
 
-async fn render_page_inner(
-    db: &DatabasePool,
-    session: &Session,
-    root: Org,
-    form: FormState,
-) -> Result<Response, PageError> {
-    let children = Org::list_children(db, &root.org_id).await.map_err(|_| {
+/// Breadcrumbs under the Sub-organizations list of `root`.
+fn child_breadcrumbs(root: &Org, tail: Vec<templates::BreadcrumbItem>) -> templates::Breadcrumbs {
+    // The organization itself is the breadcrumb bar's switcher.
+    let mut breadcrumbs = vec![templates::BreadcrumbItem::clickable(
+        "Sub-organizations".to_string(),
+        children_url(root),
+    )];
+    breadcrumbs.extend(tail);
+    breadcrumbs
+}
+
+/// A page with status 400 when it explains a rejected form, and no caching.
+fn form_page(html: askama::Result<String>, rejected: bool) -> Result<Response, PageError> {
+    let html = html.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to load sub-organizations",
+            "Unable to render the page",
         )
     })?;
-    let overview = account_overview(db, session, &root, &children).await?;
-    let members = OrgUser::get_users_with_roles_by_org(db, &root.org_id)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to load account members",
-            )
-        })?
-        .into_iter()
-        .filter(|member| member.active)
-        .collect();
-    let breadcrumbs = vec![
-        templates::BreadcrumbItem::clickable(root.name.clone(), format!("/@{}", root.slug)),
-        templates::BreadcrumbItem::current("Sub-organizations".to_string()),
-    ];
-    let status = if form.error.is_some() {
+    let status = if rejected {
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::OK
     };
-    let template = SubOrgsPage {
-        title: "Sub-organizations",
-        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
-        root,
-        children,
-        overview,
-        members,
-        idempotency_key: Uuid::now_v7(),
-        form,
-    };
-    let html = template.render().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to render sub-organizations",
-        )
-    })?;
     Ok((
         status,
         [
@@ -361,6 +407,155 @@ async fn render_page_inner(
         Html(html),
     )
         .into_response())
+}
+
+/// A sub-organization of `root`, or the page that says there is none.
+async fn child_of(
+    db: &DatabasePool,
+    session: &Session,
+    root: &Org,
+    child_id: &Uuid,
+) -> Result<Org, Response> {
+    Org::get_org_uncached(db, child_id)
+        .await
+        .ok()
+        .filter(|child| child.parent_org_id == Some(root.org_id))
+        .ok_or_else(|| {
+            page_error(
+                session,
+                (StatusCode::NOT_FOUND, "Sub-organization not found"),
+            )
+        })
+}
+
+/// The account members given access to `child` directly.
+async fn explicit_grants(db: &DatabasePool, child: &Org) -> Result<Vec<ExplicitGrant>, PageError> {
+    let membership = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
+    Ok(
+        OrgUser::get_users_with_roles_by_org(&membership, &child.org_id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Unable to load access to the sub-organization",
+                )
+            })?
+            .into_iter()
+            .filter(|member| member.active)
+            .map(|member| ExplicitGrant {
+                email: member.email,
+                role_label: if member.org_user_role_id == 2 {
+                    "Administrator"
+                } else {
+                    "Member"
+                },
+            })
+            .collect(),
+    )
+}
+
+/// The Sub-organizations list: one page of an account that may hold thousands.
+pub async fn list(
+    Path(slug): Path<String>,
+    Query(params): Query<AHashMap<String, String>>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    render_list(&db, &session, root, &params)
+        .await
+        .map_err(|error| page_error(&session, error))
+}
+
+async fn render_list(
+    db: &DatabasePool,
+    session: &Session,
+    root: Org,
+    params: &AHashMap<String, String>,
+) -> Result<Response, PageError> {
+    let page = list_query::PageParams::parse(params, CHILDREN_PER_PAGE);
+    let search = params
+        .get("search")
+        .map(|search| search.trim().chars().take(200).collect::<String>())
+        .unwrap_or_default();
+    let (state, lifecycle) = match params.get("state").map(String::as_str) {
+        Some("active") => ("active", Some(OrgLifecycle::Active)),
+        Some("suspended") => ("suspended", Some(OrgLifecycle::Suspended)),
+        Some("archived") => ("archived", Some(OrgLifecycle::Archived)),
+        _ => ("", None),
+    };
+    let (children, matching_children, total_children) = Org::list_children_page(
+        db,
+        &root.org_id,
+        &search,
+        lifecycle,
+        CHILDREN_PER_PAGE,
+        page.offset,
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to load sub-organizations",
+        )
+    })?;
+    // Activity for the account and this page's sub-organizations only.
+    let mut shown = vec![root.clone()];
+    shown.extend(children);
+    let mut rows = account_overview(db, session, &root, &shown).await?;
+    let account = rows.remove(0);
+    let pagination = list_query::PaginationWindow::new(matching_children, &page);
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("search", &search)
+        .append_pair("state", state)
+        .finish();
+    let breadcrumbs = vec![templates::BreadcrumbItem::current(
+        "Sub-organizations".to_string(),
+    )];
+    let template = SubOrgsPage {
+        title: "Sub-organizations",
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        account,
+        rows,
+        total_children,
+        matching_children,
+        filtered: !search.is_empty() || lifecycle.is_some(),
+        page_prefix: format!("{}?{query}&p=", children_url(&root)),
+        search,
+        state,
+        current_page_num: page.current_page_num,
+        start_page: pagination.start_page,
+        end_page: pagination.end_page,
+        has_next_page: pagination.has_next_page,
+        has_prev_page: pagination.has_prev_page,
+        root,
+    };
+    form_page(template.render(), false)
+}
+
+fn render_new(session: &Session, root: Org, form: FormState) -> Result<Response, PageError> {
+    let breadcrumbs = child_breadcrumbs(
+        &root,
+        vec![templates::BreadcrumbItem::current("New".to_string())],
+    );
+    let rejected = form.error.is_some();
+    let template = SubOrgNewPage {
+        title: "New Sub-organization",
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        root,
+        idempotency_key: Uuid::now_v7(),
+        form,
+    };
+    form_page(template.render(), rejected)
+}
+
+pub async fn new(
+    Path(slug): Path<String>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    render_new(&session, root, FormState::default()).map_err(|error| page_error(&session, error))
 }
 
 #[derive(Deserialize)]
@@ -380,16 +575,19 @@ pub async fn create(
 ) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
     let slug = form.slug.trim().to_string();
-    let submitted = |error: String| FormState {
-        error: Some(error),
-        child_name: form.name.clone(),
-        child_slug: form.slug.clone(),
-        child_external_id: form.external_id.clone().unwrap_or_default(),
+    // The form comes back with what was submitted and why it was refused.
+    let rejected = |root: Org, error: String| {
+        let form = FormState {
+            error: Some(error),
+            child_name: form.name.clone(),
+            child_slug: form.slug.clone(),
+            child_external_id: form.external_id.clone().unwrap_or_default(),
+        };
+        render_new(&session, root, form).unwrap_or_else(|error| page_error(&session, error))
     };
     let reserved = crate::slug::extra_reserved_from_conf(&conf);
     if let Err(error) = crate::slug::validate_format_with_extra(&slug, &reserved) {
-        let page = render_page(&db, &session, root, submitted(error.message().into()));
-        return Err(page.await.unwrap_or_else(|page| page));
+        return Err(rejected(root, error.message().into()));
     }
     let child = CreateChild {
         name: form.name.clone(),
@@ -401,36 +599,167 @@ pub async fn create(
         idempotency_key: form.idempotency_key.clone(),
         hosted: hot::product::billing_enabled(&conf),
     };
-    if let Err(error) =
-        Org::create_child(&db, &root.org_id, &session.current_user_id(), &child).await
-    {
-        tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
-        let message = org_error_message(&error, "Unable to create the sub-organization.");
-        let page = render_page(&db, &session, root, submitted(message));
-        return Err(page.await.unwrap_or_else(|page| page));
+    match Org::create_child(&db, &root.org_id, &session.current_user_id(), &child).await {
+        Ok(provisioned) => Ok(Redirect::to(&child_url(&root, &provisioned.org.org_id))),
+        Err(error) => {
+            tracing::warn!(root_org_id = %root.org_id, %error, "Child provisioning rejected");
+            let message = org_error_message(&error, "Unable to create the sub-organization.");
+            Err(rejected(root, message))
+        }
     }
-    Ok(Redirect::to(&format!("/@{}/children", root.slug)))
 }
 
-/// Redirect back to the page, or re-render it with `error` explained above the forms.
-async fn back_to_page(
+/// What a sub-organization's status means for its work right now.
+fn status_note(root: &Org, child: &Org) -> String {
+    match child.lifecycle_state.as_str() {
+        "active" if !root.is_admitting() => format!(
+            "Active, but held: the {} account is {}, so no new work starts here.",
+            root.name, root.lifecycle_state
+        ),
+        "active" => "Active. New work starts normally.".to_string(),
+        "suspended" => {
+            "Suspended. New work is held and its API keys are refused until it is reactivated."
+                .to_string()
+        }
+        _ => "Archived. It is retired and holds no new work.".to_string(),
+    }
+}
+
+pub async fn detail(
+    Path((slug, child_id)): Path<(String, Uuid)>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    let child = child_of(&db, &session, &root, &child_id).await?;
+    render_detail(&db, &session, root, child)
+        .await
+        .map_err(|error| page_error(&session, error))
+}
+
+async fn render_detail(
     db: &DatabasePool,
     session: &Session,
     root: Org,
-    error: Option<String>,
-) -> Result<Redirect, Response> {
-    match error {
-        None => Ok(Redirect::to(&format!("/@{}/children", root.slug))),
-        Some(error) => {
-            let page = render_page(db, session, root, FormState::error(error));
-            Err(page.await.unwrap_or_else(|page| page))
-        }
-    }
+    child: Org,
+) -> Result<Response, PageError> {
+    let overview = account_overview(db, session, &root, std::slice::from_ref(&child))
+        .await?
+        .pop()
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to load account activity",
+        ))?;
+    let grants = explicit_grants(db, &child).await?;
+    let breadcrumbs = child_breadcrumbs(
+        &root,
+        vec![templates::BreadcrumbItem::current(child.name.clone())],
+    );
+    let template = SubOrgDetailPage {
+        title: child.name.clone(),
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        status_note: status_note(&root, &child),
+        root,
+        child,
+        overview,
+        grants,
+    };
+    form_page(template.render(), false)
 }
 
 #[derive(Deserialize)]
 pub struct LifecycleForm {
     state: OrgLifecycle,
+}
+
+const CHILD_LIFECYCLE_OPTIONS: [LifecycleOption; 3] = [
+    LifecycleOption {
+        value: "active",
+        label: "Active",
+        note: "New work starts normally.",
+    },
+    LifecycleOption {
+        value: "suspended",
+        label: "Suspended",
+        note: "Holds new work and refuses its API keys. Reversible.",
+    },
+    LifecycleOption {
+        value: "archived",
+        label: "Archived",
+        note: "Retires the sub-organization. Restore it to suspended before activating it again.",
+    },
+];
+
+const ACCOUNT_LIFECYCLE_OPTIONS: [LifecycleOption; 3] = [
+    LifecycleOption {
+        value: "active",
+        label: "Active",
+        note: "New work starts normally in the account and its sub-organizations.",
+    },
+    LifecycleOption {
+        value: "suspended",
+        label: "Suspended",
+        note: "Holds new work in every sub-organization. Administrators keep recovery and billing access.",
+    },
+    LifecycleOption {
+        value: "archived",
+        label: "Archived",
+        note: "Retires the account. Restore it to suspended before activating it again.",
+    },
+];
+
+/// The status page of one sub-organization.
+fn render_child_lifecycle(
+    session: &Session,
+    root: &Org,
+    child: &Org,
+    selected: Option<OrgLifecycle>,
+    error: Option<String>,
+) -> Result<Response, PageError> {
+    let breadcrumbs = child_breadcrumbs(
+        root,
+        vec![
+            templates::BreadcrumbItem::clickable(
+                child.name.clone(),
+                child_url(root, &child.org_id),
+            ),
+            templates::BreadcrumbItem::current("Status".to_string()),
+        ],
+    );
+    let rejected = error.is_some();
+    let template = LifecyclePage {
+        title: format!("Status: {}", child.name),
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        heading: format!("Status of {}", child.name),
+        intro: format!(
+            "Changes only this sub-organization. Other sub-organizations of {} are not affected.",
+            root.name
+        ),
+        subject: child.name.clone(),
+        confirm_note: "New work stops in this sub-organization and its API keys are refused. Runs already in progress are not interrupted.",
+        current_badge: lifecycle_badge(&child.lifecycle_state, false),
+        selected_state: selected
+            .map(|state| state.as_str().to_string())
+            .unwrap_or_else(|| child.lifecycle_state.clone()),
+        current_state: child.lifecycle_state.clone(),
+        options: CHILD_LIFECYCLE_OPTIONS,
+        rule: "An archived sub-organization goes back to suspended before it can be active.",
+        action: format!("{}/lifecycle", child_url(root, &child.org_id)),
+        back_url: child_url(root, &child.org_id),
+        error,
+    };
+    form_page(template.render(), rejected)
+}
+
+pub async fn lifecycle_page(
+    Path((slug, child_id)): Path<(String, Uuid)>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    let child = child_of(&db, &session, &root, &child_id).await?;
+    render_child_lifecycle(&session, &root, &child, None, None)
+        .map_err(|error| page_error(&session, error))
 }
 
 pub async fn lifecycle(
@@ -440,23 +769,139 @@ pub async fn lifecycle(
     Form(form): Form<LifecycleForm>,
 ) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    let child = Org::get_org_uncached(&db, &child_id).await.ok();
-    if child.is_none_or(|child| child.parent_org_id != Some(root.org_id)) {
-        return Err(page_error(
-            &session,
-            (StatusCode::NOT_FOUND, "Sub-organization not found"),
-        ));
-    }
-    let error = Org::set_lifecycle(&db, &child_id, &session.current_user_id(), form.state)
-        .await
-        .err()
-        .map(|error| {
-            org_error_message(
+    let child = child_of(&db, &session, &root, &child_id).await?;
+    match Org::set_lifecycle(&db, &child_id, &session.current_user_id(), form.state).await {
+        Ok(_) => Ok(Redirect::to(&child_url(&root, &child_id))),
+        Err(error) => {
+            let message = org_error_message(
                 &error,
                 "That status change isn't allowed. Restore an archived sub-organization to suspended before activating it.",
+            );
+            Err(
+                render_child_lifecycle(&session, &root, &child, Some(form.state), Some(message))
+                    .unwrap_or_else(|error| page_error(&session, error)),
             )
-        });
-    back_to_page(&db, &session, root, error).await
+        }
+    }
+}
+
+/// The account's own status page.
+fn render_root_lifecycle(
+    session: &Session,
+    root: &Org,
+    selected: Option<OrgLifecycle>,
+    error: Option<String>,
+) -> Result<Response, PageError> {
+    let breadcrumbs = child_breadcrumbs(
+        root,
+        vec![templates::BreadcrumbItem::current(
+            "Account status".to_string(),
+        )],
+    );
+    let rejected = error.is_some();
+    let template = LifecyclePage {
+        title: "Account Status".to_string(),
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        heading: format!("Account status of {}", root.name),
+        intro: format!("Changes {} and every sub-organization under it.", root.name),
+        subject: root.name.clone(),
+        confirm_note: "New work stops in this organization and in every sub-organization, and their API keys are refused. Runs already in progress are not interrupted.",
+        current_badge: lifecycle_badge(&root.lifecycle_state, false),
+        selected_state: selected
+            .map(|state| state.as_str().to_string())
+            .unwrap_or_else(|| root.lifecycle_state.clone()),
+        current_state: root.lifecycle_state.clone(),
+        options: ACCOUNT_LIFECYCLE_OPTIONS,
+        rule: "An archived account goes back to suspended before it can be active.",
+        action: format!("/@{}/lifecycle", root.slug),
+        back_url: children_url(root),
+        error,
+    };
+    form_page(template.render(), rejected)
+}
+
+pub async fn root_lifecycle_page(
+    Path(slug): Path<String>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    render_root_lifecycle(&session, &root, None, None).map_err(|error| page_error(&session, error))
+}
+
+pub async fn root_lifecycle(
+    Path(slug): Path<String>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+    Form(form): Form<LifecycleForm>,
+) -> Result<Redirect, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    match Org::set_lifecycle(&db, &root.org_id, &session.current_user_id(), form.state).await {
+        Ok(_) => Ok(Redirect::to(&children_url(&root))),
+        Err(error) => {
+            let message = org_error_message(&error, "That account status change isn't allowed.");
+            Err(
+                render_root_lifecycle(&session, &root, Some(form.state), Some(message))
+                    .unwrap_or_else(|error| page_error(&session, error)),
+            )
+        }
+    }
+}
+
+async fn render_access(
+    db: &DatabasePool,
+    session: &Session,
+    root: Org,
+    child: Org,
+    selected_user: String,
+    error: Option<String>,
+) -> Result<Response, PageError> {
+    let members = OrgUser::get_users_with_roles_by_org(db, &root.org_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to load account members",
+            )
+        })?
+        .into_iter()
+        .filter(|member| member.active)
+        .collect();
+    let grants = explicit_grants(db, &child).await?;
+    let breadcrumbs = child_breadcrumbs(
+        &root,
+        vec![
+            templates::BreadcrumbItem::clickable(
+                child.name.clone(),
+                child_url(&root, &child.org_id),
+            ),
+            templates::BreadcrumbItem::current("Access".to_string()),
+        ],
+    );
+    let rejected = error.is_some();
+    let template = SubOrgAccessPage {
+        title: format!("Access: {}", child.name),
+        page_context: PrivatePageContext::for_org_page("children", session, breadcrumbs),
+        root,
+        child,
+        members,
+        grants,
+        selected_user,
+        error,
+    };
+    form_page(template.render(), rejected)
+}
+
+pub async fn access_page(
+    Path((slug, child_id)): Path<(String, Uuid)>,
+    State(db): State<Arc<DatabasePool>>,
+    axum::Extension(session): axum::Extension<Session>,
+) -> Result<Response, Response> {
+    let root = root_for_admin(&db, &session, &slug).await?;
+    let child = child_of(&db, &session, &root, &child_id).await?;
+    render_access(&db, &session, root, child, String::new(), None)
+        .await
+        .map_err(|error| page_error(&session, error))
 }
 
 #[derive(Deserialize)]
@@ -472,37 +917,40 @@ pub async fn grant(
     Form(form): Form<GrantForm>,
 ) -> Result<Redirect, Response> {
     let root = root_for_admin(&db, &session, &slug).await?;
+    let child = child_of(&db, &session, &root, &child_id).await?;
     let role = match form.role_id {
-        0 => None,
-        1 | 2 => Some(form.role_id),
-        _ => {
-            return back_to_page(&db, &session, root, Some("Choose a role.".into())).await;
-        }
+        0 => Ok(None),
+        1 | 2 => Ok(Some(form.role_id)),
+        _ => Err("Choose a role.".to_string()),
     };
-    let error = Org::set_child_user_grant(
-        &db,
-        &root.org_id,
-        &child_id,
-        &session.current_user_id(),
-        &form.user_id,
-        role,
-    )
-    .await
-    .err()
-    .map(|error| org_error_message(&error, "Unable to change access."));
-    back_to_page(&db, &session, root, error).await
-}
-
-pub async fn root_lifecycle(
-    Path(slug): Path<String>,
-    State(db): State<Arc<DatabasePool>>,
-    axum::Extension(session): axum::Extension<Session>,
-    Form(form): Form<LifecycleForm>,
-) -> Result<Redirect, Response> {
-    let root = root_for_admin(&db, &session, &slug).await?;
-    let error = Org::set_lifecycle(&db, &root.org_id, &session.current_user_id(), form.state)
+    let saved = match role {
+        Ok(role) => Org::set_child_user_grant(
+            &db,
+            &root.org_id,
+            &child_id,
+            &session.current_user_id(),
+            &form.user_id,
+            role,
+        )
         .await
-        .err()
-        .map(|error| org_error_message(&error, "That account status change isn't allowed."));
-    back_to_page(&db, &session, root, error).await
+        .map_err(|error| org_error_message(&error, "Unable to change access.")),
+        Err(message) => Err(message),
+    };
+    match saved {
+        // Back to the access page, where the change shows in the list.
+        Ok(()) => Ok(Redirect::to(&format!(
+            "{}/access",
+            child_url(&root, &child_id)
+        ))),
+        Err(message) => Err(render_access(
+            &db,
+            &session,
+            root,
+            child,
+            form.user_id.to_string(),
+            Some(message),
+        )
+        .await
+        .unwrap_or_else(|error| page_error(&session, error))),
+    }
 }
