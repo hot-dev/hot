@@ -890,6 +890,34 @@ fn reload_dev_context_storage(
 }
 
 /// File watcher for dev mode - watches source files and reloads event handlers/schedules on change
+/// The resource roots `hot dev` reloads on change: every existing root the
+/// resource registry is built from, dependency `resource-paths` included.
+fn dev_resource_roots(
+    conf: &Val,
+    project_name: &str,
+    extra_paths: &[String],
+) -> Vec<std::path::PathBuf> {
+    hot::project::resolve_project_resource_roots(
+        conf,
+        project_name,
+        extra_paths,
+        hot::project::DependencyResources::Include,
+    )
+    .into_iter()
+    .filter(|p| p.exists())
+    .collect()
+}
+
+/// True iff `path` lives under one of the canonical `roots`.
+fn is_under_any_root(roots: &[std::path::PathBuf], path: &Path) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    let canon = path.canonicalize().ok();
+    let target = canon.as_deref().unwrap_or(path);
+    roots.iter().any(|root| target.starts_with(root))
+}
+
 pub(crate) async fn run_dev_file_watcher(
     conf: Val,
     global_options: GlobalOptions,
@@ -928,17 +956,14 @@ pub(crate) async fn run_dev_file_watcher(
         }
     }
 
-    // Resource roots — the same set that ends up in the bundle so that an
-    // edit to a prompt template or a JSON config in dev triggers the same
-    // reload semantics as a code change. We track them separately from the
-    // src/dep paths because resource changes refresh the in-process
-    // resource registry rather than recompiling event handlers.
-    let resource_roots: Vec<PathBuf> =
-        hot::project::get_project_resource_paths(&conf, &project_name)
-            .into_iter()
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-            .collect();
+    // Resource roots — the same set the resource registry loads (project
+    // paths, `--resource.path` extras and dependency `resource-paths`), so
+    // that an edit to a prompt template, a JSON config or a dependency's
+    // `SKILL.md` in dev refreshes what `::hot::resource` serves. We track
+    // them separately from the src/dep paths because resource changes
+    // refresh the in-process resource registry rather than recompiling
+    // event handlers.
+    let resource_roots = dev_resource_roots(&conf, &project_name, &global_options.resource_paths);
     let mut canonical_resource_roots: Vec<PathBuf> = resource_roots
         .iter()
         .filter_map(|p| p.canonicalize().ok())
@@ -958,9 +983,11 @@ pub(crate) async fn run_dev_file_watcher(
         }
     }
 
-    // Set up watchers for resource roots (deduped against src paths in case
-    // a project lists the same dir as both source and resource — `notify`
-    // tolerates duplicate watches but it's wasteful to re-fire on them).
+    // Set up watchers for resource roots, skipping any already covered by a
+    // recursive src or dep watch: a project may list the same dir as both
+    // source and resource, and a local dependency's resources sit inside its
+    // watched package dir. `notify` tolerates duplicate watches but it's
+    // wasteful to re-fire on them.
     let already_watched: std::collections::HashSet<PathBuf> = watch_paths
         .iter()
         .filter_map(|p| p.canonicalize().ok())
@@ -970,7 +997,7 @@ pub(crate) async fn run_dev_file_watcher(
         let canon = path.canonicalize().ok();
         if canon
             .as_ref()
-            .map(|c| already_watched.contains(c))
+            .map(|c| already_watched.iter().any(|watched| c.starts_with(watched)))
             .unwrap_or(false)
         {
             continue;
@@ -1024,16 +1051,8 @@ pub(crate) async fn run_dev_file_watcher(
     // True iff `path` lives under one of the resource roots. Used to decide
     // whether a non-`.hot` change is a resource edit we should react to,
     // vs noise from an unrelated file in a watched src dir.
-    let is_resource_path = |path: &std::path::Path| -> bool {
-        if canonical_resource_roots.is_empty() {
-            return false;
-        }
-        let canon = path.canonicalize().ok();
-        let target = canon.as_deref().unwrap_or(path);
-        canonical_resource_roots
-            .iter()
-            .any(|root| target.starts_with(root))
-    };
+    let is_resource_path =
+        |path: &std::path::Path| -> bool { is_under_any_root(&canonical_resource_roots, path) };
 
     loop {
         // Check if shutdown was requested
@@ -1137,6 +1156,7 @@ pub(crate) async fn run_dev_file_watcher(
                 &project_name,
                 &global_options.resource_paths,
                 global_options.no_gitignore,
+                hot::project::DependencyResources::Include,
             );
             // A resource edit may have touched a `*.skill.md` source —
             // regenerate the corresponding `*.skill.hot` stubs so the
@@ -1214,6 +1234,62 @@ mod tests {
     use hot::lang::parser::{ErrorLocation, ParseError};
     use hot::queue::Queue;
     use hot::queue::sqlite::SqliteQueue;
+
+    // An edit to a resource inside a local dependency refreshes the registry
+    // in `hot dev`, as an edit to one of the project's own resources does.
+    #[test]
+    fn dev_resource_roots_cover_dependency_and_extra_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("dep-skills");
+        let pkg_res = pkg_dir.join("resources/dep-pack/tone");
+        let proj_res = dir.path().join("proj-resources");
+        let extra_res = dir.path().join("extra-resources");
+        std::fs::create_dir_all(pkg_dir.join("src")).unwrap();
+        std::fs::create_dir_all(&pkg_res).unwrap();
+        std::fs::create_dir_all(&proj_res).unwrap();
+        std::fs::create_dir_all(&extra_res).unwrap();
+        std::fs::write(
+            pkg_dir.join("pkg.hot"),
+            "::hot::pkg ns\n\
+             hot.pkg.dep-skills {\n\
+               name: \"acme/dep-skills\",\n\
+               version: \"0.1.0\",\n\
+               src-paths: [\"src/\"],\n\
+               resource-paths: [\"resources/\"]\n\
+             }\n",
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("src/mod.hot"), "::dep::skills ns\n").unwrap();
+        let dep_skill = pkg_res.join("SKILL.md");
+        std::fs::write(&dep_skill, "dep skill").unwrap();
+
+        let conf_src = format!(
+            "hot.project.app.resources.paths [\"{}\"]\n\
+             hot.project.app.deps {{\"acme/dep-skills\": {{\"local\": \"{}\"}}}}\n",
+            proj_res.display(),
+            pkg_dir.display()
+        );
+        let conf = hot::project::get_resolved_conf(hot::lang::data::eval_data(&conf_src).unwrap());
+
+        let extras = vec![extra_res.to_string_lossy().to_string()];
+        let roots = dev_resource_roots(&conf, "app", &extras);
+        assert_eq!(
+            roots,
+            vec![
+                proj_res.clone(),
+                extra_res.clone(),
+                pkg_dir.join("resources")
+            ]
+        );
+
+        let canonical: Vec<std::path::PathBuf> = roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .collect();
+        assert!(is_under_any_root(&canonical, &dep_skill));
+        assert!(!is_under_any_root(&canonical, &pkg_dir.join("src/mod.hot")));
+        assert!(!is_under_any_root(&[], &dep_skill));
+    }
 
     #[test]
     fn project_dev_lock_excludes_a_second_holder() {

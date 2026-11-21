@@ -41,10 +41,10 @@ use crate::command::test::run_test;
 use crate::command::worker::{run_task_worker, run_worker};
 use crate::conf::{
     ExtractedOptions, apply_command_specific_defaults, apply_configuration_options, apply_env_vars,
-    create_default_conf, extract_options_from_command, get_blob_resolved_conf,
-    get_emitter_resolved_conf, get_file_resolved_conf, get_log_format_for_command,
-    get_merged_src_paths, get_merged_test_paths, load_conf, load_ctx, load_dotenv_files,
-    redact_sensitive_config, show_command_config,
+    create_default_conf, dependency_resources_for_command, extract_options_from_command,
+    get_blob_resolved_conf, get_emitter_resolved_conf, get_file_resolved_conf,
+    get_log_format_for_command, get_merged_src_paths, get_merged_test_paths, load_conf, load_ctx,
+    load_dotenv_files, redact_sensitive_config, show_command_config,
 };
 
 // Log a structured OOM line to stderr before the inevitable abort. The
@@ -1040,6 +1040,7 @@ async fn async_main(providers: CliProviders) {
             &resolved_project_name,
             &global_options.resource_paths,
             global_options.no_gitignore,
+            dependency_resources_for_command(&cli.command),
         );
         if !registry.entries.is_empty() {
             tracing::debug!(

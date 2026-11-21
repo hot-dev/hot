@@ -123,7 +123,9 @@ opts ::ai::chat/ChatOptions({
   `[{path, size}]`) and `read_skill_resource(name, path, offset?)`
   (capped at 250,000 characters per read with a newline-aligned
   continuation hint). Dotfiles, path traversal, `SKILL.md`, and nested
-  skill directories are excluded. Bundled scripts are never executed on
+  skill directories are excluded. A `SKILL.md` at the top of a resource
+  root has no directory of its own, so it exposes no bundled files; give
+  each skill its own directory. Bundled scripts are never executed on
   workers; read them as text or pass their `::hot::resource/path` URI to
   `::hot::box`.
 - **Package-bundled skills**: project `resources.paths` shadow

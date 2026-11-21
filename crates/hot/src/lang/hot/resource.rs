@@ -302,15 +302,6 @@ pub fn build_registry(
         if !root.exists() {
             continue;
         }
-        if std::fs::symlink_metadata(root)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            tracing::warn!(
-                "resource: root '{}' is a symlink; deployed bundles do not follow symlinks",
-                root.display()
-            );
-        }
         let abs_root = match root.canonicalize() {
             Ok(p) => p,
             Err(_) => root.clone(),
@@ -353,13 +344,6 @@ pub fn build_registry(
                 }
             };
             let path = dent.path();
-            if dent.path_is_symlink() {
-                tracing::warn!(
-                    "resource: skipping symlink '{}' (symlinks are not included in resources or deployed bundles)",
-                    path.display()
-                );
-                continue;
-            }
             if !path.is_file() {
                 continue;
             }
@@ -589,6 +573,29 @@ mod tests {
         assert_eq!(registry.entries.len(), 2);
         assert!(registry.entries.contains_key("hello.txt"));
         assert!(registry.entries.contains_key("nested/deep.md"));
+    }
+
+    // A resource that is a symlink to a file is read through, both by the
+    // local registry and by a bundle built from the same walk.
+    #[cfg(unix)]
+    #[test]
+    fn build_registry_reads_through_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("res");
+        std::fs::create_dir_all(root.join("prompts")).unwrap();
+        let shared = dir.path().join("shared.md");
+        std::fs::write(&shared, "shared prompt").unwrap();
+        symlink(&shared, root.join("prompts/system.md")).unwrap();
+
+        let registry = build_registry(std::slice::from_ref(&root), false, &[]);
+        assert!(registry.entries.contains_key("prompts/system.md"));
+
+        let bundled = crate::bundle::collect_resource_files(&[root], false, &[]).unwrap();
+        assert_eq!(bundled.len(), 1);
+        assert_eq!(bundled[0].rel_path, "prompts/system.md");
+        assert_eq!(bundled[0].content, b"shared prompt");
     }
 
     #[test]
