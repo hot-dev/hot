@@ -164,12 +164,40 @@ choose_default_mode() {
     fi
 }
 
-# Download file
+is_localhost_url() {
+    case "$1" in
+        http://*@*) return 1 ;;
+        http://localhost|http://localhost/*|http://localhost:*|http://127.0.0.1|http://127.0.0.1/*|http://127.0.0.1:*|http://\[::1\]|http://\[::1\]/*|http://\[::1\]:*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Download file (enforcing HTTPS and TLS 1.2+ except for localhost test servers)
 download() {
+    if is_localhost_url "$1"; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$1" -o "$2"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q "$1" -O "$2"
+        else
+            error "Neither curl nor wget found. Please install one of them."
+        fi
+        return
+    fi
+
+    case "$1" in
+        https://*) ;;
+        *) error "Refusing to download over non-HTTPS URL: $1" ;;
+    esac
+
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1" -o "$2"
+        curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$1" -O "$2"
+        wget --https-only --secure-protocol=TLSv1_2 -q "$1" -O "$2"
     else
         error "Neither curl nor wget found. Please install one of them."
     fi
@@ -185,20 +213,21 @@ sha256_of() {
     fi
 }
 
-# Download $1 into $2 and check it against the release's $1.sha256. With
-# "optional" as $3, a release that publishes no checksum only warns.
+# Download $1 into $2 and verify it against the release's $1.sha256.
 download_verified() {
     echo "Downloading $(basename "$1")..."
     download "$1" "$2" || error "Download failed: $1"
-    if ! download "$1.sha256" "$2.sha256" 2>/dev/null; then
-        if [ "${3:-}" = "optional" ]; then
-            echo "Warning: this release publishes no checksum for $(basename "$1"); not verified." >&2
-            return 0
-        fi
-        error "This release publishes no checksum for $(basename "$1"). Releases before user installs were supported can only install with --system."
-    fi
+    download "$1.sha256" "$2.sha256" 2>/dev/null || error "Failed to download checksum for $(basename "$1"): $1.sha256"
     read -r expected _ < "$2.sha256" || true
+    case "$expected" in
+        *[!0-9a-fA-F]*|"") error "Invalid checksum in $(basename "$1").sha256" ;;
+    esac
+    if [ "${#expected}" -ne 64 ]; then
+        error "Invalid checksum length in $(basename "$1").sha256"
+    fi
+    expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
     actual="$(sha256_of "$2")" || error "Neither sha256sum nor shasum found to verify the download."
+    actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
     [ "$actual" = "$expected" ] || error "Checksum mismatch for $(basename "$1"): expected $expected, got $actual"
 }
 
@@ -390,28 +419,25 @@ main() {
     AS=""
     if [ "$MODE" = "system" ] && [ -z "$PREFIX" ] && [ "$os" = "macos" ]; then
         file="${FILE_PREFIX}_${os}_${arch}.pkg"
-        download_verified "${BASE_URL}/${file}" "$tmp_dir/$file" optional
+        download_verified "${BASE_URL}/${file}" "$tmp_dir/$file"
         install_macos "$tmp_dir/$file"
         bin_dir="/usr/local/bin"
     elif [ "$MODE" = "system" ] && [ -z "$PREFIX" ] && command -v dpkg >/dev/null 2>&1; then
         file="${FILE_PREFIX}_${os}_${arch}.deb"
-        download_verified "${BASE_URL}/${file}" "$tmp_dir/$file" optional
+        download_verified "${BASE_URL}/${file}" "$tmp_dir/$file"
         install_linux "$tmp_dir/$file"
         bin_dir="/usr/bin"
     else
-        checksum=""
         if [ "$MODE" = "system" ]; then
             # Linux without dpkg, or a chosen --prefix: the release archive,
-            # for the whole machine. An older release's hot finds its
-            # resources in /usr/local/share/hot, so it needs no checksum.
+            # for the whole machine.
             PREFIX="${PREFIX:-/usr/local}"
             AS="$SUDO"
-            checksum="optional"
         else
             [ -n "${HOME:-}" ] || error "HOME is not set; pass --prefix"
             PREFIX="${PREFIX:-$HOME/.local}"
         fi
-        download_verified "${BASE_URL}/${archive}" "$tmp_dir/$archive" "$checksum"
+        download_verified "${BASE_URL}/${archive}" "$tmp_dir/$archive"
         install_archive "$tmp_dir/$archive"
         bin_dir="$PREFIX/bin"
     fi

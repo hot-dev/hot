@@ -57,6 +57,8 @@ runs:
 
     - name: Configure sccache (local disk cache)
       shell: bash
+      env:
+        SCCACHE_SIZE: ${{ inputs.sccache-size }}
       run: |
         # Keep the on-disk location at ~/.cache/sccache on every OS so it
         # matches the actions/cache path below. The sccache server is spawned
@@ -68,7 +70,7 @@ runs:
           echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
         fi
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=${SCCACHE_SIZE}" >> "$GITHUB_ENV"
         # The server stops after 600s without a new request, even while a
         # compile is in flight. Windows builds the `hot` crate alone for
         # about that long, so the default drops its connection mid-compile.
@@ -145,8 +147,10 @@ runs:
         steps.tailwind-cache.outputs.cache-hit != 'true' &&
         steps.tailwind-restore.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        TAILWIND_VERSION: ${{ inputs.tailwind-version }}
       # Verifies the download against the SHA-256 the script pins per asset.
-      run: bash "$GITHUB_WORKSPACE/scripts/install-tailwind.sh" "${{ inputs.tailwind-version }}" "$HOME/.local/bin"
+      run: bash "$GITHUB_WORKSPACE/scripts/install-tailwind.sh" "$TAILWIND_VERSION" "$HOME/.local/bin"
 
     - name: Add Tailwind to PATH
       shell: bash

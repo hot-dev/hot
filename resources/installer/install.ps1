@@ -16,6 +16,27 @@
 
 $ErrorActionPreference = "Stop"
 
+# Enforce TLS 1.2+ (Windows PowerShell 5.1 defaults to TLS 1.0/1.1)
+$tlsProtocols = [Net.SecurityProtocolType]::Tls12
+if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+    $tlsProtocols = $tlsProtocols -bor [Net.SecurityProtocolType]::Tls13
+}
+[Net.ServicePointManager]::SecurityProtocol = $tlsProtocols
+
+function Assert-SecureUrl {
+    param([string]$Url)
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$uri)) {
+        Write-Host "Error: Invalid download URL: $Url"
+        exit 1
+    }
+    $isLocal = $uri.Scheme -eq "http" -and ($uri.Host -eq "localhost" -or $uri.Host -eq "127.0.0.1" -or $uri.Host -eq "::1")
+    if ($uri.Scheme -ne "https" -and -not $isLocal) {
+        Write-Host "Error: Refusing to download over non-HTTPS URL: $Url"
+        exit 1
+    }
+}
+
 $UserDir = Join-Path $env:LOCALAPPDATA "Programs\Hot Dev"
 $SystemDir = Join-Path $env:ProgramFiles "Hot Dev"
 
@@ -44,6 +65,7 @@ else {
     $BaseUrl = "https://get.hot.dev/releases/$HotVersion"
     $FilePrefix = "hot_$HotVersion"
 }
+Assert-SecureUrl $BaseUrl
 
 function Get-Architecture {
     # Use PROCESSOR_ARCHITECTURE which works on all PowerShell versions
@@ -71,6 +93,7 @@ function Get-Architecture {
 
 function Test-Url {
     param([string]$Url)
+    Assert-SecureUrl $Url
     try {
         Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing | Out-Null
         return $true
@@ -80,10 +103,11 @@ function Test-Url {
     }
 }
 
-# Download $Url to $OutFile and check it against the release's $Url.sha256
-# when the release publishes one
+# Download $Url to $OutFile and verify it against the release's $Url.sha256
 function Get-VerifiedFile {
     param([string]$Url, [string]$OutFile)
+
+    Assert-SecureUrl $Url
 
     Write-Host "Downloading $([System.IO.Path]::GetFileName($Url))..."
     try {
@@ -98,13 +122,17 @@ function Get-VerifiedFile {
         $sums = (Invoke-WebRequest -Uri "$Url.sha256" -UseBasicParsing).Content
     }
     catch {
-        Write-Host "Warning: this release publishes no checksum for $([System.IO.Path]::GetFileName($Url)); not verified."
-        return
+        Write-Host "Error: Failed to download checksum for $([System.IO.Path]::GetFileName($Url)): $_"
+        exit 1
     }
     if ($sums -is [byte[]]) {
         $sums = [System.Text.Encoding]::ASCII.GetString($sums)
     }
     $expected = ($sums.Trim() -split '\s+')[0].ToLowerInvariant()
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        Write-Host "Error: Invalid checksum file for $([System.IO.Path]::GetFileName($Url))"
+        exit 1
+    }
     $actual = (Get-FileHash -Path $OutFile -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
         Write-Host "Error: Checksum mismatch for $([System.IO.Path]::GetFileName($Url)): expected $expected, got $actual"

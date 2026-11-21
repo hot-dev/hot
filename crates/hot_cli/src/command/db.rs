@@ -29,12 +29,12 @@ pub(crate) async fn run_db(
                     Ok(_) => println!("  Connection: OK"),
                     Err(e) => {
                         println!("  Connection: FAILED - {}", e);
-                        return Ok(());
+                        return Err(format!("Database connection failed: {}", e));
                     }
                 },
                 Err(e) => {
                     println!("  Connection: FAILED - {}", e);
-                    return Ok(());
+                    return Err(format!("Database connection failed: {}", e));
                 }
             }
             match hot::db::migration_state(conf).await {

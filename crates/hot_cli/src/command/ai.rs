@@ -123,7 +123,7 @@ struct SkillTarget {
 
 impl SkillTarget {
     fn preflight(&self) -> Result<(), String> {
-        preflight_agent_skill(&self.base, &self.skill)
+        preflight_agent_skill(&self.base, self.scope, &self.skill)
     }
 
     fn install(&self) -> Result<(), String> {
@@ -138,13 +138,14 @@ fn print_skipped_external(skill_dir: &std::path::Path) {
     );
 }
 
-/// The skill folders of a scope Hot may write. A folder that is itself a
-/// symlink, such as `~/.claude/skills` linked to `~/.agents/skills`, is
-/// skipped: Hot never writes through a link.
+/// The skill folders of a scope Hot may write. A folder whose path passes
+/// through a symlink — such as `~/.claude`, `~/.agents`, or `~/.claude/skills`
+/// linked to `~/.agents/skills` — is skipped: Hot never writes through a link.
 fn writable_skill_bases(scope: Scope) -> Result<Vec<std::path::PathBuf>, String> {
+    let scope_root = scope.root()?;
     let mut bases = Vec::new();
     for base in scope.skill_bases()? {
-        if ensure_managed_path_is_not_symlinked(&base, &base).is_err() {
+        if ensure_managed_path_is_not_symlinked(&scope_root, &base).is_err() {
             println!("  Left {} alone: it is a symlink", base.display());
             continue;
         }
@@ -227,25 +228,33 @@ fn update_targets(scope: Scope, bundled: &BTreeSet<String>) -> Result<Vec<SkillT
 /// Remove the old `.skills` copy of each skill that now has a Hot-managed
 /// copy where agents read it.
 fn retire_legacy_skills(scope: Scope) -> Result<(), String> {
+    let scope_root = scope.root()?;
     let legacy_base = scope.legacy_base()?;
     let bases = scope.skill_bases()?;
     for skill in installed_hot_skill_names(&legacy_base) {
-        let moved = bases
-            .iter()
-            .any(|base| skill_dir_owner(&base.join(&skill)) == SkillDirOwner::Hot);
+        let moved = bases.iter().any(|base| {
+            ensure_managed_path_is_not_symlinked(&scope_root, base).is_ok()
+                && skill_dir_owner(&base.join(&skill)) == SkillDirOwner::Hot
+        });
         if moved {
-            retire_legacy_skill(&legacy_base, &skill)?;
+            retire_legacy_skill(&scope_root, &legacy_base, &skill)?;
         }
     }
     // Only succeeds once the folder is empty.
-    let _ = fs::remove_dir(&legacy_base);
+    if ensure_managed_path_is_not_symlinked(&scope_root, &legacy_base).is_ok() {
+        let _ = fs::remove_dir(&legacy_base);
+    }
     Ok(())
 }
 
 /// Delete one skill Hot installed under `.skills`, unless it holds anything
 /// Hot didn't write: a changed or added file, or a symlink. Those copies stay
 /// put with a note, so no local edit is lost.
-fn retire_legacy_skill(legacy_base: &std::path::Path, skill: &str) -> Result<(), String> {
+fn retire_legacy_skill(
+    scope_root: &std::path::Path,
+    legacy_base: &std::path::Path,
+    skill: &str,
+) -> Result<(), String> {
     let skill_dir = legacy_base.join(skill);
     let keep = |reason: &str| {
         println!(
@@ -255,7 +264,7 @@ fn retire_legacy_skill(legacy_base: &std::path::Path, skill: &str) -> Result<(),
         Ok(())
     };
 
-    if ensure_managed_path_is_not_symlinked(legacy_base, &skill_dir).is_err() {
+    if ensure_managed_path_is_not_symlinked(scope_root, &skill_dir).is_err() {
         return keep("it is a symlink");
     }
     let InstalledSkillManifestState::Valid(manifest) = read_installed_skill_manifest(&skill_dir)?
@@ -388,7 +397,14 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             }
 
             let mut updated: BTreeSet<String> = BTreeSet::new();
-            if !*global && std::path::Path::new("AGENTS.md").exists() {
+            let agents_md_present = match fs::symlink_metadata(std::path::Path::new("AGENTS.md")) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(format!("Failed to inspect AGENTS.md: {error}"));
+                }
+            };
+            if !*global && agents_md_present {
                 setup_agents_md()?;
                 updated.insert("AGENTS.md".into());
             }
@@ -526,7 +542,14 @@ fn installed_skills(scope: Scope) -> Vec<InstalledSkill> {
 
 /// The Hot section of AGENTS.md in the current folder, if it has one.
 fn agents_md_freshness() -> Option<Freshness> {
-    let existing = fs::read_to_string("AGENTS.md").ok()?;
+    let path = std::path::Path::new("AGENTS.md");
+    if fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_symlink())
+    {
+        return None;
+    }
+    let existing = fs::read_to_string(path).ok()?;
     let installed = extract_section_hash(&existing, HOT_SECTION_START)?;
     let template = hot::resources::read_agents_md().ok()?;
     Some(if installed == agents_section_hash(&template) {
@@ -738,10 +761,24 @@ fn setup_agents_md() -> Result<(), String> {
         section_start: &str,
         section_end: &str,
     ) -> Result<bool, String> {
+        let existed = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "Refusing to manage {} because it is a symlink",
+                    file_desc
+                ));
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!("Failed to inspect {}: {}", file_desc, error));
+            }
+        };
+
         let new_hash = content_hash(template_content);
         let new_section = create_section(template_content, section_start, section_end);
 
-        if path.exists() {
+        if existed {
             let existing = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", file_desc, e))?;
 
@@ -783,7 +820,14 @@ fn setup_agents_md() -> Result<(), String> {
     let agents_template = hot::resources::read_agents_md()?;
 
     let agents_md_path = std::path::Path::new("AGENTS.md");
-    let agents_existed = agents_md_path.exists();
+    let agents_existed = match fs::symlink_metadata(agents_md_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("Refusing to manage AGENTS.md because it is a symlink".into());
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("Failed to inspect AGENTS.md: {}", error)),
+    };
     match update_shared_file(
         agents_md_path,
         &agents_template,
@@ -855,28 +899,33 @@ fn skill_manifest_key(path: &std::path::Path) -> String {
 }
 
 fn ensure_managed_path_is_not_symlinked(
-    skills_base: &std::path::Path,
+    scope_root: &std::path::Path,
     path: &std::path::Path,
 ) -> Result<(), String> {
-    let relative = path.strip_prefix(skills_base).map_err(|_| {
+    let relative = path.strip_prefix(scope_root).map_err(|_| {
         format!(
             "Managed skill path {} is outside {}",
             path.display(),
-            skills_base.display()
+            scope_root.display()
         )
     })?;
-    let mut current = skills_base.to_path_buf();
+    if relative.as_os_str().is_empty() {
+        return Err(format!(
+            "Managed skill path {} must be beneath {}",
+            path.display(),
+            scope_root.display()
+        ));
+    }
+    let mut current = scope_root.to_path_buf();
 
-    for component in std::iter::once(None).chain(relative.components().map(Some)) {
-        if let Some(component) = component {
-            let std::path::Component::Normal(component) = component else {
-                return Err(format!(
-                    "Managed skill path {} contains an unsupported component",
-                    path.display()
-                ));
-            };
-            current.push(component);
-        }
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(format!(
+                "Managed skill path {} contains an unsupported component",
+                path.display()
+            ));
+        };
+        current.push(component);
 
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -938,11 +987,19 @@ fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<boo
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    if path.is_file()
-        && let Ok(existing) = fs::read(path)
-        && existing == content
-    {
-        return Ok(false);
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Refusing to write managed path {} because it is a symlink",
+                path.display()
+            ));
+        }
+        if metadata.is_file()
+            && let Ok(existing) = fs::read(path)
+            && existing == content
+        {
+            return Ok(false);
+        }
     }
     let parent = path
         .parent()
@@ -1124,25 +1181,30 @@ fn manifest_relative_path(key: &str) -> Result<std::path::PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
-fn preflight_agent_skill(skills_base: &std::path::Path, skill_name: &str) -> Result<(), String> {
+fn preflight_agent_skill(
+    skills_base: &std::path::Path,
+    scope: Scope,
+    skill_name: &str,
+) -> Result<(), String> {
+    let scope_root = scope.root()?;
     let skill_files = bundled_skill_files(skill_name)?;
     let skills_base = skills_base.to_path_buf();
     let skill_dir = skills_base.join(skill_name);
 
-    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skills_base)?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir)?;
     validate_skill_ownership(&skill_dir)?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_OWNER_FILE))?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(SKILL_MANIFEST_FILE))?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(SKILL_OWNER_FILE))?;
     for (rel_path, _) in &skill_files {
-        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+        ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(rel_path))?;
     }
 
     if let InstalledSkillManifestState::Valid(manifest) = read_installed_skill_manifest(&skill_dir)?
     {
         for key in manifest.files.keys() {
             let rel_path = manifest_relative_path(key)?;
-            ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+            ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(rel_path))?;
         }
     }
     Ok(())
@@ -1156,17 +1218,18 @@ fn setup_agent_skill(
 ) -> Result<(), String> {
     use ahash::AHashSet;
 
+    let scope_root = scope.root()?;
     let skills_base = skills_base.to_path_buf();
     let location_desc = scope.label();
     let skill_files = bundled_skill_files(skill_name)?;
 
     let skill_dir = skills_base.join(skill_name);
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir)?;
     validate_skill_ownership(&skill_dir)?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_OWNER_FILE))?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(SKILL_MANIFEST_FILE))?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(SKILL_OWNER_FILE))?;
     for (rel_path, _) in &skill_files {
-        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+        ensure_managed_path_is_not_symlinked(&scope_root, &skill_dir.join(rel_path))?;
     }
     let installed_manifest_state = read_installed_skill_manifest(&skill_dir)?;
     let preserve_untracked_files = matches!(
@@ -1272,7 +1335,7 @@ fn setup_agent_skill(
         // Repeat the component check immediately before the atomic write. The
         // rename replaces a leaf symlink rather than following it, while this
         // recheck protects parent components changed since preflight.
-        ensure_managed_path_is_not_symlinked(&skills_base, &full_path)?;
+        ensure_managed_path_is_not_symlinked(&scope_root, &full_path)?;
         let manifest_key = skill_manifest_key(rel_path);
         next_manifest
             .files
@@ -1305,7 +1368,7 @@ fn setup_agent_skill(
             };
 
             let full_path = skill_dir.join(&rel_path);
-            ensure_managed_path_is_not_symlinked(&skills_base, &full_path)?;
+            ensure_managed_path_is_not_symlinked(&scope_root, &full_path)?;
             let metadata = fs::symlink_metadata(&full_path)
                 .map_err(|e| format!("Failed to inspect {}: {}", full_path.display(), e))?;
             if metadata.file_type().is_symlink() {
@@ -1336,12 +1399,12 @@ fn setup_agent_skill(
         .map_err(|e| format!("Failed to serialize installed skill manifest: {}", e))?;
     manifest_content.push(b'\n');
     let owner_path = skill_dir.join(SKILL_OWNER_FILE);
-    ensure_managed_path_is_not_symlinked(&skills_base, &owner_path)?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &owner_path)?;
     if write_atomic_if_changed(&owner_path, SKILL_OWNER_CONTENT)? {
         any_updated = true;
     }
     let manifest_path = skill_dir.join(SKILL_MANIFEST_FILE);
-    ensure_managed_path_is_not_symlinked(&skills_base, &manifest_path)?;
+    ensure_managed_path_is_not_symlinked(&scope_root, &manifest_path)?;
     if write_atomic_if_changed(&manifest_path, &manifest_content)? {
         any_updated = true;
     }
@@ -1393,5 +1456,31 @@ mod skill_manifest_tests {
 
         let hot = "// hot-skill-hash:9\n::demo ns\n";
         assert_eq!(strip_legacy_skill_hash(hot), "::demo ns\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_managed_path_rejects_symlinked_parent_dotdirs() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(outside.join("skills")).unwrap();
+
+        symlink(&outside, root.join(".claude")).unwrap();
+        symlink(&outside, root.join(".agents")).unwrap();
+
+        assert!(
+            super::ensure_managed_path_is_not_symlinked(root, &root.join(".claude/skills"))
+                .is_err()
+        );
+        assert!(
+            super::ensure_managed_path_is_not_symlinked(
+                root,
+                &root.join(".agents/skills/hot-language/SKILL.md")
+            )
+            .is_err()
+        );
     }
 }

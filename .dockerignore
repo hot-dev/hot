@@ -37,7 +37,35 @@ tests/
 *.tmp
 *.temp
 .env
-.env.local
+.env.*
+
+# Secrets, keys, and infrastructure state (mirroring .gitignore)
+**/dev.key
+*.key
+**/*.key
+*.pem
+**/*.pem
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+hot/ctx.hot
+*.tfvars
+**/*.tfvars
+*.tfstate
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/.terraform/
+**/.terraform.tfstate.lock.info
+*.kubeconfig
+**/*.kubeconfig
+
+# Local CDN, AI, and git worktree directories
+cdn-output/
+.claude/
+.skills/
+.worktrees/
 
 # Node modules (if any)
 node_modules/

@@ -485,6 +485,21 @@ NSIS_SCRIPT
     sed -i "s/\${VERSION}/$VERSION/g" "$staging_dir/installer.nsi"
     sed -i "s/\${ARCH}/$arch/g" "$staging_dir/installer.nsi"
 
+    # Sign hot.exe before makensis bundles it into the installer
+    if [ -f "/workspace/certs/codesign.pfx" ] && [ -n "$CODESIGN_PASSWORD" ]; then
+        echo "Signing hot.exe binary..."
+        osslsigncode sign \
+            -pkcs12 /workspace/certs/codesign.pfx \
+            -pass "$CODESIGN_PASSWORD" \
+            -n "Hot Dev" \
+            -i "https://hot.dev" \
+            -t "https://timestamp.digicert.com" \
+            -in "$staging_dir/hot.exe" \
+            -out "$staging_dir/hot_signed.exe"
+        mv "$staging_dir/hot_signed.exe" "$staging_dir/hot.exe"
+        echo "Binary signed successfully."
+    fi
+
     # Build the installer
     cd "$staging_dir"
 
@@ -494,27 +509,15 @@ NSIS_SCRIPT
     # Move installer to output directory
     mv "hot_${VERSION}_${arch}_installer.exe" "/workspace/target/packages/"
 
-    # Sign binaries and installer if certificate is available
+    # Sign installer if certificate is available
     if [ -f "/workspace/certs/codesign.pfx" ] && [ -n "$CODESIGN_PASSWORD" ]; then
-        echo "Signing hot.exe binary..."
-        osslsigncode sign \
-            -pkcs12 /workspace/certs/codesign.pfx \
-            -pass "$CODESIGN_PASSWORD" \
-            -n "Hot Dev" \
-            -i "https://hot.dev" \
-            -t "http://timestamp.digicert.com" \
-            -in "$staging_dir/hot.exe" \
-            -out "$staging_dir/hot_signed.exe"
-        mv "$staging_dir/hot_signed.exe" "$staging_dir/hot.exe"
-        echo "Binary signed successfully."
-
         echo "Signing installer..."
         osslsigncode sign \
             -pkcs12 /workspace/certs/codesign.pfx \
             -pass "$CODESIGN_PASSWORD" \
             -n "Hot Dev" \
             -i "https://hot.dev" \
-            -t "http://timestamp.digicert.com" \
+            -t "https://timestamp.digicert.com" \
             -in "/workspace/target/packages/hot_${VERSION}_${arch}_installer.exe" \
             -out "/workspace/target/packages/hot_${VERSION}_${arch}_installer_signed.exe"
         mv "/workspace/target/packages/hot_${VERSION}_${arch}_installer_signed.exe" \

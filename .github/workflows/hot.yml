@@ -408,17 +408,24 @@ jobs:
       matrix:
         required-check: [ 'Lint, Rust Tests, and Hot Tests' ]
     runs-on: ubuntu-24.04
-    needs: [clippy-and-checks, rust-tests, hot-tests, kata-check]
+    needs: [browser-security, clippy-and-checks, rust-tests, hot-tests, kata-check]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     steps:
       - name: Check split job results
+        env:
+          BROWSER_SECURITY_RESULT: ${{ needs.browser-security.result }}
+          CLIPPY_RESULT: ${{ needs.clippy-and-checks.result }}
+          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+          HOT_TESTS_RESULT: ${{ needs.hot-tests.result }}
+          KATA_CHECK_RESULT: ${{ needs.kata-check.result }}
         run: |
           failed=0
           for result in \
-            "${{ needs.clippy-and-checks.result }}" \
-            "${{ needs.rust-tests.result }}" \
-            "${{ needs.hot-tests.result }}" \
-            "${{ needs.kata-check.result }}"; do
+            "$BROWSER_SECURITY_RESULT" \
+            "$CLIPPY_RESULT" \
+            "$RUST_TESTS_RESULT" \
+            "$HOT_TESTS_RESULT" \
+            "$KATA_CHECK_RESULT"; do
             if [[ "$result" != "success" ]]; then
               failed=1
             fi
