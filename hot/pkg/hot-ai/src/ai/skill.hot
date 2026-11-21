@@ -678,7 +678,7 @@ meta {
     """
 }
 fn (skills: Vec<Skill>): SkillResolver {
-    has-resources some(skills, (s) { is-some(s.resource-root) })
+    has-resources some(skills, (s) { is-some(normalize-resource-root(s.resource-root)) })
     base {
         list-fn: (ctx: Map): Vec<Skill> { skills },
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
@@ -728,7 +728,7 @@ meta {
 }
 fn (skills: Vec<Skill>, opts: Map): SkillResolver {
     always-on or(get(opts, "always-on"), [])
-    has-resources some(skills, (s) { is-some(s.resource-root) })
+    has-resources some(skills, (s) { is-some(normalize-resource-root(s.resource-root)) })
     base {
         list-fn: (ctx: Map): Vec<Skill> { always-on },
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
@@ -1129,7 +1129,7 @@ meta { no-doc: true }
 fn (front: Map, meta-map: Map?, top-key: Str, meta-key: Str): Vec<Str>? {
     top get(front, top-key)
     cond {
-        is-some(top) => { top }
+        is-some(top) => { parse-meta-str-list(top) }
         is-null(meta-map) => { null }
         => { parse-meta-str-list(get(meta-map, meta-key)) }
     }
@@ -1292,7 +1292,7 @@ fn
                         |> assoc-some("compatibility", get(front, "compatibility"))
                         |> assoc-some("metadata", raw-meta)
                         |> assoc-some("allowed-tools", allowed-val)
-                        |> assoc-some("resource-root", get(opts, "resource-root"))
+                        |> assoc-some("resource-root", normalize-resource-root(get(opts, "resource-root")))
                         |> assoc-some("extra", extra-val)
 
                     skill Skill(fields)
@@ -1359,6 +1359,18 @@ fn (root: Str, rel-path: Str): Bool {
     }
 }
 
+normalize-resource-root
+meta { no-doc: true }
+fn (root: Str?): Str? {
+    cond {
+        is-null(root) => { null }
+        => {
+            cleaned trim-trailing-slashes(root)
+            if(is-empty(cleaned), null, cleaned)
+        }
+    }
+}
+
 list-skill-resources-of
 meta {
     doc: """
@@ -1372,10 +1384,10 @@ meta {
 fn
 (skill: Skill): Vec<Map> { list-skill-resources-of(skill, null) },
 (skill: Skill, filter-fn: Fn?): Vec<Map> {
-    root skill.resource-root
+    root normalize-resource-root(skill.resource-root)
     cond {
         // An empty root would match every resource in the project.
-        or(is-null(root), is-empty(root)) => { [] }
+        is-null(root) => { [] }
         => {
             prefix `${root}/`
             prefix-len length(prefix)
@@ -1419,9 +1431,9 @@ meta {
 fn
 (skill: Skill, rel-path: Str): Str { read-skill-resource-of(skill, rel-path, {}) },
 (skill: Skill, rel-path: Str, opts: Map): Str {
-    root skill.resource-root
+    root normalize-resource-root(skill.resource-root)
     cond {
-        or(is-null(root), is-empty(root)) => { `Skill '${skill.name}' has no bundled resources.` }
+        is-null(root) => { `Skill '${skill.name}' has no bundled resources.` }
         => {
             norm normalize-skill-rel-path(rel-path)
             cond {
@@ -1549,11 +1561,12 @@ fn
             dir-name if(is-empty(parent), null, path-basename(parent))
             // An empty parent is the top of the resource roots, not a
             // directory this skill owns, so it is never a resource root.
-            own-dir if(is-empty(parent), null, parent)
+            own-dir normalize-resource-root(parent)
+            opt-root normalize-resource-root(get(opts, "resource-root"))
             opts
                 |> assoc-some("default-name", or(get(opts, "default-name"), dir-name))
                 |> assoc-some("dir-name", or(get(opts, "dir-name"), dir-name))
-                |> assoc-some("resource-root", if(expose-res, or(get(opts, "resource-root"), own-dir), null))
+                |> assoc-some("resource-root", if(expose-res, or(opt-root, own-dir), null))
         }
 
         ends-with(base, ".skill.md") => {
@@ -1748,30 +1761,31 @@ fn (existing: Vec<::tool/Tool>, additions: Vec<::tool/Tool>): Map {
 
 activate-skill-graph
 meta { no-doc: true }
-fn (resolver: SkillResolver, queue: Vec<Str>, visited: Vec<Str>, tools: Vec<::tool/Tool>): Map {
+fn (resolver: SkillResolver, queue: Vec<Str>, visited: Vec<Str>, tools: Vec<::tool/Tool>, added: Vec<Str>): Map {
     cond {
-        is-empty(queue) => { {visited, tools, added: []} }
+        is-empty(queue) => { {visited, tools, added} }
         => {
             name first(queue)
             rest slice(queue, 1, length(queue))
             cond {
-                in(name, visited) => { activate-skill-graph(resolver, rest, visited, tools) }
+                in(name, visited) => { activate-skill-graph(resolver, rest, visited, tools, added) }
                 => {
                     next-visited concat(visited, [name])
                     s resolver.read-fn(name)
                     cond {
-                        is-null(s) => { activate-skill-graph(resolver, rest, next-visited, tools) }
+                        is-null(s) => { activate-skill-graph(resolver, rest, next-visited, tools, added) }
                         => {
                             bundled or(s.tools, [])
                             merged append-unique-tools(tools, bundled)
                             reqs or(s.requires, [])
                             next-queue concat(rest, reqs)
-                            tail activate-skill-graph(resolver, next-queue, next-visited, merged.tools)
-                            {
-                                visited: tail.visited,
-                                tools: tail.tools,
-                                added: concat(merged.added, tail.added)
-                            }
+                            activate-skill-graph(
+                                resolver,
+                                next-queue,
+                                next-visited,
+                                merged.tools,
+                                concat(added, merged.added)
+                            )
                         }
                     }
                 }
@@ -1813,11 +1827,20 @@ fn (resolver: SkillResolver?, calls: Vec<Any>, current-tools: Vec<::tool/Tool>, 
                         cond {
                             is-null(s) => { acc }
                             => {
-                                res activate-skill-graph(resolver, [name], acc.active, acc.tools)
+                                bundled or(s.tools, [])
+                                merged append-unique-tools(acc.tools, bundled)
+                                reqs or(s.requires, [])
+                                res activate-skill-graph(
+                                    resolver,
+                                    reqs,
+                                    concat(acc.active, [name]),
+                                    merged.tools,
+                                    merged.added
+                                )
                                 act {
                                     skill: s.name,
                                     tools-added: res.added,
-                                    requires: or(s.requires, [])
+                                    requires: reqs
                                 }
                                 {
                                     tools: res.tools,

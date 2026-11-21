@@ -881,6 +881,43 @@ fn () {
         contains(::skill/read-skill-resource-of(s, "ai-skill-fixtures/invoice-parser/references/schema.md"), "no bundled resources"),
         "an empty root does not reach into another skill"
     )
+
+    // Resolvers treat an empty resource-root the same as null (no Tier-3 tools).
+    assert-eq(3, length(::skill/builtins-with-resolver(::skill/in-memory-resolver([s]))))
+    assert-eq(4, length(::skill/builtins-with-resolver(::skill/searchable-resolver([s], {}))))
+
+    // Trailing slash on a manual resource-root still resolves files cleanly.
+    slashed ::skill/Skill({
+        name: "slashed",
+        description: "Manual root with trailing slash.",
+        body: "Body.",
+        resource-root: "ai-skill-fixtures/invoice-parser/"
+    })
+    assert(in("references/schema.md", map(::skill/list-skill-resources-of(slashed), %.path)))
+    assert(contains(::skill/read-skill-resource-of(slashed, "references/schema.md"), "invoice_id"))
+}
+
+test-from-markdown-top-level-string-hot-fields
+meta ["test"]
+fn () {
+    raw """
+---
+name: string-fields
+description: Uses strings for top-level Hot extension keys.
+when: "reply, support email"
+modalities: "image, pdf"
+requires: "base-rules, tax-rules"
+---
+Body.
+"""
+    s ::skill/from-markdown(raw)
+    assert-eq(["reply", "support email"], s.when)
+    assert-eq(["image", "pdf"], s.modalities)
+    assert-eq(["base-rules", "tax-rules"], s.requires)
+
+    // Explicit blank opts.resource-root is ignored rather than stored as "".
+    no-empty ::skill/from-markdown(raw, {resource-root: ""})
+    assert(is-null(no-empty.resource-root), "empty resource-root option is omitted")
 }
 
 test-read-skill-resource-chunking-by-offset
