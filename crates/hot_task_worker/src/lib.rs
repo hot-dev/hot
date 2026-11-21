@@ -1418,9 +1418,6 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         shutdown_drain_secs,
     ));
 
-    // Clean up orphaned data volumes from a previous crash
-    cleanup_stale_data_volumes(&data_vol_base).await;
-
     // Reap orphaned Kata shims/QEMU VMs from a previously killed worker so
     // they don't keep eating host memory and OOM us in turn. Safe even when
     // the backend isn't Kata: it scans /proc and only acts on processes
@@ -1429,9 +1426,10 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     let task_queue_arc = Arc::new(task_queue);
 
-    // Settle cancelled executions, and adopt orphaned containers from a
-    // previous worker or clean them up. Without a box executor yet, this runs
-    // once the backend answers.
+    // Settle cancelled executions, adopt orphaned containers from a previous
+    // worker (or clean them up), and only then clean up stale data volumes
+    // that are not mounted by any adopted container. Without a box executor
+    // yet, this runs once the backend answers.
     match boxes.executor() {
         Some(executor) => {
             recover_containers(
@@ -1441,6 +1439,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 &task_queue_arc,
                 &coordinator,
                 &worker_id,
+                &data_vol_base,
             )
             .await;
         }
@@ -1452,6 +1451,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
             let coordinator = Arc::clone(&coordinator);
             let recovery_coordinator = Arc::clone(&coordinator);
             let worker_id = worker_id.clone();
+            let recovery_data_vol_base = data_vol_base.clone();
             tokio::spawn(async move {
                 connect_box_backend(
                     &boxes,
@@ -1466,6 +1466,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                             &task_queue,
                             &recovery_coordinator,
                             &worker_id,
+                            &recovery_data_vol_base,
                         )
                         .await;
                     },
@@ -3859,8 +3860,9 @@ async fn connect_box_backend<C, F, R, RF>(
 }
 
 /// Startup's container recovery, which needs the box executor: settle
-/// cancelled executions, then adopt or clean up containers a previous worker
-/// left, watching the ones adopted.
+/// cancelled executions, adopt or clean up containers a previous worker left,
+/// clean up stale data volumes not mounted by adopted containers, and watch
+/// the ones adopted.
 async fn recover_containers(
     executor: &Arc<executor::BoxExecutor>,
     db: &Arc<DatabasePool>,
@@ -3868,6 +3870,7 @@ async fn recover_containers(
     task_queue: &Arc<ProcessingQueue<TaskRequest>>,
     coordinator: &Arc<shutdown::TaskShutdownCoordinator>,
     worker_id: &str,
+    data_vol_base: &std::path::Path,
 ) {
     cancellation_quota::reap(db, executor, coordinator, worker_id).await;
 
@@ -3880,6 +3883,23 @@ async fn recover_containers(
         worker_id,
     )
     .await;
+
+    // Clean up orphaned data volumes only after container adoption has
+    // identified all live containers and their mounted volume paths.
+    if adoption.listing_succeeded {
+        let protected_task_ids: std::collections::HashSet<Uuid> = adoption
+            .adopted
+            .iter()
+            .map(|a| a.task_id)
+            .chain(adoption.deferred.iter().map(|(id, _)| *id))
+            .collect();
+        cleanup_stale_data_volumes(
+            data_vol_base,
+            &adoption.protected_volume_paths,
+            &protected_task_ids,
+        )
+        .await;
+    }
 
     // Monitor any adopted containers in background poll tasks
     for adopted in adoption.adopted {
@@ -4839,61 +4859,22 @@ async fn process_container_task(
 
         let mut mount_error: Option<String> = None;
         for m in mounts {
-            let container_path = m.get("container_path").and_then(|v| v.as_str());
-            let resource_path = m.get("resource_path").and_then(|v| v.as_str());
-            let readonly = m.get("readonly").and_then(|v| v.as_bool()).unwrap_or(true);
-            let (Some(container_path), Some(resource_path)) = (container_path, resource_path)
-            else {
-                mount_error = Some(format!("invalid mount spec in args: {}", m));
-                break;
-            };
-
-            let source = resources_root.join(resource_path);
-            // Re-validate at the worker too: defence in depth against a
-            // malformed args_json that bypassed the Hot-side parser
-            // (e.g. a hand-crafted task insert in the DB).
-            let canonical = match source.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    mount_error = Some(format!(
-                        "resource path {:?} not found in bundle ({}). Available roots are under {:?}.",
-                        resource_path, e, resources_root
-                    ));
+            match resolve_bundle_resource_bind(&resources_root, m) {
+                Ok((bind_spec, container_path, resource_path)) => {
+                    extras.binds.push(bind_spec);
+                    tracing::debug!(
+                        task_id = %task_id,
+                        container = %container_path,
+                        resource = %resource_path,
+                        readonly = true,
+                        "box.mount.bound"
+                    );
+                }
+                Err(err) => {
+                    mount_error = Some(err);
                     break;
                 }
-            };
-            let canonical_root = match resources_root.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    mount_error = Some(format!(
-                        "bundle has no resources/ directory ({}); cannot honor mounts",
-                        e
-                    ));
-                    break;
-                }
-            };
-            if !canonical.starts_with(&canonical_root) {
-                mount_error = Some(format!(
-                    "resource path {:?} escapes the bundle resources/ root",
-                    resource_path
-                ));
-                break;
             }
-
-            let mode = if readonly { "ro" } else { "rw" };
-            extras.binds.push(format!(
-                "{}:{}:{}",
-                canonical.to_string_lossy(),
-                container_path,
-                mode,
-            ));
-            tracing::debug!(
-                task_id = %task_id,
-                container = %container_path,
-                resource = %resource_path,
-                readonly = readonly,
-                "box.mount.bound"
-            );
         }
 
         if let Some(err_msg) = mount_error {
@@ -8841,6 +8822,12 @@ struct OrphanAdoption {
     /// `(task_id, container_id)` of containers left running because the
     /// database could not say what their task is.
     deferred: Vec<(Uuid, String)>,
+    /// Host paths mounted by adopted or deferred containers that must not be
+    /// removed by stale data volume cleanup.
+    protected_volume_paths: std::collections::HashSet<std::path::PathBuf>,
+    /// Whether container discovery succeeded (so stale volume cleanup can
+    /// safely remove unreferenced volumes).
+    listing_succeeded: bool,
 }
 
 /// What became of one container a previous worker left.
@@ -8887,6 +8874,7 @@ async fn adopt_orphaned_containers(
     #[cfg(all(target_os = "linux", feature = "kata"))]
     if matches!(executor, executor::BoxExecutor::Kata(_)) {
         cleanup_kata_orphans(executor, db, stream_publisher, task_queue).await;
+        adoption.listing_succeeded = true;
         return adoption;
     }
 
@@ -8913,6 +8901,8 @@ async fn adopt_orphaned_containers(
         #[cfg(all(target_os = "linux", feature = "kata"))]
         executor::BoxExecutor::Kata(_) => unreachable!("Kata handled above"),
     };
+
+    adoption.listing_succeeded = true;
 
     if containers.is_empty() {
         return adoption;
@@ -8963,13 +8953,17 @@ async fn adopt_orphaned_containers(
             ContainerAdoption::Adopted {
                 ownership_resolved,
                 bundle_lease,
-            } => adoption.adopted.push(AdoptedContainer {
-                task_id,
-                container_id,
-                ownership_resolved,
-                bundle_lease,
-            }),
+            } => {
+                record_container_mount_sources(c, &mut adoption.protected_volume_paths);
+                adoption.adopted.push(AdoptedContainer {
+                    task_id,
+                    container_id,
+                    ownership_resolved,
+                    bundle_lease,
+                });
+            }
             ContainerAdoption::Deferred => {
+                record_container_mount_sources(c, &mut adoption.protected_volume_paths);
                 // Held as active from here, before the reaper's first pass.
                 coordinator.defer_adoption(task_id);
                 adoption.deferred.push((task_id, container_id));
@@ -9556,24 +9550,244 @@ async fn finish_adopted_task_run(db: &DatabasePool, task: &Task) {
     finish_container_task_run(&scoped, task.env_id, task.task_id).await;
 }
 
-/// Clean up stale data volume mounts from a previous worker crash.
-async fn cleanup_stale_data_volumes(data_vol_base: &std::path::Path) {
-    if data_vol_base.exists()
-        && let Ok(entries) = std::fs::read_dir(data_vol_base)
+/// Record all host mount source paths (and parent volume directories for
+/// `/mnt` loop-mounts) of an adopted/deferred container so stale data volume
+/// cleanup skips them.
+fn record_container_mount_sources(
+    container: &bollard::models::ContainerSummary,
+    protected: &mut std::collections::HashSet<std::path::PathBuf>,
+) {
+    let Some(mounts) = container.mounts.as_ref() else {
+        return;
+    };
+    for mount in mounts {
+        let Some(source) = mount.source.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let path = std::path::PathBuf::from(source);
+        if let Ok(canon) = std::fs::canonicalize(&path) {
+            if canon.file_name().is_some_and(|name| name == "mnt")
+                && let Some(parent) = canon.parent()
+            {
+                protected.insert(parent.to_path_buf());
+            }
+            protected.insert(canon);
+        }
+        if path.file_name().is_some_and(|name| name == "mnt")
+            && let Some(parent) = path.parent()
+        {
+            protected.insert(parent.to_path_buf());
+        }
+        protected.insert(path);
+    }
+}
+
+/// Validate a bundle resource mount's destination path inside the container.
+///
+/// Re-validated in `hot_task_worker` as defense in depth against malformed or
+/// hand-crafted `args_json`. Rejects relative paths, NUL bytes, `:` (Docker
+/// bind-spec option injection), `.` / `..` segments, `/`, and reserved mount
+/// targets or any subpath beneath them.
+fn validate_bundle_mount_container_path(container_path: &str) -> Result<(), String> {
+    if !container_path.starts_with('/') {
+        return Err(format!(
+            "container mount path {:?} must be absolute (start with '/')",
+            container_path
+        ));
+    }
+    if container_path.contains('\0') || container_path.contains(':') {
+        return Err(format!(
+            "container mount path {:?} contains disallowed characters",
+            container_path
+        ));
+    }
+
+    let mut segments = Vec::new();
+    for segment in container_path.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment == "." || segment == ".." {
+            return Err(format!(
+                "container mount path {:?} must not contain '.' or '..' segments",
+                container_path
+            ));
+        }
+        segments.push(segment);
+    }
+    if segments.is_empty() {
+        return Err(format!(
+            "container mount path {:?} clashes with a reserved mount point",
+            container_path
+        ));
+    }
+
+    let normalized = format!("/{}", segments.join("/"));
+    const RESERVED_PREFIXES: &[&str] = &[
+        "/data",
+        "/tmp",
+        "/hot",
+        "/hot/sockets",
+        "/usr/local/bin/hotbox",
+        "/etc",
+        "/proc",
+        "/sys",
+        "/dev",
+    ];
+    if normalized == "/usr/local/bin"
+        || RESERVED_PREFIXES.iter().any(|reserved| {
+            normalized == *reserved
+                || normalized
+                    .strip_prefix(reserved)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
     {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                #[cfg(target_os = "linux")]
-                {
-                    let _ = std::process::Command::new("umount")
-                        .arg(path.join("mnt"))
-                        .output();
-                }
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    tracing::warn!("Failed to clean up stale data volume {:?}: {}", path, e);
+        return Err(format!(
+            "container mount path {:?} clashes with a reserved mount point",
+            container_path
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a bundle resource mount entry and format its Docker bind spec.
+/// Bundle resource mounts are ALWAYS read-only (`:ro`) so containers cannot
+/// mutate shared bundle extraction directories.
+fn resolve_bundle_resource_bind(
+    resources_root: &std::path::Path,
+    mount: &serde_json::Value,
+) -> Result<(String, String, String), String> {
+    let container_path = mount.get("container_path").and_then(|v| v.as_str());
+    let resource_path = mount.get("resource_path").and_then(|v| v.as_str());
+    let (Some(container_path), Some(resource_path)) = (container_path, resource_path) else {
+        return Err(format!("invalid mount spec in args: {}", mount));
+    };
+
+    validate_bundle_mount_container_path(container_path)?;
+
+    if mount.get("readonly").and_then(|v| v.as_bool()) == Some(false) {
+        tracing::warn!(
+            container = %container_path,
+            resource = %resource_path,
+            "Bundle resource mount requested writable mode; forcing read-only (:ro)"
+        );
+    }
+
+    let source = resources_root.join(resource_path);
+    // Re-validate at the worker too: defence in depth against a malformed
+    // args_json that bypassed the Hot-side parser (e.g. a hand-crafted task
+    // insert in the DB).
+    let canonical = source.canonicalize().map_err(|e| {
+        format!(
+            "resource path {:?} not found in bundle ({}). Available roots are under {:?}.",
+            resource_path, e, resources_root
+        )
+    })?;
+    let canonical_root = resources_root.canonicalize().map_err(|e| {
+        format!(
+            "bundle has no resources/ directory ({}); cannot honor mounts",
+            e
+        )
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "resource path {:?} escapes the bundle resources/ root",
+            resource_path
+        ));
+    }
+
+    let bind = format!("{}:{}:ro", canonical.to_string_lossy(), container_path);
+    Ok((bind, container_path.to_string(), resource_path.to_string()))
+}
+
+#[cfg(target_os = "linux")]
+const STALE_UMOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn is_protected_data_volume_dir(
+    path: &std::path::Path,
+    protected_paths: &std::collections::HashSet<std::path::PathBuf>,
+    protected_task_ids: &std::collections::HashSet<Uuid>,
+) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name == "sockets" {
+        return true;
+    }
+    if protected_task_ids.iter().any(|task_id| {
+        let id_str = task_id.to_string();
+        name == id_str || name.starts_with(&format!("{id_str}-"))
+    }) {
+        return true;
+    }
+    let mnt = path.join("mnt");
+    if protected_paths.contains(path) || protected_paths.contains(&mnt) {
+        return true;
+    }
+    if let Ok(canon) = std::fs::canonicalize(path)
+        && (protected_paths.contains(&canon) || protected_paths.contains(&canon.join("mnt")))
+    {
+        return true;
+    }
+    false
+}
+
+/// Clean up stale data volume mounts from a previous worker crash.
+///
+/// Must run *after* `adopt_orphaned_containers` so live containers' volumes
+/// (passed via `protected_paths` and `protected_task_ids`) and the `sockets/`
+/// directory are preserved.
+async fn cleanup_stale_data_volumes(
+    data_vol_base: &std::path::Path,
+    protected_paths: &std::collections::HashSet<std::path::PathBuf>,
+    protected_task_ids: &std::collections::HashSet<Uuid>,
+) {
+    if !data_vol_base.exists() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(data_vol_base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if is_protected_data_volume_dir(&path, protected_paths, protected_task_ids) {
+            tracing::debug!(
+                path = %path.display(),
+                "Skipping protected directory during stale data volume cleanup"
+            );
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mnt = path.join("mnt");
+            if mnt.exists() {
+                let mut cmd = tokio::process::Command::new("umount");
+                cmd.kill_on_drop(true).arg(&mnt);
+                let unmounted = tokio::time::timeout(STALE_UMOUNT_TIMEOUT, cmd.output())
+                    .await
+                    .is_ok_and(|res| res.is_ok_and(|output| output.status.success()));
+                if !unmounted {
+                    let mut lazy = tokio::process::Command::new("umount");
+                    lazy.kill_on_drop(true).args(["-l"]).arg(&mnt);
+                    if tokio::time::timeout(STALE_UMOUNT_TIMEOUT, lazy.output())
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "Timed out running lazy umount on stale data volume; skipping directory removal"
+                        );
+                        continue;
+                    }
                 }
             }
+        }
+        if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+            tracing::warn!("Failed to clean up stale data volume {:?}: {}", path, e);
         }
     }
 }
@@ -14461,5 +14675,203 @@ flaky fn (args: Any): Map {
         assert!(watched_at.elapsed() < std::time::Duration::from_secs(5));
         kill_and_remove_with_timeout(&executor, &container, Some(&task_id)).await;
         assert!(cancellation_quota::runtime_stopped(&executor, &container).await);
+    }
+
+    #[test]
+    fn bundle_mount_container_path_validation() {
+        // Valid paths
+        for valid in [
+            "/app",
+            "/app/config.json",
+            "/workspace/models/v1",
+            "/opt/hot/assets",
+            "/usr/local/bin/custom-tool",
+            "/data-extra/file",
+            "/etcetera/foo",
+        ] {
+            assert!(
+                validate_bundle_mount_container_path(valid).is_ok(),
+                "expected {valid:?} to be valid"
+            );
+        }
+
+        // Rejected paths
+        for invalid in [
+            "",
+            "app",
+            "relative/path",
+            "/",
+            "///",
+            "/app\0evil",
+            "/app:rw",
+            "/app/./sub",
+            "/app/../etc",
+            "/app/..",
+            "/.",
+            "/..",
+            "/data",
+            "/data/",
+            "/data/seed",
+            "/tmp",
+            "/tmp/sub",
+            "/hot",
+            "/hot/sockets",
+            "/hot/sockets/hotbox.sock",
+            "/usr/local/bin",
+            "/usr/local/bin/hotbox",
+            "/usr/local/bin/hotbox/sub",
+            "/etc",
+            "/etc/passwd",
+            "//etc/shadow",
+            "/proc",
+            "/proc/self",
+            "/sys",
+            "/sys/fs/cgroup",
+            "/dev",
+            "/dev/null",
+        ] {
+            assert!(
+                validate_bundle_mount_container_path(invalid).is_err(),
+                "expected {invalid:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_resource_mount_is_always_readonly_and_validated() {
+        let dir_path = std::env::temp_dir().join(format!("hot-c8-{}", Uuid::new_v4().simple()));
+        let resources_root = dir_path.join("resources");
+        std::fs::create_dir_all(resources_root.join("cfg")).unwrap();
+        std::fs::write(resources_root.join("cfg/app.toml"), "ok").unwrap();
+        std::fs::write(dir_path.join("secret.txt"), "nope").unwrap();
+
+        // Even if args_json asks for readonly: false, worker forces :ro.
+        let rw_request = serde_json::json!({
+            "container_path": "/app/cfg",
+            "resource_path": "cfg",
+            "readonly": false
+        });
+        let (bind, container_path, resource_path) =
+            resolve_bundle_resource_bind(&resources_root, &rw_request).unwrap();
+        assert_eq!(container_path, "/app/cfg");
+        assert_eq!(resource_path, "cfg");
+        assert!(
+            bind.ends_with(":/app/cfg:ro"),
+            "bundle resource mounts must always be :ro, got {bind}"
+        );
+
+        // Traversal outside resources/ is rejected.
+        let escape = serde_json::json!({
+            "container_path": "/app/secret",
+            "resource_path": "../secret.txt",
+            "readonly": true
+        });
+        assert!(resolve_bundle_resource_bind(&resources_root, &escape).is_err());
+
+        // Reserved container path is rejected.
+        let reserved = serde_json::json!({
+            "container_path": "/etc/cfg",
+            "resource_path": "cfg",
+            "readonly": true
+        });
+        assert!(resolve_bundle_resource_bind(&resources_root, &reserved).is_err());
+
+        // Docker bind-option injection via ':' is rejected.
+        let colon_inject = serde_json::json!({
+            "container_path": "/app:rw",
+            "resource_path": "cfg",
+            "readonly": true
+        });
+        assert!(resolve_bundle_resource_bind(&resources_root, &colon_inject).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_container_extras_binds_only_per_task_socket_dir() {
+        let task_id = Uuid::new_v4();
+        let socket_base = std::path::PathBuf::from(format!("/tmp/hbx-ex-{}", task_id.simple()));
+        let sockets_root = socket_base.join("sockets");
+        let db = hot::db::test_db().await;
+        let storage = hot::file_storage::file_storage_from_config(&hot::val!({}))
+            .await
+            .unwrap();
+        let ctx = file_server::FileServerContext {
+            org_id: Uuid::nil(),
+            env_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            run_id: None,
+            auth_token: "test-tok".to_string(),
+            db: Arc::new(db),
+            storage: Arc::from(storage),
+        };
+        let handle = file_server::start(&task_id, &sockets_root, ctx)
+            .await
+            .unwrap();
+        let extras = build_container_extras(Some(&handle), None, executor::Backend::Docker);
+
+        let expected_task_dir = sockets_root.join(task_id.to_string());
+        let expected_bind = format!("{}:/hot/sockets:rw", expected_task_dir.to_string_lossy());
+        assert!(
+            extras.binds.contains(&expected_bind),
+            "expected per-task socket bind {expected_bind}, got {:?}",
+            extras.binds
+        );
+        assert!(
+            extras
+                .extra_env
+                .contains(&"HOTBOX_SOCKET=/hot/sockets/hotbox.sock".to_string()),
+            "expected HOTBOX_SOCKET=/hot/sockets/hotbox.sock, got {:?}",
+            extras.extra_env
+        );
+
+        handle.shutdown().await;
+        let _ = std::fs::remove_dir_all(&socket_base);
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_data_volumes_preserves_sockets_and_adopted_volumes() {
+        let base_path = std::env::temp_dir().join(format!("hot-h24-{}", Uuid::new_v4().simple()));
+        let sockets_dir = base_path.join("sockets");
+        let adopted_by_path = base_path.join("adopted-path-vol");
+        let adopted_mnt_vol = base_path.join("adopted-mnt-vol");
+        let adopted_task_id = Uuid::new_v4();
+        let adopted_by_task = base_path.join(format!("{adopted_task_id}-abc123"));
+        let stale_vol = base_path.join("stale-dead-vol");
+
+        std::fs::create_dir_all(sockets_dir.join("task-1")).unwrap();
+        std::fs::create_dir_all(&adopted_by_path).unwrap();
+        std::fs::create_dir_all(adopted_mnt_vol.join("mnt")).unwrap();
+        std::fs::create_dir_all(&adopted_by_task).unwrap();
+        std::fs::create_dir_all(&stale_vol).unwrap();
+
+        let mut protected_paths = std::collections::HashSet::new();
+        protected_paths.insert(adopted_by_path.clone());
+        protected_paths.insert(adopted_mnt_vol.join("mnt"));
+        let mut protected_task_ids = std::collections::HashSet::new();
+        protected_task_ids.insert(adopted_task_id);
+
+        cleanup_stale_data_volumes(&base_path, &protected_paths, &protected_task_ids).await;
+
+        assert!(sockets_dir.exists(), "sockets/ must be preserved");
+        assert!(
+            adopted_by_path.exists(),
+            "volume matching protected mount path must be preserved"
+        );
+        assert!(
+            adopted_mnt_vol.exists(),
+            "volume whose /mnt matches protected mount path must be preserved"
+        );
+        assert!(
+            adopted_by_task.exists(),
+            "volume matching adopted task_id prefix must be preserved"
+        );
+        assert!(
+            !stale_vol.exists(),
+            "unreferenced stale volume must be removed"
+        );
+
+        let _ = std::fs::remove_dir_all(&base_path);
     }
 }

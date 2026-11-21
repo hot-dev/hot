@@ -199,6 +199,26 @@ pub fn set_jit_vm_ptr(vm: *mut VirtualMachine) -> *mut VirtualMachine {
     JIT_VM_PTR.with(|cell| cell.replace(vm))
 }
 
+/// RAII guard that sets the thread-local VM pointer for the duration of a JIT
+/// call and restores the previous pointer even when a resumed helper panic
+/// unwinds out of the call.
+pub struct JitVmPtrGuard {
+    prev: *mut VirtualMachine,
+}
+
+impl Drop for JitVmPtrGuard {
+    fn drop(&mut self) {
+        set_jit_vm_ptr(self.prev);
+    }
+}
+
+/// Install `vm` as the active thread-local JIT VM pointer and return a guard
+/// that restores the previous value on drop (including unwind).
+pub fn enter_jit_vm_ptr(vm: *mut VirtualMachine) -> JitVmPtrGuard {
+    let prev = set_jit_vm_ptr(vm);
+    JitVmPtrGuard { prev }
+}
+
 /// Retrieve the thread-local VM pointer (used by JIT helper functions).
 fn get_jit_vm_ptr() -> *mut VirtualMachine {
     JIT_VM_PTR.with(|cell| cell.get())
@@ -3109,7 +3129,7 @@ thread_local! {
 /// that code has returned, so the panic fails the run as it does in the
 /// interpreter. Until then every contained helper returns its fallback at
 /// once, so no more of the program runs.
-fn contain_helper_panic(fallback: impl FnOnce() -> i64, body: impl FnOnce() -> i64) -> i64 {
+fn contain_helper_panic<R>(fallback: impl FnOnce() -> R, body: impl FnOnce() -> R) -> R {
     if HELPER_PANIC_PENDING.with(Cell::get) {
         return fallback();
     }
@@ -3225,6 +3245,33 @@ contained_helpers! {
     hot_jit_template_interpolate = hot_jit_template_interpolate_body(
         parts_ptr: *const i64, parts_count: i64
     ) -> HALT_SENTINEL;
+    hot_jit_make_map = hot_jit_make_map_body(
+        args_ptr: *const i64, entries: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_make_vec = hot_jit_make_vec_body(
+        args_ptr: *const i64, args_count: i64
+    ) -> helper_panic_err();
+    hot_jit_promote_to_owned = hot_jit_promote_to_owned_body(
+        kind: i64, raw: i64
+    ) -> helper_panic_err();
+    hot_jit_ensure_result = hot_jit_ensure_result_body(
+        val_ptr: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_self_tail_owned_arg = hot_jit_self_tail_owned_arg_body(
+        function_id: i64, index: i64, tagged_only: i64, raw: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_owned_raw_arg = hot_jit_owned_raw_arg_body(
+        raw: i64, kind: i64, out: *mut u8
+    ) -> HALT_SENTINEL;
+    hot_jit_dot_set = hot_jit_dot_set_body(
+        obj_ptr: i64, key_ptr: i64, val_ptr: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_dynamic_dot_access = hot_jit_dynamic_dot_access_body(
+        obj_ptr: i64, key_ptr: i64
+    ) -> HALT_SENTINEL;
+    hot_jit_dynamic_dot_set = hot_jit_dynamic_dot_set_body(
+        obj_ptr: i64, key_ptr: i64, val_ptr: i64
+    ) -> HALT_SENTINEL;
     hot_jit_construct_typed = hot_jit_construct_typed_body(
         src_ptr: i64, type_info_ptr: i64
     ) -> helper_panic_err();
@@ -3251,56 +3298,76 @@ struct FlowTrace {
 /// Compiled code of a traced call enters an inline flow, as the
 /// interpreter's BeginFlow traces one (see `VirtualMachine::begin_compiled_flow`).
 unsafe extern "C" fn hot_jit_flow_begin(trace_ptr: i64) {
-    let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() || trace_ptr == 0 {
-        return;
-    }
-    let trace = unsafe { &*(trace_ptr as *const FlowTrace) };
-    unsafe { &mut *vm_ptr }.begin_compiled_flow(
-        trace.flow_type,
-        trace.origin.as_deref(),
-        trace.source.as_deref(),
+    contain_helper_panic(
+        || (),
+        || {
+            let vm_ptr = get_jit_vm_ptr();
+            if vm_ptr.is_null() || trace_ptr == 0 {
+                return;
+            }
+            let trace = unsafe { &*(trace_ptr as *const FlowTrace) };
+            unsafe { &mut *vm_ptr }.begin_compiled_flow(
+                trace.flow_type,
+                trace.origin.as_deref(),
+                trace.source.as_deref(),
+            );
+        },
     );
 }
 
 /// Compiled code ends the inline flow it entered, with the result in
 /// `kind`/`raw` (a `HELPER_VAL_KIND_*` and its value). Borrows `raw`.
 unsafe extern "C" fn hot_jit_flow_end(kind: i64, raw: i64) {
-    let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() {
-        return;
-    }
-    let result = unsafe { decode_helper_val(kind, raw) };
-    unsafe { &mut *vm_ptr }.end_compiled_flow(&result);
+    contain_helper_panic(
+        || (),
+        || {
+            let vm_ptr = get_jit_vm_ptr();
+            if vm_ptr.is_null() {
+                return;
+            }
+            let result = unsafe { decode_helper_val(kind, raw) };
+            unsafe { &mut *vm_ptr }.end_compiled_flow(&result);
+        },
+    );
 }
 
 /// Compiled code enters the branch named by the `Str` at `name_ptr` of the
 /// inline flow it is in, or leaves it (0).
 unsafe extern "C" fn hot_jit_flow_branch(name_ptr: i64) {
-    let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() {
-        return;
-    }
-    let branch = match name_ptr {
-        0 => None,
-        ptr => match unsafe { &*(ptr as *const Val) } {
-            Val::Str(name) => Some(Arc::clone(name)),
-            _ => None,
+    contain_helper_panic(
+        || (),
+        || {
+            let vm_ptr = get_jit_vm_ptr();
+            if vm_ptr.is_null() {
+                return;
+            }
+            let branch = match name_ptr {
+                0 => None,
+                ptr => match unsafe { &*(ptr as *const Val) } {
+                    Val::Str(name) => Some(Arc::clone(name)),
+                    _ => None,
+                },
+            };
+            unsafe { &mut *vm_ptr }.set_compiled_flow_branch(branch);
         },
-    };
-    unsafe { &mut *vm_ptr }.set_compiled_flow_branch(branch);
+    );
 }
 
 /// A self tail call jumps out of the `count` inline flows it is in: close
 /// them untraced, as the interpreter's tail call does.
 unsafe extern "C" fn hot_jit_flow_unwind(count: i64) {
-    let vm_ptr = get_jit_vm_ptr();
-    if vm_ptr.is_null() {
-        return;
-    }
-    let vm = unsafe { &mut *vm_ptr };
-    let depth = vm.flow_context_depth();
-    vm.close_flows_from(depth.saturating_sub(usize::try_from(count).unwrap_or(0)));
+    contain_helper_panic(
+        || (),
+        || {
+            let vm_ptr = get_jit_vm_ptr();
+            if vm_ptr.is_null() {
+                return;
+            }
+            let vm = unsafe { &mut *vm_ptr };
+            let depth = vm.flow_context_depth();
+            vm.close_flows_from(depth.saturating_sub(usize::try_from(count).unwrap_or(0)));
+        },
+    );
 }
 
 /// Intrinsic helpers return this sentinel when a Result.Err operand
@@ -3670,7 +3737,7 @@ unsafe extern "C" fn hot_jit_consume_err(raw: i64, consumer: i64, payload: i64, 
 /// the raw value to `out` (an i64, or a D256 for a Dec) and returns 0, halts
 /// on an Err (`HALT_SENTINEL`), or returns 1 for a value of another type,
 /// which the call passes through the VM. Borrows `raw`.
-unsafe extern "C" fn hot_jit_owned_raw_arg(raw: i64, kind: i64, out: *mut u8) -> i64 {
+unsafe fn hot_jit_owned_raw_arg_body(raw: i64, kind: i64, out: *mut u8) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() || out.is_null() {
         return 1;
@@ -3706,7 +3773,7 @@ unsafe extern "C" fn hot_jit_owned_raw_arg(raw: i64, kind: i64, out: *mut u8) ->
 /// says only a tagged value can need one (`ParamArrows::FromTagged`). Returns an
 /// owned handle to the value the loop goes on with, or `HALT_SENTINEL` if the
 /// arrow fails. Borrows `raw`.
-unsafe extern "C" fn hot_jit_self_tail_owned_arg(
+unsafe fn hot_jit_self_tail_owned_arg_body(
     function_id: i64,
     index: i64,
     tagged_only: i64,
@@ -3987,7 +4054,7 @@ unsafe fn hot_jit_call_vm_body(function_id: i64, args_ptr: *const i64, args_coun
 
 /// JIT helper: promote a typed value to an OwnedVal.
 /// Takes (kind, raw) and returns an OwnedVal handle.
-unsafe extern "C" fn hot_jit_promote_to_owned(kind: i64, raw: i64) -> i64 {
+unsafe fn hot_jit_promote_to_owned_body(kind: i64, raw: i64) -> i64 {
     let val = unsafe { decode_helper_val(kind, raw) };
     new_owned_val(val)
 }
@@ -3996,7 +4063,7 @@ unsafe extern "C" fn hot_jit_promote_to_owned(kind: i64, raw: i64) -> i64 {
 /// `args_ptr` - pointer to array of (kind: i64, raw: i64) pairs
 /// `args_count` - number of elements
 /// Returns an OwnedVal handle to a Val::Vec.
-unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> i64 {
+unsafe fn hot_jit_make_vec_body(args_ptr: *const i64, args_count: i64) -> i64 {
     let count = args_count as usize;
     let mut elements = Vec::with_capacity(count);
     for i in 0..count {
@@ -4009,9 +4076,9 @@ unsafe extern "C" fn hot_jit_make_vec(args_ptr: *const i64, args_count: i64) -> 
 
 /// JIT helper: build a map literal from `entries` (key, value) pairs encoded
 /// at `args_ptr` as for [`hot_jit_make_vec`], two per entry, at its full
-/// size. A key that can't be one is the map's Err, as `hot_jit_set_element`
-/// makes it.
-unsafe extern "C" fn hot_jit_make_map(args_ptr: *const i64, entries: i64) -> i64 {
+/// size. A key that fails shape validation halts the VM as the interpreter's
+/// `MakeMap` does, draining any remaining taken handles first so none leak.
+unsafe fn hot_jit_make_map_body(args_ptr: *const i64, entries: i64) -> i64 {
     let count = entries as usize;
     let mut map = crate::val::ValIndexMap::with_capacity_and_hasher(count, Default::default());
     for i in 0..count {
@@ -4021,6 +4088,17 @@ unsafe extern "C" fn hot_jit_make_map(args_ptr: *const i64, entries: i64) -> i64
         let key = read(i * 2);
         let value = read(i * 2 + 1);
         if let Err(error) = key.check_shape("map key") {
+            // Drain any remaining taken handles so the caller clearing its
+            // taken registers does not leak their Arc<Val>s.
+            for rest in (i + 1)..count {
+                let _ = read(rest * 2);
+                let _ = read(rest * 2 + 1);
+            }
+            let vm_ptr = get_jit_vm_ptr();
+            if !vm_ptr.is_null() {
+                let vm = unsafe { &mut *vm_ptr };
+                return vm_runtime_error_to_halt(vm, VmError::runtime(error));
+            }
             return new_owned_val(Val::err(Val::from(error)));
         }
         map.insert(key, value);
@@ -4064,6 +4142,9 @@ unsafe fn hot_jit_run_fused_pipeline_body(plan: i64, args_ptr: *const i64, args_
 /// JIT helper: the `Int` in the OwnedVal handle `raw`, which it releases. A fused
 /// `length` hands its count back this way to a register that holds it raw.
 unsafe extern "C" fn hot_jit_take_owned_int(raw: i64) -> i64 {
+    if raw == 0 {
+        return 0;
+    }
     let value = unsafe { Arc::from_raw(raw as *const Val) };
     match *value {
         Val::Int(n) => n,
@@ -4304,7 +4385,10 @@ unsafe extern "C" fn hot_jit_extract_inner_val(src_ptr: i64) -> i64 {
 
 /// JIT helper: wrap a value in Result.Ok if it isn't already a Result.
 /// If the value is a lazy thunk, evaluates it first with result-checking suppressed.
-unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
+unsafe fn hot_jit_ensure_result_body(val_ptr: i64) -> i64 {
+    if val_ptr == 0 {
+        return new_owned_val(Val::Null);
+    }
     let val = unsafe { &*(val_ptr as *const Val) };
 
     // A lazy value is forced as the interpreter forces it; a halt while
@@ -4675,7 +4759,7 @@ unsafe extern "C" fn hot_jit_str_starts_with(str_ptr: i64, prefix_ptr: i64) -> i
 /// `obj_ptr` - OwnedVal pointer to the object
 /// `key_ptr` - OwnedVal pointer to the key (Str for maps, Int for vecs)
 /// Returns OwnedVal handle to the result.
-unsafe extern "C" fn hot_jit_dynamic_dot_access(obj_ptr: i64, key_ptr: i64) -> i64 {
+unsafe fn hot_jit_dynamic_dot_access_body(obj_ptr: i64, key_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str(
@@ -4697,7 +4781,7 @@ unsafe extern "C" fn hot_jit_dynamic_dot_access(obj_ptr: i64, key_ptr: i64) -> i
 /// `key_ptr` - OwnedVal pointer to the key
 /// `val_ptr` - OwnedVal pointer to the value
 /// Returns OwnedVal handle to the modified object.
-unsafe extern "C" fn hot_jit_dynamic_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -> i64 {
+unsafe fn hot_jit_dynamic_dot_set_body(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str(
@@ -4720,10 +4804,10 @@ unsafe extern "C" fn hot_jit_dynamic_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr
 /// `key_ptr` - OwnedVal pointer to the key (Val::Str)
 /// `val_ptr` - OwnedVal pointer to the value
 /// Returns OwnedVal handle to the modified object.
-unsafe extern "C" fn hot_jit_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -> i64 {
+unsafe fn hot_jit_dot_set_body(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
-        return obj_ptr;
+        return unsafe { hot_jit_clone_owned_val(obj_ptr) };
     }
     let vm = unsafe { &mut *vm_ptr };
     let mut obj_val = unsafe { &*(obj_ptr as *const Val) }.clone();
@@ -6023,13 +6107,15 @@ unsafe fn decode_helper_val(kind: i64, raw: i64) -> Val {
         HELPER_VAL_KIND_BOOL => Val::Bool(raw != 0),
         HELPER_VAL_KIND_DEC => Val::Dec(unsafe { *(raw as *const D256) }),
         HELPER_VAL_KIND_NULL => Val::Null,
-        HELPER_VAL_KIND_OWNED => {
+        HELPER_VAL_KIND_OWNED if raw != 0 => {
             let ptr = raw as *const Val;
             unsafe { Arc::increment_strong_count(ptr) };
             let arc = unsafe { Arc::from_raw(ptr) };
             (*arc).clone()
         }
+        HELPER_VAL_KIND_OWNED => Val::Null,
         HELPER_VAL_KIND_OWNED_TAKE => unsafe { take_owned_val(raw) },
+        HELPER_VAL_KIND_TYPE_TOKEN => type_token_name(raw).map_or(Val::Null, Val::from),
         _ => Val::Null,
     }
 }
@@ -6040,87 +6126,38 @@ fn helper_value_kind(kind: RawKind) -> i64 {
         RawKind::Bool => HELPER_VAL_KIND_BOOL,
         RawKind::Dec => HELPER_VAL_KIND_DEC,
         RawKind::Null => HELPER_VAL_KIND_NULL,
-        RawKind::OwnedVal | RawKind::TypeTag | RawKind::StringConst => HELPER_VAL_KIND_OWNED,
+        RawKind::OwnedVal => HELPER_VAL_KIND_OWNED,
+        RawKind::TypeTag | RawKind::StringConst => HELPER_VAL_KIND_TYPE_TOKEN,
     }
 }
 
 /// Normalize a register's kind+value for passing to trampolines.
 ///
-/// `Int | Bool | Dec | Null | OwnedVal` pass through unchanged — the trampoline
-/// reads them directly from the args buffer.
-///
-/// `TypeTag | StringConst` registers are *not* handled here because the token
-/// → original-string mapping needs the source `instructions` slice (see
-/// `materialize_string_const_for_trampoline`); the caller must materialize
-/// those into `OwnedVal` *before* calling this helper. Otherwise we'd silently
-/// pass `Val::Null` for a type reference, which previously broke
-/// `is-type(value, Null)` (and therefore JIT-compiled `is-null`) by giving
-/// the runtime `is_type` a non-string second arg, returning Err and ultimately
-/// `false` from `is-null` for *every* value.
+/// Every `RawKind` (including `TypeTag` and `StringConst`, which encode as
+/// `HELPER_VAL_KIND_TYPE_TOKEN` and are decoded from their runtime token in
+/// [`decode_helper_val`]) passes through directly.
 fn normalize_for_trampoline(
     _builder: &mut FunctionBuilder<'_>,
     kind: RawKind,
     raw: cranelift_codegen::ir::Value,
 ) -> (RawKind, cranelift_codegen::ir::Value) {
-    debug_assert!(
-        !matches!(kind, RawKind::TypeTag | RawKind::StringConst),
-        "TypeTag/StringConst args must be materialized via \
-         materialize_string_const_for_trampoline before normalize_for_trampoline; \
-         see emit_vm_callback for the canonical pattern"
-    );
     (kind, raw)
-}
-
-/// Materialize a StringConst type token to its OwnedVal string representation.
-/// Used when we need to pass the actual type name string to a trampoline.
-fn materialize_string_const_for_trampoline(
-    program: &BytecodeProgram,
-    instructions: &[Instruction],
-    reg: u32,
-    builder: &mut FunctionBuilder<'_>,
-) -> cranelift_codegen::ir::Value {
-    for inst in instructions.iter().rev() {
-        if let Instruction::LoadConst { dest, constant } = inst
-            && *dest == reg
-            && let Some(s) = match program.constants.get(*constant as usize) {
-                Some(Constant::Val(Val::Str(s))) => Some(s.as_ref()),
-                Some(Constant::StringRef(s)) => Some(s.as_ref()),
-                Some(Constant::FunctionRef(s)) => Some(s.as_ref()),
-                _ => None,
-            }
-        {
-            let val = baked_owned_val(Val::Str(s.to_string().into()));
-            return builder.ins().iconst(types::I64, val);
-        }
-    }
-    let null_val = baked_owned_val(Val::Null);
-    builder.ins().iconst(types::I64, null_val)
 }
 
 /// Resolve a register's kind+value for passing to a VM trampoline.
 ///
-/// Wraps `normalize_for_trampoline` with a pre-step that promotes the
-/// only kinds it can't faithfully serialize — `StringConst` and `TypeTag` —
-/// into a freshly materialized `OwnedVal(Val::Str(<original-string>))` by
-/// scanning `instructions` for the LoadConst that produced this register.
-///
-/// Without this step, a `LoadConst` of `"::hot::type/Null"` (which
-/// `encode_special_string_const` collapses to a 1-word token) would round-trip
-/// through the trampoline as `Val::Null`, so any JIT-compiled function that
-/// passes a primitive type reference (e.g. the body of `is-null`, which calls
-/// `is-type(value, Null)`) silently called the runtime with the wrong arg.
+/// `TypeTag` and `StringConst` carry a runtime type token (`TYPE_TOKEN_*`) and
+/// are tagged with `HELPER_VAL_KIND_TYPE_TOKEN` by [`helper_value_kind`], so
+/// [`decode_helper_val`] reconstructs the exact type-path string from the
+/// register's live value even across branches, moves, and register reuse.
 fn resolve_trampoline_arg(
-    program: &BytecodeProgram,
-    instructions: &[Instruction],
-    reg: u32,
+    _program: &BytecodeProgram,
+    _instructions: &[Instruction],
+    _reg: u32,
     kind: RawKind,
     raw: cranelift_codegen::ir::Value,
     builder: &mut FunctionBuilder<'_>,
 ) -> (RawKind, cranelift_codegen::ir::Value) {
-    if matches!(kind, RawKind::TypeTag | RawKind::StringConst) {
-        let owned = materialize_string_const_for_trampoline(program, instructions, reg, builder);
-        return (RawKind::OwnedVal, owned);
-    }
     normalize_for_trampoline(builder, kind, raw)
 }
 
@@ -8788,25 +8825,7 @@ impl<'a> EmitCtx<'a> {
                     }
                 } else {
                     let (val_owned, val_temp) = self.owned_operand(builder, *value)?;
-                    let mut type_temp = None;
-                    let type_owned = if matches!(type_kind, RawKind::OwnedVal) {
-                        self.reg_value(builder, *type_path)?
-                    } else if matches!(type_kind, RawKind::StringConst | RawKind::TypeTag) {
-                        // Baked compile-time constant; alive for the lifetime
-                        // of the compiled code, no per-call release needed.
-                        materialize_string_const_for_trampoline(
-                            self.program,
-                            instructions,
-                            *type_path,
-                            builder,
-                        )
-                    } else {
-                        let type_raw = self.reg_value(builder, *type_path)?;
-                        let promoted =
-                            promote_to_owned(builder, &self.helper_refs, type_kind, type_raw)?;
-                        type_temp = Some(promoted);
-                        promoted
-                    };
+                    let (type_owned, type_temp) = self.owned_operand(builder, *type_path)?;
                     let call = builder
                         .ins()
                         .call(self.helper_refs.is_type_check, &[val_owned, type_owned]);
@@ -8824,34 +8843,15 @@ impl<'a> EmitCtx<'a> {
             } => {
                 let string_kind = self.register_kind(*string)?;
                 let suffix_kind = self.register_kind(*suffix)?;
-                if string_kind == RawKind::TypeTag && suffix_kind == RawKind::StringConst {
-                    let raw = builder.ins().iconst(types::I64, 0);
-                    self.define_register(builder, *dest, RawKind::Bool, raw)?;
-                } else if string_kind == RawKind::OwnedVal || suffix_kind == RawKind::OwnedVal {
-                    let to_owned =
-                        |b: &mut FunctionBuilder<'_>,
-                         kind: RawKind,
-                         raw: cranelift_codegen::ir::Value,
-                         refs: &JitHelperRefs|
-                         -> Result<cranelift_codegen::ir::Value, String> {
-                            match kind {
-                                RawKind::OwnedVal => Ok(raw),
-                                RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null => {
-                                    promote_to_owned(b, refs, kind, raw)
-                                }
-                                RawKind::TypeTag | RawKind::StringConst => Err(format!(
-                                    "JIT StrEndsWith cannot promote {:?} to OwnedVal",
-                                    kind
-                                )),
-                            }
-                        };
-                    let str_raw = self.reg_value(builder, *string)?;
-                    let str_owned = to_owned(builder, string_kind, str_raw, &self.helper_refs)?;
-                    let str_temp = (string_kind != RawKind::OwnedVal).then_some(str_owned);
-                    let suffix_raw = self.reg_value(builder, *suffix)?;
-                    let suffix_owned =
-                        to_owned(builder, suffix_kind, suffix_raw, &self.helper_refs)?;
-                    let suffix_temp = (suffix_kind != RawKind::OwnedVal).then_some(suffix_owned);
+                if matches!(
+                    string_kind,
+                    RawKind::OwnedVal | RawKind::TypeTag | RawKind::StringConst
+                ) || matches!(
+                    suffix_kind,
+                    RawKind::OwnedVal | RawKind::TypeTag | RawKind::StringConst
+                ) {
+                    let (str_owned, str_temp) = self.owned_operand(builder, *string)?;
+                    let (suffix_owned, suffix_temp) = self.owned_operand(builder, *suffix)?;
                     let call = builder
                         .ins()
                         .call(self.helper_refs.str_ends_with, &[str_owned, suffix_owned]);
@@ -9044,8 +9044,10 @@ impl<'a> EmitCtx<'a> {
                 for reg in taken {
                     self.clear_register(builder, reg)?;
                 }
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::CallLibBuiltin {
@@ -9096,8 +9098,8 @@ impl<'a> EmitCtx<'a> {
                 if give_args {
                     self.clear_register(builder, *args)?;
                 }
-                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[fn_temp]);
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 self.emit_halt_return(builder, halt_block);
@@ -9447,8 +9449,8 @@ impl<'a> EmitCtx<'a> {
                     &[fn_ptr, args_buf, count_val, mask_val],
                 );
                 let result = builder.inst_results(call)[0];
-                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[fn_temp]);
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 self.emit_halt_return(builder, halt_block);
@@ -9461,33 +9463,15 @@ impl<'a> EmitCtx<'a> {
             } => {
                 let string_kind = self.register_kind(*string)?;
                 let prefix_kind = self.register_kind(*prefix)?;
-                if string_kind == RawKind::TypeTag && prefix_kind == RawKind::StringConst {
-                    let raw = builder.ins().iconst(types::I64, 0);
-                    self.define_register(builder, *dest, RawKind::Bool, raw)?;
-                } else if string_kind == RawKind::OwnedVal || prefix_kind == RawKind::OwnedVal {
-                    let to_owned =
-                        |b: &mut FunctionBuilder<'_>,
-                         kind: RawKind,
-                         raw: cranelift_codegen::ir::Value,
-                         refs: &JitHelperRefs|
-                         -> Result<cranelift_codegen::ir::Value, String> {
-                            match kind {
-                                RawKind::OwnedVal => Ok(raw),
-                                RawKind::Int | RawKind::Bool | RawKind::Dec | RawKind::Null => {
-                                    promote_to_owned(b, refs, kind, raw)
-                                }
-                                RawKind::TypeTag | RawKind::StringConst => Err(format!(
-                                    "JIT StrStartsWith cannot promote {:?} to OwnedVal",
-                                    kind
-                                )),
-                            }
-                        };
-                    let str_raw = self.reg_value(builder, *string)?;
-                    let prefix_raw = self.reg_value(builder, *prefix)?;
-                    let str_ptr = to_owned(builder, string_kind, str_raw, &self.helper_refs)?;
-                    let str_temp = (string_kind != RawKind::OwnedVal).then_some(str_ptr);
-                    let prefix_ptr = to_owned(builder, prefix_kind, prefix_raw, &self.helper_refs)?;
-                    let prefix_temp = (prefix_kind != RawKind::OwnedVal).then_some(prefix_ptr);
+                if matches!(
+                    string_kind,
+                    RawKind::OwnedVal | RawKind::TypeTag | RawKind::StringConst
+                ) || matches!(
+                    prefix_kind,
+                    RawKind::OwnedVal | RawKind::TypeTag | RawKind::StringConst
+                ) {
+                    let (str_ptr, str_temp) = self.owned_operand(builder, *string)?;
+                    let (prefix_ptr, prefix_temp) = self.owned_operand(builder, *prefix)?;
                     let call = builder
                         .ins()
                         .call(self.helper_refs.str_starts_with, &[str_ptr, prefix_ptr]);
@@ -9515,8 +9499,8 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dynamic_dot_access, &[obj_ptr, prop_ptr]);
                 let result = builder.inst_results(call)[0];
-                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[obj_temp, prop_temp]);
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 self.emit_halt_return(builder, halt_block);
@@ -10574,12 +10558,8 @@ fn build_supported_body(
                 }
                 if ctx.call_scope.traces_flows() && flow.flow_type != FlowType::Serial {
                     let (kind, raw) = match ctx.register_kinds[ctx.remap_reg(*dest)?] {
-                        Some(kind) if !matches!(kind, RawKind::TypeTag | RawKind::StringConst) => {
-                            (helper_value_kind(kind), ctx.reg_value(builder, *dest)?)
-                        }
-                        // A type token's text isn't at hand here: it traces
-                        // as null.
-                        _ => (HELPER_VAL_KIND_NULL, builder.ins().iconst(types::I64, 0)),
+                        Some(kind) => (helper_value_kind(kind), ctx.reg_value(builder, *dest)?),
+                        None => (HELPER_VAL_KIND_NULL, builder.ins().iconst(types::I64, 0)),
                     };
                     let kind = builder.ins().iconst(types::I64, kind);
                     builder.ins().call(ctx.helper_refs.flow_end, &[kind, raw]);
@@ -13165,12 +13145,7 @@ fn compile_thunk_inline(
                     ),
                     RawKind::TypeTag | RawKind::StringConst => (
                         RawKind::OwnedVal,
-                        materialize_string_const_for_trampoline(
-                            program,
-                            instructions,
-                            *value,
-                            builder,
-                        ),
+                        promote_to_owned(builder, helper_refs, kind, val)?,
                     ),
                     _ => (kind, val),
                 };

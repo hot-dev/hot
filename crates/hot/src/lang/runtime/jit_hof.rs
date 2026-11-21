@@ -2081,34 +2081,19 @@ fn writes_register(ins: &Instruction, reg: RegisterId) -> bool {
         if *dest == reg)
 }
 
-/// Does this instruction read `reg` as an operand? Conservative best-effort over
-/// the instruction forms relevant to pipeline regions.
+/// Does this instruction read `reg` as an operand? Delegates to the exhaustive
+/// register-operand table in `moves::operands` plus jump conditions so newly
+/// added instructions are never silently missed.
 fn reads_register(ins: &Instruction, reg: RegisterId) -> bool {
-    match ins {
-        Instruction::Move { src, .. } => *src == reg,
-        Instruction::Return { value } => *value == reg,
-        Instruction::Add { left, right, .. }
-        | Instruction::Sub { left, right, .. }
-        | Instruction::Mul { left, right, .. }
-        | Instruction::Eq { left, right, .. }
-        | Instruction::Gt { left, right, .. }
-        | Instruction::Lt { left, right, .. } => *left == reg || *right == reg,
-        Instruction::Call {
-            function,
-            args_start,
-            args_count,
-            ..
-        } => *function == reg || (reg >= *args_start && reg < *args_start + *args_count as u32),
-        Instruction::DotAccess { object, .. } => *object == reg,
-        Instruction::TemplateInterpolate {
-            parts_start,
-            parts_count,
-            ..
-        } => reg >= *parts_start && reg < *parts_start + *parts_count as u32,
-        Instruction::JumpIf { condition, .. } | Instruction::JumpIfNot { condition, .. } => {
-            *condition == reg
-        }
-        _ => false,
+    match crate::lang::moves::operands(ins) {
+        Some(ops) => ops.all_reads().any(|r| r == reg),
+        None => match ins {
+            Instruction::JumpIf { condition, .. } | Instruction::JumpIfNot { condition, .. } => {
+                *condition == reg
+            }
+            Instruction::Jump { .. } => false,
+            _ => true,
+        },
     }
 }
 

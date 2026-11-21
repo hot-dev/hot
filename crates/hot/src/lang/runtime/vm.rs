@@ -10493,10 +10493,9 @@ impl VirtualMachine {
         // Code that never looks up a name or runs other Hot code needs
         // neither the call's frame nor its namespace.
         if !compiled.needs_vm_scope() {
-            let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-            let result = compiled.call(args);
-            crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-            return result;
+            let _jit_guard =
+                crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
+            return compiled.call(args);
         }
         let function_info = self
             .program
@@ -10522,9 +10521,11 @@ impl VirtualMachine {
                 .push(LexicalScope::call_frame(param_names, args, is_boundary));
         }
 
-        let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = compiled.call(args);
-        crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        let result = {
+            let _jit_guard =
+                crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
+            compiled.call(args)
+        };
         self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
         result
@@ -10541,10 +10542,9 @@ impl VirtualMachine {
         args: Vec<Val>,
     ) -> Result<Val, String> {
         if !compiled.needs_vm_scope() {
-            let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-            let result = compiled.call_owned(args);
-            crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-            return result;
+            let _jit_guard =
+                crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
+            return compiled.call_owned(args);
         }
         let function_info = self
             .program
@@ -10583,9 +10583,11 @@ impl VirtualMachine {
             ));
         }
 
-        let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = compiled.call_owned(args);
-        crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        let result = {
+            let _jit_guard =
+                crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
+            compiled.call_owned(args)
+        };
         self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
         result
@@ -10731,7 +10733,6 @@ impl VirtualMachine {
         effective_args: Vec<Val>,
     ) -> VmResult<Val> {
         let was_halted = self.has_failed() || self.has_cancelled();
-        let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = if compiled.needs_vm_scope() {
             let saved_namespace = std::mem::replace(
                 &mut self.current_namespace,
@@ -10764,17 +10765,24 @@ impl VirtualMachine {
                     .or_insert_with(|| value.clone());
             }
             self.scope_stack.push(frame);
-            let result =
-                crate::lang::runtime::jit::call_compiled_lambda_owned(compiled, effective_args);
+            // Install JIT_VM_PTR only after all `&mut self` mutations finish
+            // so the raw pointer stays valid under Stacked Borrows, and restore
+            // via RAII guard even on resumed helper panic unwinds.
+            let result = {
+                let _jit_guard =
+                    crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
+                crate::lang::runtime::jit::call_compiled_lambda_owned(compiled, effective_args)
+            };
             self.scope_stack.truncate(saved_scope_depth);
             self.current_namespace = saved_namespace;
             result
         } else {
             // Code that never looks up a name or runs other Hot code needs
             // neither the call's frame nor its namespace.
+            let _jit_guard =
+                crate::lang::runtime::jit::enter_jit_vm_ptr(self as *mut VirtualMachine);
             crate::lang::runtime::jit::call_compiled_lambda_owned(compiled, effective_args)
         };
-        crate::lang::runtime::jit::set_jit_vm_ptr(prev);
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
         self.propagate_jit_halt(was_halted)?;
@@ -11577,19 +11585,25 @@ impl VirtualMachine {
                                         &new_args,
                                         is_boundary,
                                     ));
-                                    let prev =
-                                        super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-                                    let call_result =
-                                        self.jit.try_call_compiled(function_id, &new_args);
-                                    super::jit::set_jit_vm_ptr(prev);
-                                    if let Some(result) = call_result.map_err(|msg| {
-                                        VmError::RuntimeError(
-                                            RuntimeError::new(msg)
-                                                .with_instruction_pointer(self.instruction_pointer),
-                                        )
-                                    })? {
-                                        self.propagate_jit_halt(was_halted)?;
-                                        break result;
+                                    if let Some(compiled) =
+                                        self.jit.compiled_function(function_id, &new_args)
+                                    {
+                                        let call_result = {
+                                            let _jit_guard = super::jit::enter_jit_vm_ptr(
+                                                self as *mut VirtualMachine,
+                                            );
+                                            compiled.try_call(&new_args)
+                                        };
+                                        if let Some(result) = call_result.map_err(|msg| {
+                                            VmError::RuntimeError(
+                                                RuntimeError::new(msg).with_instruction_pointer(
+                                                    self.instruction_pointer,
+                                                ),
+                                            )
+                                        })? {
+                                            self.propagate_jit_halt(was_halted)?;
+                                            break result;
+                                        }
                                     }
                                 }
 

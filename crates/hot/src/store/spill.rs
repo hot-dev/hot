@@ -364,16 +364,21 @@ impl Store for SpillingStore {
         entries: Vec<StoreWrite>,
     ) -> Result<BatchWritten, String> {
         let mut stored = Vec::with_capacity(entries.len());
+        let mut spilled = Vec::new();
         for (_, value, _, _) in &entries {
-            stored.push(self.stored_form(store_name, value).await?);
+            match self.stored_form(store_name, value).await {
+                Ok(form) => {
+                    if form != *value {
+                        spilled.push(form.clone());
+                    }
+                    stored.push(form);
+                }
+                Err(e) => {
+                    self.release(&spilled).await;
+                    return Err(e);
+                }
+            }
         }
-        // Only a value that went to blob storage differs from what was given.
-        let spilled: Vec<JsonValue> = stored
-            .iter()
-            .zip(&entries)
-            .filter(|(stored, (_, value, _, _))| *stored != value)
-            .map(|(stored, _)| stored.clone())
-            .collect();
         let writes = entries
             .into_iter()
             .zip(stored)
@@ -889,5 +894,35 @@ mod tests {
             .await
             .unwrap();
         assert!(without.store.get(NAME, &key).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn put_many_releases_earlier_spilled_refs_when_later_entry_fails_to_spill() {
+        // First entry fits under max-total-bytes and spills; second entry
+        // exceeds max-total-bytes so stored_form errors mid-batch.
+        let fixture = fixture_with(json!({
+            "mode": "service",
+            "rehydrate": {"max-total-bytes": (MAX_INLINE_HARD_LIMIT_BYTES + 2048)},
+        }))
+        .await;
+        let ok_large = large("a");
+        let too_large = json!({ "pad": "b".repeat(MAX_INLINE_HARD_LIMIT_BYTES + 4096) });
+        let err = fixture
+            .store
+            .put_many(
+                NAME,
+                vec![
+                    (json!("k1"), ok_large, None, None),
+                    (json!("k2"), too_large, None, None),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("max-total-bytes"), "{err}");
+        assert_eq!(
+            fixture.active_refs().await,
+            0,
+            "earlier spilled blob ref must be released on mid-batch error"
+        );
     }
 }

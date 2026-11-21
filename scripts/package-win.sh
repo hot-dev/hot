@@ -35,17 +35,17 @@ mkdir -p target/packages
 echo "Building Docker image for Windows packaging..."
 docker build -f docker/package-windows.Dockerfile -t hot-windows-packager .
 
-# Prepare certificate mount if available
-CERT_MOUNT=""
+# Prepare optional certificate mount and signing environment using arrays
+DOCKER_EXTRA_ARGS=()
 if [ -d "certs" ] && [ -f "certs/codesign.pfx" ]; then
     echo "Code signing certificate found, will sign installer."
-    CERT_MOUNT="-v $(pwd)/certs:/workspace/certs"
+    DOCKER_EXTRA_ARGS+=(-v "$(pwd)/certs:/workspace/certs:ro")
 fi
 
-# Pass code signing password if set
-SIGN_ENV=""
-if [ -n "$CODESIGN_PASSWORD" ]; then
-    SIGN_ENV="-e CODESIGN_PASSWORD=$CODESIGN_PASSWORD"
+# Pass code signing password from environment without exposing its value in argv
+if [ -n "${CODESIGN_PASSWORD:-}" ]; then
+    export CODESIGN_PASSWORD
+    DOCKER_EXTRA_ARGS+=(-e CODESIGN_PASSWORD)
 fi
 
 # Run packaging in container
@@ -56,8 +56,7 @@ docker run --rm \
     -v "$(pwd)/resources:/workspace/resources:ro" \
     -v "$(pwd)/hot/pkg/hot-std:/workspace/hot/pkg/hot-std:ro" \
     -v "$(pwd)/Cargo.toml:/workspace/Cargo.toml:ro" \
-    $CERT_MOUNT \
-    $SIGN_ENV \
+    "${DOCKER_EXTRA_ARGS[@]}" \
     hot-windows-packager
 
 # Extract version for success message (from resources/version.txt)

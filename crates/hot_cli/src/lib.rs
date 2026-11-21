@@ -2048,16 +2048,19 @@ fn collect_nested_hot_caches(dir: &Path, depth: usize, targets: &mut Vec<PathBuf
     }
 }
 
-/// Calculate the total size of a directory recursively
+/// Calculate the total size of a directory recursively without following symlinks
 fn dir_size(path: &std::path::Path) -> u64 {
     let mut size = 0;
-    if path.is_dir()
-        && let Ok(entries) = std::fs::read_dir(path)
-    {
+    if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                size += dir_size(&entry_path);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                size += dir_size(&entry.path());
             } else if let Ok(metadata) = entry.metadata() {
                 size += metadata.len();
             }
@@ -2331,5 +2334,17 @@ mod command_output_logging_tests {
         };
         assert!(status_of(&["hot", "db", "migrate", "--status"]));
         assert!(!status_of(&["hot", "db", "migrate"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_ignores_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.bin"), b"12345").unwrap();
+        symlink(dir.path(), dir.path().join("loop")).unwrap();
+
+        assert_eq!(dir_size(dir.path()), 5);
     }
 }

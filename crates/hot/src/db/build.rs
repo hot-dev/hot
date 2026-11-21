@@ -179,6 +179,9 @@ async fn carry_dynamic_schedules_postgres(
     let Some(replaced) = replaced else {
         return Ok(CarriedSchedules::default());
     };
+    if replaced == *build_id {
+        return Ok(CarriedSchedules::default());
+    }
     let rearmed = sqlx::query(concat!(
         "UPDATE schedule SET active = true, deactivated_at = NULL, meta = NULLIF(meta - 'deactivation-reason', '{}'::jsonb) \
          WHERE schedule.build_id = $1 AND NOT schedule.active AND schedule.value IS NOT NULL \
@@ -192,16 +195,38 @@ async fn carry_dynamic_schedules_postgres(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    // Only merge against an *active* matching schedule on the target build.
+    // Any non-spent inactive row was already re-armed above; any remaining
+    // inactive matching row is a spent one-time `@at:` schedule that must not
+    // cancel the replaced build's pending `@at:` schedule.
     let merged = sqlx::query(concat!(
         "UPDATE schedule SET active = false, deactivated_at = NOW(), meta = COALESCE(meta, '{}'::jsonb) || $3 WHERE ",
         pg_carried!(),
-        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = $1 AND ",
+        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = $1 AND o.active AND ",
         pg_same_call!(),
         ")"
     ))
     .bind(build_id)
     .bind(replaced)
     .bind(serde_json::json!({ "deactivation-reason": MERGED_SCHEDULE_REASON }))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    // If the target build holds a spent inactive `@at:` row with the same
+    // (ns, var, cron, value) as an active carried row on `replaced` (e.g. on
+    // rollback), temporarily tag its cron so moving the pending row to `$1`
+    // does not violate `idx_schedule_unique_call`, then swap the spent row
+    // onto `$2` with its original cron and `schedule_log` history intact.
+    let parked = sqlx::query(concat!(
+        "UPDATE schedule SET cron = '@swap:' || schedule.schedule_id::text || ':' || schedule.cron \
+         WHERE schedule.build_id = $1 AND NOT schedule.active AND schedule.value IS NOT NULL \
+         AND schedule.cron LIKE '@at:%' \
+         AND EXISTS (SELECT 1 FROM schedule o WHERE o.active AND o.value IS NOT NULL AND o.build_id = $2 AND ",
+        pg_same_call!(),
+        ")"
+    ))
+    .bind(build_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -214,6 +239,17 @@ async fn carry_dynamic_schedules_postgres(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    if parked > 0 {
+        sqlx::query(
+            "UPDATE schedule SET build_id = $2, \
+             cron = substr(cron, length('@swap:' || schedule_id::text || ':') + 1) \
+             WHERE build_id = $1 AND cron LIKE '@swap:' || schedule_id::text || ':%'",
+        )
+        .bind(build_id)
+        .bind(replaced)
+        .execute(&mut *tx)
+        .await?;
+    }
     Ok(CarriedSchedules {
         carried: moved + rearmed,
         cancelled: merged,
@@ -229,6 +265,9 @@ async fn carry_dynamic_schedules_sqlite(
     let Some(replaced) = replaced else {
         return Ok(CarriedSchedules::default());
     };
+    if replaced == *build_id {
+        return Ok(CarriedSchedules::default());
+    }
     let rearmed = sqlx::query(concat!(
         "UPDATE schedule SET active = 1, deactivated_at = NULL, meta = NULLIF(json_remove(meta, '$.deactivation-reason'), '{}') \
          WHERE schedule.build_id = ?1 AND schedule.active = 0 AND schedule.value IS NOT NULL \
@@ -245,13 +284,26 @@ async fn carry_dynamic_schedules_sqlite(
     let merged = sqlx::query(concat!(
         "UPDATE schedule SET active = 0, deactivated_at = CURRENT_TIMESTAMP, meta = json_set(COALESCE(meta, '{}'), '$.deactivation-reason', ?3) WHERE ",
         sqlite_carried!(),
-        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = ?1 AND ",
+        " AND EXISTS (SELECT 1 FROM schedule o WHERE o.build_id = ?1 AND o.active = 1 AND ",
         sqlite_same_call!(),
         ")"
     ))
     .bind(build_id)
     .bind(replaced)
     .bind(MERGED_SCHEDULE_REASON)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let parked = sqlx::query(concat!(
+        "UPDATE schedule SET cron = '@swap:' || hex(schedule.schedule_id) || ':' || schedule.cron \
+         WHERE schedule.build_id = ?1 AND schedule.active = 0 AND schedule.value IS NOT NULL \
+         AND schedule.cron LIKE '@at:%' \
+         AND EXISTS (SELECT 1 FROM schedule o WHERE o.active = 1 AND o.value IS NOT NULL AND o.build_id = ?2 AND ",
+        sqlite_same_call!(),
+        ")"
+    ))
+    .bind(build_id)
+    .bind(replaced)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -264,6 +316,17 @@ async fn carry_dynamic_schedules_sqlite(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+    if parked > 0 {
+        sqlx::query(
+            "UPDATE schedule SET build_id = ?2, \
+             cron = substr(cron, length('@swap:' || hex(schedule_id) || ':') + 1) \
+             WHERE build_id = ?1 AND cron LIKE '@swap:' || hex(schedule_id) || ':%'",
+        )
+        .bind(build_id)
+        .bind(replaced)
+        .execute(&mut *tx)
+        .await?;
+    }
     Ok(CarriedSchedules {
         carried: moved + rearmed,
         cancelled: merged,
@@ -2293,6 +2356,96 @@ mod tests {
             let moved = get(moved).await;
             assert!(moved.active);
             assert_eq!(moved.build_id, new);
+        }
+    }
+
+    /// Rolling back to a build that holds a spent one-time `@at:` schedule
+    /// must not cancel an active pending `@at:` schedule with the same call
+    /// carried from the replaced build, and must keep the spent row's log intact.
+    #[tokio::test]
+    async fn rollback_with_spent_at_schedule_carries_pending_at_schedule_intact() {
+        use super::super::{Schedule, ScheduleLog};
+        for prepared in [false, true] {
+            let db = test_db().await;
+            let user = Uuid::now_v7();
+            let (_, project) = insert_test_project(&db, &user).await;
+            let target = insert_test_build(&db, &project, &user).await;
+            let replaced = insert_test_build(&db, &project, &user).await;
+            activate(&db, &target, &user, prepared).await;
+
+            let cron = "@at:2030-01-01T00:00:00Z";
+            let args = serde_json::json!(["job-1"]);
+
+            // Spent one-time `@at:` schedule on `target`: already ran & logged, now inactive.
+            let spent_id = Uuid::now_v7();
+            Schedule::insert_schedule(
+                &db,
+                &spent_id,
+                &target,
+                cron,
+                "::app",
+                "once",
+                None,
+                Some(&args),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            ScheduleLog::insert(&db, &spent_id, None, Utc::now(), false)
+                .await
+                .unwrap();
+            Schedule::deactivate_schedule(&db, &spent_id).await.unwrap();
+
+            // Deploy `replaced` and arm a fresh pending `@at:` schedule with identical call.
+            activate(&db, &replaced, &user, prepared).await;
+            let pending_id = Uuid::now_v7();
+            Schedule::insert_schedule(
+                &db,
+                &pending_id,
+                &replaced,
+                cron,
+                "::app",
+                "once",
+                None,
+                Some(&args),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Roll back to `target`: `pending_id` must be carried active onto `target`,
+            // while `spent_id` remains inactive with its history intact.
+            activate(&db, &target, &user, prepared).await;
+
+            let pending = Schedule::get_schedule(&db, &pending_id).await.unwrap();
+            assert!(
+                pending.active,
+                "pending @at: schedule must not be cancelled by a spent row on the target build"
+            );
+            assert_eq!(pending.build_id, target);
+            assert_eq!(pending.cron, cron);
+            assert_eq!(pending.value, Some(args.clone()));
+
+            let spent = Schedule::get_schedule(&db, &spent_id).await.unwrap();
+            assert!(!spent.active, "spent @at: schedule must remain inactive");
+            assert_eq!(spent.build_id, replaced);
+            assert_eq!(
+                spent.cron, cron,
+                "spent row's cron must be restored verbatim"
+            );
+            let log_count = ScheduleLog::get_execution_count(&db, &spent_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                log_count, 1,
+                "spent row's schedule_log entry must stay intact"
+            );
         }
     }
 

@@ -24,34 +24,54 @@ const INSTALL_SCRIPT_URL: &str = "https://get.hot.dev/install.sh";
 /// install in place.
 pub(crate) const ARCHIVE_RECEIPT: &str = "install-receipt.json";
 
-fn release_base_url(target_version: Option<&str>) -> Option<String> {
+/// Validate that an update URL uses HTTPS (allowing plain HTTP only for
+/// loopback addresses used by local test servers).
+fn validate_update_url(raw: &str, name: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("{name} is not a valid URL ({trimmed}): {e}"))?;
+    match parsed.scheme() {
+        "https" if parsed.host_str().is_some() => Ok(trimmed.to_string()),
+        "http" if matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) => {
+            Ok(trimmed.to_string())
+        }
+        _ => Err(format!(
+            "{name} must use https:// (got {trimmed}); plain http:// is only allowed for localhost"
+        )),
+    }
+}
+
+fn release_base_url(target_version: Option<&str>) -> Result<Option<String>, String> {
     if std::env::var("HOT_UPDATE_DISABLED")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
     {
-        return None;
+        return Ok(None);
     }
 
     match std::env::var("HOT_UPDATE_BASE_URL") {
-        Ok(value) if value.trim().is_empty() => None,
-        Ok(value) => Some(value.trim_end_matches('/').to_string()),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => validate_update_url(&value, "HOT_UPDATE_BASE_URL")
+            .map(|url| Some(url.trim_end_matches('/').to_string())),
         // A release's own folder is named by its bare version, as the release
         // workflow uploads it: releases/2.6.11/hot_2.6.11_macos_arm64.pkg.
-        Err(_) => Some(match target_version {
+        Err(_) => Ok(Some(match target_version {
             Some(version) => format!(
                 "https://get.hot.dev/releases/{}",
                 version.trim().trim_start_matches('v')
             ),
             None => DEFAULT_RELEASE_BASE_URL.to_string(),
-        }),
+        })),
     }
 }
 
-fn windows_installer_url() -> String {
-    std::env::var("HOT_UPDATE_INSTALLER_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_WINDOWS_INSTALLER_URL.to_string())
+fn windows_installer_url() -> Result<String, String> {
+    match std::env::var("HOT_UPDATE_INSTALLER_URL") {
+        Ok(value) if !value.trim().is_empty() => {
+            validate_update_url(&value, "HOT_UPDATE_INSTALLER_URL")
+        }
+        _ => Ok(DEFAULT_WINDOWS_INSTALLER_URL.to_string()),
+    }
 }
 
 /// Represents the detected platform and architecture
@@ -284,8 +304,9 @@ pub async fn check_for_updates(target_version: Option<&str>) -> UpdateCheckResul
     }
 
     let release_base_url = match release_base_url(target_version) {
-        Some(url) => url,
-        None => return UpdateCheckResult::Disabled,
+        Ok(Some(url)) => url,
+        Ok(None) => return UpdateCheckResult::Disabled,
+        Err(error) => return UpdateCheckResult::CheckFailed { error },
     };
 
     if let Some(version) = target_version {
@@ -361,6 +382,7 @@ async fn fetch_latest_version(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let user_agent = format!("hot/{}", crate::build_info::VERSION);
     let client = hot::outbound::client_builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .timeout(std::time::Duration::from_secs(10))
         .user_agent(&user_agent)
         .build()?;
@@ -510,7 +532,10 @@ fn windows_update_command(
             powershell_literal(version)
         ));
     }
-    script.push_str(&format!("irm {} | iex", powershell_literal(installer_url)));
+    script.push_str(&format!(
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm {} | iex",
+        powershell_literal(installer_url)
+    ));
     format!(
         "Start-Process powershell -ArgumentList @('-ExecutionPolicy','Bypass','-Command',{}){}",
         powershell_literal(&script),
@@ -593,12 +618,9 @@ pub async fn run_installer(
             std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
             windows_user_uninstaller().as_deref(),
         );
-        let ps_command = windows_update_command(
-            user_install,
-            install_dir,
-            target_version,
-            &windows_installer_url(),
-        );
+        let installer_url = windows_installer_url()?;
+        let ps_command =
+            windows_update_command(user_install, install_dir, target_version, &installer_url);
         Command::new("powershell")
             .args(["-ExecutionPolicy", "Bypass", "-Command", &ps_command])
             .spawn()?;
@@ -607,6 +629,7 @@ pub async fn run_installer(
         std::process::exit(0);
     }
 
+    validate_update_url(&platform.download_url, "Download URL")?;
     let client = download_client()?;
 
     if let InstallMethod::Archive { prefix } = &install_method {
@@ -620,14 +643,7 @@ pub async fn run_installer(
 
     let expected = fetch_sha256(&client, &platform.download_url).await?;
     download(&client, &platform.download_url, &temp_file).await?;
-    match expected {
-        Some(expected) => check_sha256(&platform.download_url, &temp_file, &expected)?,
-        // Releases before checksums were published still install
-        None => eprintln!(
-            "Warning: this release publishes no checksum for {}; not verified.",
-            platform.package_name
-        ),
-    }
+    check_sha256(&platform.download_url, &temp_file, &expected)?;
 
     // Run the appropriate installer
     println!("Installing (requires sudo)...");
@@ -671,6 +687,7 @@ pub async fn run_installer(
 fn download_client() -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
     let user_agent = format!("hot/{}", crate::build_info::VERSION);
     Ok(hot::outbound::client_builder()
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
         .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large downloads
         .user_agent(&user_agent)
         .build()?)
@@ -713,22 +730,30 @@ async fn download(
     Ok(())
 }
 
-/// The SHA-256 the release publishes for `url`, as `<url>.sha256`, or `None`
-/// when it publishes none (releases before user installs).
+/// The SHA-256 the release publishes for `url`, as `<url>.sha256`.
+/// Fails closed if the checksum cannot be downloaded or is malformed.
 async fn fetch_sha256(
     client: &reqwest::Client,
     url: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let response = client.get(format!("{url}.sha256")).send().await?;
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let checksum_url = format!("{url}.sha256");
+    let response = client.get(&checksum_url).send().await?;
     if !response.status().is_success() {
-        return Ok(None);
+        return Err(format!(
+            "Failed to download checksum from {checksum_url}: server returned {}",
+            response.status()
+        )
+        .into());
     }
     let sums = response.text().await?;
     let expected = sums
         .split_whitespace()
         .next()
-        .ok_or_else(|| format!("The checksum file at {url}.sha256 is empty"))?;
-    Ok(Some(expected.to_ascii_lowercase()))
+        .ok_or_else(|| format!("The checksum file at {checksum_url} is empty"))?;
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("Invalid SHA-256 checksum in {checksum_url}").into());
+    }
+    Ok(expected.to_ascii_lowercase())
 }
 
 /// Check `file`, downloaded from `url`, against its published SHA-256
@@ -786,17 +811,7 @@ async fn install_archive(
         Err(e) => return Err(e.into()),
     };
 
-    // Only releases whose hot runs from any folder publish the archive's
-    // checksum, so an older one can't replace this install.
-    let Some(expected) = fetch_sha256(client, &platform.download_url).await? else {
-        return Err(format!(
-            "This Hot release predates user installs, so it can't run from {}. \
-             Install it for the whole machine instead:\n  \
-             curl -fsSL {INSTALL_SCRIPT_URL} | sh -s -- --system",
-            prefix.display()
-        )
-        .into());
-    };
+    let expected = fetch_sha256(client, &platform.download_url).await?;
     let archive = stage.path().join(&platform.package_name);
     download(client, &platform.download_url, &archive).await?;
     check_sha256(&platform.download_url, &archive, &expected)?;
@@ -888,8 +903,18 @@ pub fn refresh_global_ai_skills(binary_before_update: Option<&Path>, version: &s
     }
     let manual = "Run 'hot ai update --global' to refresh your global Hot skills.";
     println!();
-    // Under sudo the files would end up owned by root.
-    if std::env::var_os("SUDO_USER").is_some() {
+    // Under sudo or as root, the files would end up owned by root.
+    #[cfg(unix)]
+    let running_as_root = {
+        // SAFETY: POSIX `geteuid()` takes no pointers and always succeeds.
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() == 0 }
+    };
+    #[cfg(not(unix))]
+    let running_as_root = false;
+    if std::env::var_os("SUDO_USER").is_some() || running_as_root {
         println!("{manual}");
         return;
     }
@@ -1133,5 +1158,43 @@ mod tests {
             "{}",
             info.download_url
         );
+    }
+
+    #[test]
+    fn validate_update_url_enforces_https_except_localhost() {
+        assert!(validate_update_url("https://get.hot.dev/releases/latest", "TEST").is_ok());
+        assert!(validate_update_url("http://127.0.0.1:8080/releases", "TEST").is_ok());
+        assert!(validate_update_url("http://localhost:9000/releases", "TEST").is_ok());
+        assert!(validate_update_url("http://[::1]:8080/releases", "TEST").is_ok());
+
+        assert!(validate_update_url("http://get.hot.dev/releases/latest", "TEST").is_err());
+        assert!(validate_update_url("http://localhost.evil.com/releases", "TEST").is_err());
+        assert!(validate_update_url("http://127.0.0.1.evil.com/releases", "TEST").is_err());
+        assert!(validate_update_url("file:///etc/passwd", "TEST").is_err());
+        assert!(validate_update_url("not-a-url", "TEST").is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_sha256_fails_closed_on_missing_checksum() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/hot_linux_x86_64.deb");
+        let err = fetch_sha256(&client, &url).await.unwrap_err();
+        assert!(err.to_string().contains("404"), "{err}");
+        server.await.unwrap();
     }
 }

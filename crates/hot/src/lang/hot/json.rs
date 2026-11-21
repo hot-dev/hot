@@ -176,6 +176,47 @@ fn build_json_value(v: &Val, depth: usize) -> Result<serde_json::Value, Val> {
 /// hands every number to a visitor as a map of this one key to its digits.
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
+/// Check whether `s` is syntactically a JSON number (RFC 8259).
+fn is_valid_json_number(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if bytes.get(i) == Some(&b'-') {
+        i += 1;
+    }
+    match bytes.get(i) {
+        Some(b'0') => i += 1,
+        Some(b'1'..=b'9') => {
+            i += 1;
+            while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+                i += 1;
+            }
+        }
+        _ => return false,
+    }
+    if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            return false;
+        }
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            i += 1;
+        }
+    }
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(bytes.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        if !matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            return false;
+        }
+        while matches!(bytes.get(i), Some(b'0'..=b'9')) {
+            i += 1;
+        }
+    }
+    i == bytes.len()
+}
+
 /// A Val read from its digits, as `serde_json::Value` numbers were read: an
 /// Int when they fit one, else a Dec, keeping every digit, else the digits.
 fn number_val(digits: &str) -> Val {
@@ -290,16 +331,29 @@ impl<'de> serde::de::Visitor<'de> for JsonIn {
         let mut entries =
             ValIndexMap::with_capacity_and_hasher(map.size_hint().unwrap_or(0), Default::default());
         while let Some(key) = map.next_key_seed(JsonKey)? {
-            if entries.is_empty() && matches!(&key, Val::Str(k) if &**k == NUMBER_TOKEN) {
-                let digits: String = map.next_value()?;
-                return Ok(number_val(&digits));
-            }
             let value = map.next_value_seed(JsonIn {
                 depth: self.depth + 1,
             })?;
+            if entries.is_empty()
+                && matches!(&key, Val::Str(k) if &**k == NUMBER_TOKEN)
+                && let Val::Str(ref digits) = value
+                && is_valid_json_number(digits)
+            {
+                if let Some(next_key) = map.next_key_seed(JsonKey)? {
+                    entries.insert(key, value);
+                    let next_value = map.next_value_seed(JsonIn {
+                        depth: self.depth + 1,
+                    })?;
+                    entries.insert(next_key, next_value);
+                    continue;
+                }
+                return Ok(number_val(digits));
+            }
             entries.insert(key, value);
         }
-        if let Some(Val::Str(type_name)) = entries.get(&Val::from("$type")) {
+        if entries.len() == 2
+            && let Some(Val::Str(type_name)) = entries.get(&Val::from("$type"))
+        {
             if &**type_name == HOT_BYTE_TYPE
                 && let Some(byte) = entries.get(&Val::from("$val")).and_then(val_to_byte)
             {
@@ -450,5 +504,23 @@ mod tests {
             .ok()
             .unwrap();
         assert_eq!(bytes, Val::bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn from_json_does_not_hijack_non_number_token_or_drop_extra_type_keys() {
+        let non_num = parse(r#"{"$serde_json::private::Number": "hello"}"#);
+        assert!(matches!(non_num, Val::Map(_)), "got {non_num:?}");
+        assert_eq!(
+            non_num.get("$serde_json::private::Number"),
+            Some(Val::from("hello"))
+        );
+
+        let extra_num = parse(r#"{"$serde_json::private::Number": "42", "other": 1}"#);
+        assert!(matches!(extra_num, Val::Map(_)), "got {extra_num:?}");
+        assert_eq!(extra_num.get("other"), Some(Val::Int(1)));
+
+        let extra_type = parse(r#"{"$type":"::hot::type/Byte","$val":42,"extra":"keep"}"#);
+        assert!(matches!(extra_type, Val::Map(_)), "got {extra_type:?}");
+        assert_eq!(extra_type.get("extra"), Some(Val::from("keep")));
     }
 }

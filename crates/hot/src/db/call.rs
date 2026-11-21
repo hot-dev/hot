@@ -340,6 +340,9 @@ impl Call {
         days: i32,
         batch_size: i64,
     ) -> Result<i64, DatabaseError> {
+        if days <= 0 {
+            return Ok(0);
+        }
         let days_str = days.to_string();
         let mut total_deleted: i64 = 0;
         let mut last_logged: i64 = 0;
@@ -415,7 +418,7 @@ impl Call {
         days: i32,
         batch_size: i64,
     ) -> Result<i64, DatabaseError> {
-        if env_ids.is_empty() {
+        if days <= 0 || env_ids.is_empty() {
             return Ok(0);
         }
 
@@ -485,12 +488,20 @@ impl Call {
         days: i32,
         batch_size: i64,
     ) -> Result<CallRetention, DatabaseError> {
+        if days <= 0 {
+            return Ok(CallRetention {
+                calls: 0,
+                blob_refs: 0,
+            });
+        }
         let retention = db.with_scope(super::DatabaseScope::Maintenance {
             operation: super::MaintenanceOperation::Retention,
             org_id: None,
         });
-        let calls = Self::delete_older_than(&retention, days, batch_size).await?;
+        // Capture the cutoff *before* deleting calls so a call inserted after
+        // deletion starts never loses its blob ref while the call row survives.
         let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        let calls = Self::delete_older_than(&retention, days, batch_size).await?;
         let org_ids: Vec<Uuid> = match &retention {
             DatabasePool::Postgres(pool) => {
                 sqlx::query_scalar("SELECT org_id FROM hot.org")
@@ -947,6 +958,40 @@ mod tests {
         assert!(ref_is_active(&db, kept_ref).await);
         assert_eq!(calls_in_run(&db, data.run_id).await, 1);
         Call::get_call(&db, &kept_call).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_retention_guards_zero_and_negative_days() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let (call_id, blob_ref) =
+            insert_traced_call(&db, data.org_id, data.env_id, data.run_id).await;
+
+        for days in [0, -1] {
+            assert_eq!(
+                Call::delete_older_than(&db, days, 10).await.unwrap(),
+                0,
+                "delete_older_than must no-op for days={days}"
+            );
+            assert_eq!(
+                Call::delete_older_than_for_org(&db, &[data.env_id], days, 10)
+                    .await
+                    .unwrap(),
+                0,
+                "delete_older_than_for_org must no-op for days={days}"
+            );
+            assert_eq!(
+                Call::apply_local_retention(&db, days, 10).await.unwrap(),
+                CallRetention {
+                    calls: 0,
+                    blob_refs: 0
+                },
+                "apply_local_retention must no-op for days={days}"
+            );
+        }
+
+        assert!(ref_is_active(&db, blob_ref).await);
+        Call::get_call(&db, &call_id).await.unwrap();
     }
 
     /// A purge that finished, having removed `calls` and `blob_refs`.

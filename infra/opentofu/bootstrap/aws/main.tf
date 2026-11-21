@@ -261,6 +261,7 @@ resource "aws_iam_role_policy" "plan_no_data" {
     { Effect = "Deny", Resource = "*", Action = [
       "logs:GetLogEvents", "logs:GetLogRecord", "logs:FilterLogEvents", "logs:StartQuery", "logs:GetQueryResults",
       "logs:StartLiveTail", "logs:Unmask", "ssm:GetCommandInvocation", "ssm:ListCommandInvocations",
+      "ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "ssm:GetParameterHistory",
       "rds:DownloadDBLogFilePortion", "rds:DownloadCompleteDBLogFile", "ec2:GetConsoleOutput", "ec2:GetConsoleScreenshot",
     ] },
   ] })

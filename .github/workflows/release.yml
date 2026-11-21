@@ -59,24 +59,31 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         fetch-depth: 0
+        persist-credentials: false
 
     - name: Validate release identity
       id: version
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REF_VALUE: ${{ github.ref }}
+        GITHUB_REF_TYPE_VALUE: ${{ github.ref_type }}
+        GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
+        INPUT_BETA_RELEASE: ${{ github.event.inputs.beta_release }}
+        INPUT_RELEASE_SCOPE: ${{ github.event.inputs.release_scope }}
+        INPUT_PUBLISH_TO_CDN: ${{ github.event.inputs.publish_to_cdn }}
       run: |
         VERSION=$(tr -d '[:space:]' < resources/version.txt)
         TAG_NAME="v${VERSION}"
         IS_BETA=false
         IS_PACKAGE_ONLY=false
         PUBLISH_PACKAGE_CDN=false
-        if [[ "${{ github.ref }}" == "refs/heads/beta" || "${{ github.event.inputs.beta_release }}" == "true" ]]; then
+        if [[ "$GITHUB_REF_VALUE" == "refs/heads/beta" || "$INPUT_BETA_RELEASE" == "true" ]]; then
           IS_BETA=true
         fi
-        if [[ "${{ github.ref }}" == "refs/heads/pkg-release" || "${{ github.event.inputs.release_scope }}" == "packages_only" ]]; then
+        if [[ "$GITHUB_REF_VALUE" == "refs/heads/pkg-release" || "$INPUT_RELEASE_SCOPE" == "packages_only" ]]; then
           IS_PACKAGE_ONLY=true
         fi
-        if [[ "$IS_BETA" == "true" || "$IS_PACKAGE_ONLY" == "true" || "${{ github.event.inputs.publish_to_cdn }}" == "true" || "${{ github.ref_type }}" == "tag" ]]; then
+        if [[ "$IS_BETA" == "true" || "$IS_PACKAGE_ONLY" == "true" || "$INPUT_PUBLISH_TO_CDN" == "true" || "$GITHUB_REF_TYPE_VALUE" == "tag" ]]; then
           PUBLISH_PACKAGE_CDN=true
         fi
 
@@ -85,8 +92,8 @@ jobs:
           exit 1
         fi
 
-        if [[ "$IS_PACKAGE_ONLY" != "true" && "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" != "$TAG_NAME" ]]; then
-          echo "::error::Tag ${{ github.ref_name }} does not match resources/version.txt (${TAG_NAME})"
+        if [[ "$IS_PACKAGE_ONLY" != "true" && "$GITHUB_REF_TYPE_VALUE" == "tag" && "$GITHUB_REF_NAME_VALUE" != "$TAG_NAME" ]]; then
+          echo "::error::Tag ${GITHUB_REF_NAME_VALUE} does not match resources/version.txt (${TAG_NAME})"
           exit 1
         fi
 
@@ -99,7 +106,7 @@ jobs:
           fi
 
           remote_tag_sha=$(git ls-remote --tags origin "refs/tags/${TAG_NAME}" | awk '{print $1}' | head -1)
-          if [[ -n "$remote_tag_sha" && "${{ github.ref_type }}" != "tag" ]]; then
+          if [[ -n "$remote_tag_sha" && "$GITHUB_REF_TYPE_VALUE" != "tag" ]]; then
             echo "::error::Tag ${TAG_NAME} already exists. Release versions are immutable; increment the patch version."
             exit 1
           fi
@@ -171,6 +178,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
@@ -209,6 +218,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
@@ -243,8 +254,10 @@ jobs:
 
     - name: Validate AWS secrets for package CDN upload
       if: ${{ needs.validate-release.outputs.publish_package_cdn == 'true' && vars.PKG_S3_BUCKET != '' }}
+      env:
+        PKG_AWS_ROLE_ARN: ${{ secrets.PKG_AWS_ROLE_ARN }}
       run: |
-        if [ -z "${{ secrets.PKG_AWS_ROLE_ARN }}" ]; then
+        if [ -z "$PKG_AWS_ROLE_ARN" ]; then
           echo "::error::PKG_AWS_ROLE_ARN secret is not configured."
           exit 1
         fi
@@ -276,6 +289,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
@@ -353,6 +368,8 @@ jobs:
 
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -445,15 +462,17 @@ jobs:
 
     - name: Build binary
       shell: bash
+      env:
+        MATRIX_TARGET: ${{ matrix.target }}
       run: |
         # Bundled SQLite 3.51.x can compile MSVC intrinsic paths that crash
         # with STATUS_ILLEGAL_INSTRUCTION on otherwise supported x64 CPUs.
         # Keep the mitigation target-specific; Windows ARM64 and other
         # platforms retain SQLite's normal intrinsic paths.
-        if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+        if [[ "$MATRIX_TARGET" == "x86_64-pc-windows-msvc" ]]; then
           export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
         fi
-        cargo build --release --locked --target ${{ matrix.target }} -j 4
+        cargo build --release --locked --target "$MATRIX_TARGET" -j 4
 
     - name: Smoke test Windows x64 release binary
       if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -504,31 +523,42 @@ jobs:
 
     - name: Prepare binary (Unix)
       if: matrix.platform != 'windows'
+      env:
+        MATRIX_TARGET: ${{ matrix.target }}
+        MATRIX_PLATFORM: ${{ matrix.platform }}
+        MATRIX_ARCH: ${{ matrix.arch }}
       run: |
         mkdir -p artifacts
-        cp target/${{ matrix.target }}/release/hot artifacts/hot-${{ matrix.platform }}-${{ matrix.arch }}
-        chmod +x artifacts/hot-${{ matrix.platform }}-${{ matrix.arch }}
+        cp "target/${MATRIX_TARGET}/release/hot" "artifacts/hot-${MATRIX_PLATFORM}-${MATRIX_ARCH}"
+        chmod +x "artifacts/hot-${MATRIX_PLATFORM}-${MATRIX_ARCH}"
 
     - name: Prepare hotbox binary (Linux only)
       if: matrix.platform == 'linux'
+      env:
+        MATRIX_ARCH: ${{ matrix.arch }}
       run: |
-        HOTBOX_ARCH=${{ matrix.arch }}
+        HOTBOX_ARCH="$MATRIX_ARCH"
         if [ "$HOTBOX_ARCH" = "aarch64" ]; then HOTBOX_ARCH="arm64"; fi
         mkdir -p artifacts
-        if [ "${{ matrix.arch }}" = "x86_64" ]; then
-          cp target/x86_64-unknown-linux-musl/release/hotbox artifacts/hotbox-linux-${HOTBOX_ARCH}
+        if [ "$MATRIX_ARCH" = "x86_64" ]; then
+          cp target/x86_64-unknown-linux-musl/release/hotbox "artifacts/hotbox-linux-${HOTBOX_ARCH}"
         else
-          cp target/hotbox-musl-build/hotbox artifacts/hotbox-linux-${HOTBOX_ARCH}
+          cp target/hotbox-musl-build/hotbox "artifacts/hotbox-linux-${HOTBOX_ARCH}"
           rm -rf target/hotbox-musl-build
         fi
-        chmod +x artifacts/hotbox-linux-${HOTBOX_ARCH}
-        file artifacts/hotbox-linux-${HOTBOX_ARCH}
+        chmod +x "artifacts/hotbox-linux-${HOTBOX_ARCH}"
+        file "artifacts/hotbox-linux-${HOTBOX_ARCH}"
 
     - name: Prepare binary (Windows)
       if: matrix.platform == 'windows'
+      shell: pwsh
+      env:
+        MATRIX_TARGET: ${{ matrix.target }}
+        MATRIX_PLATFORM: ${{ matrix.platform }}
+        MATRIX_ARCH: ${{ matrix.arch }}
       run: |
-        mkdir artifacts
-        copy target\${{ matrix.target }}\release\hot.exe artifacts\hot-${{ matrix.platform }}-${{ matrix.arch }}.exe
+        New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+        Copy-Item "target\$env:MATRIX_TARGET\release\hot.exe" "artifacts\hot-$env:MATRIX_PLATFORM-$env:MATRIX_ARCH.exe"
 
     - name: Upload binary artifact
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -544,6 +574,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Download Linux binaries
       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -581,6 +613,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Download macOS binaries
       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -677,6 +711,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Download macOS binaries
       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -700,8 +736,9 @@ jobs:
         echo "Version: $VERSION"
 
     - name: Create Homebrew tarballs
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        VERSION="${{ steps.version.outputs.version }}"
         mkdir -p packages
 
         # Map our arch names to Homebrew-friendly names
@@ -792,6 +829,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Download Windows binaries
       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -821,8 +860,10 @@ jobs:
 
     - name: Prepare staging directory
       shell: pwsh
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        $version = "${{ steps.version.outputs.version }}"
+        $version = $env:VERSION
 
         # Create staging directories
         New-Item -ItemType Directory -Force -Path staging/x86_64
@@ -949,8 +990,10 @@ jobs:
 
     - name: Build installers with NSIS
       shell: pwsh
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        $version = "${{ steps.version.outputs.version }}"
+        $version = $env:VERSION
         Copy-Item resources/installer/win/installer.nsi staging/x86_64/installer.nsi
         cd staging/x86_64
         # The machine-wide installer, then the per-user one (PER_USER)
@@ -1005,12 +1048,16 @@ jobs:
     steps:
       - name: Determine release channel from ref
         id: channel
+        env:
+          GITHUB_REF_TYPE_VALUE: ${{ github.ref_type }}
+          GITHUB_REF_VALUE: ${{ github.ref }}
+          INPUT_BETA_RELEASE: ${{ github.event.inputs.beta_release }}
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ "$GITHUB_REF_TYPE_VALUE" == "tag" ]]; then
             echo "channel=stable" >> $GITHUB_OUTPUT
             echo "is_stable_release=true" >> $GITHUB_OUTPUT
             echo "is_beta=false" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/beta" || "${{ github.event.inputs.beta_release }}" == "true" ]]; then
+          elif [[ "$GITHUB_REF_VALUE" == "refs/heads/beta" || "$INPUT_BETA_RELEASE" == "true" ]]; then
             echo "channel=beta" >> $GITHUB_OUTPUT
             echo "is_stable_release=false" >> $GITHUB_OUTPUT
             echo "is_beta=true" >> $GITHUB_OUTPUT
@@ -1042,6 +1089,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - uses: ./.github/actions/free-disk-space
 
@@ -1124,11 +1173,14 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
 
     - name: Get version
       id: version
+      env:
+        VERSION: ${{ needs.validate-release.outputs.version }}
       run: |
-        VERSION="${{ needs.validate-release.outputs.version }}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Release version: $VERSION"
 
@@ -1148,11 +1200,14 @@ jobs:
     # .github/release-notes/<tag>.md; the generated PR list follows them.
     - name: Find curated release notes
       id: notes
+      env:
+        TAG_NAME: ${{ needs.validate-release.outputs.tag_name }}
+        IS_STABLE_RELEASE: ${{ needs.determine-release-channel.outputs.is_stable_release }}
       run: |
-        notes=".github/release-notes/${{ needs.validate-release.outputs.tag_name }}.md"
+        notes=".github/release-notes/${TAG_NAME}.md"
         if [[ -f "$notes" ]]; then
           echo "body_path=$notes" >> "$GITHUB_OUTPUT"
-        elif [[ "${{ needs.determine-release-channel.outputs.is_stable_release }}" == "true" ]]; then
+        elif [[ "$IS_STABLE_RELEASE" == "true" ]]; then
           echo "::warning::No curated release notes at $notes; the release body lists merged PRs only."
         fi
 
@@ -1172,8 +1227,10 @@ jobs:
 
     - name: Validate AWS secrets for S3 upload
       if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      env:
+        RELEASE_AWS_ROLE_ARN: ${{ secrets.RELEASE_AWS_ROLE_ARN }}
       run: |
-        if [ -z "${{ secrets.RELEASE_AWS_ROLE_ARN }}" ]; then
+        if [ -z "$RELEASE_AWS_ROLE_ARN" ]; then
           echo "::error::RELEASE_AWS_ROLE_ARN secret is not configured."
           echo "Please add the RELEASE_AWS_ROLE_ARN secret to repository or organization secrets."
           exit 1
@@ -1188,11 +1245,11 @@ jobs:
 
     - name: Upload installers to S3
       if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        BUCKET: ${{ vars.RELEASE_S3_BUCKET }}
+        IS_BETA: ${{ needs.validate-release.outputs.is_beta }}
       run: |
-        VERSION="${{ steps.version.outputs.version }}"
-        BUCKET="${{ vars.RELEASE_S3_BUCKET }}"
-        IS_BETA="${{ needs.validate-release.outputs.is_beta }}"
-
         if [ "$IS_BETA" = "true" ]; then
           VERSION_PREFIX="releases/beta/${VERSION}"
           LATEST_PREFIX="releases/beta/latest"
@@ -1293,15 +1350,19 @@ jobs:
 
     - name: Invalidate CloudFront cache
       if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' && vars.RELEASE_CLOUDFRONT_DIST_ID != '' }}
+      env:
+        IS_BETA: ${{ needs.validate-release.outputs.is_beta }}
+        DISTRIBUTION_ID: ${{ vars.RELEASE_CLOUDFRONT_DIST_ID }}
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
         echo "Invalidating CloudFront cache for updated paths..."
-        if [ "${{ needs.validate-release.outputs.is_beta }}" = "true" ]; then
+        if [ "$IS_BETA" = "true" ]; then
           aws cloudfront create-invalidation \
-            --distribution-id "${{ vars.RELEASE_CLOUDFRONT_DIST_ID }}" \
-            --paths "/releases/beta/${{ steps.version.outputs.version }}/*" "/releases/beta/latest/*"
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths "/releases/beta/${VERSION}/*" "/releases/beta/latest/*"
         else
           aws cloudfront create-invalidation \
-            --distribution-id "${{ vars.RELEASE_CLOUDFRONT_DIST_ID }}" \
+            --distribution-id "$DISTRIBUTION_ID" \
             --paths "/releases/latest/*" "/install.sh" "/install.ps1" "/index.html"
         fi
         echo "CloudFront invalidation created"
@@ -1310,14 +1371,13 @@ jobs:
       if: ${{ needs.determine-release-channel.outputs.is_stable_release == 'true' && needs.validate-release.outputs.is_beta != 'true' && vars.RELEASE_S3_BUCKET != '' }}
       env:
         HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
         # Skip if HOMEBREW_TAP_TOKEN is not configured
         if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
           echo "HOMEBREW_TAP_TOKEN not configured, skipping Homebrew formula update"
           exit 0
         fi
-
-        VERSION="${{ steps.version.outputs.version }}"
 
         # Read SHA256 checksums from the checksums file
         # Format in file: macos_arm64=abc123..., macos_x86_64=def456..., linux_arm64=..., linux_x86_64=...
@@ -1338,8 +1398,22 @@ jobs:
         echo "  Linux ARM64 SHA256: ${LINUX_ARM64_SHA256}"
         echo "  Linux x86_64 SHA256: ${LINUX_X86_64_SHA256}"
 
+        # Authenticate via GIT_ASKPASS so HOMEBREW_TAP_TOKEN never appears in argv or .git/config
+        ASKPASS_SCRIPT="$(mktemp)"
+        trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+        chmod 700 "$ASKPASS_SCRIPT"
+        cat > "$ASKPASS_SCRIPT" << 'ASKPASS_EOF'
+        #!/bin/sh
+        case "$1" in
+          *Username*) printf '%s\n' "x-access-token" ;;
+          *Password*) printf '%s\n' "$HOMEBREW_TAP_TOKEN" ;;
+        esac
+        ASKPASS_EOF
+        export GIT_ASKPASS="$ASKPASS_SCRIPT"
+        export GIT_TERMINAL_PROMPT=0
+
         # Clone the homebrew tap repo
-        git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/hot-dev/homebrew-hot.git" homebrew-tap
+        git clone "https://x-access-token@github.com/hot-dev/homebrew-hot.git" homebrew-tap
         cd homebrew-tap
 
         # Ensure Formula directory exists
@@ -1454,6 +1528,7 @@ jobs:
       with:
         sparse-checkout: infra/runtime
         path: hot
+        persist-credentials: false
 
     - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       with:
@@ -1513,4 +1588,4 @@ jobs:
       run: |
         files=(hot-selfhost-manifest.json hot-selfhost-manifest.sigstore.json)
         if [[ -f hot-runtime-vulnerabilities.json ]]; then files+=(hot-runtime-vulnerabilities.json); fi
-        gh release upload "$TAG_NAME" "${files[@]}" --repo "${{ github.repository }}" --clobber
+        gh release upload "$TAG_NAME" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber

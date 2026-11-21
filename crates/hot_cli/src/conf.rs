@@ -1819,19 +1819,29 @@ fn config_key_segment(key: &Val) -> String {
 }
 
 fn is_uri_config_path(path: &str) -> bool {
-    path.eq_ignore_ascii_case("db.uri")
-        || path.eq_ignore_ascii_case("migration-uri")
-        || path.eq_ignore_ascii_case("db.migration-uri")
-        || path.eq_ignore_ascii_case("redis.uri")
-        || path.ends_with(".db.uri")
-        || path.ends_with(".db.migration-uri")
-        || path.ends_with(".redis.uri")
+    let lower = path.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "db.uri"
+            | "migration-uri"
+            | "db.migration-uri"
+            | "redis.uri"
+            | "network.egress-proxy"
+            | "egress-proxy"
+    ) || lower.ends_with(".db.uri")
+        || lower.ends_with(".db.migration-uri")
+        || lower.ends_with(".redis.uri")
+        || lower.ends_with(".network.egress-proxy")
 }
 
 fn is_sensitive_config_path(path: &str) -> bool {
-    let last_segment = path.rsplit('.').next().unwrap_or(path).to_ascii_lowercase();
+    let lower = path.to_ascii_lowercase();
+    if lower == "redis.auth" || lower.ends_with(".redis.auth") {
+        return true;
+    }
+    let last_segment = lower.rsplit('.').next().unwrap_or(lower.as_str());
     matches!(
-        last_segment.as_str(),
+        last_segment,
         "key" | "token" | "secret" | "password" | "client-secret" | "session-secret"
     ) || last_segment.ends_with("-key")
         || last_segment.ends_with("_key")
@@ -2724,7 +2734,12 @@ mod tests {
                 "uri": "postgres://user:password@localhost/hot"
             },
             "redis": {
-                "uri": "redis://:redis-password@localhost:6379"
+                "uri": "redis://:redis-password@localhost:6379",
+                "auth": "redis-auth-secret"
+            },
+            "network": {
+                "egress-proxy": "http://proxy-user:proxy-pass@proxy.internal:8080",
+                "allow-hosts": ["api.example.com"]
             },
             "app": {
                 "session-secret": "jwt-secret"
@@ -2735,6 +2750,7 @@ mod tests {
 
         assert_eq!(redacted.get_str("remote.hot-dev.key"), "***");
         assert_eq!(redacted.get_str("app.session-secret"), "***");
+        assert_eq!(redacted.get_str("redis.auth"), "***");
 
         let db_uri = redacted.get_str("db.uri");
         assert!(db_uri.contains("***"));
@@ -2743,6 +2759,11 @@ mod tests {
         let redis_uri = redacted.get_str("redis.uri");
         assert!(redis_uri.contains("***"));
         assert!(!redis_uri.contains("redis-password"));
+
+        let egress_proxy = redacted.get_str("network.egress-proxy");
+        assert!(egress_proxy.contains("***"));
+        assert!(!egress_proxy.contains("proxy-pass"));
+        assert!(egress_proxy.contains("proxy.internal:8080"));
 
         assert_eq!(
             redacted.get_str("remote.hot-dev.url"),

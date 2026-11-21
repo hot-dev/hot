@@ -491,16 +491,27 @@ impl BatchRows {
             .as_ref()
             .map_or(Some(0), |e| e.len().checked_mul(4))
             .ok_or("Store embedding is too large")?;
+        let key_bytes = key.to_string().len();
+        let text_bytes = text_content.as_ref().map_or(0, |s| s.len());
         let size = super::quota::entry_size(
-            key.to_string().len(),
+            key_bytes,
             super::stored_value_size(&value),
-            text_content.as_ref().map_or(0, |s| s.len()),
+            text_bytes,
             embedding_bytes,
         )?;
-        // A reference counts for the blob it points at, which stays where it is.
-        if !super::spill::is_spilled(&value) {
-            self.bytes = self.bytes.saturating_add(size);
-        }
+        // A blob reference's payload stays in blob storage, but the row's key,
+        // text_content, and embedding still travel in this SQL batch message.
+        let wire_bytes = if super::spill::is_spilled(&value) {
+            i64::try_from(
+                key_bytes
+                    .saturating_add(text_bytes)
+                    .saturating_add(embedding_bytes),
+            )
+            .unwrap_or(i64::MAX)
+        } else {
+            size
+        };
+        self.bytes = self.bytes.saturating_add(wire_bytes);
         self.embedding_literals.push(
             embedding
                 .as_ref()

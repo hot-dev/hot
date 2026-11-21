@@ -122,16 +122,25 @@ case "$OS" in
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     # Windows / Git Bash environments
+    PS_PROFILE_DIR=""
     if command -v pwsh >/dev/null 2>&1; then
       PS_PROFILE_DIR="$HOME/Documents/PowerShell"
-      mkdir -p "$PS_PROFILE_DIR"
-      "$BIN" completions powershell | iconv -t utf-8 > "$PS_PROFILE_DIR/Microsoft.PowerShell_profile.ps1"
-      echo "Installed PowerShell completion, appended to $PS_PROFILE_DIR/Microsoft.PowerShell_profile.ps1"
     elif command -v powershell >/dev/null 2>&1; then
       PS_PROFILE_DIR="$HOME/Documents/WindowsPowerShell"
+    fi
+    if [ -n "$PS_PROFILE_DIR" ]; then
       mkdir -p "$PS_PROFILE_DIR"
-      "$BIN" completions powershell | iconv -t utf-8 > "$PS_PROFILE_DIR/Microsoft.PowerShell_profile.ps1"
-      echo "Installed PowerShell completion, appended to $PS_PROFILE_DIR/Microsoft.PowerShell_profile.ps1"
+      PS_PROFILE="$PS_PROFILE_DIR/Microsoft.PowerShell_profile.ps1"
+      if ! grep -qF "# hot-completions" "$PS_PROFILE" 2>/dev/null; then
+        {
+          echo ""
+          echo "# hot-completions"
+          "$BIN" completions powershell | iconv -t utf-8
+        } >> "$PS_PROFILE"
+        echo "Installed PowerShell completion, appended to $PS_PROFILE"
+      else
+        echo "PowerShell completion already present in $PS_PROFILE"
+      fi
     fi
 
     if command -v bash >/dev/null 2>&1; then

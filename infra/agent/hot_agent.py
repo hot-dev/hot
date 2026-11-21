@@ -1218,11 +1218,15 @@ def write_atomic(path, text):
     temporary = path.with_name(f".{path.name}.new")
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+        except BaseException:
+            os.close(descriptor)
+            raise
         with os.fdopen(descriptor, "w") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except BaseException:
         with contextlib.suppress(OSError):
