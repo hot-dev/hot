@@ -843,3 +843,107 @@ fn hot_ai_update_never_writes_through_a_symlinked_skills_folder() {
         "update must not write through the symlinked folder"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_add_and_update_skip_symlinked_claude_and_agents_parent_dirs() {
+    use std::os::unix::fs::symlink;
+
+    // Symlinked .claude skips .claude/skills and still installs to .agents/skills.
+    let project = tempfile::tempdir().expect("project");
+    let outside_claude = project.path().join("outside-claude");
+    std::fs::create_dir_all(outside_claude.join("skills")).unwrap();
+    symlink(&outside_claude, project.path().join(".claude")).unwrap();
+
+    run(project.path(), &["ai", "add"]);
+    assert!(
+        project
+            .path()
+            .join(".agents/skills/hot-language/SKILL.md")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_dir(outside_claude.join("skills"))
+            .unwrap()
+            .count(),
+        0,
+        "add must never write through a symlinked .claude directory"
+    );
+
+    // Symlinked .agents and .claude together reject add before writing AGENTS.md.
+    let project2 = tempfile::tempdir().expect("project2");
+    let outside = project2.path().join("outside");
+    std::fs::create_dir_all(outside.join("skills")).unwrap();
+    symlink(&outside, project2.path().join(".agents")).unwrap();
+    symlink(&outside, project2.path().join(".claude")).unwrap();
+
+    let status = run_status(project2.path(), &["ai", "add"]);
+    assert!(!status.success(), "both parent dotdirs symlinked must fail");
+    assert_eq!(
+        std::fs::read_dir(outside.join("skills")).unwrap().count(),
+        0
+    );
+    assert!(!project2.path().join("AGENTS.md").exists());
+
+    // Update must also refuse to write through a symlinked .agents parent dir.
+    let project3 = tempfile::tempdir().expect("project3");
+    run(project3.path(), &["ai", "add"]);
+    let real_agents = project3.path().join("agents-real");
+    std::fs::rename(project3.path().join(".agents"), &real_agents).unwrap();
+    let manifest = real_agents.join("skills/hot-language").join(MANIFEST_FILE);
+    std::fs::write(&manifest, "{not valid json").unwrap();
+    symlink(&real_agents, project3.path().join(".agents")).unwrap();
+
+    run(project3.path(), &["ai", "update"]);
+    assert_eq!(
+        std::fs::read_to_string(&manifest).unwrap(),
+        "{not valid json",
+        "update must not write through a symlinked .agents directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_add_and_update_refuse_symlinked_agents_md() {
+    use std::os::unix::fs::symlink;
+
+    // Live symlink target
+    let project = tempfile::tempdir().expect("project");
+    let outside = project.path().join("outside-agents.md");
+    std::fs::write(&outside, "do not touch\n").unwrap();
+    symlink(&outside, project.path().join("AGENTS.md")).unwrap();
+
+    let status = run_status(project.path(), &["ai", "add"]);
+    assert!(!status.success(), "add must refuse a symlinked AGENTS.md");
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "do not touch\n",
+        "add must never write through a symlinked AGENTS.md"
+    );
+
+    let update_status = run_status(project.path(), &["ai", "update"]);
+    assert!(
+        !update_status.success(),
+        "update must refuse a symlinked AGENTS.md"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "do not touch\n",
+        "update must never write through a symlinked AGENTS.md"
+    );
+
+    // Dangling symlink target
+    let project2 = tempfile::tempdir().expect("project2");
+    let nonexistent = project2.path().join("does-not-exist.md");
+    symlink(&nonexistent, project2.path().join("AGENTS.md")).unwrap();
+
+    let dangling_status = run_status(project2.path(), &["ai", "add"]);
+    assert!(
+        !dangling_status.success(),
+        "add must refuse a dangling AGENTS.md symlink"
+    );
+    assert!(
+        !nonexistent.exists(),
+        "add must not create the target of a dangling AGENTS.md symlink"
+    );
+}

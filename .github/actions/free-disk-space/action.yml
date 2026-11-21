@@ -14,10 +14,12 @@ runs:
   steps:
     - name: Free disk space when low
       shell: bash
+      env:
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
       run: |
         avail_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
-        echo "Free on /: ${avail_gb} GB (cleanup below ${{ inputs.min-free-gb }} GB)"
-        if [ "$avail_gb" -lt "${{ inputs.min-free-gb }}" ]; then
+        echo "Free on /: ${avail_gb} GB (cleanup below ${MIN_FREE_GB} GB)"
+        if [ "$avail_gb" -lt "$MIN_FREE_GB" ]; then
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force

@@ -118,6 +118,7 @@ jobs:
         run: |
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
           [[ "$PRESET" =~ ^[a-z-]+$ ]] || { echo "::error::invalid preset"; exit 1; }
+          [[ "$DIR" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && "/$DIR/" != *"/../"* ]] || { echo "::error::invalid installation_dir"; exit 1; }
           # Artifact names are unique within a run, which may plan several
           # installations.
           name="$(printf %s "$DIR" | tr -c 'A-Za-z0-9._-' '-')-$(printf %s "$DIR" | sha256sum | cut -c1-8)"

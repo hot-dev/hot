@@ -273,8 +273,9 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
     let serialization =
         Serialization::from_str(&conf.get_str("serialization.type")).unwrap_or_default();
 
-    let worker_conf = conf.get("worker").unwrap();
-    let threads = Some(worker_conf.get_int("threads") as usize);
+    let threads = conf
+        .get("worker")
+        .and_then(|worker_conf| usize::try_from(worker_conf.get_int("threads")).ok());
 
     // Create database pool FIRST - needed by emitter and event publisher
     let db_pool = match hot::db::create_db_pool(&conf).await {
