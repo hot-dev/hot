@@ -71,11 +71,71 @@ opts ::chat/ChatOptions({
 })
 ```
 
-### `::ai::skill` — Prompt skills
+### `::ai::skill` — Prompt skills (`SKILL.md` & Hot skills)
 
 Skills are named prompt augmentations that an agent can expose to the
-model through `list_skills`, `read_skill`, and `apply_skill`.
-Prompt-only skills are plain `Skill` values:
+model through `list_skills`, `read_skill`, and `apply_skill` (plus
+`search_skills` when searchable, and `list_skill_resources` /
+`read_skill_resource` for bundled files).
+
+#### Loading standard `SKILL.md` directories (recommended)
+
+Mount skill directories (`<name>/SKILL.md` with optional `references/`,
+`examples/`, `assets/`) in `hot.project.<name>.resources.paths` (or
+pass `--resource.path` from the CLI) and load them at runtime:
+
+```hot
+::skill ::ai::skill
+
+// Load a single skill (sets resource-root to "skills/invoice-parser")
+invoice ::skill/from-resource("skills/invoice-parser/SKILL.md")
+
+// Discover all SKILL.md (and *.skill.md) under an explicit prefix
+resolver ::skill/resource-resolver("skills", {
+  searchable: false,
+  max-resource-chars: 250000,
+  // Optional gate (filtered paths report "Resource not found"):
+  // resource-filter: (skill, rel-path) { not(starts-with(rel-path, "examples/")) },
+})
+
+opts ::ai::chat/ChatOptions({
+  chat-fn: provider-chat-fn,
+  model: model,
+  skill-resolver: resolver,
+})
+```
+
+- **Portable frontmatter**: standard [agentskills.io](https://agentskills.io)
+  top-level keys (`name`, `description`, `license`, `compatibility`,
+  `metadata`, `allowed-tools`) map directly onto `Skill`. Hot extensions
+  (`when`, `modalities`, `requires`) are read from top-level keys first,
+  falling back to `metadata.hot-when`, `metadata.hot-modalities`, and
+  `metadata.hot-requires` (comma-separated string or YAML list) so files
+  can pass strict `skills-ref` validation. Unrecognized top-level keys
+  are preserved in `Skill.extra` rather than `metadata`.
+- **Typed fields**: `allowed-tools` accepts either the spec's
+  space-separated string (paren-aware, e.g. `"Read Glob Bash(git add:*)"`)
+  or `Vec<Str>`; call `::skill/allowed-tools-of(skill)` to normalize.
+  `license`, `compatibility`, `resource-root` require `Str?`, and
+  `metadata` / `extra` require `Map?`.
+- **Tier-3 bundled files**: resolvers with `list-resources-fn` /
+  `read-resource-fn` expose `list_skill_resources(name)` (returns
+  `[{path, size}]`) and `read_skill_resource(name, path, offset?)`
+  (capped at 250,000 characters per read with a newline-aligned
+  continuation hint). Dotfiles, path traversal, `SKILL.md`, and nested
+  skill directories are excluded. Bundled scripts are never executed on
+  workers; read them as text or pass their `::hot::resource/path` URI to
+  `::hot::box`.
+- **Package-bundled skills**: project `resources.paths` shadow
+  dependency `resource-paths` per file. Always load from an explicit
+  prefix (`from-resources("my-skills")`) rather than `""` so dependency
+  skills cannot enter the prompt unintentionally; ship package skills
+  under a package-named subdirectory.
+
+#### Inline & function-backed skills
+
+Prompt-only skills are plain `Skill` values, and function-backed skills
+use `meta {skill: ...}` with `::skill/from-fn(fn-ref)`:
 
 ```hot
 ::skill ::ai::skill
@@ -88,15 +148,17 @@ refund-tone ::skill/Skill({
 })
 ```
 
-Function-backed skills are still supported with `meta {skill: ...}` and
-`::skill/from-fn(fn-ref)`. Use that form when the skill needs a
-`body-fn` or when you want to attach metadata to an existing function.
+When a skill declares `tools` or `requires`, `::ai::chat/run-loop` and
+`run-loop-stream` activate those bundled tools once the model calls
+`read_skill` or `apply_skill` (seeding from assistant history on
+`run-loop-messages`, never overriding host tools or built-ins, and
+publishing `ai:skill:activate` when `emit-steps: true`). Skills with
+non-empty `requires` also receive a trailing hint line naming their
+required skills. Note that activating tools changes the request prefix
+and rebuilds provider prompt caches once per activation that adds tools.
 
-Markdown-authored skills use `*.skill.md` files under the project's
-`resources.paths`. Hot codegen turns them into generated `.skill.hot`
-files that export `Skill` values. Because generated skills construct
-`::ai::skill/Skill`, projects with Markdown skill resources must include
-`"hot.dev/hot-ai"` in `hot.project.<name>.deps`.
+Static stub codegen for `*.skill.md` files remains supported as an
+optional workflow (requires `"hot.dev/hot-ai"` in `deps`).
 
 ### Per-call provider credentials
 

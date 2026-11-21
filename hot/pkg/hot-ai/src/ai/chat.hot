@@ -1434,6 +1434,10 @@ fn (opts: ChatOptions, messages: Vec<Message>): Str {
         => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver, opts.skill-context)) }
     }
 
+    host-owns-skill-tools some(base-tools, (t) { or(eq(t.name, "read_skill"), eq(t.name, "apply_skill")) })
+    activation-resolver if(host-owns-skill-tools, null, resolver)
+    seeded ::ai::skill/seed-active-skills(activation-resolver, messages, tools)
+
     effective-system cond {
         is-empty(indexed-skills) => { opts.system }
         => {
@@ -1449,8 +1453,10 @@ fn (opts: ChatOptions, messages: Vec<Message>): Str {
     run-loop-step(
         ChatOptions({...untype(opts), system: effective-system}),
         messages,
-        tools,
-        max-iter
+        seeded.tools,
+        max-iter,
+        activation-resolver,
+        seeded.active
     )
 }
 
@@ -1644,12 +1650,39 @@ fn (opts: ChatOptions, iteration: Int, reply: ChatReply, tool-results: Vec<Any>?
     }
 }
 
+emit-skill-activations
+meta {
+    no-doc: true,
+    doc: """
+    Internal: publish an `ai:skill:activate` event per activated skill when
+    `opts.emit-steps` is on. Swallows stream errors like `emit-step`.
+    """
+}
+fn (opts: ChatOptions, iteration: Int, activations: Vec<Map>): Null {
+    cond {
+        or(not(or(opts.emit-steps, false)), is-empty(activations)) => { null }
+        => {
+            for-each(activations, (act) {
+                payload {
+                    iteration: iteration,
+                    skill: act.skill,
+                    tools-added: act.tools-added,
+                    requires: act.requires,
+                }
+
+                if-err(::hot::stream/data(::ai::stream-labels/SKILL_ACTIVATE, payload), null)
+            })
+            null
+        }
+    }
+}
+
 run-loop-step
 meta {
     no-doc: true,
     doc: """Internal: one iteration of `run-loop`. Tail-recursive."""
 }
-fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int): Str {
+fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int, resolver: ::ai::skill/SkillResolver?, active-skills: Vec<Str>): Str {
     lte(remaining, 0) => {
         fail(`run-loop exceeded max-iterations`, {messages: messages})
     }
@@ -1668,13 +1701,15 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
             => {
                 results map(calls, (call) { ::tool/dispatch(tools, call) })
                 emit-step(opts, iteration, reply, results)
+                activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
+                emit-skill-activations(opts, iteration, activated.activations)
                 tool-msgs map(results, tool-result-message)
                 next-messages concat(
                     messages,
                     [assistant-message(reply.text, calls)],
                     tool-msgs
                 )
-                run-loop-step(opts, next-messages, tools, sub(remaining, 1))
+                run-loop-step(opts, next-messages, activated.tools, sub(remaining, 1), resolver, activated.active)
             }
         }
     }
@@ -1779,6 +1814,10 @@ fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
         => { concat(base-tools, ::ai::skill/builtins-with-resolver(resolver, opts.skill-context)) }
     }
 
+    host-owns-skill-tools some(base-tools, (t) { or(eq(t.name, "read_skill"), eq(t.name, "apply_skill")) })
+    activation-resolver if(host-owns-skill-tools, null, resolver)
+    seeded ::ai::skill/seed-active-skills(activation-resolver, messages, tools)
+
     effective-system cond {
         is-empty(indexed-skills) => { opts.system }
         => {
@@ -1795,9 +1834,11 @@ fn (opts: ChatOptions, messages: Vec<Message>, on-delta: Fn?): Str {
     run-loop-stream-step(
         ChatOptions({...untype(opts), system: effective-system}),
         messages,
-        tools,
+        seeded.tools,
         max-iter,
-        effective-on-delta
+        effective-on-delta,
+        activation-resolver,
+        seeded.active
     )
 }
 
@@ -1806,7 +1847,7 @@ meta {
     no-doc: true,
     doc: """Internal: one iteration of `run-loop-stream`. Tail-recursive."""
 }
-fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int, on-delta: Fn): Str {
+fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>, remaining: Int, on-delta: Fn, resolver: ::ai::skill/SkillResolver?, active-skills: Vec<Str>): Str {
     lte(remaining, 0) => {
         fail(`run-loop-stream exceeded max-iterations`, {messages: messages})
     }
@@ -1825,13 +1866,15 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
             => {
                 results map(calls, (call) { ::tool/dispatch(tools, call) })
                 emit-step(opts, iteration, reply, results)
+                activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
+                emit-skill-activations(opts, iteration, activated.activations)
                 tool-msgs map(results, tool-result-message)
                 next-messages concat(
                     messages,
                     [assistant-message(reply.text, calls)],
                     tool-msgs
                 )
-                run-loop-stream-step(opts, next-messages, tools, sub(remaining, 1), on-delta)
+                run-loop-stream-step(opts, next-messages, activated.tools, sub(remaining, 1), on-delta, resolver, activated.active)
             }
         }
     }

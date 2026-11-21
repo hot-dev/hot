@@ -302,6 +302,15 @@ pub fn build_registry(
         if !root.exists() {
             continue;
         }
+        if std::fs::symlink_metadata(root)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                "resource: root '{}' is a symlink; deployed bundles do not follow symlinks",
+                root.display()
+            );
+        }
         let abs_root = match root.canonicalize() {
             Ok(p) => p,
             Err(_) => root.clone(),
@@ -344,6 +353,13 @@ pub fn build_registry(
                 }
             };
             let path = dent.path();
+            if dent.path_is_symlink() {
+                tracing::warn!(
+                    "resource: skipping symlink '{}' (symlinks are not included in resources or deployed bundles)",
+                    path.display()
+                );
+                continue;
+            }
             if !path.is_file() {
                 continue;
             }

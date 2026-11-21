@@ -210,18 +210,46 @@ pub fn get_project_respect_gitignore(conf: &Val, project_name: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// Build a `ResourceRegistry` from project config and install it
-/// process-globally so that `::hot::resource/*` bindings can read from it.
+/// Collect `resource-paths` declared by resolved non-`hot-std` dependencies
+/// of `project_name`, in dependency order.
+pub fn collect_dependency_resource_roots(
+    conf: &Val,
+    project_name: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let resolved_deps = get_resolved_project_dependencies(conf, project_name).unwrap_or_default();
+    let mut roots = Vec::new();
+    for dep in resolved_deps {
+        if dep.name == "hot-std" || dep.name == "hot.dev/hot-std" {
+            continue;
+        }
+        let dep_roots =
+            crate::bundle::collect_package_resource_roots_from_root(&dep.resolved_path)?;
+        if !dep_roots.is_empty() {
+            tracing::debug!(
+                "Including dependency '{}' with {} resource root(s)",
+                dep.name,
+                dep_roots.len()
+            );
+            roots.extend(dep_roots);
+        }
+    }
+    Ok(roots)
+}
+
+/// Resolve all resource roots for `project_name` in classpath priority order:
 ///
-/// `extra_paths` are appended after the project-config paths (typically
-/// from `--resource.path` CLI flags). When `force_no_gitignore` is true
-/// it overrides the project's `respect-gitignore` setting.
-pub fn install_resource_registry(
+/// 1. `hot.project.<name>.resources.paths`
+/// 2. `extra_paths` (typically `--resource.path` CLI flags)
+/// 3. Resolved dependency `resource-paths` (skipping `hot-std`), matching
+///    `crate::build::collect_build_inputs`.
+///
+/// On a relative-path collision the registry keeps the first root's file, so
+/// project resources always shadow dependency resources.
+pub fn resolve_project_resource_roots(
     conf: &Val,
     project_name: &str,
     extra_paths: &[String],
-    force_no_gitignore: bool,
-) -> crate::lang::hot::resource::ResourceRegistry {
+) -> Vec<std::path::PathBuf> {
     let mut paths: Vec<std::path::PathBuf> = get_project_resource_paths(conf, project_name)
         .into_iter()
         .map(std::path::PathBuf::from)
@@ -229,6 +257,33 @@ pub fn install_resource_registry(
     for p in extra_paths {
         paths.push(std::path::PathBuf::from(p));
     }
+    match collect_dependency_resource_roots(conf, project_name) {
+        Ok(dep_roots) => paths.extend(dep_roots),
+        Err(error) => {
+            tracing::warn!(
+                "Failed to collect dependency resource roots for project '{}': {}",
+                project_name,
+                error
+            );
+        }
+    }
+    paths
+}
+
+/// Build a `ResourceRegistry` from project config and install it
+/// process-globally so that `::hot::resource/*` bindings can read from it.
+///
+/// `extra_paths` are appended after the project-config paths (typically
+/// from `--resource.path` CLI flags), followed by any resolved dependency
+/// `resource-paths`. When `force_no_gitignore` is true it overrides the
+/// project's `respect-gitignore` setting.
+pub fn install_resource_registry(
+    conf: &Val,
+    project_name: &str,
+    extra_paths: &[String],
+    force_no_gitignore: bool,
+) -> crate::lang::hot::resource::ResourceRegistry {
+    let paths = resolve_project_resource_roots(conf, project_name, extra_paths);
     let respect = if force_no_gitignore {
         false
     } else {
@@ -488,6 +543,61 @@ mod tests {
         assert_eq!(
             error,
             "Project 'app' is not defined, and hot.hot defines no projects."
+        );
+    }
+
+    #[test]
+    fn install_resource_registry_includes_dependency_resources_with_project_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg_dir = dir.path().join("dep-skills");
+        let pkg_src = pkg_dir.join("src");
+        let pkg_res = pkg_dir.join("resources/dep-pack");
+        let proj_res = dir.path().join("proj-resources/dep-pack");
+        std::fs::create_dir_all(&pkg_src).unwrap();
+        std::fs::create_dir_all(&pkg_res).unwrap();
+        std::fs::create_dir_all(&proj_res).unwrap();
+
+        std::fs::write(
+            pkg_dir.join("pkg.hot"),
+            "::hot::pkg ns\n\
+             hot.pkg.dep-skills {\n\
+               name: \"acme/dep-skills\",\n\
+               version: \"0.1.0\",\n\
+               src-paths: [\"src/\"],\n\
+               resource-paths: [\"resources/\"]\n\
+             }\n",
+        )
+        .unwrap();
+        std::fs::write(pkg_src.join("mod.hot"), "::dep::skills ns\n").unwrap();
+        std::fs::write(pkg_res.join("SKILL.md"), "dep skill").unwrap();
+        std::fs::write(pkg_res.join("only-in-dep.md"), "from dep").unwrap();
+        // Project overrides SKILL.md while still seeing only-in-dep.md
+        std::fs::write(proj_res.join("SKILL.md"), "project skill").unwrap();
+
+        let proj_res_root = dir.path().join("proj-resources");
+        let conf_src = format!(
+            "hot.project.app.resources.paths [\"{}\"]\n\
+             hot.project.app.deps {{\"acme/dep-skills\": {{\"local\": \"{}\"}}}}\n",
+            proj_res_root.display(),
+            pkg_dir.display()
+        );
+        let conf = resolved(&conf_src);
+
+        let roots = resolve_project_resource_roots(&conf, "app", &[]);
+        assert_eq!(roots.len(), 2, "expected project root + dependency root");
+        assert_eq!(roots[0], proj_res_root);
+        assert_eq!(roots[1], pkg_dir.join("resources"));
+
+        let registry = install_resource_registry(&conf, "app", &[], true);
+        assert!(registry.entries.contains_key("dep-pack/only-in-dep.md"));
+        let skill_entry = registry
+            .entries
+            .get("dep-pack/SKILL.md")
+            .expect("overridden SKILL.md present");
+        assert_eq!(
+            std::fs::read_to_string(&skill_entry.abs_path).unwrap(),
+            "project skill",
+            "project resource must shadow dependency resource"
         );
     }
 }
