@@ -158,17 +158,17 @@ async fn org_key_pages_embed_names_and_grants_as_script_safe_json() {
     )
     .await
     .unwrap();
-    for path in [
-        "/keys".to_string(),
-        "/keys/org".to_string(),
-        "/keys/org/new".to_string(),
-        format!("/keys/org/{}/edit", key.org_api_key_id),
+    for (page, path) in [
+        ("environment keys", "/keys".to_string()),
+        ("org keys", "/keys/org".to_string()),
+        ("new org key", "/keys/org/new".to_string()),
+        ("org key", format!("/keys/org/{}/edit", key.org_api_key_id)),
     ] {
         let response = client.get(&path).await;
         response.assert_status(StatusCode::OK);
         assert_no_script_breakout(&response);
         // No attribute ends early on a quote from the name.
-        assert!(!response.body.contains("\"quoted\""), "{path}");
+        assert!(!response.body.contains("\"quoted\""), "{page}");
     }
     let response = client.get("/keys/org/new").await;
     assert!(

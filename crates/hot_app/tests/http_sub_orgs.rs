@@ -726,9 +726,9 @@ async fn the_account_overview_counts_each_environments_runs() {
             })
             .collect()
     };
-    // The account: running, failed in 24h and runs this month.
-    let account = texts(td.org_id, "</section>", "dd");
-    assert_eq!(account[..3], ["1", "1", "2"], "{account:?}");
+    // The parent organization: running, failed in 24h and runs this month.
+    let root_counts = texts(td.org_id, "</section>", "dd");
+    assert_eq!(root_counts[..3], ["1", "1", "2"], "{root_counts:?}");
     // A sub-organization's row: name, status, then the same three counts.
     let child_row = texts(child.org.org_id, "</tr>", "td");
     assert_eq!(child_row[1..5], ["active", "0", "0", "0"], "{child_row:?}");

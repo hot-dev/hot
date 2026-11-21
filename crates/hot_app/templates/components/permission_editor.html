@@ -218,6 +218,9 @@
 
 {% macro script() %}
 <script>
+// Numbers each editor on a page, so its labels and fields get distinct ids.
+let permissionEditorCount = 0;
+
 function permissionEditor(config) {
     const kind = config.kind === 'org' ? 'org' : 'env';
     const ENV_ACTIONS = {
@@ -350,7 +353,7 @@ function permissionEditor(config) {
 
     return {
         kind,
-        uid: 'perm-' + Math.random().toString(36).slice(2, 8),
+        uid: 'perm-' + (++permissionEditorCount),
         readOnly: config.readOnly === true,
         accessLevel: config.accessLevel || 'restricted',
         rootOrgName: config.rootOrgName || '',
