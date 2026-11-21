@@ -665,3 +665,293 @@ fn () {
     assert(not(from-resolver.is-error), Str(from-resolver.output))
     assert-eq("Use a warm tone. Avoid jargon.", from-resolver.output)
 }
+
+// ============================================================================
+// SKILL.md parsing, validation, and resource loaders (PR 1)
+// ============================================================================
+
+test-skill-equality-without-new-fields
+meta ["test"]
+fn () {
+    a ::skill/Skill({name: "tone", description: "Voice", when: ["reply"], body: "Be warm."})
+    b ::skill/from-markdown("---\nname: tone\ndescription: Voice\nwhen:\n  - reply\n---\nBe warm.")
+    assert-eq(a, b, "omitted optional fields keep exact equality")
+    assert-eq(to-json(a), to-json(b), "omitted optional fields serialize identically")
+    assert(not(contains(to-json(a), "license")), "unset optional fields are omitted from JSON")
+    assert(not(contains(to-json(a), "extra")), "unset extra is omitted from JSON")
+}
+
+test-from-markdown-full-spec-and-extra
+meta ["test"]
+fn () {
+    raw """
+---
+name: invoice-parser
+description: Parse invoices.
+license: MIT
+compatibility: Hot 3.0+
+allowed-tools: "Read Glob Bash(git add:*) Bash(python:*)"
+metadata:
+  author: finance
+  version: "1.2.0"
+  hot-when: "invoice, vendor bill"
+  hot-modalities: "pdf, image"
+  hot-requires: "currency-rules, tax-rules"
+vendor-flag: true
+---
+
+# Instructions
+
+Exact body line.
+"""
+    s ::skill/from-markdown(raw)
+    assert-eq("invoice-parser", s.name)
+    assert-eq("Parse invoices.", s.description)
+    assert-eq("MIT", s.license)
+    assert-eq("Hot 3.0+", s.compatibility)
+    assert-eq(["Read", "Glob", "Bash(git add:*)", "Bash(python:*)"], s.allowed-tools)
+    assert-eq(["Read", "Glob", "Bash(git add:*)", "Bash(python:*)"], ::skill/allowed-tools-of(s))
+    assert-eq(["invoice", "vendor bill"], s.when)
+    assert-eq(["pdf", "image"], s.modalities)
+    assert-eq(["currency-rules", "tax-rules"], s.requires)
+    assert-eq("1.2.0", get(s.metadata, "version"))
+    assert-eq("invoice, vendor bill", get(s.metadata, "hot-when"), "hot-* stays in metadata")
+    assert-eq({vendor-flag: true}, s.extra, "unknown keys land in extra, not metadata")
+    assert-eq("\n# Instructions\n\nExact body line.", s.body, "body preserved byte for byte")
+    with-trailing ::skill/from-markdown("---\nname: trailing\ndescription: d\n---\n\nLine.\n")
+    assert-eq("\nLine.\n", with-trailing.body, "trailing newline preserved byte for byte")
+}
+
+test-from-markdown-top-level-wins-over-metadata-and-list-form
+meta ["test"]
+fn () {
+    raw """
+---
+name: precedence
+description: Top level wins over metadata.
+when:
+  - top-trigger
+metadata:
+  hot-when: "meta-trigger"
+  hot-modalities:
+    - image
+    - pdf
+  hot-requires:
+    - base-rules
+---
+Body.
+"""
+    s ::skill/from-markdown(raw)
+    assert-eq(["top-trigger"], s.when, "top-level when wins over metadata.hot-when")
+    assert-eq(["image", "pdf"], s.modalities, "metadata list form supported")
+    assert-eq(["base-rules"], s.requires, "metadata list form supported for requires")
+}
+
+test-allowed-tools-accepts-string-or-vec-on-constructor
+meta ["test"]
+fn () {
+    s-str ::skill/Skill({name: "a", description: "d", allowed-tools: "Read Bash(git status:*)"})
+    assert-eq("Read Bash(git status:*)", s-str.allowed-tools)
+    assert-eq(["Read", "Bash(git status:*)"], ::skill/allowed-tools-of(s-str))
+
+    s-vec ::skill/Skill({name: "b", description: "d", allowed-tools: ["Read", "Write"]})
+    assert-eq(["Read", "Write"], ::skill/allowed-tools-of(s-vec))
+
+    s-none ::skill/Skill({name: "c", description: "d"})
+    assert-eq([], ::skill/allowed-tools-of(s-none))
+}
+
+test-validate-skill-md-and-portability-notes
+meta ["test"]
+fn () {
+    good ::skill/Skill({
+        name: "good-skill-1",
+        description: "Valid description.",
+        compatibility: "Hot 3.0+",
+        metadata: {author: "hot", version: "1.0.0"}
+    })
+    assert-eq([], ::skill/validate-skill-md(good, "good-skill-1"))
+
+    bad ::skill/Skill({
+        name: "Bad--Name-",
+        description: "   ",
+        compatibility: "   ",
+        metadata: {version: 123}
+    })
+    probs ::skill/validate-skill-md(bad, "other-dir")
+    assert(gte(length(probs), 4), `expected multiple problems, got ${probs}`)
+
+    strict-err ::skill/from-markdown("---\nname: BadName\n---\nBody", {strict: true})
+    assert(is-err(strict-err), "strict mode rejects missing description / invalid name")
+
+    notes ::skill/frontmatter-portability-notes({name: "x", description: "y", when: ["a"], custom: 1})
+    assert-eq(2, length(notes))
+}
+
+test-from-resource-and-from-resources-fixtures
+meta ["test"]
+fn () {
+    inv ::skill/from-resource("ai-skill-fixtures/invoice-parser/SKILL.md")
+    assert-eq("invoice-parser", inv.name)
+    assert-eq("ai-skill-fixtures/invoice-parser", inv.resource-root)
+    assert-eq("Apache-2.0", inv.license)
+    assert-eq(["Read", "Glob", "Bash(git add:*)"], inv.allowed-tools)
+    assert-eq(["parse invoice", "vendor bill"], inv.when)
+    assert-eq(["pdf", "image"], inv.modalities)
+    assert-eq(["currency-rules"], inv.requires)
+    assert-eq({custom-ext: "kept-in-extra"}, inv.extra)
+
+    no-res ::skill/from-resource("ai-skill-fixtures/invoice-parser/SKILL.md", {expose-resources: false})
+    assert(is-null(no-res.resource-root), "expose-resources: false omits resource-root")
+
+    all-skills ::skill/from-resources("ai-skill-fixtures")
+    names map(all-skills, %.name)
+    assert(in("invoice-parser", names), "finds SKILL.md")
+    assert(in("nested-child", names), "finds nested SKILL.md")
+    assert(in("legacy-tone", names), "includes *.skill.md by default")
+    assert(not(in("hidden-skill", names)), "skips dot-prefixed directory under prefix")
+
+    only-skill-md ::skill/from-resources("ai-skill-fixtures", {include-legacy-ext: false})
+    only-names map(only-skill-md, %.name)
+    assert(not(in("legacy-tone", only-names)), "include-legacy-ext: false skips *.skill.md")
+
+    dot-prefixed ::skill/from-resources(".ai-dot-prefix-fixtures")
+    assert-eq(["dot-prefix-skill"], map(dot-prefixed, %.name), "dot segment in prefix itself is allowed")
+}
+
+test-from-resources-duplicate-names
+meta ["test"]
+fn () {
+    dup-err ::skill/from-resources("ai-skill-dup-fixtures")
+    assert(is-err(dup-err), "duplicate skill names fail by default")
+
+    dup-first ::skill/from-resources("ai-skill-dup-fixtures", {on-duplicate: "first"})
+    assert-eq(1, length(dup-first))
+    assert-eq("First body.\n", dup-first[0].body)
+}
+
+test-bundled-files-list-read-security-and-filter
+meta ["test"]
+fn () {
+    inv ::skill/from-resource("ai-skill-fixtures/invoice-parser/SKILL.md")
+    listed ::skill/list-skill-resources-of(inv)
+    paths map(listed, %.path)
+    assert(in("references/schema.md", paths), "lists reference file")
+    assert(in("examples/vendor-a.md", paths), "lists example file")
+    assert(not(in("SKILL.md", paths)), "omits SKILL.md")
+    assert(not(in(".hot-skill-owner", paths)), "omits hidden dotfile")
+    assert(not(in("nested-child/SKILL.md", paths)), "omits nested skill SKILL.md")
+    assert(not(in("nested-child/references/secret.md", paths)), "omits nested skill files")
+    assert(gt(first(listed).size, 0), "list entries include file size")
+
+    // Exact read under cap
+    schema ::skill/read-skill-resource-of(inv, "references/schema.md")
+    assert-eq("# Invoice Schema\n\nFields: invoice_id, vendor, total_cents, currency.\n", schema)
+
+    // Path traversal, dotfiles, nested skill files, missing, non-UTF-8
+    assert(contains(::skill/read-skill-resource-of(inv, "../legacy-tone.skill.md"), "Invalid resource path"))
+    assert(contains(::skill/read-skill-resource-of(inv, "/etc/passwd"), "Invalid resource path"))
+    assert(contains(::skill/read-skill-resource-of(inv, "references\\schema.md"), "Invalid resource path"))
+    assert(contains(::skill/read-skill-resource-of(inv, ".hot-skill-owner"), "Invalid resource path"))
+    assert(contains(::skill/read-skill-resource-of(inv, "SKILL.md"), "Invalid resource path"))
+    assert(contains(::skill/read-skill-resource-of(inv, "nested-child/references/secret.md"), "Resource not found"), "nested skill files blocked on read too")
+    assert(contains(::skill/read-skill-resource-of(inv, "references/nope.md"), "Resource not found"))
+    assert(contains(::skill/read-skill-resource-of(inv, "assets/invalid.bin"), "not valid UTF-8"))
+
+    // Custom filter gates both list and read (filtered read reports "Resource not found")
+    no-examples (s, rel) { not(starts-with(rel, "examples/")) }
+    filtered-paths map(::skill/list-skill-resources-of(inv, no-examples), %.path)
+    assert(not(in("examples/vendor-a.md", filtered-paths)), "filter hides example from list")
+    assert(in("references/schema.md", filtered-paths), "filter keeps reference")
+    assert(contains(::skill/read-skill-resource-of(inv, "examples/vendor-a.md", {resource-filter: no-examples}), "Resource not found"), "filtered read reports not found")
+}
+
+test-read-skill-resource-chunking-by-offset
+meta ["test"]
+fn () {
+    inv ::skill/from-resource("ai-skill-fixtures/invoice-parser/SKILL.md")
+    full ::skill/read-skill-resource-of(inv, "references/long.md")
+
+    // Multi-line chunking aligns on newline and rejoins to exact original
+    p1 ::skill/read-skill-resource-of(inv, "references/long.md", {max-resource-chars: 80, offset: 0})
+    assert(contains(p1, "call read_skill_resource with offset"), "continuation hint present")
+    p1-lines split(p1, "\n")
+    p1-body `${join(slice(p1-lines, 0, sub(length(p1-lines), 1)), "\n")}\n`
+    off1 length(p1-body)
+
+    p2 ::skill/read-skill-resource-of(inv, "references/long.md", {max-resource-chars: 80, offset: off1})
+    assert(contains(p2, "call read_skill_resource with offset"), "second chunk continues")
+    p2-lines split(p2, "\n")
+    p2-body `${join(slice(p2-lines, 0, sub(length(p2-lines), 1)), "\n")}\n`
+    off2 add(off1, length(p2-body))
+
+    p3 ::skill/read-skill-resource-of(inv, "references/long.md", {max-resource-chars: 80, offset: off2})
+    assert(not(contains(p3, "call read_skill_resource")), "final chunk has no continuation hint")
+    assert-eq(full, `${p1-body}${p2-body}${p3}`, "rejoined chunks equal original byte-for-byte")
+
+    // Single unbroken line without newlines falls back to hard cut (no stall)
+    full-single ::skill/read-skill-resource-of(inv, "references/single-line.txt")
+    s1 ::skill/read-skill-resource-of(inv, "references/single-line.txt", {max-resource-chars: 40, offset: 0})
+    assert(contains(s1, "offset 40."), "no-newline fallback advances by max-resource-chars")
+    s1-body first(split(s1, "\n"))
+    assert-eq(40, length(s1-body))
+
+    // Past-end and negative offsets return clean messages
+    assert(contains(::skill/read-skill-resource-of(inv, "references/long.md", {offset: 99999}), "past end"))
+    assert(contains(::skill/read-skill-resource-of(inv, "references/long.md", {offset: -1}), "Invalid offset"))
+    assert(contains(full-single, "abc"), "single-line fixture loaded")
+}
+
+test-resource-resolver-and-builtin-tool-counts
+meta ["test"]
+fn () {
+    r ::skill/resource-resolver("ai-skill-fixtures", {include-legacy-ext: false})
+    bt ::skill/builtins-with-resolver(r)
+    assert-eq(5, length(bt), "3 base + 2 resource tools")
+    names map(bt, %.name)
+    assert(in("list_skill_resources", names))
+    assert(in("read_skill_resource", names))
+
+    list-tool ::tool/find-by-name(bt, "list_skill_resources")
+    read-tool ::tool/find-by-name(bt, "read_skill_resource")
+    assert(gt(length(list-tool.fn("invoice-parser")), 0))
+    assert(contains(read-tool.fn("invoice-parser", "references/schema.md", null), "invoice_id"))
+    assert(contains(read-tool.fn("missing", "references/schema.md", null), "Unknown skill"))
+
+    r-search ::skill/resource-resolver("ai-skill-fixtures", {searchable: true, include-legacy-ext: false})
+    assert-eq(6, length(::skill/builtins-with-resolver(r-search)), "3 base + search + 2 resource tools")
+
+    r-no-res ::skill/resource-resolver("ai-skill-fixtures", {expose-resources: false})
+    assert-eq(3, length(::skill/builtins-with-resolver(r-no-res)), "expose-resources: false keeps 3 tools")
+
+    // Custom resolver with only read-resource-fn (null list-resources-fn) adds only read_skill_resource
+    inv ::skill/from-resource("ai-skill-fixtures/invoice-parser/SKILL.md")
+    read-only ::skill/SkillResolver({
+        list-fn: (ctx: Map) { [inv] },
+        read-fn: (n: Str) { if(eq(n, "invoice-parser"), inv, null) },
+        read-resource-fn: (s, p, off) { ::skill/read-skill-resource-of(s, p, assoc-some({}, "offset", off)) }
+    })
+    ro-names map(::skill/builtins-with-resolver(read-only), %.name)
+    assert-eq(4, length(ro-names))
+    assert(in("read_skill_resource", ro-names))
+    assert(not(in("list_skill_resources", ro-names)))
+}
+
+test-requires-trailing-hint-in-read-tool-not-load-body
+meta ["test"]
+fn () {
+    s ::skill/Skill({
+        name: "with-reqs",
+        description: "Has requires.",
+        requires: ["base-rules", "tax-rules"],
+        body: "Main body."
+    })
+    assert-eq("Main body.", ::skill/load-body(s, {}), "load-body returns verbatim body without requires line")
+
+    tools ::skill/builtins-with-resolver(::skill/in-memory-resolver([s]))
+    read-tool ::tool/find-by-name(tools, "read_skill")
+    out read-tool.fn("with-reqs")
+    assert(starts-with(out, "Main body."), "body comes first")
+    assert(contains(out, "Required skills"), "trailing hint present")
+    assert(contains(out, "base-rules, tax-rules"), "names required skills")
+}

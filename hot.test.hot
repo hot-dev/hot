@@ -111,6 +111,8 @@ hot.daemon false
 hot.project.pkg-test-hot-ai.src.paths ["./hot/pkg/hot-ai/src"]
 hot.project.pkg-test-hot-ai.test.paths ["./hot/pkg/hot-ai/test"]
 hot.project.pkg-test-hot-ai.test.capture true
+hot.project.pkg-test-hot-ai.resources.paths ["./hot/pkg/hot-ai/test/fixtures/resources"]
+hot.project.pkg-test-hot-ai.skills.codegen.enabled false
 hot.project.pkg-test-hot-ai.deps {
     "hot.dev/hot-std": { "local": "./hot/pkg/hot-std" }
 }

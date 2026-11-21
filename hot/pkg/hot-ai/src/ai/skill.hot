@@ -88,6 +88,8 @@ meta {
 }
 
 ::tool ::ai::tool
+::res  ::hot::resource
+::md   ::hot::md
 
 // ============================================================================
 // Skill type
@@ -122,6 +124,18 @@ meta {
       from. Preserved for callers that need to round-trip to the source
       function; built-in `read_skill` / `apply_skill` resolve `body` or
       `body-fn` rather than calling this function.
+    - `license` — optional license identifier or filename from `SKILL.md`.
+    - `compatibility` — optional environment/product requirements from
+      `SKILL.md` (max 500 chars per agentskills.io).
+    - `metadata` — optional author metadata map (e.g. `{author, version}`)
+      from `SKILL.md`.
+    - `allowed-tools` — optional pre-approved tools hint from `SKILL.md`
+      (either the spec's space-delimited `Str` or a `Vec<Str>`). Use
+      `allowed-tools-of` to normalize to `Vec<Str>`.
+    - `resource-root` — optional relative resource directory for Tier-3
+      bundled files (e.g. `"reglang"` or `"skills/invoice-parser"`).
+    - `extra` — any unrecognized top-level frontmatter keys preserved by
+      `from-markdown` without polluting `metadata`.
     """
 }
 type {
@@ -133,7 +147,13 @@ type {
     body-fn: Fn?,
     tools: Vec<::tool/Tool>?,
     requires: Vec<Str>?,
-    fn: Fn?
+    fn: Fn?,
+    license: Str?,
+    compatibility: Str?,
+    metadata: Map?,
+    allowed-tools: Str | Vec<Str> | Null,
+    resource-root: Str?,
+    extra: Map?
 }
 
 // ============================================================================
@@ -162,7 +182,7 @@ meta {
 }
 fn (f: Fn): Skill {
     raw ::hot::internal::skill/meta-from-fn(f)
-    Skill({
+    base {
         name: or(get(raw, "name"), raw.fn-name),
         description: or(get(raw, "description"), ""),
         when: or(get(raw, "when"), []),
@@ -172,7 +192,15 @@ fn (f: Fn): Skill {
         tools: get(raw, "tools"),
         requires: get(raw, "requires"),
         fn: f
-    })
+    }
+
+    enriched base
+        |> assoc-some("license", get(raw, "license"))
+        |> assoc-some("compatibility", get(raw, "compatibility"))
+        |> assoc-some("metadata", get(raw, "metadata"))
+        |> assoc-some("allowed-tools", get(raw, "allowed-tools"))
+        |> assoc-some("resource-root", get(raw, "resource-root"))
+    Skill(enriched)
 }
 
 for-agent
@@ -376,6 +404,25 @@ fn (skills: Vec<Skill>): ::tool/Tool {
     })
 }
 
+format-skill-body-with-requires
+meta {
+    no-doc: true,
+    doc: """
+    Internal: append a stateless trailing hint naming `skill.requires` when
+    non-empty. Returns `body` unchanged when `requires` is null or empty.
+    """
+}
+fn (skill: Skill, body: Str): Str {
+    reqs skill.requires
+    cond {
+        or(is-null(reqs), is-empty(reqs)) => { body }
+        => {
+            hint `Required skills (read each if you have not already): ${join(reqs, ", ")}`
+            if(is-empty(body), hint, `${body}\n\n${hint}`)
+        }
+    }
+}
+
 builtin-read-skill
 meta {
     doc: """
@@ -406,7 +453,7 @@ fn (skills: Vec<Skill>): ::tool/Tool {
         output-schema: null,
         fn: (name: Str): Str {
             s find-skill(skills, name)
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, {}))
+            if(is-null(s), `Unknown skill: ${name}`, format-skill-body-with-requires(s, load-body(s, {})))
         }
     })
 }
@@ -451,7 +498,7 @@ fn
         fn: (name: Str, ctx: Map?): Str {
             s find-skill(skills, name)
             enriched merge(or(ctx, {}), or(skill-context, {}))
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))
+            if(is-null(s), `Unknown skill: ${name}`, format-skill-body-with-requires(s, load-body(s, enriched)))
         }
     })
 }
@@ -500,7 +547,7 @@ meta {
     doc: """
     Pluggable strategy for picking which skills are visible to the
     model on a given turn. `::ai::chat/run-loop` calls into a resolver
-    at three fixed points:
+    at fixed points:
 
     - `list-fn(ctx)` — once per turn, when building the system-prompt
       skill index. Returns the `Vec<Skill>` to advertise this turn.
@@ -513,17 +560,20 @@ meta {
       from `list-fn`: a store-backed resolver may know about more
       skills than it surfaces in any single turn.
     - `search-fn(query, opts)` — optional. When set, `run-loop` adds a
-      fourth `search_skills` tool that lets the model query the
-      resolver directly. Useful when the index is too large to inline
-      every turn.
+      `search_skills` tool that lets the model query the resolver directly.
+    - `list-resources-fn(skill)` — optional `(skill: Skill) -> Vec<Map>`.
+      When set, `builtins-with-resolver` adds `list_skill_resources`.
+    - `read-resource-fn(skill, rel-path, offset)` — optional
+      `(skill: Skill, rel-path: Str, offset: Int?) -> Str`. When set,
+      `builtins-with-resolver` adds `read_skill_resource`.
 
     Built-in factories:
 
     - `in-memory-resolver(skills)` — current behaviour, no search.
-    - `searchable-resolver(skills)` — like `in-memory-resolver` but
+    - `searchable-resolver(skills, opts)` — like `in-memory-resolver` but
       with a substring-rank `search-fn` over name/description/when.
-      Pair with a small or empty `list-fn` output to scale to many
-      skills without inflating the system prompt.
+    - `resource-resolver(skills-or-prefix, opts)` — loads or wraps
+      `SKILL.md` skills with Tier-3 bundled-file access.
 
     Custom resolvers (Postgres, Pinecone, LLM-judged routing, etc.)
     are constructed by passing your own `Fn` slots to
@@ -534,7 +584,9 @@ type {
     list-fn: Fn,
     read-fn: Fn,
     search-fn: Fn?,
-    skills: Vec<Skill>?
+    skills: Vec<Skill>?,
+    list-resources-fn: Fn?,
+    read-resource-fn: Fn?
 }
 
 // ----------------------------------------------------------------------------
@@ -609,9 +661,10 @@ meta {
     doc: """
     Default `SkillResolver`: `list-fn` returns the full `skills`
     vector every turn, `read-fn` does an in-memory name lookup, and
-    `search-fn` is `null`. Mirrors the pre-resolver behaviour of
-    `::ai::chat/run-loop` exactly, so wrapping `opts.skills` in this
-    resolver is a no-op for the model.
+    `search-fn` is `null`. When any skill carries a `resource-root`,
+    also wires `list-resources-fn` and `read-resource-fn` for Tier-3
+    bundled-file access; otherwise omits them so pre-existing callers
+    see the exact same resolver shape and tool list.
 
     **Example**
 
@@ -625,12 +678,26 @@ meta {
     """
 }
 fn (skills: Vec<Skill>): SkillResolver {
-    SkillResolver({
+    has-resources some(skills, (s) { is-some(s.resource-root) })
+    base {
         list-fn: (ctx: Map): Vec<Skill> { skills },
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
         search-fn: null,
         skills: skills
-    })
+    }
+
+    enriched cond {
+        has-resources => {
+            base
+                |> assoc("list-resources-fn", (s: Skill): Vec<Map> { list-skill-resources-of(s, null) })
+                |> assoc("read-resource-fn", (s: Skill, rel-path: Str, offset: Int?): Str {
+                    read-skill-resource-of(s, rel-path, assoc-some({}, "offset", offset))
+                })
+        }
+        => { base }
+    }
+
+    SkillResolver(enriched)
 }
 
 searchable-resolver
@@ -639,7 +706,8 @@ meta {
     `SkillResolver` over a fixed `Vec<Skill>` that also exposes a
     substring-rank `search-fn`. `run-loop` will surface a fourth
     `search_skills` tool so the model can query for relevant skills
-    on demand.
+    on demand. When any skill carries a `resource-root`, also wires
+    `list-resources-fn` and `read-resource-fn`.
 
     `opts.always-on` (default `[]`) are skills returned from
     `list-fn` every turn regardless of search; the rest of `skills`
@@ -660,14 +728,28 @@ meta {
 }
 fn (skills: Vec<Skill>, opts: Map): SkillResolver {
     always-on or(get(opts, "always-on"), [])
-    SkillResolver({
+    has-resources some(skills, (s) { is-some(s.resource-root) })
+    base {
         list-fn: (ctx: Map): Vec<Skill> { always-on },
         read-fn: (name: Str): Skill? { find-skill(skills, name) },
         search-fn: (query: Str, search-opts: Map): Vec<Skill> {
             search-skills-of(skills, query, or(search-opts, {}))
         },
         skills: skills
-    })
+    }
+
+    enriched cond {
+        has-resources => {
+            base
+                |> assoc("list-resources-fn", (s: Skill): Vec<Map> { list-skill-resources-of(s, null) })
+                |> assoc("read-resource-fn", (s: Skill, rel-path: Str, offset: Int?): Str {
+                    read-skill-resource-of(s, rel-path, assoc-some({}, "offset", offset))
+                })
+        }
+        => { base }
+    }
+
+    SkillResolver(enriched)
 }
 
 // ----------------------------------------------------------------------------
@@ -732,7 +814,7 @@ fn (resolver: SkillResolver): ::tool/Tool {
         output-schema: null,
         fn: (name: Str): Str {
             s resolver.read-fn(name)
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, {}))
+            if(is-null(s), `Unknown skill: ${name}`, format-skill-body-with-requires(s, load-body(s, {})))
         }
     })
 }
@@ -776,7 +858,7 @@ fn
         fn: (name: Str, ctx: Map?): Str {
             s resolver.read-fn(name)
             enriched merge(or(ctx, {}), or(skill-context, {}))
-            if(is-null(s), `Unknown skill: ${name}`, load-body(s, enriched))
+            if(is-null(s), `Unknown skill: ${name}`, format-skill-body-with-requires(s, load-body(s, enriched)))
         }
     })
 }
@@ -829,14 +911,77 @@ fn (resolver: SkillResolver): ::tool/Tool {
     })
 }
 
+builtin-list-skill-resources-r
+meta {
+    doc: """
+    Built-in `list_skill_resources` tool. Only constructed when the
+    resolver declares a `list-resources-fn`. Lists bundled files
+    (as `{path, size}` maps) inside a skill's `resource-root`.
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    list-res-fn resolver.list-resources-fn
+    ::tool/Tool({
+        name: "list_skill_resources",
+        description: "List bundled files (references, examples, assets) inside a skill directory as {path, size} maps.",
+        input-schema: {
+            type: "object",
+            properties: {name: {type: "string"}},
+            required: ["name"]
+        },
+        output-schema: null,
+        fn: (name: Str): Any {
+            s resolver.read-fn(name)
+            cond {
+                is-null(s) => { `Unknown skill: ${name}` }
+                => { list-res-fn(s) }
+            }
+        }
+    })
+}
+
+builtin-read-skill-resource-r
+meta {
+    doc: """
+    Built-in `read_skill_resource` tool. Only constructed when the
+    resolver declares a `read-resource-fn`. Reads a bundled text file
+    relative to the named skill's `resource-root`, with an optional
+    character `offset` for large files.
+    """
+}
+fn (resolver: SkillResolver): ::tool/Tool {
+    read-res-fn resolver.read-resource-fn
+    ::tool/Tool({
+        name: "read_skill_resource",
+        description: "Read a bundled file relative to a skill directory (for example references/spec.md). Pass offset to continue reading a large file.",
+        input-schema: {
+            type: "object",
+            properties: {
+                name: {type: "string"},
+                path: {type: "string"},
+                offset: {type: "integer"}
+            },
+            required: ["name", "path"]
+        },
+        output-schema: null,
+        fn: (name: Str, path: Str, offset: Int?): Str {
+            s resolver.read-fn(name)
+            cond {
+                is-null(s) => { `Unknown skill: ${name}` }
+                => { read-res-fn(s, path, offset) }
+            }
+        }
+    })
+}
+
 builtins-with-resolver
 meta {
     doc: """
     Build the per-turn skill toolset from a `SkillResolver`. Always
-    emits `list_skills`, `read_skill`, and `apply_skill`; appends a
-    fourth `search_skills` tool when the resolver provides a
-    `search-fn`. Used by `::ai::chat/run-loop` whenever an agent
-    declares either `opts.skills` or `opts.skill-resolver`.
+    emits `list_skills`, `read_skill`, and `apply_skill`; appends
+    `search_skills` when `search-fn` is set, `list_skill_resources`
+    when `list-resources-fn` is set, and `read_skill_resource` when
+    `read-resource-fn` is set.
 
     The arity-2 form forwards `skill-context` to `builtin-apply-skill-r`
     so per-turn harness data flows into skill activation. See
@@ -860,7 +1005,9 @@ fn
         builtin-read-skill-r(resolver),
         builtin-apply-skill-r(resolver, skill-context)
     ]
-    if(is-null(resolver.search-fn), base, concat(base, [builtin-search-skills-r(resolver)]))
+    with-search if(is-null(resolver.search-fn), base, concat(base, [builtin-search-skills-r(resolver)]))
+    with-list-res if(is-null(resolver.list-resources-fn), with-search, concat(with-search, [builtin-list-skill-resources-r(resolver)]))
+    if(is-null(resolver.read-resource-fn), with-list-res, concat(with-list-res, [builtin-read-skill-resource-r(resolver)]))
 }
 
 // ----------------------------------------------------------------------------
@@ -896,5 +1043,816 @@ fn (skill-resolver: SkillResolver?, skills: Vec<Any>?): SkillResolver? {
         is-null(skills) => { null }
         is-empty(skills) => { null }
         => { in-memory-resolver(for-agent(skills)) }
+    }
+}
+
+// ============================================================================
+// SKILL.md parsing, validation, and resource loading
+// ============================================================================
+
+DEFAULT_MAX_RESOURCE_CHARS 250000
+
+SPEC_FRONTMATTER_KEYS ["name", "description", "license", "allowed-tools", "metadata", "compatibility"]
+KNOWN_FRONTMATTER_KEYS ["name", "description", "when", "modalities", "requires", "license", "compatibility", "metadata", "allowed-tools"]
+VALID_SKILL_NAME_CHARS "abcdefghijklmnopqrstuvwxyz0123456789-"
+
+is-ws-char
+meta { no-doc: true }
+fn (ch: Str): Bool {
+    or(eq(ch, " "), eq(ch, "\t"), eq(ch, "\n"), eq(ch, "\r"))
+}
+
+parse-allowed-tools
+meta {
+    doc: """
+    Parse an `allowed-tools` value (`Str | Vec<Str> | Null`) into a
+    `Vec<Str>`. Space-separated strings are split outside parentheses
+    so entries like `"Read Glob Bash(git add:*)"` remain intact as
+    `["Read", "Glob", "Bash(git add:*)"]`.
+    """
+}
+fn (raw: Str | Vec<Str> | Null): Vec<Str> {
+    cond {
+        is-null(raw) => { [] }
+        is-vec(raw) => { raw }
+        => {
+            n length(raw)
+            state reduce(range(0, n), (acc, i) {
+                ch slice(raw, i, add(i, 1))
+                depth acc.depth
+                buf acc.buf
+                items acc.items
+                cond {
+                    eq(ch, "(") => { {depth: add(depth, 1), buf: `${buf}${ch}`, items} }
+                    eq(ch, ")") => { {depth: max(0, sub(depth, 1)), buf: `${buf}${ch}`, items} }
+                    and(eq(depth, 0), is-ws-char(ch)) => {
+                        if(is-empty(buf), acc, {depth: 0, buf: "", items: concat(items, [buf])})
+                    }
+                    => { {depth, buf: `${buf}${ch}`, items} }
+                }
+            }, {depth: 0, buf: "", items: []})
+            if(is-empty(state.buf), state.items, concat(state.items, [state.buf]))
+        }
+    }
+}
+
+allowed-tools-of
+meta {
+    doc: """
+    Return a skill's normalized `allowed-tools` list (`Vec<Str>`),
+    accepting either the agentskills.io space-separated string form
+    or a `Vec<Str>`. Returns `[]` when unset.
+    """
+}
+fn (skill: Skill): Vec<Str> {
+    parse-allowed-tools(skill.allowed-tools)
+}
+
+parse-meta-str-list
+meta { no-doc: true }
+fn (val: Any): Vec<Str>? {
+    cond {
+        is-null(val) => { null }
+        is-vec(val) => { val }
+        is-str(val) => {
+            parts split(val, ",")
+                |> map(trim(%))
+                |> filter((s) { not(is-empty(s)) })
+            if(is-empty(parts), null, parts)
+        }
+        => { null }
+    }
+}
+
+extract-hot-list
+meta { no-doc: true }
+fn (front: Map, meta-map: Map?, top-key: Str, meta-key: Str): Vec<Str>? {
+    top get(front, top-key)
+    cond {
+        is-some(top) => { top }
+        is-null(meta-map) => { null }
+        => { parse-meta-str-list(get(meta-map, meta-key)) }
+    }
+}
+
+extract-extra-frontmatter
+meta { no-doc: true }
+fn (front: Map): Map? {
+    ks filter(keys(front), (k) { not(in(k, KNOWN_FRONTMATTER_KEYS)) })
+    cond {
+        is-empty(ks) => { null }
+        => {
+            reduce(ks, (acc, k) { assoc(acc, k, get(front, k)) }, {})
+        }
+    }
+}
+
+is-valid-skill-name-chars
+meta { no-doc: true }
+fn (name: Str): Bool {
+    n length(name)
+    all(range(0, n), (i) { contains(VALID_SKILL_NAME_CHARS, slice(name, i, add(i, 1))) })
+}
+
+validate-skill-md
+meta {
+    doc: """
+    Validate a `Skill` against the agentskills.io specification.
+    Returns a `Vec<Str>` of human-readable problems (empty when valid):
+
+    - `name`: 1–64 chars of `[a-z0-9-]`, no leading, trailing, or
+      consecutive hyphens, and equal to `dir-name` when provided.
+    - `description`: 1–1024 chars (non-empty).
+    - `compatibility`: when set, 1–500 chars.
+    - `metadata`: when set, all values must be strings.
+    """
+}
+fn
+(skill: Skill): Vec<Str> { validate-skill-md(skill, null) },
+(skill: Skill, dir-name: Str?): Vec<Str> {
+    name skill.name
+    desc skill.description
+    compat skill.compatibility
+    meta-map skill.metadata
+
+    p1 cond {
+        is-empty(name) => { ["name must not be empty"] }
+        gt(length(name), 64) => { ["name must be at most 64 characters"] }
+        not(is-valid-skill-name-chars(name)) => { ["name must use only lowercase ASCII letters, digits, and hyphens"] }
+        or(starts-with(name, "-"), ends-with(name, "-")) => { ["name must not start or end with a hyphen"] }
+        contains(name, "--") => { ["name must not contain consecutive hyphens"] }
+        => { [] }
+    }
+
+    p2 cond {
+        and(is-some(dir-name), ne(name, dir-name)) => { [`name '${name}' must match parent directory '${dir-name}'`] }
+        => { [] }
+    }
+
+    p3 cond {
+        is-blank(desc) => { ["description must not be empty"] }
+        gt(length(desc), 1024) => { ["description must be at most 1024 characters"] }
+        => { [] }
+    }
+
+    p4 cond {
+        is-null(compat) => { [] }
+        is-blank(compat) => { ["compatibility must not be empty when set"] }
+        gt(length(compat), 500) => { ["compatibility must be at most 500 characters"] }
+        => { [] }
+    }
+
+    p5 cond {
+        is-null(meta-map) => { [] }
+        not(all(vals(meta-map), is-str)) => { ["metadata values must all be strings"] }
+        => { [] }
+    }
+    [...p1, ...p2, ...p3, ...p4, ...p5]
+}
+
+frontmatter-portability-notes
+meta {
+    doc: """
+    Return advisory notes for top-level frontmatter keys outside the
+    agentskills.io six-field schema (`name`, `description`, `license`,
+    `allowed-tools`, `metadata`, `compatibility`). Never an error.
+    """
+}
+fn (front: Map): Vec<Str> {
+    keys(front)
+        |> filter((k) { not(in(k, SPEC_FRONTMATTER_KEYS)) })
+        |> map((k) { `Top-level frontmatter key '${k}' is outside the agentskills.io six-field schema.` })
+}
+
+from-markdown
+meta {
+    doc: """
+    Parse a `SKILL.md` (or `*.skill.md`) Markdown string with YAML
+    frontmatter into a `Skill`.
+
+    Reads Hot extension fields (`when`, `modalities`, `requires`) from
+    the top level first, falling back to `metadata.hot-when`,
+    `metadata.hot-modalities`, and `metadata.hot-requires` (each
+    accepted as a comma-separated string or a YAML list). Leaves
+    `parsed.body` verbatim and puts any unrecognized top-level keys in
+    `extra` rather than `metadata`.
+
+    Options (`opts`):
+    - `default-name: Str` — fallback when frontmatter omits `name`.
+    - `dir-name: Str` — expected directory name for `strict` validation.
+    - `resource-root: Str` — relative resource directory for Tier-3 files.
+    - `strict: Bool` — when `true`, validates via `validate-skill-md`
+      and returns `Err` on any problem (including missing `description`).
+    """
+}
+fn
+(raw: Str): Skill { from-markdown(raw, {}) },
+(raw: Str, opts: Map): Skill {
+    parsed ::md/parse-frontmatter(raw)
+    front parsed.frontmatter
+    strict or(get(opts, "strict"), false)
+    raw-meta get(front, "metadata")
+    meta-map if(is-map(raw-meta), raw-meta, null)
+
+    raw-name or(get(front, "name"), get(opts, "default-name"))
+    cond {
+        or(is-null(raw-name), not(is-str(raw-name)), is-blank(raw-name)) => {
+            err("Skill frontmatter must include a non-empty 'name'")
+        }
+        => {
+            raw-desc get(front, "description")
+            cond {
+                and(strict, or(is-null(raw-desc), not(is-str(raw-desc)), is-blank(raw-desc))) => {
+                    err("Skill frontmatter must include a non-empty 'description'")
+                }
+                => {
+                    desc or(raw-desc, "")
+                    when-val extract-hot-list(front, meta-map, "when", "hot-when")
+                    mods-val extract-hot-list(front, meta-map, "modalities", "hot-modalities")
+                    reqs-val extract-hot-list(front, meta-map, "requires", "hot-requires")
+                    raw-allowed get(front, "allowed-tools")
+                    allowed-val cond {
+                        is-null(raw-allowed) => { null }
+                        is-vec(raw-allowed) => { raw-allowed }
+                        is-str(raw-allowed) => { parse-allowed-tools(raw-allowed) }
+                        => { raw-allowed }
+                    }
+
+                    extra-val extract-extra-frontmatter(front)
+
+                    fields {
+                        name: raw-name,
+                        description: desc
+                    }
+                        |> assoc-some("when", when-val)
+                        |> assoc-some("modalities", mods-val)
+                        |> assoc("body", parsed.body)
+                        |> assoc-some("requires", reqs-val)
+                        |> assoc-some("license", get(front, "license"))
+                        |> assoc-some("compatibility", get(front, "compatibility"))
+                        |> assoc-some("metadata", raw-meta)
+                        |> assoc-some("allowed-tools", allowed-val)
+                        |> assoc-some("resource-root", get(opts, "resource-root"))
+                        |> assoc-some("extra", extra-val)
+
+                    skill Skill(fields)
+                    cond {
+                        strict => {
+                            problems validate-skill-md(skill, get(opts, "dir-name"))
+                            if(is-empty(problems), skill, err(join(problems, "; ")))
+                        }
+                        => { skill }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Bundled-file access (Tier-3 progressive disclosure)
+// ============================================================================
+
+normalize-skill-rel-path
+meta {
+    doc: """
+    Validate and normalize a relative path inside a skill directory.
+    Rejects empty paths, leading `/`, backslashes, `.` / `..` segments,
+    dot-prefixed segments, empty segments (`//`), and `SKILL.md`.
+    """
+}
+fn (rel-path: Str): Result<Str, Str> {
+    cond {
+        is-empty(rel-path) => { err("path must not be empty") }
+        starts-with(rel-path, "/") => { err("path must be relative") }
+        contains(rel-path, "\\") => { err("path must use forward slashes") }
+        eq(rel-path, "SKILL.md") => { err("use read_skill to read SKILL.md") }
+        => {
+            segs split(rel-path, "/")
+            bad some(segs, (seg) {
+                or(is-empty(seg), eq(seg, "."), eq(seg, ".."), starts-with(seg, "."))
+            })
+            if(bad, err("path contains invalid or hidden segment"), ok(rel-path))
+        }
+    }
+}
+
+join-resource-path
+meta { no-doc: true }
+fn (root: Str, rel: Str): Str {
+    if(is-empty(root), rel, `${root}/${rel}`)
+}
+
+is-in-nested-skill
+meta { no-doc: true }
+fn (root: Str, rel-path: Str): Bool {
+    segs split(rel-path, "/")
+    n length(segs)
+    cond {
+        lte(n, 1) => { false }
+        => {
+            some(range(1, n), (i) {
+                sub-dir join(slice(segs, 0, i), "/")
+                ::res/exists(join-resource-path(root, `${sub-dir}/SKILL.md`))
+            })
+        }
+    }
+}
+
+list-skill-resources-of
+meta {
+    doc: """
+    List bundled files inside `skill.resource-root` as `{path, size}`
+    maps sorted by `path`. Excludes `SKILL.md`, dot-prefixed segments,
+    files inside nested skill directories, and anything rejected by
+    the optional `filter-fn(skill, rel-path)`. Returns `[]` when
+    `skill.resource-root` is `null`.
+    """
+}
+fn
+(skill: Skill): Vec<Map> { list-skill-resources-of(skill, null) },
+(skill: Skill, filter-fn: Fn?): Vec<Map> {
+    root skill.resource-root
+    cond {
+        is-null(root) => { [] }
+        => {
+            prefix if(is-empty(root), "", `${root}/`)
+            prefix-len length(prefix)
+            all-refs ::res/list()
+            all-refs
+                |> filter((ref) {
+                    cond {
+                        is-empty(prefix) => { true }
+                        => { starts-with(ref.path, prefix) }
+                    }
+                })
+                |> map((ref) {
+                    rel if(is-empty(prefix), ref.path, slice(ref.path, prefix-len, length(ref.path)))
+                    {path: rel, size: ref.size}
+                })
+                |> filter((item) {
+                    norm normalize-skill-rel-path(item.path)
+                    and(
+                        is-ok(norm),
+                        not(is-in-nested-skill(root, item.path)),
+                        if(is-null(filter-fn), true, filter-fn(skill, item.path))
+                    )
+                })
+                |> sort-by(%.path)
+        }
+    }
+}
+
+read-skill-resource-of
+meta {
+    doc: """
+    Read a bundled text file relative to `skill.resource-root` via
+    `::hot::resource`. Returns a plain error message string (not a
+    halt) when the skill has no `resource-root`, the path is invalid,
+    filtered, missing, or non-UTF-8.
+
+    Options (`opts`):
+    - `offset: Int` — starting character index (default `0`).
+    - `max-resource-chars: Int` — max characters per read (default
+      `250000`). When text remains, ends at the last newline in the
+      window (or cuts at `max-resource-chars` if no newline exists)
+      and appends a continuation line naming the next `offset`.
+    - `resource-filter: Fn` — optional `(skill, rel-path) -> Bool`
+      predicate; rejected paths report `"Resource not found"`.
+    """
+}
+fn
+(skill: Skill, rel-path: Str): Str { read-skill-resource-of(skill, rel-path, {}) },
+(skill: Skill, rel-path: Str, opts: Map): Str {
+    root skill.resource-root
+    cond {
+        is-null(root) => { `Skill '${skill.name}' has no bundled resources.` }
+        => {
+            norm normalize-skill-rel-path(rel-path)
+            cond {
+                is-err(norm) => { `Invalid resource path '${rel-path}': ${err-message(norm)}.` }
+                => {
+                    rel ok-value(norm)
+                    filter-fn get(opts, "resource-filter")
+                    blocked or(
+                        is-in-nested-skill(root, rel),
+                        and(is-some(filter-fn), not(filter-fn(skill, rel)))
+                    )
+                    full-path join-resource-path(root, rel)
+                    cond {
+                        or(blocked, not(::res/exists(full-path))) => { `Resource not found: ${rel-path}` }
+                        => {
+                            loaded ::res/load-str(full-path)
+                            cond {
+                                is-err(loaded) => { `Resource is not valid UTF-8 text: ${rel-path}` }
+                                => {
+                                    text ok-value(loaded)
+                                    offset or(get(opts, "offset"), 0)
+                                    max-chars or(get(opts, "max-resource-chars"), DEFAULT_MAX_RESOURCE_CHARS)
+                                    total length(text)
+                                    cond {
+                                        lt(offset, 0) => { "Invalid offset: must be >= 0." }
+                                        lte(max-chars, 0) => { "Invalid max-resource-chars: must be > 0." }
+                                        and(gt(offset, 0), gte(offset, total)) => {
+                                            `Offset ${offset} is past end of resource (${total} characters).`
+                                        }
+
+                                        and(eq(offset, 0), lte(total, max-chars)) => { text }
+                                        => {
+                                            end-limit min(add(offset, max-chars), total)
+                                            cond {
+                                                gte(end-limit, total) => { slice(text, offset, total) }
+                                                => {
+                                                    window slice(text, offset, end-limit)
+                                                    parts split(window, "\n")
+                                                    cut cond {
+                                                        gt(length(parts), 1) => {
+                                                            sub(length(window), length(last(parts)))
+                                                        }
+                                                        => { length(window) }
+                                                    }
+
+                                                    next-offset add(offset, cut)
+                                                    chunk slice(window, 0, cut)
+                                                    note `[Characters ${offset} to ${next-offset} of ${total}. For the rest, call read_skill_resource with offset ${next-offset}.]`
+                                                    if(ends-with(chunk, "\n"), `${chunk}${note}`, `${chunk}\n${note}`)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Resource loaders & resource-resolver
+// ============================================================================
+
+path-parent
+meta { no-doc: true }
+fn (p: Str): Str {
+    segs split(p, "/")
+    if(lte(length(segs), 1), "", join(slice(segs, 0, sub(length(segs), 1)), "/"))
+}
+
+path-basename
+meta { no-doc: true }
+fn (p: Str): Str {
+    segs split(p, "/")
+    if(is-empty(segs), "", last(segs))
+}
+
+trim-trailing-slashes
+meta { no-doc: true }
+fn (p: Str): Str {
+    cond {
+        and(not(is-empty(p)), ends-with(p, "/")) => {
+            trim-trailing-slashes(slice(p, 0, sub(length(p), 1)))
+        }
+        => { p }
+    }
+}
+
+has-dot-segment
+meta { no-doc: true }
+fn (p: Str): Bool {
+    some(split(p, "/"), (seg) { and(not(is-empty(seg)), starts-with(seg, ".")) })
+}
+
+from-resource
+meta {
+    doc: """
+    Load a single `Skill` from `::hot::resource` at `rel-path`.
+
+    - For `<dir>/SKILL.md` (or `"SKILL.md"`), sets `resource-root` to
+      the parent directory (unless `opts.expose-resources` is `false`)
+      and uses the directory basename as `default-name` and `dir-name`.
+    - For `*.skill.md`, derives `default-name` from the filename stem
+      and leaves `resource-root` unset unless provided in `opts`.
+    """
+}
+fn
+(rel-path: Str): Skill { from-resource(rel-path, {}) },
+(rel-path: Str, opts: Map): Skill {
+    raw ::res/load-str(rel-path)
+    expose-res ne(get(opts, "expose-resources"), false)
+    base path-basename(rel-path)
+    is-skill-md eq(base, "SKILL.md")
+    merged-opts cond {
+        is-skill-md => {
+            parent path-parent(rel-path)
+            dir-name if(is-empty(parent), null, path-basename(parent))
+            opts
+                |> assoc-some("default-name", or(get(opts, "default-name"), dir-name))
+                |> assoc-some("dir-name", or(get(opts, "dir-name"), dir-name))
+                |> assoc-some("resource-root", if(expose-res, or(get(opts, "resource-root"), parent), null))
+        }
+
+        ends-with(base, ".skill.md") => {
+            stem slice(base, 0, sub(length(base), 9))
+            opts
+                |> assoc-some("default-name", or(get(opts, "default-name"), stem))
+        }
+        => { opts }
+    }
+
+    from-markdown(raw, merged-opts)
+}
+
+from-resources
+meta {
+    doc: """
+    Discover and load all `SKILL.md` (and optionally `*.skill.md`)
+    skills under `prefix` from `::hot::resource`.
+
+    `prefix` is required; pass `""` to scan every resource root
+    (including dependency resources). Paths with dot-prefixed segments
+    under `prefix` are skipped. Results are sorted by resource path.
+    Duplicate skill names return `Err` unless `opts.on-duplicate` is
+    `"first"`.
+
+    Options (`opts`):
+    - `include-legacy-ext: Bool` — include `*.skill.md` files (default `true`).
+    - `on-duplicate: Str` — `"error"` (default) or `"first"`.
+    - `expose-resources: Bool` — set `resource-root` on `SKILL.md` skills (default `true`).
+    - `strict: Bool` — validate every loaded skill via `validate-skill-md`.
+    """
+}
+fn
+(prefix: Str): Vec<Skill> { from-resources(prefix, {}) },
+(prefix: Str, opts: Map): Vec<Skill> {
+    clean-prefix trim-trailing-slashes(prefix)
+    match-prefix if(is-empty(clean-prefix), "", `${clean-prefix}/`)
+    match-len length(match-prefix)
+    include-legacy ne(get(opts, "include-legacy-ext"), false)
+    on-dup or(get(opts, "on-duplicate"), "error")
+
+    paths ::res/list()
+        |> map(%.path)
+        |> filter((p) {
+            under cond {
+                is-empty(match-prefix) => { true }
+                => { starts-with(p, match-prefix) }
+            }
+
+            cond {
+                not(under) => { false }
+                => {
+                    tail if(is-empty(match-prefix), p, slice(p, match-len, length(p)))
+                    base path-basename(tail)
+                    is-match or(
+                        eq(base, "SKILL.md"),
+                        and(include-legacy, ends-with(base, ".skill.md"))
+                    )
+                    and(is-match, not(has-dot-segment(tail)))
+                }
+            }
+        })
+        |> sort()
+
+    loaded reduce(paths, (acc, p) {
+        cond {
+            is-some(acc.error) => { acc }
+            => {
+                s from-resource(p, opts)
+                cond {
+                    is-err(s) => { assoc(acc, "error", err-value(s)) }
+                    => {
+                        skill ok-value(s)
+                        dup in(skill.name, acc.seen)
+                        cond {
+                            and(dup, eq(on-dup, "first")) => { acc }
+                            dup => { assoc(acc, "error", `Duplicate skill name '${skill.name}' found at '${p}'`) }
+                            => {
+                                {
+                                    seen: concat(acc.seen, [skill.name]),
+                                    skills: concat(acc.skills, [skill]),
+                                    error: null
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, {seen: [], skills: [], error: null})
+
+    cond {
+        is-some(loaded.error) => { err(loaded.error) }
+        => { loaded.skills }
+    }
+}
+
+resource-resolver
+meta {
+    doc: """
+    Build a `SkillResolver` backed by resource-loaded `SKILL.md` skills
+    (either a `prefix: Str` loaded via `from-resources` or a pre-loaded
+    `Vec<Skill>`).
+
+    Options (`opts`):
+    - `always-on: Vec<Skill>` — skills returned from `list-fn` every turn
+      (defaults to `[]` when `searchable` is `true`, else all `skills`).
+    - `searchable: Bool` — when `true`, wires `search-fn` so `run-loop`
+      exposes `search_skills`.
+    - `expose-resources: Bool` — when `false`, omits `list-resources-fn`
+      and `read-resource-fn` (default `true`).
+    - `resource-filter: Fn` — optional `(skill, rel-path) -> Bool` gate.
+    - `max-resource-chars: Int` — per-read character cap (default `250000`).
+    """
+}
+fn
+(skills-or-prefix: Str | Vec<Skill>): SkillResolver { resource-resolver(skills-or-prefix, {}) },
+(skills-or-prefix: Str | Vec<Skill>, opts: Map): SkillResolver {
+    skills cond {
+        is-str(skills-or-prefix) => { from-resources(skills-or-prefix, opts) }
+        => { skills-or-prefix }
+    }
+
+    searchable or(get(opts, "searchable"), false)
+    has-always-on is-some(get(opts, "always-on"))
+    listed cond {
+        has-always-on => { get(opts, "always-on") }
+        searchable => { [] }
+        => { skills }
+    }
+
+    expose-res ne(get(opts, "expose-resources"), false)
+    filter-fn get(opts, "resource-filter")
+    max-chars get(opts, "max-resource-chars")
+
+    base {
+        list-fn: (ctx: Map): Vec<Skill> { listed },
+        read-fn: (name: Str): Skill? { find-skill(skills, name) },
+        skills: skills
+    }
+
+    with-search cond {
+        searchable => {
+            assoc(base, "search-fn", (query: Str, search-opts: Map): Vec<Skill> {
+                search-skills-of(skills, query, or(search-opts, {}))
+            })
+        }
+        => { assoc(base, "search-fn", null) }
+    }
+
+    with-resources cond {
+        expose-res => {
+            with-search
+                |> assoc("list-resources-fn", (s: Skill): Vec<Map> {
+                    list-skill-resources-of(s, filter-fn)
+                })
+                |> assoc("read-resource-fn", (s: Skill, rel-path: Str, offset: Int?): Str {
+                    read-opts {}
+                        |> assoc-some("resource-filter", filter-fn)
+                        |> assoc-some("max-resource-chars", max-chars)
+                        |> assoc-some("offset", offset)
+                    read-skill-resource-of(s, rel-path, read-opts)
+                })
+        }
+        => { with-search }
+    }
+
+    SkillResolver(with-resources)
+}
+
+// ============================================================================
+// Dynamic skill activation helpers (used by ::ai::chat/run-loop)
+// ============================================================================
+
+append-unique-tools
+meta { no-doc: true }
+fn (existing: Vec<::tool/Tool>, additions: Vec<::tool/Tool>): Map {
+    existing-names map(existing, %.name)
+    reduce(additions, (acc, t) {
+        cond {
+            in(t.name, acc.names) => { acc }
+            => {
+                {
+                    names: concat(acc.names, [t.name]),
+                    tools: concat(acc.tools, [t]),
+                    added: concat(acc.added, [t.name])
+                }
+            }
+        }
+    }, {names: existing-names, tools: existing, added: []})
+}
+
+activate-skill-graph
+meta { no-doc: true }
+fn (resolver: SkillResolver, queue: Vec<Str>, visited: Vec<Str>, tools: Vec<::tool/Tool>): Map {
+    cond {
+        is-empty(queue) => { {visited, tools, added: []} }
+        => {
+            name first(queue)
+            rest slice(queue, 1, length(queue))
+            cond {
+                in(name, visited) => { activate-skill-graph(resolver, rest, visited, tools) }
+                => {
+                    next-visited concat(visited, [name])
+                    s resolver.read-fn(name)
+                    cond {
+                        is-null(s) => { activate-skill-graph(resolver, rest, next-visited, tools) }
+                        => {
+                            bundled or(s.tools, [])
+                            merged append-unique-tools(tools, bundled)
+                            reqs or(s.requires, [])
+                            next-queue concat(rest, reqs)
+                            tail activate-skill-graph(resolver, next-queue, next-visited, merged.tools)
+                            {
+                                visited: tail.visited,
+                                tools: tail.tools,
+                                added: concat(merged.added, tail.added)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+extract-skill-call-names
+meta { no-doc: true }
+fn (calls: Vec<Any>): Vec<Str> {
+    calls
+        |> filter((c) { or(eq(c.name, "read_skill"), eq(c.name, "apply_skill")) })
+        |> map((c) { if(is-map(c.input), get(c.input, "name"), null) })
+        |> filter((n) { and(is-str(n), not(is-empty(n))) })
+}
+
+activate-skills-from-calls
+meta {
+    no-doc: true,
+    doc: """
+    Internal: given a round's tool calls, resolve any newly read/applied
+    skills (and their transitive `requires`), appending bundled `tools`
+    without overriding existing tools. Returns `{tools, active, activations}`.
+    """
+}
+fn (resolver: SkillResolver?, calls: Vec<Any>, current-tools: Vec<::tool/Tool>, active: Vec<Str>): Map {
+    cond {
+        or(is-null(resolver), is-empty(calls)) => {
+            {tools: current-tools, active, activations: []}
+        }
+        => {
+            names extract-skill-call-names(calls)
+            reduce(names, (acc, name) {
+                cond {
+                    in(name, acc.active) => { acc }
+                    => {
+                        s resolver.read-fn(name)
+                        cond {
+                            is-null(s) => { acc }
+                            => {
+                                res activate-skill-graph(resolver, [name], acc.active, acc.tools)
+                                act {
+                                    skill: s.name,
+                                    tools-added: res.added,
+                                    requires: or(s.requires, [])
+                                }
+                                {
+                                    tools: res.tools,
+                                    active: res.visited,
+                                    activations: concat(acc.activations, [act])
+                                }
+                            }
+                        }
+                    }
+                }
+            }, {tools: current-tools, active, activations: []})
+        }
+    }
+}
+
+seed-active-skills
+meta {
+    no-doc: true,
+    doc: """
+    Internal: scan prior assistant messages in `messages` for `read_skill`
+    or `apply_skill` tool calls and pre-activate their bundled tools so
+    resumed `run-loop-messages` turns retain previously activated tools.
+    """
+}
+fn (resolver: SkillResolver?, messages: Vec<Any>, initial-tools: Vec<::tool/Tool>): Map {
+    cond {
+        is-null(resolver) => { {tools: initial-tools, active: []} }
+        => {
+            hist-calls reduce(messages, (acc, msg) {
+                tcs get(msg, "tool-calls")
+                cond {
+                    and(eq(get(msg, "role"), "assistant"), is-vec(tcs)) => { concat(acc, tcs) }
+                    => { acc }
+                }
+            }, [])
+            res activate-skills-from-calls(resolver, hist-calls, initial-tools, [])
+            {tools: res.tools, active: res.active}
+        }
     }
 }

@@ -713,3 +713,243 @@ meta ["test"] fn () {
     assert(is-err(result), "the caller can branch on it")
     assert-eq(401, err-value(result).status)
 }
+
+// ============================================================================
+// Dynamic skill tool activation (PR 3)
+// ============================================================================
+
+skill-secret-tool fn (x: Str): Str { `secret:${x}` }
+skill-dep-tool fn (): Str { "dep-ok" }
+host-override-tool fn (): Str { "host-wins" }
+skill-shadow-tool fn (): Str { "skill-loses" }
+host-read-skill-fn fn (name: Str): Str { `host-read:${name}` }
+
+test-run-loop-activates-bundled-skill-tools-after-read
+meta ["test"]
+fn () {
+    bundled-skill ::skill/Skill({
+        name: "coach",
+        description: "Coach with a bundled tool.",
+        body: "Call secret_lookup.",
+        tools: [::tool/from-fn(skill-secret-tool, {name: "secret_lookup"})]
+    })
+
+    // Turn 1: assert secret_lookup is NOT present yet; call read_skill("coach").
+    // Turn 2: assert secret_lookup IS now present; call secret_lookup("42").
+    // Turn 3: return the tool result.
+    mock (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+        tool-names map(or(tools, []), %.name)
+        tool-msgs filter(messages, eq(%.role, "tool"))
+        cond {
+            eq(length(tool-msgs), 0) => {
+                assert(not(in("secret_lookup", tool-names)), "bundled tool absent before skill read")
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [::tool/ToolCall({id: "c1", name: "read_skill", input: {name: "coach"}})],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+
+            eq(length(tool-msgs), 1) => {
+                assert(in("secret_lookup", tool-names), "bundled tool present after skill read")
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [::tool/ToolCall({id: "c2", name: "secret_lookup", input: {x: "42"}})],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+            => {
+                ::chat/ChatReply({
+                    text: Str(last(tool-msgs).content),
+                    tool-calls: null,
+                    stop-reason: "end_turn",
+                    usage: null,
+                    raw: null
+                })
+            }
+        }
+    }
+
+    opts ::chat/ChatOptions({
+        chat-fn: mock,
+        model: "mock-model",
+        skills: [bundled-skill],
+        emit-steps: true
+    })
+    assert-eq("secret:42", ::chat/run-loop(opts, "coach me"))
+}
+
+test-run-loop-stream-activates-bundled-skill-tools
+meta ["test"]
+fn () {
+    bundled-skill ::skill/Skill({
+        name: "coach",
+        description: "Coach with a bundled tool.",
+        body: "Call secret_lookup.",
+        tools: [::tool/from-fn(skill-secret-tool, {name: "secret_lookup"})]
+    })
+
+    mock-stream (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?, on-delta: Fn): ::chat/ChatReply {
+        tool-names map(or(tools, []), %.name)
+        tool-msgs filter(messages, eq(%.role, "tool"))
+        cond {
+            eq(length(tool-msgs), 0) => {
+                assert(not(in("secret_lookup", tool-names)), "absent before read in stream loop")
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [::tool/ToolCall({id: "c1", name: "apply_skill", input: {name: "coach"}})],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+
+            eq(length(tool-msgs), 1) => {
+                assert(in("secret_lookup", tool-names), "present after apply_skill in stream loop")
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [::tool/ToolCall({id: "c2", name: "secret_lookup", input: {x: "stream"}})],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+            => {
+                ::chat/ChatReply({
+                    text: Str(last(tool-msgs).content),
+                    tool-calls: null,
+                    stop-reason: "end_turn",
+                    usage: null,
+                    raw: null
+                })
+            }
+        }
+    }
+
+    opts ::chat/ChatOptions({
+        chat-stream-fn: mock-stream,
+        model: "mock-model",
+        skills: [bundled-skill],
+        emit-steps: true
+    })
+    assert-eq("secret:stream", ::chat/run-loop-stream(opts, "coach me"))
+}
+
+test-run-loop-activation-history-seeding-requires-cycles-and-host-precedence
+meta ["test"]
+fn () {
+    // Cyclic requires: skill-a -> skill-b -> skill-a; plus a tool name clash with host tool
+    skill-a ::skill/Skill({
+        name: "skill-a",
+        description: "Skill A",
+        body: "Body A",
+        requires: ["skill-b"],
+        tools: [
+            ::tool/from-fn(skill-secret-tool, {name: "secret_lookup"}),
+            ::tool/from-fn(skill-shadow-tool, {name: "shared_tool"})
+        ]
+    })
+    skill-b ::skill/Skill({
+        name: "skill-b",
+        description: "Skill B",
+        body: "Body B",
+        requires: ["skill-a"],
+        tools: [::tool/from-fn(skill-dep-tool, {name: "dep_tool"})]
+    })
+
+    // Seed history as if a prior turn already called read_skill("skill-a")
+    history [
+        ::chat/user-message("earlier"),
+        ::chat/assistant-message("", [::tool/ToolCall({id: "h1", name: "read_skill", input: {name: "skill-a"}})]),
+        ::chat/tool-result-message(::tool/ToolResult({id: "h1", output: "Body A", is-error: false})),
+        ::chat/user-message("now run tools")
+    ]
+
+    mock (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+        tool-names map(or(tools, []), %.name)
+        tool-msgs filter(messages, eq(%.role, "tool"))
+        cond {
+            eq(length(tool-msgs), 1) => {
+                assert(in("secret_lookup", tool-names), "seeded tool from skill-a")
+                assert(in("dep_tool", tool-names), "seeded transitive tool from cyclic requires skill-b")
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [
+                        ::tool/ToolCall({id: "c1", name: "shared_tool", input: {}}),
+                        ::tool/ToolCall({id: "c2", name: "dep_tool", input: {}})
+                    ],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+            => {
+                outputs map(slice(tool-msgs, 1, length(tool-msgs)), (m) { Str(m.content) })
+                ::chat/ChatReply({
+                    text: join(outputs, ","),
+                    tool-calls: null,
+                    stop-reason: "end_turn",
+                    usage: null,
+                    raw: null
+                })
+            }
+        }
+    }
+
+    opts ::chat/ChatOptions({
+        chat-fn: mock,
+        model: "mock-model",
+        tools: [::tool/from-fn(host-override-tool, {name: "shared_tool"})],
+        skills: [skill-a, skill-b]
+    })
+    assert-eq("host-wins,dep-ok", ::chat/run-loop-messages(opts, history))
+}
+
+test-run-loop-host-read-skill-disables-activation
+meta ["test"]
+fn () {
+    bundled-skill ::skill/Skill({
+        name: "coach",
+        description: "Coach",
+        body: "Body",
+        tools: [::tool/from-fn(skill-secret-tool, {name: "secret_lookup"})]
+    })
+
+    mock (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+        tool-names map(or(tools, []), %.name)
+        tool-msgs filter(messages, eq(%.role, "tool"))
+        cond {
+            eq(length(tool-msgs), 0) => {
+                ::chat/ChatReply({
+                    text: "",
+                    tool-calls: [::tool/ToolCall({id: "c1", name: "read_skill", input: {name: "coach"}})],
+                    stop-reason: "tool_use",
+                    usage: null,
+                    raw: null
+                })
+            }
+            => {
+                assert(not(in("secret_lookup", tool-names)), "host owns read_skill, so no activation occurs")
+                ::chat/ChatReply({
+                    text: Str(last(tool-msgs).content),
+                    tool-calls: null,
+                    stop-reason: "end_turn",
+                    usage: null,
+                    raw: null
+                })
+            }
+        }
+    }
+
+    opts ::chat/ChatOptions({
+        chat-fn: mock,
+        model: "mock-model",
+        tools: [::tool/from-fn(host-read-skill-fn, {name: "read_skill"})],
+        skills: [bundled-skill]
+    })
+    assert-eq("host-read:coach", ::chat/run-loop(opts, "hi"))
+}

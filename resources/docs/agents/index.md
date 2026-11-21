@@ -320,9 +320,23 @@ No additional code is needed. The agent tagging happens at the runtime level whe
 
 ## Agent Skills
 
-Agents that use `hot.dev/hot-ai` can expose prompt skills to the model. A skill is a named instruction bundle that the chat run loop advertises through `list_skills`, `read_skill`, and `apply_skill`.
+Agents that use `hot.dev/hot-ai` can expose prompt skills to the model. A skill is a named instruction bundle that the chat run loop advertises through `list_skills`, `read_skill`, and `apply_skill` (plus `search_skills`, `list_skill_resources`, and `read_skill_resource` when configured).
 
-Prompt-only skills are `::ai::skill/Skill` values:
+### Standard `SKILL.md` Directories (Recommended)
+
+Standard [agentskills.io](https://agentskills.io) skill folders (`<name>/SKILL.md` with optional `references/`, `examples/`, and `assets/`) live under `resources.paths` (or `--resource.path` when running from the CLI) and load at runtime via `::ai::skill`:
+
+```hot
+::skill ::ai::skill
+
+resolver ::skill/resource-resolver("skills")
+```
+
+This works identically across standalone CLI runs, `hot dev`, and deployed builds without generating stub files. Always pass an explicit prefix (such as `"skills"`) so dependency resources are not scanned into your prompt unintentionally. For strict `skills-ref` portability, place Hot extensions under `metadata` (`hot-when`, `hot-modalities`, `hot-requires`).
+
+### Inline, Function-Backed, and Static-Stub Skills
+
+Prompt-only skills can also be constructed directly as `::ai::skill/Skill` values:
 
 ```hot
 ::skill ::ai::skill
@@ -337,9 +351,9 @@ support-tone ::skill/Skill({
 })
 ```
 
-Function-backed skills are also supported with `meta {skill: ...}` and `::skill/from-fn`, but those functions are metadata sources. The built-in skill tools read `body` or call `body-fn`; they do not invoke the skill function itself.
+Function-backed skills are supported with `meta {skill: ...}` and `::skill/from-fn`; the built-in skill tools read `body` or call `body-fn` rather than invoking the skill function itself. If a skill bundles `tools` (or `requires` skills that do), `::ai::chat/run-loop` activates those tools after the model reads or applies the skill.
 
-Markdown-authored skills live in project resources as `*.skill.md` files. Skill codegen turns them into generated `.skill.hot` files that export `Skill` values, so they can be listed directly in `::skill/for-agent([...])`. Because generated skills construct `::ai::skill/Skill`, projects with Markdown skill resources must declare a `hot.dev/hot-ai` dependency:
+For static-stub codegen, `*.skill.md` files under `resources.paths` are converted into generated `.skill.hot` files exporting `Skill` values that can be listed in `::skill/for-agent([...])`. Projects using Markdown skill codegen must declare a `hot.dev/hot-ai` dependency:
 
 ```hot
 hot.project.support.deps {

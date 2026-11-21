@@ -231,6 +231,33 @@ silently present provider failure as model output.
 Use `::ai::skill/Skill` for prompt guidance selected by the model. Use
 `::ai::tool/Tool` for executable capabilities.
 
+For standard `SKILL.md` directories (`<name>/SKILL.md` plus optional
+`references/`, `examples/`, `assets/`), mount them in `resources.paths`
+(or pass `--resource.path` from the CLI) and load at runtime with an
+explicit prefix:
+
+```hot
+::skill ::ai::skill
+
+resolver ::skill/resource-resolver("skills")
+
+opts ::chat/ChatOptions({
+    chat-stream-fn: provider-stream-fn,
+    model: model,
+    skill-resolver: resolver,
+})
+```
+
+For portable `skills-ref` frontmatter, place Hot extensions under
+`metadata` (`hot-when`, `hot-modalities`, `hot-requires`). Always pass an
+explicit prefix to `from-resources` / `resource-resolver` so dependency
+resources do not enter the prompt unintentionally. Bundled files are
+exposed via `list_skill_resources` and `read_skill_resource` (250k char
+cap with `offset`; dotfiles, traversal, and nested skill directories are
+excluded; pass `resource-filter` to gate specific paths).
+
+Inline and function-backed skills remain supported:
+
 ```hot
 refund-policy
 meta {
@@ -250,12 +277,15 @@ opts ::chat/ChatOptions({
 ```
 
 The chat loop adds `list_skills`, `read_skill`, and `apply_skill` when a skill
-resolver is present. Use `skill-context` for harness-owned data such as
-attachments or tenant identity; harness values override model-supplied keys.
+resolver is present, activates any `skill.tools` (and transitive `requires`)
+after `read_skill` / `apply_skill`, and seeds active tools from assistant
+history in `run-loop-messages`. Use `skill-context` for harness-owned data
+such as attachments or tenant identity; harness values override model-supplied
+keys.
 
-For Markdown-authored `*.skill.md` resources, enable skill codegen, include
-the generated source root, include the resource path, and depend on
-`hot.dev/hot-ai`. Never hand-edit generated `.skill.hot` files.
+For static-stub `*.skill.md` codegen, include the generated source root,
+include the resource path, and depend on `hot.dev/hot-ai`. Never hand-edit
+generated `.skill.hot` files.
 
 ## Sessions, Identity, and Request Context
 

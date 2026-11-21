@@ -149,8 +149,9 @@ meta {
 SKILL_ACTIVATE
 meta {
     doc: """
-    Reserved: stream label for skill activation events.
-    Payload SHOULD include `{name, when-matched}`.
+    Stream label for skill activation events published by `::ai::chat/run-loop`
+    and `run-loop-stream` when `opts.emit-steps` is enabled.
+    Payload shape: `{iteration, skill, tools-added, requires}`.
     """
 }
 "ai:skill:activate"

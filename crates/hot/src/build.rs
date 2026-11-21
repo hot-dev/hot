@@ -432,18 +432,11 @@ pub fn collect_build_inputs(
                 dep_files.len()
             );
             all_files.extend(dep_files);
-
-            let dep_resource_roots =
-                crate::bundle::collect_package_resource_roots_from_root(&dep.resolved_path)?;
-            if !dep_resource_roots.is_empty() {
-                tracing::debug!(
-                    "Including dependency '{}' with {} resource root(s)",
-                    dep.name,
-                    dep_resource_roots.len()
-                );
-                resource_paths.extend(dep_resource_roots);
-            }
         }
+        resource_paths.extend(crate::project::collect_dependency_resource_roots(
+            c,
+            &build_context.project_name,
+        )?);
     }
 
     // Collect bundled resources (`hot.project.<x>.resources.paths`, package
