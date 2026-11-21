@@ -69,7 +69,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard, Notify};
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -307,10 +307,17 @@ impl fmt::Debug for RedisLeaseClient {
 }
 
 /// Cached connection per backend. Lazily created on first command, then
-/// reused for the life of the lease provider.
+/// cloned out of the mutex for concurrent multiplexed use.
+#[derive(Clone)]
 enum RedisLeaseConn {
     Standalone(redis::aio::MultiplexedConnection),
     Cluster(redis::cluster_async::ClusterConnection),
+}
+
+#[derive(Default)]
+struct CachedLeaseConn {
+    next_gen: u64,
+    current: Option<(u64, RedisLeaseConn)>,
 }
 
 impl RedisLeaseConn {
@@ -356,8 +363,10 @@ struct RedisLeaseInner {
     /// Key prefix. `hot:task:lease:` for standalone, `{hot:task}:lease:`
     /// for cluster (so leases hash to the same slot as `{hot:task}`).
     key_prefix: String,
-    /// Lazy shared connection. Recreated transparently on connect failure.
-    conn: Mutex<Option<RedisLeaseConn>>,
+    /// Lazy shared connection. Cloned out of the mutex before awaiting Redis
+    /// commands so concurrent lease acquires, heartbeats, and releases do not
+    /// serialize behind a single lock. Recreated transparently on failure.
+    conn: Mutex<CachedLeaseConn>,
     /// Heartbeat cadence. Exposed for tests to drive sub-second.
     heartbeat_interval: Duration,
     /// End-to-end ceiling for connection admission, connection creation,
@@ -381,27 +390,23 @@ impl fmt::Debug for RedisLeaseInner {
     }
 }
 
-/// Clears a cached connection when a Redis operation fails or its enclosing
-/// timeout cancels the future. This is deliberately armed while the command is
-/// in flight: dropping a multiplexed command future leaves its server-side
-/// outcome unknown, so the connection must not be reused as if it were healthy.
-struct RedisLeaseConnectionGuard<'a> {
-    inner: MutexGuard<'a, Option<RedisLeaseConn>>,
+/// Clears a cached connection (if still at the same generation) when a Redis
+/// command future is dropped before completing (e.g. cancelled by timeout).
+/// Because the connection is cloned out of the mutex before awaiting, this
+/// guard does NOT hold the mutex across network I/O.
+struct InflightConnGuard<'a> {
+    conn: &'a Mutex<CachedLeaseConn>,
+    generation: u64,
     clear_on_drop: bool,
 }
 
-impl<'a> RedisLeaseConnectionGuard<'a> {
-    fn new(inner: MutexGuard<'a, Option<RedisLeaseConn>>) -> Self {
+impl<'a> InflightConnGuard<'a> {
+    fn new(conn: &'a Mutex<CachedLeaseConn>, generation: u64) -> Self {
         Self {
-            inner,
+            conn,
+            generation,
             clear_on_drop: true,
         }
-    }
-
-    fn connection(&mut self) -> Result<&mut RedisLeaseConn, LeaseError> {
-        self.inner
-            .as_mut()
-            .ok_or_else(|| LeaseError::Redis("lease connection is unavailable".to_string()))
     }
 
     fn preserve(mut self) {
@@ -409,10 +414,16 @@ impl<'a> RedisLeaseConnectionGuard<'a> {
     }
 }
 
-impl Drop for RedisLeaseConnectionGuard<'_> {
+impl Drop for InflightConnGuard<'_> {
     fn drop(&mut self) {
-        if self.clear_on_drop {
-            *self.inner = None;
+        if self.clear_on_drop
+            && let Ok(mut guard) = self.conn.try_lock()
+            && guard
+                .current
+                .as_ref()
+                .is_some_and(|(g, _)| *g == self.generation)
+        {
+            guard.current = None;
         }
     }
 }
@@ -447,21 +458,45 @@ impl RedisLeaseInner {
         })
     }
 
+    /// Return a cloned multiplexed connection without holding the mutex across
+    /// caller Redis I/O.
+    async fn get_conn(&self) -> Result<(u64, RedisLeaseConn), LeaseError> {
+        let mut guard = self.conn.lock().await;
+        if let Some((generation, ref conn)) = guard.current {
+            return Ok((generation, conn.clone()));
+        }
+        let conn = self.connect().await?;
+        guard.next_gen = guard.next_gen.wrapping_add(1);
+        let generation = guard.next_gen;
+        guard.current = Some((generation, conn.clone()));
+        Ok((generation, conn))
+    }
+
+    async fn invalidate_conn(&self, generation: u64) {
+        let mut guard = self.conn.lock().await;
+        if guard
+            .current
+            .as_ref()
+            .is_some_and(|(g, _)| *g == generation)
+        {
+            guard.current = None;
+        }
+    }
+
     async fn run_cmd(&self, cmd: &Cmd) -> Result<redis::Value, LeaseError> {
         let operation = async {
-            let mut guard = self.conn.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.connect().await?);
-            }
-            let mut guarded = RedisLeaseConnectionGuard::new(guard);
-            let result = guarded.connection()?.run_cmd(cmd).await;
+            let (generation, mut conn) = self.get_conn().await?;
+            let inflight = InflightConnGuard::new(&self.conn, generation);
+            let result = conn.run_cmd(cmd).await;
             match result {
                 Ok(value) => {
-                    guarded.preserve();
+                    inflight.preserve();
                     Ok(value)
                 }
                 Err(error) => {
+                    inflight.preserve();
                     tracing::debug!(error = %error, "Lease Redis command failed; clearing cached connection");
+                    self.invalidate_conn(generation).await;
                     Err(error)
                 }
             }
@@ -484,19 +519,18 @@ impl RedisLeaseInner {
         args: &[Vec<u8>],
     ) -> Result<redis::Value, LeaseError> {
         let operation = async {
-            let mut guard = self.conn.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.connect().await?);
-            }
-            let mut guarded = RedisLeaseConnectionGuard::new(guard);
-            let result = guarded.connection()?.run_script(script, keys, args).await;
+            let (generation, mut conn) = self.get_conn().await?;
+            let inflight = InflightConnGuard::new(&self.conn, generation);
+            let result = conn.run_script(script, keys, args).await;
             match result {
                 Ok(value) => {
-                    guarded.preserve();
+                    inflight.preserve();
                     Ok(value)
                 }
                 Err(error) => {
+                    inflight.preserve();
                     tracing::debug!(error = %error, "Lease Redis script failed; clearing cached connection");
+                    self.invalidate_conn(generation).await;
                     Err(error)
                 }
             }
@@ -556,7 +590,7 @@ impl RedisTaskLease {
                 client: RedisLeaseClient::Standalone(Box::new(client)),
                 worker_id,
                 key_prefix: "hot:task:lease:".to_string(),
-                conn: Mutex::new(None),
+                conn: Mutex::new(CachedLeaseConn::default()),
                 heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
                 command_timeout: REDIS_COMMAND_TIMEOUT,
                 extend_script: Script::new(EXTEND_SCRIPT),
@@ -573,7 +607,7 @@ impl RedisTaskLease {
                 client: RedisLeaseClient::Cluster(Box::new(client)),
                 worker_id,
                 key_prefix: "{hot:task}:lease:".to_string(),
-                conn: Mutex::new(None),
+                conn: Mutex::new(CachedLeaseConn::default()),
                 heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
                 command_timeout: REDIS_COMMAND_TIMEOUT,
                 extend_script: Script::new(EXTEND_SCRIPT),
