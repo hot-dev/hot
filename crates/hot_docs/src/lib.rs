@@ -478,9 +478,11 @@ fn parse_nav_item(item: &str) -> (String, Option<String>) {
         && let Some(end_bracket) = item.find(']')
     {
         let title = item[1..end_bracket].to_string();
-        let path = item
-            .find('(')
-            .and_then(|start| item.find(')').map(|end| item[start + 1..end].to_string()));
+        let after_bracket = &item[end_bracket + 1..];
+        let path = after_bracket.find('(').and_then(|start| {
+            let rest = &after_bracket[start + 1..];
+            rest.find(')').map(|end| rest[..end].to_string())
+        });
         return (title, path);
     }
     (item.to_string(), None)
@@ -582,17 +584,57 @@ fn frontmatter_description(frontmatter: &Val) -> Option<String> {
     }
 }
 
+fn is_safe_relative_path(path: &str) -> bool {
+    let candidate = Path::new(path);
+    let mut has_normal = false;
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(_) => has_normal = true,
+            _ => return false,
+        }
+    }
+    has_normal
+}
+
+fn is_safe_single_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.contains('/')
+        && !segment.contains('\\')
+        && matches!(
+            Path::new(segment)
+                .components()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [std::path::Component::Normal(_)]
+        )
+}
+
+fn canonical_contained_path(base_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    let canonical_base = fs::canonicalize(base_dir).ok()?;
+    let canonical_candidate = fs::canonicalize(candidate).ok()?;
+    if canonical_candidate.starts_with(&canonical_base) {
+        Some(canonical_candidate)
+    } else {
+        None
+    }
+}
+
 fn docs_file_path(docs_dir: &Path, path: &str) -> Option<PathBuf> {
     let cleaned = path.trim_matches('/').trim_end_matches(".md");
     let candidates = if cleaned == "index" || cleaned.is_empty() {
         vec![docs_dir.join("index.md")]
     } else {
+        if !is_safe_relative_path(cleaned) {
+            return None;
+        }
         vec![
             docs_dir.join(format!("{cleaned}.md")),
             docs_dir.join(cleaned).join("index.md"),
         ]
     };
-    candidates.into_iter().find(|candidate| candidate.exists())
+    candidates
+        .into_iter()
+        .find_map(|candidate| canonical_contained_path(docs_dir, &candidate))
 }
 
 fn load_all_pages(config: &DocsConfig) -> Result<Vec<DocPage>, String> {
@@ -1156,16 +1198,29 @@ fn load_cached_pkg_docs_versioned(
     pkg_name: &str,
     version: Option<&str>,
 ) -> Result<(PkgDocs, String, Vec<String>), String> {
-    let versions_path = config.pkg_docs_dir.join(pkg_name).join("versions.json");
-    if versions_path.exists() {
+    if !is_safe_single_segment(pkg_name) {
+        return Err(format!("Invalid package name: '{pkg_name}'"));
+    }
+    if let Some(v) = version
+        && !is_safe_single_segment(v)
+    {
+        return Err(format!("Invalid package version: '{v}'"));
+    }
+
+    let versions_candidate = config.pkg_docs_dir.join(pkg_name).join("versions.json");
+    if let Some(versions_path) = canonical_contained_path(&config.pkg_docs_dir, &versions_candidate)
+    {
         let versions_index: PkgVersionsIndex = docs::load_versions_index(&versions_path)?;
         let target_version = version.unwrap_or(&versions_index.latest);
-        let docs_path = config
+        if !is_safe_single_segment(target_version) {
+            return Err(format!("Invalid package version: '{target_version}'"));
+        }
+        let docs_candidate = config
             .pkg_docs_dir
             .join(pkg_name)
             .join(target_version)
             .join("docs.json");
-        if docs_path.exists() {
+        if let Some(docs_path) = canonical_contained_path(&config.pkg_docs_dir, &docs_candidate) {
             let pkg_docs = docs::load_pkg_docs_from_json(&docs_path)?;
             return Ok((
                 pkg_docs,
@@ -1175,15 +1230,15 @@ fn load_cached_pkg_docs_versioned(
         }
     }
 
-    let legacy_path = config.pkg_docs_dir.join(format!("{pkg_name}.json"));
-    if legacy_path.exists() {
+    let legacy_candidate = config.pkg_docs_dir.join(format!("{pkg_name}.json"));
+    if let Some(legacy_path) = canonical_contained_path(&config.pkg_docs_dir, &legacy_candidate) {
         let pkg_docs = docs::load_pkg_docs_from_json(&legacy_path)?;
         let version = pkg_docs.meta.version.clone();
         return Ok((pkg_docs, version.clone(), vec![version]));
     }
 
-    let pkg_path = config.pkg_source_dir.join(pkg_name);
-    if pkg_path.exists() {
+    let pkg_candidate = config.pkg_source_dir.join(pkg_name);
+    if let Some(pkg_path) = canonical_contained_path(&config.pkg_source_dir, &pkg_candidate) {
         let pkg_docs = docs::load_pkg_docs(&pkg_path)?;
         let version = pkg_docs.meta.version.clone();
         return Ok((pkg_docs, version.clone(), vec![version]));
@@ -1294,7 +1349,12 @@ fn load_pkg_page(
 }
 
 fn render_pkg_readme(config: &DocsConfig, pkg_name: &str) -> Result<String, String> {
-    let readme_path = config.pkg_source_dir.join(pkg_name).join("README.md");
+    if !is_safe_single_segment(pkg_name) {
+        return Err(format!("Invalid package name: '{pkg_name}'"));
+    }
+    let candidate = config.pkg_source_dir.join(pkg_name).join("README.md");
+    let readme_path = canonical_contained_path(&config.pkg_source_dir, &candidate)
+        .ok_or_else(|| format!("README not found for package '{pkg_name}'"))?;
     let markdown = fs::read_to_string(&readme_path)
         .map_err(|e| format!("Failed to read {}: {e}", readme_path.display()))?;
     Ok(markdown_to_html_with_toc(&markdown).0)
@@ -1527,7 +1587,8 @@ fn slugify(text: &str) -> String {
 fn excerpt(text: &str) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.len() > 180 {
-        format!("{}...", &text[..180])
+        let end = text.floor_char_boundary(180);
+        format!("{}...", &text[..end])
     } else {
         text
     }
@@ -1717,5 +1778,89 @@ hot.pkg.demo {
         assert!(html.contains(
             r#"<meta name="description" content="A &quot;quoted&quot; &amp; useful page.">"#
         ));
+    }
+
+    #[test]
+    fn docs_file_path_rejects_traversal_and_symlink_escapes() {
+        let test_id = format!(
+            "hot-docs-path-traversal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(test_id);
+        let docs_dir = root.join("docs");
+        let outside = root.join("secret.md");
+        fs::create_dir_all(docs_dir.join("guide")).unwrap();
+        fs::write(&outside, "# Secret").unwrap();
+        fs::write(docs_dir.join("index.md"), "# Home").unwrap();
+        fs::write(docs_dir.join("guide").join("intro.md"), "# Intro").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, docs_dir.join("leak.md")).unwrap();
+
+        assert!(docs_file_path(&docs_dir, "index").is_some());
+        assert!(docs_file_path(&docs_dir, "guide/intro").is_some());
+        assert!(docs_file_path(&docs_dir, "../secret").is_none());
+        assert!(docs_file_path(&docs_dir, "guide/../../secret").is_none());
+        assert!(docs_file_path(&docs_dir, "./index").is_none());
+        #[cfg(unix)]
+        assert!(docs_file_path(&docs_dir, "leak").is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pkg_docs_and_readme_reject_traversal() {
+        let test_id = format!(
+            "hot-docs-pkg-traversal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(test_id);
+        let pkg_source_dir = root.join("pkgs");
+        let pkg_docs_dir = root.join("pkg-docs");
+        fs::create_dir_all(&pkg_source_dir).unwrap();
+        fs::create_dir_all(&pkg_docs_dir).unwrap();
+        fs::write(root.join("README.md"), "# Outside").unwrap();
+
+        let config = DocsConfig {
+            pkg_source_dir,
+            pkg_docs_dir,
+            ..DocsConfig::from_resources()
+        };
+
+        assert!(render_pkg_readme(&config, "..").is_err());
+        assert!(render_pkg_readme(&config, "../outside").is_err());
+        assert!(load_cached_pkg_docs_versioned(&config, "..", None).is_err());
+        assert!(load_cached_pkg_docs_versioned(&config, "demo", Some("../1.0.0")).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excerpt_handles_multibyte_utf8_at_boundary() {
+        // 179 ASCII bytes + a 3-byte em-dash ('—') puts byte 180 mid-character.
+        let text = format!("{}—tail", "a".repeat(179));
+        let result = excerpt(&text);
+        assert_eq!(result, format!("{}...", "a".repeat(179)));
+    }
+
+    #[test]
+    fn parse_nav_item_handles_parentheses_in_title_and_malformed_order() {
+        assert_eq!(
+            parse_nav_item("[Title )](valid-path)"),
+            ("Title )".to_string(), Some("valid-path".to_string()))
+        );
+        assert_eq!(
+            parse_nav_item("[Title (beta)](beta-path)"),
+            ("Title (beta)".to_string(), Some("beta-path".to_string()))
+        );
+        assert_eq!(parse_nav_item("[Title] ) ("), ("Title".to_string(), None));
     }
 }

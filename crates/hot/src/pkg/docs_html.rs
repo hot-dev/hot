@@ -131,7 +131,7 @@ pub fn render_ctx_requirements(ctx: &CtxRequirements) -> String {
         html.push_str("<span class=\"ctx-label ctx-required\">Required</span>\n");
         html.push_str("<ul class=\"ctx-list\">\n");
         for var in &ctx.req {
-            html.push_str(&format!("<li><code>{}</code></li>\n", var));
+            html.push_str(&format!("<li><code>{}</code></li>\n", html_escape(var)));
         }
         html.push_str("</ul>\n</div>\n");
     }
@@ -141,7 +141,7 @@ pub fn render_ctx_requirements(ctx: &CtxRequirements) -> String {
         html.push_str("<span class=\"ctx-label ctx-optional\">Optional</span>\n");
         html.push_str("<ul class=\"ctx-list\">\n");
         for var in &ctx.opt {
-            html.push_str(&format!("<li><code>{}</code></li>\n", var));
+            html.push_str(&format!("<li><code>{}</code></li>\n", html_escape(var)));
         }
         html.push_str("</ul>\n</div>\n");
     }
@@ -158,10 +158,16 @@ pub fn render_fn_ctx_requirements(ctx: &CtxRequirements) -> String {
 
     let mut parts = Vec::new();
     for var in &ctx.req {
-        parts.push(format!("<code class=\"ctx-req\">{}</code>", var));
+        parts.push(format!(
+            "<code class=\"ctx-req\">{}</code>",
+            html_escape(var)
+        ));
     }
     for var in &ctx.opt {
-        parts.push(format!("<code class=\"ctx-opt\">{}</code>", var));
+        parts.push(format!(
+            "<code class=\"ctx-opt\">{}</code>",
+            html_escape(var)
+        ));
     }
 
     html.push_str(&parts.join(", "));
@@ -177,7 +183,10 @@ pub fn render_box_requirements(box_req: &BoxRequirementDoc) -> String {
     if let Some(ref size) = box_req.min_size {
         html.push_str("<div class=\"box-section\">\n");
         html.push_str("<span class=\"box-label box-size\">Minimum Size</span>\n");
-        html.push_str(&format!("<code class=\"box-value\">{}</code>\n", size));
+        html.push_str(&format!(
+            "<code class=\"box-value\">{}</code>\n",
+            html_escape(size)
+        ));
         html.push_str("</div>\n");
     }
 
@@ -200,7 +209,10 @@ pub fn render_fn_box_requirements(box_req: &BoxRequirementDoc) -> String {
 
     let mut parts = Vec::new();
     if let Some(ref size) = box_req.min_size {
-        parts.push(format!("<code class=\"box-fn-size\">{}</code>", size));
+        parts.push(format!(
+            "<code class=\"box-fn-size\">{}</code>",
+            html_escape(size)
+        ));
     }
     if box_req.network {
         parts.push("<code class=\"box-fn-network\">network</code>".to_string());
@@ -316,28 +328,29 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
     if !docs.meta.description.is_empty() {
         html.push_str(&format!(
             "<h1>{} <span class=\"pkg-description\">— {}</span></h1>\n",
-            docs.meta.name, docs.meta.description
+            html_escape(&docs.meta.name),
+            html_escape(&docs.meta.description)
         ));
     } else {
-        html.push_str(&format!("<h1>{}</h1>\n", docs.meta.name));
+        html.push_str(&format!("<h1>{}</h1>\n", html_escape(&docs.meta.name)));
     }
 
     // Version and metadata
     html.push_str("<div class=\"pkg-meta\">\n");
     html.push_str(&format!(
         "<p><strong>Version:</strong> {}</p>\n",
-        docs.meta.version
+        html_escape(&docs.meta.version)
     ));
     if !docs.meta.author.is_empty() {
         html.push_str(&format!(
             "<p><strong>Author:</strong> {}</p>\n",
-            docs.meta.author
+            html_escape(&docs.meta.author)
         ));
     }
     if !docs.meta.license.is_empty() {
         html.push_str(&format!(
             "<p><strong>License:</strong> {}</p>\n",
-            docs.meta.license
+            html_escape(&docs.meta.license)
         ));
     }
 
@@ -349,8 +362,17 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
             .deps
             .iter()
             .map(|dep| {
+                let escaped_name = html_escape(&dep.name);
                 if let Some(ref docs_url) = dep.docs_url {
-                    format!("<a href=\"{}\">{}</a>", docs_url, dep.name)
+                    if is_safe_href(docs_url) {
+                        format!(
+                            "<a href=\"{}\">{}</a>",
+                            html_escape(docs_url.trim()),
+                            escaped_name
+                        )
+                    } else {
+                        escaped_name
+                    }
                 } else if let Some(ref git) = dep.git {
                     let mut url = git.clone();
                     if url.starts_with("git@github.com:") {
@@ -362,9 +384,17 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
                     if let Some(ref path) = dep.path {
                         url = format!("{}/tree/main/{}", url.trim_end_matches(".git"), path);
                     }
-                    format!("<a href=\"{}\" target=\"_blank\">{}</a>", url, dep.name)
+                    if is_safe_href(&url) {
+                        format!(
+                            "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a>",
+                            html_escape(url.trim()),
+                            escaped_name
+                        )
+                    } else {
+                        escaped_name
+                    }
                 } else {
-                    dep.name.clone()
+                    escaped_name
                 }
             })
             .collect();
@@ -399,7 +429,7 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
   <pre class="deps-code-block"><code><span class="dep-string">"{0}"</span>: <span class="dep-string">"{1}"</span></code></pre>
   <p class="add-to-project-note">Add this to your <code>deps</code> in <code>hot.hot</code></p>
 </div>
-"#, pkg_name, docs.meta.version));
+"#, html_escape(pkg_name), html_escape(&docs.meta.version)));
     }
 
     // Namespace list grouped by prefix ("On this page" links to #namespaces)
@@ -413,7 +443,10 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
 
     for (prefix, namespaces) in groups {
         if !prefix.is_empty() {
-            html.push_str(&format!("<h3 class=\"namespace-header\">{}</h3>\n", prefix));
+            html.push_str(&format!(
+                "<h3 class=\"namespace-header\">{}</h3>\n",
+                html_escape(&prefix)
+            ));
         }
 
         // Determine which meta columns have any data across this group
@@ -471,7 +504,12 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
 
             html.push_str(&format!(
                 "<tr><td><code class=\"namespace-badge\"><a href=\"{}/{}/{}\">{}</a></code></td><td>{}</td><td>{}</td>",
-                base_url, pkg_name, ns.name, ns_display, fn_count, type_cell
+                html_escape(base_url),
+                html_escape(pkg_name),
+                html_escape(&ns.name),
+                html_escape(&ns_display),
+                fn_count,
+                type_cell
             ));
 
             if has_schedules {
@@ -530,7 +568,7 @@ pub fn generate_pkg_index_html(docs: &PkgDocs, pkg_name: &str, base_url: &str) -
                 ));
             }
 
-            html.push_str(&format!("<td>{}</td></tr>\n", desc));
+            html.push_str(&format!("<td>{}</td></tr>\n", html_escape(&desc)));
         }
         html.push_str("</tbody></table>\n");
     }
@@ -555,7 +593,13 @@ fn generate_type_registry_json(registry: &TypeRegistry) -> String {
         map.insert(type_name.clone(), full_path.clone());
     }
 
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+    let json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
+    // Escape characters that can break out of an inline <script> tag or break JS parsing
+    json.replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 /// Build links for documented vars that aliases can point to.
@@ -606,10 +650,12 @@ fn render_alias_badge(
 ) {
     if let Some(target) = alias_of {
         let title = format!("Alias of {}", target);
-        if let Some(href) = alias_target_index.get(target) {
+        if let Some(href) = alias_target_index.get(target)
+            && is_safe_href(href)
+        {
             html.push_str(&format!(
                 " <span class=\"meta-badge alias-badge\">alias</span> <span class=\"alias-target\"><span class=\"alias-target-label\">of</span> <a href=\"{}\" title=\"{}\"><code>{}</code></a></span>",
-                html_escape(href),
+                html_escape(href.trim()),
                 html_escape(&title),
                 html_escape(target)
             ));
@@ -747,7 +793,7 @@ pub fn generate_namespace_html_with_root(
         for value in all_values {
             html.push_str(&format!(
                 "<h3 id=\"{}\"><code>{}</code>",
-                value.name,
+                html_escape(&value.name),
                 html_escape(&value.name)
             ));
             render_alias_badge(&mut html, &value.alias_of, alias_target_index);
@@ -784,7 +830,8 @@ pub fn generate_namespace_html_with_root(
         for func in all_funcs {
             html.push_str(&format!(
                 "<h3 id=\"{}\"><code>{}</code>",
-                func.name, func.name
+                html_escape(&func.name),
+                html_escape(&func.name)
             ));
             if func.is_core {
                 html.push_str(" <span class=\"core-badge\">core</span>");
@@ -858,7 +905,7 @@ pub fn generate_namespace_html_with_root(
                         if param.is_variadic {
                             html.push_str("...");
                         }
-                        html.push_str(&param.name);
+                        html.push_str(&html_escape(&param.name));
                         if let Some(type_ann) = &param.type_annotation {
                             html.push_str(": ");
                             html.push_str(&html_escape(type_ann));
@@ -971,7 +1018,8 @@ pub fn generate_namespace_html_with_root(
         for typ in all_types {
             html.push_str(&format!(
                 "<h3 id=\"{}\"><code>{}</code>",
-                typ.name, typ.name
+                html_escape(&typ.name),
+                html_escape(&typ.name)
             ));
             if typ.is_core {
                 html.push_str(" <span class=\"core-badge\">core</span>");
@@ -990,7 +1038,7 @@ pub fn generate_namespace_html_with_root(
                         if j > 0 {
                             html.push_str(", ");
                         }
-                        html.push_str(&param.name);
+                        html.push_str(&html_escape(&param.name));
                         if let Some(type_ann) = &param.type_annotation {
                             html.push_str(": ");
                             html.push_str(&html_escape(type_ann));
@@ -1034,7 +1082,12 @@ pub fn generate_namespace_html_with_root(
                         .map(|t| format!(": {}", html_escape(t)))
                         .unwrap_or_default();
                     let comma = if i < field_count - 1 { "," } else { "" };
-                    html.push_str(&format!("    {}{}{}\n", field.name, type_ann, comma));
+                    html.push_str(&format!(
+                        "    {}{}{}\n",
+                        html_escape(&field.name),
+                        type_ann,
+                        comma
+                    ));
                 }
                 html.push_str(&format!("}}{}</code></pre>\n", refinement));
             }
@@ -1475,6 +1528,24 @@ fn looks_like_hot_code_block(code: &str) -> bool {
             .iter()
             .take(12)
             .any(|line| line.starts_with("):") || line.starts_with(") ->"))
+}
+
+/// Allow only `http://`, `https://`, or relative URLs (rejecting `javascript:`,
+/// `data:`, scheme-relative `//`, and control characters).
+fn is_safe_href(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    if let Some(colon_pos) = trimmed.find(':') {
+        let before_colon = &trimmed[..colon_pos];
+        if before_colon.contains('/') || before_colon.contains('?') || before_colon.contains('#') {
+            return true;
+        }
+        before_colon.eq_ignore_ascii_case("http") || before_colon.eq_ignore_ascii_case("https")
+    } else {
+        true
+    }
 }
 
 /// HTML escape for code content
@@ -1938,5 +2009,178 @@ chat-with-tools(
         assert_eq!(anthropic.children.len(), 2);
         assert_eq!(anthropic.children[0].title, "::api");
         assert_eq!(anthropic.children[1].title, "::batches");
+    }
+
+    #[test]
+    fn docs_html_escapes_untrusted_metadata_requirements_and_identifiers() {
+        use crate::pkg::docs::{FunctionParam, FunctionSignature, PkgDep, TypeField};
+
+        let docs = PkgDocs {
+            meta: PkgMeta {
+                name: "hot.dev/<script>alert(1)</script>".to_string(),
+                version: "1.0.0\"<img src=x>".to_string(),
+                description: "Desc <b>bold</b>".to_string(),
+                author: "Alice <alice@example.com>".to_string(),
+                license: "MIT & <Apache>".to_string(),
+                deps: vec![
+                    PkgDep {
+                        name: "bad-js".to_string(),
+                        git: Some("javascript:alert(1)".to_string()),
+                        path: None,
+                        tag: None,
+                        branch: None,
+                        local: None,
+                        docs_url: None,
+                    },
+                    PkgDep {
+                        name: "bad-docs".to_string(),
+                        git: None,
+                        path: None,
+                        tag: None,
+                        branch: None,
+                        local: None,
+                        docs_url: Some("javascript:alert(2)".to_string()),
+                    },
+                    PkgDep {
+                        name: "good-git".to_string(),
+                        git: Some("https://github.com/hot-dev/demo".to_string()),
+                        path: None,
+                        tag: None,
+                        branch: None,
+                        local: None,
+                        docs_url: None,
+                    },
+                    PkgDep {
+                        name: "good-rel".to_string(),
+                        git: None,
+                        path: None,
+                        tag: None,
+                        branch: None,
+                        local: None,
+                        docs_url: Some("/pkg/hot.dev/hot-std".to_string()),
+                    },
+                ],
+                ..PkgMeta::default()
+            },
+            readme: None,
+            license: None,
+            namespaces: vec![DocNamespace {
+                name: "demo/<x>".to_string(),
+                namespace: "::demo::<x>".to_string(),
+                doc: Some("Summary <script>xss</script>".to_string()),
+                no_doc: false,
+                functions: vec![DocFunction {
+                    name: "fn_<evil>".to_string(),
+                    doc: None,
+                    is_core: false,
+                    signatures: vec![FunctionSignature {
+                        params: vec![FunctionParam {
+                            name: "p_<xss>".to_string(),
+                            type_annotation: Some("Str".to_string()),
+                            is_lazy: false,
+                            is_variadic: false,
+                        }],
+                        return_type: None,
+                        precondition: None,
+                    }],
+                    ctx: Some(CtxRequirements {
+                        req: vec!["req.<script>".to_string()],
+                        opt: vec!["opt.<img>".to_string()],
+                    }),
+                    box_req: Some(BoxRequirementDoc {
+                        min_size: Some("<svg onload=1>".to_string()),
+                        network: true,
+                    }),
+                    schedule: None,
+                    on_event: None,
+                    webhook: None,
+                    mcp: None,
+                    sends: Vec::new(),
+                    alias_of: None,
+                }],
+                types: vec![DocType {
+                    name: "T</script><script>".to_string(),
+                    doc: None,
+                    is_core: false,
+                    fields: vec![TypeField {
+                        name: "f_<xss>".to_string(),
+                        type_annotation: Some("Int".to_string()),
+                    }],
+                    constructors: vec![FunctionSignature {
+                        params: vec![FunctionParam {
+                            name: "cp_<xss>".to_string(),
+                            type_annotation: Some("Int".to_string()),
+                            is_lazy: false,
+                            is_variadic: false,
+                        }],
+                        return_type: None,
+                        precondition: None,
+                    }],
+                    type_alias: None,
+                    refinement: None,
+                    alias_of: None,
+                }],
+                values: vec![DocValue {
+                    name: "V\"<xss>".to_string(),
+                    doc: None,
+                    value: "1".to_string(),
+                    type_annotation: None,
+                    alias_of: None,
+                }],
+                ctx: Some(CtxRequirements {
+                    req: vec!["ns.req.<script>".to_string()],
+                    opt: vec!["ns.opt.<img>".to_string()],
+                }),
+                box_req: Some(BoxRequirementDoc {
+                    min_size: Some("<b onmouseover=1>".to_string()),
+                    network: false,
+                }),
+            }],
+            type_index: Default::default(),
+        };
+
+        let index_html = generate_pkg_index_html(&docs, "hot.dev/<pkg>", "/pkg");
+        assert!(!index_html.contains("<script>"));
+        assert!(!index_html.contains("javascript:"));
+        assert!(!index_html.contains("<img src=x>"));
+        assert!(index_html.contains("rel=\"noopener noreferrer\""));
+        assert!(index_html.contains("href=\"https://github.com/hot-dev/demo\""));
+        assert!(index_html.contains("href=\"/pkg/hot.dev/hot-std\""));
+
+        let ns_html = generate_namespace_html(&docs.namespaces[0], "hot.dev/<pkg>");
+        assert!(!ns_html.contains("<script>"));
+        assert!(!ns_html.contains("</script><script>"));
+        assert!(!ns_html.contains("<svg onload=1>"));
+        assert!(!ns_html.contains("<b onmouseover=1>"));
+        assert!(!ns_html.contains("p_<xss>"));
+        assert!(!ns_html.contains("f_<xss>"));
+        assert!(!ns_html.contains("cp_<xss>"));
+        assert!(ns_html.contains("p_&lt;xss&gt;"));
+        assert!(ns_html.contains("f_&lt;xss&gt;"));
+        assert!(ns_html.contains("cp_&lt;xss&gt;"));
+        assert!(ns_html.contains("\\u003c/script\\u003e\\u003cscript\\u003e"));
+    }
+
+    #[test]
+    fn type_registry_json_escapes_script_breakers_and_line_separators() {
+        let mut registry = TypeRegistry::default();
+        registry
+            .current_ns
+            .insert("A</script>&\u{2028}\u{2029}".to_string());
+        let json = generate_type_registry_json(&registry);
+        assert!(!json.contains("</script>"));
+        assert!(!json.contains('<'));
+        assert!(!json.contains('>'));
+        assert!(!json.contains('&'));
+        assert!(!json.contains('\u{2028}'));
+        assert!(!json.contains('\u{2029}'));
+        // Still valid JSON that roundtrips cleanly
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed
+                .get("A</script>&\u{2028}\u{2029}")
+                .and_then(|v| v.as_str()),
+            Some("#A</script>&\u{2028}\u{2029}")
+        );
     }
 }

@@ -235,16 +235,32 @@ async fn oauth_sign_in(db: &DatabasePool, conf: &Val, run: &str) {
     assert!(is_new);
     assert_eq!(created.email, erin.typed);
 
-    for (spelling, provider_id) in [
-        (&erin.lower, format!("github-{run}")),
-        (&erin.upper, format!("other-github-{run}")),
-    ] {
-        let (user, is_new) = oauth(db, conf, spelling, "github", &provider_id, Some("Erin"))
-            .await
-            .unwrap();
-        assert!(!is_new, "{spelling}");
-        assert_eq!(user.user_id, created.user_id, "{spelling}");
-    }
+    let (user, is_new) = oauth(
+        db,
+        conf,
+        &erin.lower,
+        "github",
+        &format!("github-{run}"),
+        Some("Erin"),
+    )
+    .await
+    .unwrap();
+    assert!(!is_new, "{}", erin.lower);
+    assert_eq!(user.user_id, created.user_id, "{}", erin.lower);
+
+    // A different provider_user_id for an already-linked provider is refused
+    // rather than taking over the existing account or creating a duplicate.
+    let mismatch = oauth(
+        db,
+        conf,
+        &erin.upper,
+        "github",
+        &format!("other-github-{run}"),
+        Some("Erin"),
+    )
+    .await;
+    assert!(mismatch.is_err(), "mismatched provider_user_id must fail");
+    assert_eq!(accounts_named(db, &erin).await, 1);
     let (user, is_new) = oauth(
         db,
         conf,

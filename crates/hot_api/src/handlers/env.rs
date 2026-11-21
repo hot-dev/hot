@@ -228,6 +228,9 @@ pub async fn subscribe_to_env(
         let mut subscriber = subscriber;
         let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
         let start_time = tokio::time::Instant::now();
+        const FAST_NONE_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
+        const MAX_CONSECUTIVE_FAST_NONES: u32 = 3;
+        let mut consecutive_fast_nones: u32 = 0;
 
         loop {
             // Check for timeout
@@ -238,8 +241,10 @@ pub async fn subscribe_to_env(
 
             // Receive push event from pub/sub
             if let Some(ref mut sub) = subscriber {
+                let poll_start = tokio::time::Instant::now();
                 match sub.next().await {
                     Some(event) => {
+                        consecutive_fast_nones = 0;
                         // Convert pub/sub event to SSE event
                         let (event_type, sse_event) = convert_pubsub_to_sse(event);
                         if let Ok(json) = serde_json::to_string(&sse_event) {
@@ -248,8 +253,18 @@ pub async fn subscribe_to_env(
                         }
                     }
                     None => {
-                        // Subscriber returned None - could be timeout or closed
-                        // For Redis Streams, this is a 30s timeout, so we just continue
+                        // Redis Streams idle timeout returns None after ~30s; an
+                        // immediately-returning None indicates a closed channel.
+                        if poll_start.elapsed() < FAST_NONE_THRESHOLD {
+                            consecutive_fast_nones += 1;
+                            if consecutive_fast_nones >= MAX_CONSECUTIVE_FAST_NONES {
+                                tracing::debug!("SSE env subscription closed for env {}", env_id);
+                                break;
+                            }
+                            tokio::time::sleep(FAST_NONE_THRESHOLD).await;
+                        } else {
+                            consecutive_fast_nones = 0;
+                        }
                         tracing::trace!("SSE env subscription poll returned None for env {}", env_id);
                         continue;
                     }

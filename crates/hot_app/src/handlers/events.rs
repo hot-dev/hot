@@ -164,6 +164,7 @@ pub async fn events_detail_handler(
                 &mut event.event_data,
             )
             .await;
+            hot::webhook_url::redact_event_data_json_for_display(&mut event.event_data);
             // Get event runs
             let mut event_runs_raw = hot::db::Event::get_runs_by_event(
                 &db,
@@ -423,6 +424,7 @@ pub async fn event_json_handler(
                 &mut event.event_data,
             )
             .await;
+            hot::webhook_url::redact_event_data_json_for_display(&mut event.event_data);
 
             Json(json!({
                 "event_id": event.event_id,

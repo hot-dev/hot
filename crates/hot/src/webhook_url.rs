@@ -35,11 +35,17 @@ pub fn redact_url_token(url: &str) -> String {
     let redacted = match base[path_start..].find('/') {
         Some(rel) => {
             let first_slash = path_start + rel;
-            match base.rfind('/') {
-                Some(pos) if pos >= first_slash => {
-                    format!("{}/{}", &base[..pos], REDACTED_SEGMENT)
+            let trimmed = base.trim_end_matches('/');
+            let trailing = &base[trimmed.len()..];
+            if trimmed.len() <= first_slash {
+                base.to_string()
+            } else {
+                match trimmed.rfind('/') {
+                    Some(pos) if pos >= first_slash => {
+                        format!("{}/{}{}", &trimmed[..pos], REDACTED_SEGMENT, trailing)
+                    }
+                    _ => base.to_string(),
                 }
-                _ => base.to_string(),
             }
         }
         None => base.to_string(),
@@ -181,6 +187,95 @@ fn restore_request_original_url(request: &mut Val, envelope_request: Option<&Val
     }
 }
 
+/// Internal event_data key carrying endpoint-declared `secret-headers` names
+/// (never values) so API/UI event readers can redact custom secret headers
+/// while leaving them intact in Postgres for `hot_worker` hydration.
+pub const SECRET_HEADERS_META_KEY: &str = "_hot_secret_headers";
+
+const DISPLAY_REDACTED_VALUE: &str = "[redacted]";
+
+const DISPLAY_SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-auth-token",
+    "cookie",
+    "set-cookie",
+];
+
+/// Redact sensitive HTTP request headers, decrypted `auth.service-key.meta`,
+/// and webhook capability tokens in a `serde_json::Value` `event_data` payload
+/// before returning it from `/v1/events` or dashboard UI endpoints.
+///
+/// Leaves non-`HttpRequest` MCP tool arguments untouched and strips the
+/// internal `_hot_secret_headers` helper key from the returned JSON.
+pub fn redact_event_data_json_for_display(value: &mut serde_json::Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    let extra_secret_headers: Vec<String> = root
+        .remove(SECRET_HEADERS_META_KEY)
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(args) = root.get_mut("args").and_then(|v| v.as_array_mut()) {
+        for arg in args.iter_mut() {
+            let is_http_req = arg
+                .get("$type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t == "::hot::http/HttpRequest");
+            if is_http_req {
+                redact_request_json_for_display(arg, &extra_secret_headers);
+            }
+        }
+    }
+    if let Some(caller) = root.get_mut("caller") {
+        redact_request_json_for_display(caller, &extra_secret_headers);
+    }
+}
+
+fn redact_request_json_for_display(
+    request: &mut serde_json::Value,
+    extra_secret_headers: &[String],
+) {
+    let Some(req) = request.as_object_mut() else {
+        return;
+    };
+    if let Some(url) = req.get(ORIGINAL_URL_KEY).and_then(|v| v.as_str()) {
+        let redacted = redact_url_token(url);
+        req.insert(
+            ORIGINAL_URL_KEY.to_string(),
+            serde_json::Value::String(redacted),
+        );
+    }
+    if let Some(headers) = req.get_mut("headers").and_then(|v| v.as_object_mut()) {
+        for (name, val) in headers.iter_mut() {
+            let sensitive = DISPLAY_SENSITIVE_HEADERS
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(name))
+                || extra_secret_headers
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(name));
+            if sensitive {
+                *val = serde_json::Value::String(DISPLAY_REDACTED_VALUE.to_string());
+            }
+        }
+    }
+    if let Some(service_key) = req
+        .get_mut("auth")
+        .and_then(|v| v.as_object_mut())
+        .and_then(|auth| auth.get_mut("service-key"))
+        .and_then(|v| v.as_object_mut())
+    {
+        service_key.remove("meta");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +300,28 @@ mod tests {
         // Idempotent.
         let once = redact_url_token("https://h.dev/a/b/tok");
         assert_eq!(redact_url_token(&once), once);
+        // Trailing slashes still redact the token segment (never leak tok/[redacted]).
+        assert_eq!(
+            redact_url_token("https://h.dev/webhook/svc/tok/"),
+            "https://h.dev/webhook/svc/[redacted]/"
+        );
+        assert_eq!(
+            redact_url_token("https://h.dev/webhook/svc/tok///"),
+            "https://h.dev/webhook/svc/[redacted]///"
+        );
+        assert_eq!(
+            redact_url_token("https://h.dev/webhook/svc/tok/?sig=abc"),
+            "https://h.dev/webhook/svc/[redacted]/?sig=abc"
+        );
+        assert_eq!(
+            redact_url_token("https://h.dev/tok/"),
+            "https://h.dev/[redacted]/"
+        );
+        // Root-only slash has no token segment.
+        assert_eq!(redact_url_token("https://h.dev/"), "https://h.dev/");
+        // Trailing-slash redaction is idempotent.
+        let trailing_once = redact_url_token("https://h.dev/webhook/svc/tok/");
+        assert_eq!(redact_url_token(&trailing_once), trailing_once);
     }
 
     fn call_event(url: Option<&str>) -> Val {
@@ -298,5 +415,65 @@ mod tests {
         restore_event_data_original_urls(&mut in_memory, &call_event(None));
         let (arg, _) = original_urls(&in_memory);
         assert_eq!(arg.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn test_redact_event_data_json_for_display_strips_headers_meta_and_custom_secrets() {
+        let mut json = serde_json::json!({
+            "fn": "::app/handle",
+            "_hot_secret_headers": ["X-Stripe-Sig"],
+            "args": [{
+                "$type": "::hot::http/HttpRequest",
+                "original-url": "https://hooks.acme.dev/webhook/svc/tok_abc/",
+                "headers": {
+                    "authorization": "Bearer secret_tok",
+                    "x-stripe-sig": "t=1,v1=sig",
+                    "content-type": "application/json"
+                },
+                "auth": {
+                    "type": "service-key",
+                    "service-key": {
+                        "id": "sk_1",
+                        "meta": { "api_key": "customer_secret" }
+                    }
+                }
+            }, {
+                "headers": { "authorization": "non-http-tool-arg" }
+            }],
+            "caller": {
+                "headers": {
+                    "cookie": "session=abc",
+                    "x-stripe-sig": "t=1,v1=sig"
+                },
+                "auth": {
+                    "type": "service-key",
+                    "service-key": {
+                        "id": "sk_1",
+                        "meta": { "api_key": "customer_secret" }
+                    }
+                }
+            }
+        });
+
+        redact_event_data_json_for_display(&mut json);
+        assert!(json.get(SECRET_HEADERS_META_KEY).is_none());
+        assert_eq!(
+            json["args"][0]["original-url"],
+            "https://hooks.acme.dev/webhook/svc/[redacted]/"
+        );
+        assert_eq!(json["args"][0]["headers"]["authorization"], "[redacted]");
+        assert_eq!(json["args"][0]["headers"]["x-stripe-sig"], "[redacted]");
+        assert_eq!(
+            json["args"][0]["headers"]["content-type"],
+            "application/json"
+        );
+        assert!(json["args"][0]["auth"]["service-key"].get("meta").is_none());
+        assert_eq!(
+            json["args"][1]["headers"]["authorization"],
+            "non-http-tool-arg"
+        );
+        assert_eq!(json["caller"]["headers"]["cookie"], "[redacted]");
+        assert_eq!(json["caller"]["headers"]["x-stripe-sig"], "[redacted]");
+        assert!(json["caller"]["auth"]["service-key"].get("meta").is_none());
     }
 }

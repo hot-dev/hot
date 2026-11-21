@@ -312,6 +312,7 @@
             </dl>
 
             <!-- Actions -->
+            {% if page_context.is_current_org_admin %}
             {% let is_deleting = domain.status() == hot::db::domain::DomainStatus::PendingDeletion %}
             <div class="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
                 <form id="delete-domain-form" method="POST" action="/domains/{{ domain.domain_id }}/delete">
@@ -340,6 +341,7 @@
                 <div></div>
                 {% endif %}
             </div>
+            {% endif %}
         </div>
     </div>
 </div>

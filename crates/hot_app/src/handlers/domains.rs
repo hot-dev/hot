@@ -16,6 +16,17 @@ use uuid::Uuid;
 #[allow(unused_imports)]
 use hot::db::domain::DomainError;
 
+fn require_current_org_admin(session: &Session) -> Result<(), (StatusCode, String)> {
+    if session.is_current_org_admin {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "Only organization admins can manage custom domains.".to_string(),
+        ))
+    }
+}
+
 fn domain_new_breadcrumbs(session: &Session) -> crate::templates::Breadcrumbs {
     let mut bc = crate::templates::build_base_breadcrumbs_with_env(session);
     bc.push(crate::templates::BreadcrumbItem::clickable(
@@ -132,6 +143,8 @@ pub async fn domains_new_handler(
     State(conf): State<hot::val::Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let error_message = if hot::domain::custom_domains_enabled(&conf) {
         ""
     } else {
@@ -162,6 +175,8 @@ pub async fn domains_create_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     axum::extract::Form(form): axum::extract::Form<CreateDomainForm>,
 ) -> Result<Redirect, Result<Html<String>, (StatusCode, String)>> {
+    require_current_org_admin(&session).map_err(Err)?;
+
     let env = session.current_env.as_ref().ok_or(Err((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),
@@ -365,6 +380,8 @@ pub async fn domains_verify_handler(
     State(conf): State<hot::val::Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Redirect, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),
@@ -416,6 +433,8 @@ pub async fn domains_delete_handler(
     State(conf): State<hot::val::Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Redirect, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),

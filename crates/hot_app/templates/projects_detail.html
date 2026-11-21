@@ -62,20 +62,24 @@
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100">
                                     Active
                                 </span>
+                                {% if page_context.is_current_org_admin %}
                                 <form id="deactivate-project-form" method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
                                     <button type="button" class="inline-flex items-center px-2.5 py-1 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-red-50 hover:border-red-300 hover:text-red-700 dark:hover:bg-red-900/20 dark:hover:border-red-700 dark:hover:text-red-400 focus-ring transition-colors" onclick="confirmDeactivateProject()">
                                         Deactivate
                                     </button>
                                 </form>
+                                {% endif %}
                             {% else %}
                                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-100">
                                     Inactive
                                 </span>
+                                {% if page_context.is_current_org_admin %}
                                 <form method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
                                     <button type="submit" class="inline-flex items-center px-2.5 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors">
                                         Activate
                                     </button>
                                 </form>
+                                {% endif %}
                             {% endif %}
                         </dd>
                     </div>
@@ -149,9 +153,11 @@
                         </svg>
                         <p class="mt-2 text-sm font-medium text-red-600 dark:text-red-500">No build deployed</p>
                         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Event handlers and schedules are inactive.</p>
+                        {% if page_context.is_current_org_admin %}
                         <a href="/projects/{{ project.name }}/builds" class="mt-3 btn btn-primary btn-sm">
                             Deploy a Build
                         </a>
+                        {% endif %}
                     </div>
                     {% else %}
                     <div class="text-center py-6">

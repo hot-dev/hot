@@ -76,8 +76,9 @@ pub(crate) fn router(
     forward: Router<ApiStateData>,
     max_body_size: usize,
 ) -> Router<ApiStateData> {
+    let json_body_limit = crate::server::DEFAULT_JSON_BODY_LIMIT.min(max_body_size);
     let forward: Router = forward
-        .layer(DefaultBodyLimit::max(max_body_size))
+        .layer(DefaultBodyLimit::max(json_body_limit))
         .route_layer(middleware::from_fn(authorize_forwarded))
         .with_state(state.clone());
     let control = Router::new()

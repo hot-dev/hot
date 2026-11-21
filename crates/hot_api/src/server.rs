@@ -1,4 +1,6 @@
-use axum::{Extension, Router, extract::DefaultBodyLimit, middleware, routing::get};
+use axum::{
+    Extension, Router, extract::DefaultBodyLimit, handler::Handler, middleware, routing::get,
+};
 use hot::storage::build_storage_from_config;
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use hot::val;
@@ -341,10 +343,13 @@ pub(crate) async fn build_app(
     app
 }
 
+/// Default HTTP body limit for general JSON API routes (10 MB).
+pub(crate) const DEFAULT_JSON_BODY_LIMIT: usize = 10 * 1024 * 1024;
+
 /// Project, build and context routes of one environment. Environment keys call
 /// them directly; org keys reach the same handlers through
 /// `/v1/orgs/{org}/envs/{env}/...`, with grants projected onto that environment.
-fn env_admin_routes() -> Router<crate::ApiStateData> {
+fn env_admin_routes(upload_body_limit: usize) -> Router<crate::ApiStateData> {
     Router::new()
         // Projects
         .route("/v1/projects", get(list_projects).post(create_project))
@@ -365,10 +370,9 @@ fn env_admin_routes() -> Router<crate::ApiStateData> {
         // Builds - env-scoped endpoint for all builds across projects
         .route("/v1/builds", get(list_builds_by_env))
         // Builds - project-scoped endpoints
-        .route("/v1/projects/{project_id_or_slug}/builds", get(list_builds))
         .route(
             "/v1/projects/{project_id_or_slug}/builds",
-            axum::routing::post(upload_build),
+            get(list_builds).post(upload_build.layer(DefaultBodyLimit::max(upload_body_limit))),
         )
         .route(
             "/v1/projects/{project_id_or_slug}/builds/deployed",
@@ -468,9 +472,11 @@ pub(crate) fn build_router(
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP
         .layer(GlobalConcurrencyLimitLayer::new(public_concurrency_limit));
 
+    let json_body_limit = DEFAULT_JSON_BODY_LIMIT.min(max_body_size);
+
     // Create API v1 routes that require authentication
     let api_v1_routes = Router::new()
-        .merge(env_admin_routes())
+        .merge(env_admin_routes(max_body_size))
         // Runs
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/stats", get(get_run_stats))
@@ -555,13 +561,16 @@ pub(crate) fn build_router(
         .route("/v1/files/{file_id}/download", get(download_file))
         // Blob references (spilled large payloads)
         .route("/v1/blobs/{blob_ref_id}/download", get(download_blob))
-        // File upload (simple)
-        .route("/v1/files/upload/{*path}", axum::routing::put(upload_file))
+        // File upload (simple) — allows up to max_body_size (300 MB)
+        .route(
+            "/v1/files/upload/{*path}",
+            axum::routing::put(upload_file.layer(DefaultBodyLimit::max(max_body_size))),
+        )
         // Multipart uploads
         .route("/v1/files/uploads", axum::routing::post(initiate_upload))
         .route(
             "/v1/files/uploads/{upload_id}/{part_number}",
-            axum::routing::put(upload_part_handler),
+            axum::routing::put(upload_part_handler.layer(DefaultBodyLimit::max(max_body_size))),
         )
         .route(
             "/v1/files/uploads/{upload_id}/complete",
@@ -571,7 +580,7 @@ pub(crate) fn build_router(
             "/v1/files/uploads/{upload_id}",
             axum::routing::delete(abort_upload),
         )
-        .layer(DefaultBodyLimit::max(max_body_size))
+        .layer(DefaultBodyLimit::max(json_body_limit))
         .route_layer(middleware::from_fn(
             crate::auth::route_authorization_middleware,
         ))
@@ -588,8 +597,11 @@ pub(crate) fn build_router(
             authentication_middleware,
         ));
 
-    let org_routes =
-        crate::handlers::orgs::router(state.clone(), env_admin_routes(), max_body_size);
+    let org_routes = crate::handlers::orgs::router(
+        state.clone(),
+        env_admin_routes(max_body_size),
+        max_body_size,
+    );
 
     // Domain resolution cache for custom domains (mcp.example.com, etc.)
     let domain_cache = DomainCache::new();
@@ -631,11 +643,7 @@ pub(crate) fn build_router(
 fn request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
     let path = request.uri().path();
     let redacted = if path.starts_with("/webhook/") {
-        // Redact the last path segment (capability token) from trace spans
-        match path.rfind('/') {
-            Some(pos) => format!("{}/[redacted]", &path[..pos]),
-            None => path.to_string(),
-        }
+        hot::webhook_url::redact_url_token(path)
     } else {
         path.to_string()
     };
@@ -833,5 +841,50 @@ mod tests {
         let line = line_inside_request("info", "/webhook/hook/capability-token");
         assert!(line.contains("/webhook/hook/[redacted]"), "{line}");
         assert!(!line.contains("capability-token"), "{line}");
+
+        let trailing = line_inside_request("info", "/webhook/hook/capability-token/");
+        assert!(trailing.contains("/webhook/hook/[redacted]/"), "{trailing}");
+        assert!(!trailing.contains("capability-token"), "{trailing}");
+    }
+
+    #[tokio::test]
+    async fn per_route_upload_body_limit_overrides_default_json_limit() {
+        use axum::body::Bytes;
+        use axum::http::StatusCode;
+        use tower::ServiceExt;
+
+        async fn echo_len(body: Bytes) -> String {
+            body.len().to_string()
+        }
+
+        let app: Router = Router::new()
+            .route("/json", axum::routing::post(echo_len))
+            .route(
+                "/upload",
+                axum::routing::post(echo_len.layer(DefaultBodyLimit::max(64))),
+            )
+            .layer(DefaultBodyLimit::max(16));
+
+        let payload = vec![b'x'; 32];
+        let json_res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/json")
+                    .body(axum::body::Body::from(payload.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let upload_res = app
+            .oneshot(
+                axum::http::Request::post("/upload")
+                    .body(axum::body::Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload_res.status(), StatusCode::OK);
     }
 }

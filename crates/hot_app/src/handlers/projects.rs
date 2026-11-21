@@ -2,6 +2,7 @@ use ahash::AHashMap;
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect},
 };
 use hot::db::{Build, Context, DatabasePool, Project};
@@ -441,6 +442,14 @@ pub async fn projects_deploy_build_handler(
     State(conf): State<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
+    if !session.is_current_org_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only organization admins can deploy builds.",
+        )
+            .into_response();
+    }
+
     let redirect_to_builds =
         || Redirect::to(&format!("/projects/{}/builds", project_name)).into_response();
 
@@ -535,10 +544,18 @@ pub async fn projects_toggle_active_handler(
     State(conf): State<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
+    if !session.is_current_org_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            "Only organization admins can change project status.",
+        )
+            .into_response();
+    }
+
     let env_id = match session.current_env_id() {
         Some(id) => id,
         None => {
-            return Redirect::to("/projects");
+            return Redirect::to("/projects").into_response();
         }
     };
 
@@ -546,7 +563,7 @@ pub async fn projects_toggle_active_handler(
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(project)) => project,
         Ok(None) | Err(_) => {
-            return Redirect::to("/projects");
+            return Redirect::to("/projects").into_response();
         }
     };
 
@@ -559,7 +576,7 @@ pub async fn projects_toggle_active_handler(
             project.project_id,
             e
         );
-        return Redirect::to(&format!("/projects/{}", project_name));
+        return Redirect::to(&format!("/projects/{}", project_name)).into_response();
     }
 
     // On reactivation, also redeploy the latest build so schedules / event
@@ -601,8 +618,8 @@ pub async fn projects_toggle_active_handler(
     }
 
     if new_active {
-        Redirect::to(&format!("/projects/{}", project_name))
+        Redirect::to(&format!("/projects/{}", project_name)).into_response()
     } else {
-        Redirect::to("/projects")
+        Redirect::to("/projects").into_response()
     }
 }

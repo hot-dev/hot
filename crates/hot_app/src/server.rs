@@ -295,6 +295,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
     let app = routes::routes(db, conf, stream_pubsub, blob_store, shutdown_rx)
         .nest_service(ASSETS_URL_PREFIX, cached_assets)
+        .layer(axum::middleware::from_fn(security_headers_middleware))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(request_span)
@@ -344,6 +345,26 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     info!("hot.dev: APP shutdown complete");
 }
 
+/// Attach baseline security response headers without overriding stricter
+/// per-handler headers (e.g. `Referrer-Policy: no-referrer` on secret pages).
+pub(crate) async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers
+        .entry(header::X_CONTENT_TYPE_OPTIONS)
+        .or_insert_with(|| header::HeaderValue::from_static("nosniff"));
+    headers
+        .entry(header::X_FRAME_OPTIONS)
+        .or_insert_with(|| header::HeaderValue::from_static("DENY"));
+    headers
+        .entry(header::REFERRER_POLICY)
+        .or_insert_with(|| header::HeaderValue::from_static("strict-origin-when-cross-origin"));
+    response
+}
+
 /// The span that gives a request's log lines its ID. At ERROR so it exists at
 /// every log level: below the filter's level no line logged inside it would
 /// carry the ID. A span's level only decides that; the span logs nothing itself.
@@ -369,5 +390,56 @@ mod tests {
         for field in ["method", "path", "request_id"] {
             assert!(metadata.fields().field(field).is_some(), "{field}");
         }
+    }
+
+    #[tokio::test]
+    async fn security_headers_middleware_sets_defaults_and_preserves_stricter_handler_headers() {
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/default", get(|| async { "ok" }))
+            .route(
+                "/secret",
+                get(|| async {
+                    (
+                        [
+                            ("Cache-Control", "no-store"),
+                            ("Referrer-Policy", "no-referrer"),
+                        ],
+                        "secret",
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn(security_headers_middleware));
+
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/default")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(res.headers()["x-frame-options"], "DENY");
+        assert_eq!(
+            res.headers()["referrer-policy"],
+            "strict-origin-when-cross-origin"
+        );
+
+        let secret = app
+            .oneshot(
+                axum::http::Request::get("/secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(secret.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(secret.headers()["x-frame-options"], "DENY");
+        assert_eq!(secret.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(secret.headers()["cache-control"], "no-store");
     }
 }

@@ -660,10 +660,11 @@ pub async fn list_events(
 
     let mut event_responses: Vec<EventResponse> = Vec::with_capacity(events.len());
     for e in events {
-        let event_data =
+        let mut event_data =
             rehydrate_payload_json(&db, blob_store.as_ref(), e.env_id, Some(e.event_data))
                 .await
                 .unwrap_or(serde_json::Value::Null);
+        hot::webhook_url::redact_event_data_json_for_display(&mut event_data);
         event_responses.push(EventResponse {
             event_id: e.event_id,
             env_id: e.env_id,
@@ -719,7 +720,7 @@ pub async fn get_event(
         ));
     }
 
-    let event_data = rehydrate_payload_json(
+    let mut event_data = rehydrate_payload_json(
         &db,
         blob_store.as_ref(),
         event.env_id,
@@ -727,6 +728,7 @@ pub async fn get_event(
     )
     .await
     .unwrap_or(serde_json::Value::Null);
+    hot::webhook_url::redact_event_data_json_for_display(&mut event_data);
 
     Ok(Json(ApiResponse::new(EventResponse {
         event_id: event.event_id,
