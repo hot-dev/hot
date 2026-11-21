@@ -1,0 +1,13 @@
+# CodeQL model pack for Hot's Rust code. CodeQL default setup finds model packs
+# in `.github/codeql/extensions` and applies them to its analysis.
+#
+# A model here changes what code scanning reports, so treat a change to this
+# pack as a change to the scanner: each barrier names a function that really
+# performs the validation its query asks for.
+name: hot-dev/hot-rust-models
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: "*"
+dataExtensions:
+  - models/**/*.yml

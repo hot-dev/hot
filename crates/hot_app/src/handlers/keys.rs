@@ -445,13 +445,34 @@ fn selected_access_level(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// The most permissions JSON a key form parses. A grant is about a hundred
+/// bytes, so this is room for thousands of them.
+const MAX_PERMISSIONS_JSON_BYTES: usize = 256 * 1024;
+
+const PERMISSIONS_TOO_LARGE: &str = "Permissions are too large. Use fewer rules, or wildcards.";
+
+/// The permissions JSON a key form submitted, when it is small enough to
+/// parse. Every parse of a form's permissions goes through here.
+///
+/// CodeQL's `rust/unsafe-deserialization` rule is told that what this returns
+/// has been validated: see `.github/codeql/extensions/hot-rust-models`. Keep
+/// the two in step when renaming or moving this function.
+fn bounded_permissions(raw: &str) -> Option<&str> {
+    (raw.len() <= MAX_PERMISSIONS_JSON_BYTES).then_some(raw)
+}
+
 /// The submitted permissions, for re-rendering a form after an error. Text that isn't JSON is
-/// passed through as a string, which the page's permission builder ignores.
+/// passed through as a string, which the page's permission editor shows to be fixed. Oversized
+/// text is neither parsed nor sent back.
 fn submitted_permissions(raw: &str) -> serde_json::Value {
-    if raw.trim().is_empty() {
+    let Some(bounded) = bounded_permissions(raw) else {
+        return serde_json::Value::Object(Default::default());
+    };
+    if bounded.trim().is_empty() {
         serde_json::Value::Object(Default::default())
     } else {
-        serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+        serde_json::from_str(bounded)
+            .unwrap_or_else(|_| serde_json::Value::String(bounded.to_string()))
     }
 }
 
@@ -506,8 +527,9 @@ fn permissions_from_form(access_level: &str, raw: &str) -> Result<serde_json::Va
     if raw.is_empty() {
         return Ok(serde_json::json!({}));
     }
+    let bounded = bounded_permissions(raw).ok_or_else(|| PERMISSIONS_TOO_LARGE.to_string())?;
     let parsed: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| format!("Invalid permissions JSON: {}", e))?;
+        serde_json::from_str(bounded).map_err(|e| format!("Invalid permissions JSON: {}", e))?;
     // Validate the permissions structure
     hot::permission::Permissions::from_json_validated(&parsed)
         .map_err(|e| format!("Invalid permissions: {}", e))?;
@@ -1374,6 +1396,10 @@ pub async fn org_keys_create_handler(
         Ok(expires_at) => expires_at,
         Err(message) => return Err(retry(message)),
     };
+    // An oversized set is refused, not created as a key with no permissions.
+    if bounded_permissions(&form.permissions).is_none() {
+        return Err(retry(PERMISSIONS_TOO_LARGE));
+    }
     if !submitted.is_object() {
         return Err(retry("Permissions must be a JSON object."));
     }
