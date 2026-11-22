@@ -266,14 +266,23 @@ function sseStatus() {
 
             this.sseConnection.onopen = () => {
                 this.openedAt = Date.now();
+                // Always wait STABLE_OPEN_MS before resetting flap/backoff state
+                // so a rapid open/close loop cannot defeat backoff, while a
+                // healthy stream clears stale counters even before any onerror
+                // (e.g. before a bfcache pagehide/pageshow cycle).
+                if (this.confirmOpenTimer) clearTimeout(this.confirmOpenTimer);
+                this.confirmOpenTimer = setTimeout(() => {
+                    this.confirmOpenTimer = null;
+                    this.shortLivedCount = 0;
+                    this.reconnectDelayMs = 1000;
+                    if (!this.isConnected) {
+                        this.markConnected();
+                    }
+                }, this.STABLE_OPEN_MS);
+
                 if (this.shortLivedCount >= 2) {
                     // Recent streams ended right after opening. Keep showing
-                    // "Reconnecting" until this one proves stable.
-                    if (this.confirmOpenTimer) clearTimeout(this.confirmOpenTimer);
-                    this.confirmOpenTimer = setTimeout(() => {
-                        this.confirmOpenTimer = null;
-                        this.markConnected();
-                    }, this.STABLE_OPEN_MS);
+                    // "Reconnecting" until this one proves stable above.
                     return;
                 }
                 this.markConnected();
