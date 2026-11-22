@@ -65,12 +65,28 @@ RUN test -s resources/git-revision.txt \
     || { echo "run scripts/capture-git-revision.sh before building" >&2; exit 1; }
 
 # S3 and GCS storage are always compiled into `hot`; Kata is opt-in.
+# Release CI can pre-compile both binaries inside this exact `builder` stage
+# before the release gate passes and supply them via PREBUILT_DIR so image
+# assembly + provenance/SBOM signing finishes in seconds after the gate.
+ARG PREBUILT_DIR=""
 RUN --mount=type=cache,id=hot-runtime-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=hot-runtime-target,target=/src/target \
-    cargo build --release --locked -p hot_cli --features kata \
-    && cargo build --release --locked --target x86_64-unknown-linux-musl -p hotbox \
-    && cp target/release/hot /out/hot \
-    && cp target/x86_64-unknown-linux-musl/release/hotbox /out/hotbox-linux-x86_64
+    if [ -n "${PREBUILT_DIR}" ] \
+       && [ -x "/src/${PREBUILT_DIR}/hot" ] \
+       && [ -x "/src/${PREBUILT_DIR}/hotbox-linux-x86_64" ]; then \
+        cp "/src/${PREBUILT_DIR}/hot" /out/hot \
+        && cp "/src/${PREBUILT_DIR}/hotbox-linux-x86_64" /out/hotbox-linux-x86_64; \
+    else \
+        cargo build --release --locked -p hot_cli --features kata \
+        && cargo build --release --locked --target x86_64-unknown-linux-musl -p hotbox \
+        && cp target/release/hot /out/hot \
+        && cp target/x86_64-unknown-linux-musl/release/hotbox /out/hotbox-linux-x86_64; \
+    fi
+
+# Optional target that exports only the compiled binaries for release CI pre-builds.
+FROM scratch AS binaries
+COPY --from=builder /out/hot /hot
+COPY --from=builder /out/hotbox-linux-x86_64 /hotbox-linux-x86_64
 
 FROM --platform=linux/amd64 ${DEBIAN_IMAGE}
 

@@ -38,6 +38,9 @@ env:
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
+  # Pin GIT_SHA in non-release test builds so sccache / rust-cache hit across
+  # commits that do not touch a crate.
+  HOT_GIT_SHA: '0000000000000000000000000000000000000000'
   CI: 'true'
   PG_URI: postgres://hot:hot@localhost:5432/hot
   # PostgreSQL forces RLS: the Hot suite runs as a restricted runtime role and
@@ -93,63 +96,39 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          # Release refs restore only. Main/weekly saves use bounded sccache
-          # entries and registry-only rust-cache entries; persisting both full
-          # target/ and compiler caches for each OS would exceed the repo's
-          # 10 GB Actions cache budget. The dependency set needs more than
-          # 512M (a full Linux set is about 0.7 GiB): at 512M both OSes hit
-          # about 2% and compiled nearly everything on every run.
+          # Release refs restore only. Main/weekly saves use bounded sccache on
+          # macOS and target-caching rust-cache on Windows (where sccache is
+          # disabled due to Windows' 32,767-char command-line limit when Cargo
+          # passes per-dep -L flags).
           save-cache: ${{ github.ref == 'refs/heads/main' }}
+          enable-sccache: ${{ runner.os != 'Windows' }}
           sccache-size: 2G
-          cache-rust-targets: "false"
+          cache-rust-targets: ${{ runner.os == 'Windows' }}
           ci-tuning: "true"
 
-      # Cargo 1.100 passes rustc one -L per dependency (its new build
-      # directory layout), so the command that compiles the `hot` crate's
-      # tests is about 59,000 characters, past Windows' limit of 32,767.
-      # Cargo falls back to an argfile when it starts rustc itself. sccache
-      # starts rustc with the arguments written out and fails with
-      # "The filename or extension is too long. (os error 206)". Run rustc
-      # without the wrapper here until sccache passes a long command through
-      # an argfile. An empty RUSTC_WRAPPER means no wrapper.
-      - name: Run rustc without sccache (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
-      # The ort crate downloads ONNX Runtime binaries at build time; cache
-      # them like release.yml does.
-      - name: Cache ORT downloads (macOS)
-        if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/Library/Caches/ort.pyke.io
-          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ort-${{ runner.os }}-
-
-      - name: Restore ORT downloads (macOS, restore-only)
-        if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ~/Library/Caches/ort.pyke.io
-          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ort-${{ runner.os }}-
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-nextest
 
       # ----- Best-effort services -----------------------------------------
 
-      - name: Set up Postgres + pgvector (macOS)
+      - name: Set up Postgres + pgvector + Redis (macOS)
         if: runner.os == 'macOS'
         continue-on-error: true
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
         run: |
           set -euo pipefail
-          brew install postgresql@18
+          brew install postgresql@18 redis
           PG_PREFIX="$(brew --prefix postgresql@18)"
           echo "$PG_PREFIX/bin" >> "$GITHUB_PATH"
           export PATH="$PG_PREFIX/bin:$PATH"
           brew services start postgresql@18
+          brew services start redis
           for _ in $(seq 30); do pg_isready -h localhost -q && break; sleep 1; done
+          for _ in $(seq 15); do
+            redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
           # Build pgvector from source against this exact Postgres. The brew
           # pgvector formula links against whatever PG major it was built
           # for, which may not be @18.
@@ -159,26 +138,11 @@ jobs:
           psql -h localhost -d postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
           createdb -h localhost -O hot hot
 
-      # No Redis on Windows: there is no official Redis or Valkey Windows
-      # build, and Memurai/WSL would add fragility. Redis-backed tests
-      # self-skip there.
-      - name: Set up Redis (macOS)
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          brew install redis
-          brew services start redis
-          for _ in $(seq 15); do
-            redis-cli ping 2>/dev/null | grep -q PONG && break
-            sleep 1
-          done
-
       # ----- Rust suite ----------------------------------------------------
 
       - name: Build Rust tests
         if: runner.os != 'Windows'
-        run: cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
+        run: cargo nextest run --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
 
       # Windows: the Chocolatey Postgres install takes about 9 minutes, so run
       # it as a background job while the tests compile. Both share this step
@@ -195,7 +159,7 @@ jobs:
           $script = "$env:GITHUB_WORKSPACE\.github\scripts\setup-postgres-windows.ps1"
           $statusFile = Join-Path $env:RUNNER_TEMP 'postgres-setup.status'
           $setup = Start-Job -FilePath $script
-          cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
+          cargo nextest run --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
           $buildExit = $LASTEXITCODE
           Write-Host '--- Postgres setup output ---'
           Receive-Job $setup -Wait -AutoRemoveJob 2>&1 | Out-Host
@@ -257,17 +221,34 @@ jobs:
           fi
           # --no-fail-fast: on a discovery matrix we want every test binary's
           # results per run, not just the first failing one.
-          cargo test --workspace --all-targets --locked --no-fail-fast -j ${{ matrix.cargo_jobs }}
+          cargo nextest run --workspace --all-targets --locked --profile ci --no-fail-fast -j ${{ matrix.cargo_jobs }}
+
+      # Reuse the `hot` binary already built during `--workspace --all-targets`
+      # (via hot_cli's CARGO_BIN_EXE_hot integration tests) instead of rebuilding
+      # under a different feature set via `cargo run --bin hot`.
+      - name: Locate hot binary
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bin="target/debug/hot.exe"
+          else
+            bin="target/debug/hot"
+          fi
+          if [[ ! -x "$bin" ]]; then
+            cargo build --locked --bin hot -j ${{ matrix.cargo_jobs }}
+          fi
+          echo "HOT_BIN=$PWD/$bin" >> "$GITHUB_ENV"
 
       # ----- Hot suite (sqlite — always runs, no services needed) ----------
 
       - name: Run Hot init
-        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: |
+          "$HOT_BIN" init -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Hot tests
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: |
+          "$HOT_BIN" test -c hot.test.hot --ctx hot/ci.ctx.hot
 
       # ----- Hot suite (Postgres, best effort) ------------------------------
 
@@ -295,7 +276,7 @@ jobs:
           END $$;
           SQL
           export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
-          cargo run --locked --bin hot -- db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
+          "$HOT_BIN" db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
             --db.migration-uri="$PG_URI"
           psql "$PG_URI" -v ON_ERROR_STOP=1 -v runtime_role=hot_runtime -v schema=hot \
             -f resources/db/postgres/provision_runtime.sql
@@ -309,7 +290,7 @@ jobs:
             export HOT_REDIS_URI=redis://localhost:6379
             export HOT_QUEUE_TYPE=redis
           fi
-          cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot \
+          "$HOT_BIN" init -c hot.test.hot --ctx hot/ci.ctx.hot \
             --db.migration-uri="$PG_URI"
 
       - name: Run Hot tests (full suite, Postgres)
@@ -323,7 +304,7 @@ jobs:
             export HOT_REDIS_URI=redis://localhost:6379
             export HOT_QUEUE_TYPE=redis
           fi
-          cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+          "$HOT_BIN" test -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Postgres queue smoke tests (needs Postgres + Redis)
         if: steps.svc.outputs.pg == 'true' && steps.svc.outputs.redis == 'true'
@@ -333,13 +314,14 @@ jobs:
           export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
           export HOT_REDIS_URI=redis://localhost:6379
           export HOT_QUEUE_TYPE=redis
-          cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
+          "$HOT_BIN" init -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
             --profile local-dev --db.migration-uri="$PG_URI"
-          cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
+          "$HOT_BIN" test -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
             --profile local-dev
 
       # No `hot test box` steps: Docker is unavailable on macOS runners and
       # Windows runners cannot run Linux containers.
 
       - name: sccache stats
+        if: runner.os != 'Windows'
         run: sccache --show-stats || true

@@ -12,8 +12,15 @@ fn main() {
     let version = get_version(workspace_root.as_deref());
     println!("cargo:rustc-env=HOT_VERSION={}", version);
 
-    // Capture git SHA at build time
-    let git_sha = get_git_sha(&manifest_dir, workspace_root.as_deref());
+    // Capture git SHA at build time (or use CI override to preserve compiler caches across commits)
+    println!("cargo:rerun-if-env-changed=HOT_GIT_SHA");
+    let explicit_git_sha = std::env::var("HOT_GIT_SHA")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let git_sha = explicit_git_sha
+        .clone()
+        .unwrap_or_else(|| get_git_sha(&manifest_dir, workspace_root.as_deref()));
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
 
     let build_fingerprint = get_build_fingerprint(&manifest_dir, workspace_root.as_deref())
@@ -23,7 +30,11 @@ fn main() {
         build_fingerprint
     );
 
-    emit_rerun_directives(&manifest_dir, workspace_root.as_deref());
+    emit_rerun_directives(
+        &manifest_dir,
+        workspace_root.as_deref(),
+        explicit_git_sha.is_none(),
+    );
 }
 
 fn find_workspace_root(manifest_dir: &Path) -> Option<PathBuf> {
@@ -144,7 +155,7 @@ fn get_build_fingerprint(
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn emit_rerun_directives(manifest_dir: &Path, workspace_root: Option<&Path>) {
+fn emit_rerun_directives(manifest_dir: &Path, workspace_root: Option<&Path>, watch_git_head: bool) {
     let mut paths = vec![
         manifest_dir.join("src"),
         manifest_dir.join("build.rs"),
@@ -154,10 +165,12 @@ fn emit_rerun_directives(manifest_dir: &Path, workspace_root: Option<&Path>) {
     if let Some(workspace_root) = workspace_root {
         paths.extend([
             workspace_root.join("resources/version.txt"),
-            workspace_root.join(".git/HEAD"),
             workspace_root.join("Cargo.toml"),
             workspace_root.join("Cargo.lock"),
         ]);
+        if watch_git_head {
+            paths.push(workspace_root.join(".git/HEAD"));
+        }
     }
     paths.sort();
     paths.dedup();

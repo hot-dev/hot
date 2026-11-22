@@ -6211,13 +6211,14 @@ mod tests {
             .with_consumer_name("worker-1".to_string());
         worker.ensure_consumer_group().await.unwrap();
 
+        let idle_ms: u64 = 50;
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-        // Insert an entry old enough to exceed ORPHAN_IDLE_MS so a normal
+        // Insert an entry old enough to exceed `idle_ms` so a normal
         // reclaim would pick it up.
         xadd_at_ms(
             &client,
             &stream_key,
-            now_ms.saturating_sub(2 * ORPHAN_IDLE_MS),
+            now_ms.saturating_sub(2 * idle_ms),
             b"payload",
         )
         .await;
@@ -6225,12 +6226,13 @@ mod tests {
             xreadgroup_drain(&client, &stream_key, DEFAULT_CONSUMER_GROUP, "worker-1").await;
         assert_eq!(delivered, 1, "entry must be delivered to worker-1's PEL");
 
-        // Wait long enough that the entry's PEL idle exceeds ORPHAN_IDLE_MS.
-        tokio::time::sleep(std::time::Duration::from_millis(ORPHAN_IDLE_MS + 50)).await;
+        // Wait long enough that the entry's PEL idle exceeds `idle_ms`.
+        tokio::time::sleep(std::time::Duration::from_millis(idle_ms + 50)).await;
 
         // Admin handle with the legacy UUID-style default — calling
         // recover_orphaned_items here must NOT transfer the PEL entry to it.
-        let admin = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+        let mut admin = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+        admin.orphan_idle_ms = idle_ms;
         assert!(
             admin.consumer_name.starts_with("consumer-"),
             "default consumer_name should be UUID-style; got {}",
@@ -6250,8 +6252,9 @@ mod tests {
         assert_eq!(pending_after, 1, "PEL must be unchanged");
 
         // A properly-named admin handle CAN reclaim it.
-        let pinned_admin = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone())
+        let mut pinned_admin = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone())
             .with_consumer_name("worker-2".to_string());
+        pinned_admin.orphan_idle_ms = idle_ms;
         let claimed_pinned = pinned_admin
             .recover_orphaned_items()
             .await

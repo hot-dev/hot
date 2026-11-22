@@ -1,0 +1,55 @@
+name: "Install cargo-nextest"
+description: "Downloads a pinned, SHA-256-verified cargo-nextest binary for Linux, macOS, or Windows."
+runs:
+  using: "composite"
+  steps:
+    - name: Download and verify cargo-nextest
+      shell: bash
+      env:
+        NEXTEST_VERSION: "0.9.152"
+        SHA256_LINUX_X64: "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"
+        SHA256_MACOS: "2fadf57df4243e691f088ee3bff4f4ab9af16da0c95a1db84b5cb1685e098a76"
+        SHA256_WINDOWS_X64: "cc6bf4b6a7ac18e462cd6c9bae67e26921b888249c2988c6acabf3df387ed9d6"
+      run: |
+        set -euo pipefail
+        base_url="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          temp_dir="$(cygpath -u "$RUNNER_TEMP")/nextest-bin"
+        else
+          temp_dir="$RUNNER_TEMP/nextest-bin"
+        fi
+        mkdir -p "$temp_dir"
+
+        case "$RUNNER_OS" in
+          Linux)
+            asset="cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            expected="$SHA256_LINUX_X64"
+            curl -fsSL --retry 3 -o "$temp_dir/$asset" "$base_url/$asset"
+            echo "${expected}  $temp_dir/$asset" | sha256sum -c -
+            tar -xzf "$temp_dir/$asset" -C "$temp_dir"
+            rm -f "$temp_dir/$asset"
+            echo "$temp_dir" >> "$GITHUB_PATH"
+            ;;
+          macOS)
+            asset="cargo-nextest-${NEXTEST_VERSION}-universal-apple-darwin.tar.gz"
+            expected="$SHA256_MACOS"
+            curl -fsSL --retry 3 -o "$temp_dir/$asset" "$base_url/$asset"
+            echo "${expected}  $temp_dir/$asset" | shasum -a 256 -c -
+            tar -xzf "$temp_dir/$asset" -C "$temp_dir"
+            rm -f "$temp_dir/$asset"
+            echo "$temp_dir" >> "$GITHUB_PATH"
+            ;;
+          Windows)
+            asset="cargo-nextest-${NEXTEST_VERSION}-x86_64-pc-windows-msvc.zip"
+            expected="$SHA256_WINDOWS_X64"
+            curl -fsSL --retry 3 -o "$temp_dir/$asset" "$base_url/$asset"
+            echo "${expected}  $temp_dir/$asset" | sha256sum -c -
+            unzip -q -o "$temp_dir/$asset" -d "$temp_dir"
+            rm -f "$temp_dir/$asset"
+            cygpath -w "$temp_dir" >> "$GITHUB_PATH"
+            ;;
+          *)
+            echo "::error::Unsupported RUNNER_OS for cargo-nextest: $RUNNER_OS"
+            exit 1
+            ;;
+        esac

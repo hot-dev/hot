@@ -1553,7 +1553,7 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .execute(&mut *backfill)
         .await?;
     let migration =
-        include_str!("../../../resources/db/postgres/migrations/013_scope_isolation.sql");
+        include_str!("../../../../resources/db/postgres/migrations/013_scope_isolation.sql");
     let start = migration.find("UPDATE hot.call c SET").unwrap();
     let end = start + migration[start..].find(';').unwrap() + 1;
     sqlx::raw_sql(&migration[start..end])

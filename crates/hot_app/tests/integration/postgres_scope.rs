@@ -4,15 +4,11 @@
 //! `HOT_TEST_POSTGRES_URI` it skips, and it must name a login that can create
 //! databases and roles.
 
-#[allow(dead_code, unused_macros)]
-#[path = "../../hot/tests/support/privileged_fixture.rs"]
-mod privileged_fixture;
-
+use crate::privileged_fixture::{self, PrivilegedDb, TestResult};
 use axum::http::StatusCode;
 use hot::db::alert::{AlertChannel, AlertDestination, AlertSubscription, DestinationType};
 use hot::db::{self, DatabasePool, DatabaseScope};
 use hot_app::test_support::TestClient;
-use privileged_fixture::{PrivilegedDb, TestResult};
 use sqlx::PgPool;
 use uuid::Uuid;
 

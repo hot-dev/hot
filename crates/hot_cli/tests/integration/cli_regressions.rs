@@ -1,8 +1,6 @@
 //! Black-box regressions for CLI commands: daemon configuration, the
 //! project each command uses, `hot init`, `hot deps`, `hot run`/`hot eval`,
 //! and file-backed settings.
-#![cfg(unix)]
-
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};

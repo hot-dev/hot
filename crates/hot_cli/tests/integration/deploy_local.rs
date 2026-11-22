@@ -1,7 +1,5 @@
 //! `hot deploy --local` and build storage: workers read a bundle from the
 //! configured storage, wherever `hot build` and `hot deploy` first wrote it.
-#![cfg(unix)]
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 

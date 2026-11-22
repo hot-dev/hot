@@ -1,17 +1,28 @@
+use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    let git_sha = get_git_sha();
+    println!("cargo:rerun-if-env-changed=HOT_GIT_SHA");
+    let explicit_git_sha = env::var("HOT_GIT_SHA")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let git_sha = explicit_git_sha.clone().unwrap_or_else(get_git_sha);
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
 
     let version = get_version();
     println!("cargo:rustc-env=HOT_VERSION={}", version);
 
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs/heads");
-    println!("cargo:rerun-if-changed=../../resources/git-revision.txt");
-    println!("cargo:rerun-if-changed=../../resources/version.txt");
+    // Only emit rerun-if-changed for paths that exist: a missing path forces
+    // Cargo to re-run this build script and recompile the crate on every invocation.
+    if explicit_git_sha.is_none() {
+        emit_git_rerun_directives();
+    }
+    if Path::new("../../resources/version.txt").exists() {
+        println!("cargo:rerun-if-changed=../../resources/version.txt");
+    }
 }
 
 fn get_git_sha() -> String {
@@ -41,4 +52,24 @@ fn get_version() -> String {
     }
 
     "0.0.0".to_string()
+}
+
+fn emit_git_rerun_directives() {
+    let head_path = Path::new("../../.git/HEAD");
+    if head_path.exists() {
+        println!("cargo:rerun-if-changed=../../.git/HEAD");
+        if let Ok(head) = fs::read_to_string(head_path)
+            && let Some(git_ref) = head.trim().strip_prefix("ref: ")
+        {
+            let ref_path = format!("../../.git/{git_ref}");
+            if Path::new(&ref_path).exists() {
+                println!("cargo:rerun-if-changed={ref_path}");
+            } else if Path::new("../../.git/packed-refs").exists() {
+                println!("cargo:rerun-if-changed=../../.git/packed-refs");
+            }
+        }
+    }
+    if Path::new("../../resources/git-revision.txt").exists() {
+        println!("cargo:rerun-if-changed=../../resources/git-revision.txt");
+    }
 }

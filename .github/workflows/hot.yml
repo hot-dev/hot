@@ -31,9 +31,56 @@ env:
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
+  # Pin GIT_SHA in non-release CI builds so sccache hits across commits that do
+  # not touch a crate. `crates/hot` still invalidates AST/bytecode caches via
+  # HOT_BUILD_FINGERPRINT; release.yml omits this and embeds the real SHA.
+  HOT_GIT_SHA: '0000000000000000000000000000000000000000'
   CI: 'true'
 
 jobs:
+  changes:
+    name: Detect Changed Areas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      kata: ${{ steps.filter.outputs.kata }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: github.event_name == 'pull_request'
+
+      - name: Classify changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "kata=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          # Run Kata check only when hot, hot_task_worker, Cargo manifests, or CI setup change.
+          if grep -qE '^(crates/hot/|crates/hot_task_worker/|Cargo\.(toml|lock)$|\.github/(workflows/hot\.yml|actions/))' <<<"$changed"; then
+            kata=true
+          else
+            kata=false
+          fi
+          # Skip full Rust tests only when every changed file is purely AI skills,
+          # infra, release notes, top-level markdown, or standalone JS/doc-link checks.
+          # Note: resources/docs/ still triggers Rust tests (cli_docs.rs, conf_docs.rs).
+          if grep -qvE '^(resources/ai/|infra/|scripts/(check-ai|check-agents|check-doc-links|test-check-doc-links|check-demo-doc-pins|test-check-demo-doc-pins|check-actions-pinned|browser-security|check-sdk-doc-pins|test-app-scope)|\.github/release-notes/|README\.md$|CONTRIBUTING\.md$|CHANGELOG\.md$)' <<<"$changed"; then
+            rust=true
+          else
+            rust=false
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "kata=$kata" >> "$GITHUB_OUTPUT"
+          echo "Detected changes -> rust=$rust, kata=$kata"
+
   browser-security:
     name: Browser Security Regressions
     runs-on: ubuntu-24.04
@@ -68,7 +115,8 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: "false"
+          cache-rust-targets: "false"
           ci-tuning: "true"
           cargo-build-jobs: '8'
 
@@ -101,7 +149,7 @@ jobs:
       # must still fail while the example callers pin the old release.
       - name: Self-host bundle tests
         run: |
-          python3 -m unittest discover -s infra/tests
+          python3 scripts/run-unittest-parallel.py -s infra/tests
           python3 -m unittest discover -s infra/github/tests
 
       - name: Archive installer regressions
@@ -126,6 +174,13 @@ jobs:
       # merge there can't fail this one.
       - name: Verify AI skill assets sync
         run: bash ./scripts/check-ai-assets-sync.sh
+
+      # Build `hot` once and export HOT_BIN so Hot static checks, doc block
+      # checks, and real-pin smoke checks invoke the binary directly.
+      - name: Build hot binary
+        run: |
+          cargo build --locked --bin hot
+          echo "HOT_BIN=$GITHUB_WORKSPACE/target/debug/hot" >> "$GITHUB_ENV"
 
       # `hot-static-checks.sh check` runs the default project check, the package
       # aggregate check, `hot fmt --check` over all Hot source, validates
@@ -167,10 +222,11 @@ jobs:
 
   rust-tests:
     name: Rust Tests
+    needs: [changes]
     runs-on:
       group: hot-ci
       labels: ubuntu-24.04-8core
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.rust == 'true'
     services:
       postgres:
         # PostgreSQL 18.6 with pgvector 0.8.7. The digest pins both: the
@@ -207,7 +263,11 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
+          # Single writer of the shared Linux sccache and crates.io registry cache
+          # on main: rust-tests compiles the full workspace superset, avoiding four
+          # duplicate ~1 GB caches against the 10 GB repository quota.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
+          cache-rust-targets: "false"
           ci-tuning: "true"
           cargo-build-jobs: '8'
 
@@ -215,6 +275,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
+
+      - name: Install cargo-nextest
+        uses: ./.github/actions/install-nextest
 
       # Cargo runs crate tests outside the workspace root. Expose checkout
       # assets through executable-relative discovery without changing the
@@ -239,7 +302,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
           HOT_TEST_POSTGRES_RESET_SCHEMA: '1'
-        run: cargo test --workspace --all-targets --locked
+        run: cargo nextest run --workspace --all-targets --locked --profile ci
 
       - name: sccache stats
         run: sccache --show-stats || true
@@ -286,17 +349,21 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: "false"
+          cache-rust-targets: "false"
           ci-tuning: "true"
           cargo-build-jobs: '8'
 
+      - name: Build hot binary
+        run: cargo build --locked --bin hot
+
       - name: Run Hot init
-        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: ./target/debug/hot init -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Hot tests
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: ./target/debug/hot test -c hot.test.hot --ctx hot/ci.ctx.hot
 
       # The same suite with every function JIT-compiled on its first call.
       # At the default threshold most test code never reaches the JIT, so a
@@ -304,7 +371,7 @@ jobs:
       - name: Run Hot tests (JIT threshold 1)
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
+        run: ./target/debug/hot test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
 
       - name: Provision restricted PostgreSQL runtime
         env:
@@ -312,7 +379,7 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U hot -d hot -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE hot_runtime LOGIN PASSWORD 'hot_runtime' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE"
-          cargo run --locked --bin hot -- db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
+          ./target/debug/hot db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
             --db.migration-uri=postgres://hot:hot@localhost:5432/hot
           docker exec -i "${{ job.services.postgres.id }}" psql -U hot -d hot \
             -v runtime_role=hot_runtime -v schema=hot < resources/db/postgres/provision_runtime.sql
@@ -323,7 +390,7 @@ jobs:
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot --db.migration-uri=postgres://hot:hot@localhost:5432/hot
+        run: ./target/debug/hot init -c hot.test.hot --ctx hot/ci.ctx.hot --db.migration-uri=postgres://hot:hot@localhost:5432/hot
 
       - name: Run Hot tests (full suite, Postgres + Redis)
         env:
@@ -332,14 +399,14 @@ jobs:
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: ./target/debug/hot test -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Postgres queue smoke init
         env:
           HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev --db.migration-uri=postgres://hot:hot@localhost:5432/hot
+        run: ./target/debug/hot init -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev --db.migration-uri=postgres://hot:hot@localhost:5432/hot
 
       - name: Run Postgres queue smoke tests
         env:
@@ -347,12 +414,12 @@ jobs:
           HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev
+        run: ./target/debug/hot test -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev
 
       - name: Run Hot Box tests (Docker integration)
         env:
           HOT_BOX_ENABLED: true
-        run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: ./target/debug/hot test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: Run Hot Box tests (full suite, Postgres + Redis)
         env:
@@ -361,17 +428,18 @@ jobs:
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- test box -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: ./target/debug/hot test box -c hot.test.hot --ctx hot/ci.ctx.hot
 
       - name: sccache stats
         run: sccache --show-stats || true
 
   kata-check:
     name: Kata Backend Compile Check
+    needs: [changes]
     runs-on:
       group: hot-ci
       labels: ubuntu-24.04-8core
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.kata == 'true'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -383,17 +451,18 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          save-cache: "false"
+          cache-rust-targets: "false"
           ci-tuning: "true"
           cargo-build-jobs: '8'
 
       - name: Install protobuf compiler (for containerd-client)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # `cargo test --no-run --features kata` is a superset of `cargo check`.
-      # It is a Linux-only feature compile check.
+      # `cargo check --all-targets --features kata` type-checks lib, bin, and
+      # test code under the Linux-only kata feature without codegen or linking.
       - name: Compile Kata backend (Linux feature check)
-        run: cargo test -p hot_task_worker --features kata --locked --no-run
+        run: cargo check -p hot_task_worker --all-targets --features kata --locked
 
       - name: sccache stats
         run: sccache --show-stats || true
@@ -408,11 +477,14 @@ jobs:
       matrix:
         required-check: [ 'Lint, Rust Tests, and Hot Tests' ]
     runs-on: ubuntu-24.04
-    needs: [browser-security, clippy-and-checks, rust-tests, hot-tests, kata-check]
+    needs: [changes, browser-security, clippy-and-checks, rust-tests, hot-tests, kata-check]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     steps:
       - name: Check split job results
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUN_RUST: ${{ needs.changes.outputs.rust }}
+          RUN_KATA: ${{ needs.changes.outputs.kata }}
           BROWSER_SECURITY_RESULT: ${{ needs.browser-security.result }}
           CLIPPY_RESULT: ${{ needs.clippy-and-checks.result }}
           RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
@@ -421,15 +493,21 @@ jobs:
         run: |
           failed=0
           for result in \
+            "$CHANGES_RESULT" \
             "$BROWSER_SECURITY_RESULT" \
             "$CLIPPY_RESULT" \
-            "$RUST_TESTS_RESULT" \
-            "$HOT_TESTS_RESULT" \
-            "$KATA_CHECK_RESULT"; do
+            "$HOT_TESTS_RESULT"; do
             if [[ "$result" != "success" ]]; then
               failed=1
             fi
           done
+
+          if [[ "$RUST_TESTS_RESULT" != "success" && ! ( "$RUN_RUST" == "false" && "$RUST_TESTS_RESULT" == "skipped" ) ]]; then
+            failed=1
+          fi
+          if [[ "$KATA_CHECK_RESULT" != "success" && ! ( "$RUN_KATA" == "false" && "$KATA_CHECK_RESULT" == "skipped" ) ]]; then
+            failed=1
+          fi
 
           if [[ "$failed" -ne 0 ]]; then
             echo "One or more split CI jobs failed."

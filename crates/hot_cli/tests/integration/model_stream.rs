@@ -2,8 +2,6 @@
 //! through `hot run`, from a server that writes the reply the way a provider
 //! can: frames sharing a chunk, frames split across chunks, CRLF line endings,
 //! a refused call, an error inside the stream.
-#![cfg(unix)]
-
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};

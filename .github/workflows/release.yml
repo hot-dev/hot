@@ -167,14 +167,20 @@ jobs:
         fi
 
   # Compile each published package with the versions it pins before anything
-  # publishes. CI runs this only when packages change, but removing a hot-std
-  # function can break an old pin without touching hot/pkg.
+  # publishes, and pre-build the package CDN directory while the native builds
+  # and cross-platform tests are still running. CI runs pin checks only when
+  # packages change, but removing a hot-std function can break an old pin
+  # without touching hot/pkg.
   package-pins:
-    name: Package Pins
+    name: Package Pins & CDN Build
     needs: validate-release
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      # Pin GIT_SHA so this job hits main's shared Linux sccache instead of
+      # compiling `hot` from scratch on a 4-core runner.
+      HOT_GIT_SHA: '0000000000000000000000000000000000000000'
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -187,9 +193,16 @@ jobs:
         rust-toolchain: 1.100.0
         tailwind-version: ${{ env.TAILWIND_VERSION }}
         save-cache: "false"
+        cache-rust-targets: "false"
+        ci-tuning: "true"
 
     - name: Package pins match the repo versions
       run: python3 scripts/check-pkg-pins.py
+
+    - name: Build hot binary
+      run: |
+        cargo build --locked --bin hot
+        echo "HOT_BIN=$GITHUB_WORKSPACE/target/debug/hot" >> "$GITHUB_ENV"
 
     # Exit 2 means only pkg.hot.dev downloads failed.
     - name: Packages compile with their real pins
@@ -201,8 +214,30 @@ jobs:
         fi
         exit "$status"
 
+    - name: Generate package docs
+      run: |
+        PKG_ARGS=""
+        while IFS= read -r pkg; do
+          [[ "$pkg" =~ ^[[:space:]]*# ]] && continue
+          [[ -z "${pkg//[[:space:]]/}" ]] && continue
+          PKG_ARGS="$PKG_ARGS --pkg ${pkg}"
+        done < hot/pkg/pkg-publish.txt
+
+        "$HOT_BIN" docs $PKG_ARGS
+
+    - name: Generate CDN structure
+      env:
+        PACKAGE_CDN_NAMESPACE: ${{ needs.validate-release.outputs.is_beta == 'true' && 'releases/beta/packages/hot.dev' || 'hot.dev' }}
+      run: ./scripts/hot-pkg-cdn.sh ./cdn-output
+
+    - name: Upload package CDN artifact
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      with:
+        name: package-cdn
+        path: cdn-output/
+
   package-cdn:
-    name: Generate Package CDN
+    name: Publish Package CDN
     needs: [validate-release, package-pins, release-ready]
     # Package-only releases intentionally skip the native matrix. Override
     # inherited skip propagation, while requiring every direct prerequisite.
@@ -221,33 +256,8 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Setup toolchain, cache, sccache, tailwind
-      uses: ./.github/actions/rust-setup
-      with:
-        rust-toolchain: 1.100.0
-        tailwind-version: ${{ env.TAILWIND_VERSION }}
-        # Restore main's caches, but never save: a release run's caches are
-        # scoped to its tag, so no later run could restore them.
-        save-cache: "false"
-
-    - name: Generate package docs
-      run: |
-        PKG_ARGS=""
-        while IFS= read -r pkg; do
-          [[ "$pkg" =~ ^[[:space:]]*# ]] && continue
-          [[ -z "${pkg//[[:space:]]/}" ]] && continue
-          PKG_ARGS="$PKG_ARGS --pkg ${pkg}"
-        done < hot/pkg/pkg-publish.txt
-
-        cargo run --locked --bin hot -- docs $PKG_ARGS
-
-    - name: Generate CDN structure
-      env:
-        PACKAGE_CDN_NAMESPACE: ${{ needs.validate-release.outputs.is_beta == 'true' && 'releases/beta/packages/hot.dev' || 'hot.dev' }}
-      run: ./scripts/hot-pkg-cdn.sh ./cdn-output
-
-    - name: Upload package CDN artifact
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+    - name: Download package CDN artifact
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
       with:
         name: package-cdn
         path: cdn-output/
@@ -325,35 +335,43 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux targets
+          # Linux targets (native x64 and native arm64 runners)
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             platform: linux
             arch: x86_64
-          - os: ubuntu-24.04
+            cargo_jobs: 4
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             platform: linux
             arch: aarch64
+            cargo_jobs: 4
 
-          # macOS targets
+          # macOS targets: macos-latest has 3 vCPU / 7 GB RAM; -j 2 keeps
+          # peak RSS below 7 GB during cgu=1 release builds so macOS avoids
+          # swap thrashing while keeping full cgu=1 + ThinLTO output.
           - os: macos-latest
             target: x86_64-apple-darwin
             platform: macos
             arch: x86_64
+            cargo_jobs: 2
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos
             arch: aarch64
+            cargo_jobs: 2
 
           # Windows targets
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform: windows
             arch: x86_64
+            cargo_jobs: 4
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             platform: windows
             arch: aarch64
+            cargo_jobs: 4
 
     runs-on: ${{ matrix.os }}
 
@@ -401,19 +419,14 @@ jobs:
         tailwindcss --version
         echo "TailwindCSS location: $(which tailwindcss)"
 
-    - name: Setup cross compilation (Linux ARM)
-      if: matrix.target == 'aarch64-unknown-linux-gnu'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-
-    - name: Setup musl toolchain for hotbox (Linux x86_64 only)
-      if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
+    - name: Setup musl toolchain for hotbox (Linux)
+      if: matrix.platform == 'linux'
+      env:
+        MATRIX_ARCH: ${{ matrix.arch }}
       run: |
         sudo apt-get update
         sudo apt-get install -y musl-tools
-        rustup target add x86_64-unknown-linux-musl
+        rustup target add "${MATRIX_ARCH}-unknown-linux-musl"
 
     # No compilation caches here. A run can only restore caches saved on its
     # own ref or on main, and every release has a new tag while main never
@@ -464,6 +477,7 @@ jobs:
       shell: bash
       env:
         MATRIX_TARGET: ${{ matrix.target }}
+        CARGO_JOBS: ${{ matrix.cargo_jobs }}
       run: |
         # Bundled SQLite 3.51.x can compile MSVC intrinsic paths that crash
         # with STATUS_ILLEGAL_INSTRUCTION on otherwise supported x64 CPUs.
@@ -472,7 +486,7 @@ jobs:
         if [[ "$MATRIX_TARGET" == "x86_64-pc-windows-msvc" ]]; then
           export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
         fi
-        cargo build --release --locked --target "$MATRIX_TARGET" -j 4
+        cargo build --release --locked --target "$MATRIX_TARGET" -p hot_cli -j "$CARGO_JOBS"
 
     - name: Smoke test Windows x64 release binary
       if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -489,37 +503,12 @@ jobs:
         }
         Write-Host $versionText
 
-    - name: Build hotbox binary (Linux x86_64, static musl)
-      if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
-      run: cargo build --release --locked --target x86_64-unknown-linux-musl -p hotbox -j 4
-
-    - name: Build hotbox binary (Linux aarch64, static musl via Docker)
-      if: matrix.platform == 'linux' && matrix.arch == 'aarch64'
-      run: |
-        CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -c1-16)
-        DOCKER_BUILDKIT=1 docker build --progress=plain \
-          --build-arg CARGO_LOCK_HASH="$CARGO_LOCK_HASH" \
-          -f - \
-          --output "type=local,dest=target/hotbox-musl-build" \
-          . <<'DOCKERFILE'
-        FROM rust:1.100.0-slim-bookworm AS builder
-        RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
-        RUN rustup target add aarch64-unknown-linux-musl
-        RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
-        ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
-        ENV CARGO_INCREMENTAL=0 CARGO_NET_RETRY=2
-        WORKDIR /workspace
-        COPY Cargo.toml Cargo.lock ./
-        COPY crates/ ./crates/
-        ARG CARGO_LOCK_HASH=default
-        RUN --mount=type=cache,id=hotbox-arm64-registry-${CARGO_LOCK_HASH},target=/usr/local/cargo/registry \
-            --mount=type=cache,id=hotbox-arm64-git-${CARGO_LOCK_HASH},target=/usr/local/cargo/git \
-            --mount=type=cache,id=hotbox-arm64-target-${CARGO_LOCK_HASH},target=/workspace/target \
-            cargo build --release --locked --target aarch64-unknown-linux-musl -p hotbox && \
-            cp /workspace/target/aarch64-unknown-linux-musl/release/hotbox /hotbox
-        FROM scratch
-        COPY --from=builder /hotbox /hotbox
-        DOCKERFILE
+    - name: Build hotbox binary (Linux, static musl)
+      if: matrix.platform == 'linux'
+      env:
+        MATRIX_ARCH: ${{ matrix.arch }}
+        CARGO_JOBS: ${{ matrix.cargo_jobs }}
+      run: cargo build --release --locked --target "${MATRIX_ARCH}-unknown-linux-musl" -p hotbox -j "$CARGO_JOBS"
 
     - name: Prepare binary (Unix)
       if: matrix.platform != 'windows'
@@ -540,12 +529,7 @@ jobs:
         HOTBOX_ARCH="$MATRIX_ARCH"
         if [ "$HOTBOX_ARCH" = "aarch64" ]; then HOTBOX_ARCH="arm64"; fi
         mkdir -p artifacts
-        if [ "$MATRIX_ARCH" = "x86_64" ]; then
-          cp target/x86_64-unknown-linux-musl/release/hotbox "artifacts/hotbox-linux-${HOTBOX_ARCH}"
-        else
-          cp target/hotbox-musl-build/hotbox "artifacts/hotbox-linux-${HOTBOX_ARCH}"
-          rm -rf target/hotbox-musl-build
-        fi
+        cp "target/${MATRIX_ARCH}-unknown-linux-musl/release/hotbox" "artifacts/hotbox-linux-${HOTBOX_ARCH}"
         chmod +x "artifacts/hotbox-linux-${HOTBOX_ARCH}"
         file "artifacts/hotbox-linux-${HOTBOX_ARCH}"
 
@@ -566,11 +550,18 @@ jobs:
         name: binary-${{ matrix.platform }}-${{ matrix.arch }}
         path: artifacts/
 
-  # Package for Linux (using Docker)
+  # Package for Linux (natively on ubuntu-24.04 with a pinned cargo-deb .deb)
   package-linux:
     needs: [validate-release, build]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      # cargo-deb only runs `cargo metadata` under `--no-build`, so the
+      # runner's preinstalled stable toolchain suffices without downloading
+      # rust-toolchain.toml's pinned toolchain.
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_DEB_VERSION: 3.8.0
+      CARGO_DEB_SHA256: c6bd0a4affaa232814cc615b2597457f1d44fdfe1c8ebd643f3a491a1f244040
     steps:
     - name: Checkout code
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -584,9 +575,18 @@ jobs:
         path: binaries/
         merge-multiple: true
 
-    - name: Setup binaries for Docker packaging
+    - name: Install pinned cargo-deb
       run: |
-        mkdir -p target/docker-builds/linux
+        set -euo pipefail
+        deb="$RUNNER_TEMP/cargo-deb_${CARGO_DEB_VERSION}-1_amd64.deb"
+        curl -fsSL --retry 3 -o "$deb" \
+          "https://github.com/kornelski/cargo-deb/releases/download/v${CARGO_DEB_VERSION}/cargo-deb_${CARGO_DEB_VERSION}-1_amd64.deb"
+        echo "${CARGO_DEB_SHA256}  $deb" | sha256sum -c -
+        sudo dpkg -i "$deb"
+
+    - name: Setup binaries for Linux packaging
+      run: |
+        mkdir -p target/docker-builds/linux target/packages
         cp binaries/hot-linux-x86_64 target/docker-builds/linux/
         cp binaries/hot-linux-aarch64 target/docker-builds/linux/
         # Copy hotbox Linux binaries for inclusion in packages
@@ -595,7 +595,7 @@ jobs:
         done
 
     - name: Create Linux packages
-      run: ./scripts/package-linux.sh
+      run: bash docker/package-inside-docker.sh
 
     - name: Upload Linux packages
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -1067,6 +1067,51 @@ jobs:
             echo "is_beta=false" >> $GITHUB_OUTPUT
           fi
 
+  # Pre-compile the self-host runtime binaries inside runtime.Dockerfile's exact
+  # Debian builder stage while native builds and cross-platform tests run. This
+  # publishes nothing; selfhost-image stays behind release-ready to assemble,
+  # push, attest (provenance + SBOM), and sign the image.
+  selfhost-image-binaries:
+    name: Build self-host runtime binaries
+    needs: validate-release
+    if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      with:
+        persist-credentials: false
+
+    - uses: ./.github/actions/free-disk-space
+
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Record the git revision
+      run: scripts/capture-git-revision.sh
+
+    - name: Build runtime binaries in Debian builder stage
+      run: |
+        docker buildx build --platform linux/amd64 \
+          --target binaries \
+          --cache-from type=registry,ref=ghcr.io/hot-dev/hot-runtime:buildcache \
+          --output type=local,dest=selfhost-binaries \
+          -f infra/images/containers/runtime.Dockerfile .
+
+    - name: Upload self-host binaries
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      with:
+        name: selfhost-binaries
+        path: selfhost-binaries/
+
   # Self-host runtime image and its signed release manifest. Off the
   # create-release critical path: a failure here never blocks a Hot release,
   # and selfhost-release-assets attaches the manifest afterwards. The
@@ -1075,7 +1120,7 @@ jobs:
   # and prerelease-tag builds publish no manifest.
   selfhost-image:
     name: Self-host runtime image
-    needs: [validate-release, release-ready]
+    needs: [validate-release, release-ready, selfhost-image-binaries]
     if: ${{ needs.validate-release.outputs.is_package_only != 'true' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -1091,6 +1136,15 @@ jobs:
       uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       with:
         persist-credentials: false
+
+    - name: Download pre-compiled self-host binaries
+      uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: selfhost-binaries
+        path: .ci-selfhost-binaries/
+
+    - name: Mark pre-compiled binaries executable
+      run: chmod +x .ci-selfhost-binaries/hot .ci-selfhost-binaries/hotbox-linux-x86_64
 
     - uses: ./.github/actions/free-disk-space
 
@@ -1114,6 +1168,10 @@ jobs:
         platforms: linux/amd64
         push: true
         tags: ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+        build-args: |
+          PREBUILT_DIR=.ci-selfhost-binaries
+        cache-from: type=registry,ref=ghcr.io/hot-dev/hot-runtime:buildcache
+        cache-to: type=registry,ref=ghcr.io/hot-dev/hot-runtime:buildcache,mode=max
         provenance: mode=max
         sbom: true
 
@@ -1278,14 +1336,24 @@ jobs:
         upload_with_checksum() {
           local file="$1" key="$2" sum
           sum=$(sha256sum "$file" | cut -d' ' -f1)
-          aws s3 cp "$file" "s3://${BUCKET}/${key}"
+          aws s3 cp --only-show-errors "$file" "s3://${BUCKET}/${key}"
           printf '%s  %s\n' "$sum" "$(basename "$key")" \
-            | aws s3 cp - "s3://${BUCKET}/${key}.sha256" --content-type "text/plain"
+            | aws s3 cp --only-show-errors - "s3://${BUCKET}/${key}.sha256" --content-type "text/plain"
+        }
+
+        UPLOAD_PIDS=()
+        enqueue_upload() {
+          "$@" &
+          UPLOAD_PIDS+=("$!")
+          if (( ${#UPLOAD_PIDS[@]} >= 8 )); then
+            wait "${UPLOAD_PIDS[0]}"
+            UPLOAD_PIDS=("${UPLOAD_PIDS[@]:1}")
+          fi
         }
 
         echo "Uploading installers to s3://${BUCKET}/${VERSION_PREFIX}/"
 
-        # Upload installer packages with standardized names
+        # Upload installer packages with standardized names in parallel
         for file in packages/*.pkg packages/*.deb packages/*.exe; do
           if [ -f "$file" ]; then
             src_filename=$(basename "$file")
@@ -1293,11 +1361,9 @@ jobs:
               versioned_name="hot_${VERSION}_${FILE_MAP[$src_filename]}"
               latest_name="hot_${FILE_MAP[$src_filename]}"
 
-              echo "Uploading: $src_filename -> $versioned_name"
-              upload_with_checksum "$file" "${VERSION_PREFIX}/${versioned_name}"
-
-              echo "Uploading: $src_filename -> ${LATEST_PREFIX}/${latest_name}"
-              upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
+              echo "Uploading: $src_filename -> $versioned_name and ${LATEST_PREFIX}/${latest_name}"
+              enqueue_upload upload_with_checksum "$file" "${VERSION_PREFIX}/${versioned_name}"
+              enqueue_upload upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
             else
               echo "Warning: Unknown file $src_filename, skipping"
             fi
@@ -1312,27 +1378,28 @@ jobs:
             filename=$(basename "$file")
             echo "Uploading release archive: $filename"
 
-            # Upload versioned tarball
-            upload_with_checksum "$file" "${VERSION_PREFIX}/${filename}"
-
-            # Upload to latest (strip version from filename for stable URL)
-            # hot_0.7.0_macos_arm64.tar.gz -> hot_macos_arm64.tar.gz
+            # Upload versioned tarball and stable latest URL in parallel
             latest_name=$(echo "$filename" | sed "s/_${VERSION}_/_/")
-            upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
+            enqueue_upload upload_with_checksum "$file" "${VERSION_PREFIX}/${filename}"
+            enqueue_upload upload_with_checksum "$file" "${LATEST_PREFIX}/${latest_name}"
           fi
         done
 
+        for pid in "${UPLOAD_PIDS[@]}"; do
+          wait "$pid"
+        done
+
         # Write version.txt to latest folder
-        echo "$VERSION" | aws s3 cp - "s3://${BUCKET}/${LATEST_PREFIX}/version.txt"
+        echo "$VERSION" | aws s3 cp --only-show-errors - "s3://${BUCKET}/${LATEST_PREFIX}/version.txt"
 
         if [ "$IS_BETA" = "true" ]; then
           echo "Beta release mode: skipping root install scripts and index."
         else
           # Upload install scripts and index to bucket root
           echo "Uploading install scripts and index..."
-          aws s3 cp resources/installer/install.sh "s3://${BUCKET}/install.sh" --content-type "text/plain"
-          aws s3 cp resources/installer/install.ps1 "s3://${BUCKET}/install.ps1" --content-type "text/plain"
-          aws s3 cp resources/installer/index.html "s3://${BUCKET}/index.html" --content-type "text/html"
+          aws s3 cp --only-show-errors resources/installer/install.sh "s3://${BUCKET}/install.sh" --content-type "text/plain"
+          aws s3 cp --only-show-errors resources/installer/install.ps1 "s3://${BUCKET}/install.ps1" --content-type "text/plain"
+          aws s3 cp --only-show-errors resources/installer/index.html "s3://${BUCKET}/index.html" --content-type "text/html"
         fi
 
         echo ""

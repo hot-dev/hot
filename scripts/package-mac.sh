@@ -136,6 +136,8 @@ echo "Targets: ${TARGETS[*]}"
 PACKAGES_DIR="target/packages"
 mkdir -p "$PACKAGES_DIR"
 
+PKGS_TO_NOTARIZE=()
+
 for TARGET in "${TARGETS[@]}"; do
     echo "Packaging for target: $TARGET"
 
@@ -449,7 +451,8 @@ EOF
     #   export APPLE_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"
     #   export APPLE_TEAM_ID="TEAMID"
 
-    # Sign and notarize the system package and the per-user one
+    # Sign the system package and the per-user one; notarization runs in
+    # parallel across all signed packages once the target loop finishes.
     for FINAL_PKG in "$FINAL_PKG" "$USER_PKG"; do
         if [ -n "$APPLE_DEVELOPER_ID_INST" ]; then
             echo "Signing package with Developer ID Installer..."
@@ -457,56 +460,7 @@ EOF
             productsign --sign "$APPLE_DEVELOPER_ID_INST" "$FINAL_PKG" "$SIGNED_PKG"
             mv "$SIGNED_PKG" "$FINAL_PKG"
             echo "Package signed successfully."
-
-            # Notarize if credentials are available
-            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-                echo "Submitting for notarization..."
-
-                # Stream output live via tee so we still see it on hang/timeout/crash,
-                # while also capturing it for submission-id extraction. Disable set -e
-                # locally so a non-zero exit doesn't skip our error-handling block
-                # (which fetches the detailed notarization log from Apple).
-                NOTARIZE_LOG=$(mktemp)
-                set +e
-                xcrun notarytool submit "$FINAL_PKG" \
-                    --apple-id "$APPLE_ID" \
-                    --password "$APPLE_APP_PASSWORD" \
-                    --team-id "$APPLE_TEAM_ID" \
-                    --verbose \
-                    --wait 2>&1 | tee "$NOTARIZE_LOG"
-                NOTARIZE_STATUS=${PIPESTATUS[0]}
-                set -e
-                NOTARIZE_OUTPUT=$(cat "$NOTARIZE_LOG")
-                rm -f "$NOTARIZE_LOG"
-
-                # Extract submission ID from output
-                SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -E "^\s*id:" | head -1 | awk '{print $2}')
-
-                if [ "$NOTARIZE_STATUS" -ne 0 ] || echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
-                    echo ""
-                    echo "Notarization failed (exit status: $NOTARIZE_STATUS, submission id: ${SUBMISSION_ID:-<none>})."
-                    if [ -n "$SUBMISSION_ID" ]; then
-                        echo "Fetching detailed notarization log from Apple..."
-                        xcrun notarytool log "$SUBMISSION_ID" \
-                            --apple-id "$APPLE_ID" \
-                            --password "$APPLE_APP_PASSWORD" \
-                            --team-id "$APPLE_TEAM_ID" || \
-                            echo "(failed to fetch notarytool log for $SUBMISSION_ID)"
-                    else
-                        echo "No submission id was returned by notarytool — this usually indicates a"
-                        echo "transport-level failure (network/upload error or Apple service outage)"
-                        echo "rather than a problem with the package itself. Check Apple System Status:"
-                        echo "  https://www.apple.com/support/systemstatus/"
-                    fi
-                    exit 1
-                fi
-
-                echo "Stapling notarization ticket..."
-                xcrun stapler staple "$FINAL_PKG"
-                echo "Notarization complete."
-            else
-                echo "Skipping notarization (APPLE_ID, APPLE_APP_PASSWORD, or APPLE_TEAM_ID not set)"
-            fi
+            PKGS_TO_NOTARIZE+=("$FINAL_PKG")
         else
             echo "Skipping code signing (APPLE_DEVELOPER_ID_APP or APPLE_DEVELOPER_ID_INST not set)"
         fi
@@ -514,6 +468,82 @@ EOF
         echo "Created: $FINAL_PKG"
     done
 done
+
+# Notarize all signed packages concurrently so Apple's notarization queue waits
+# overlap instead of running four sequential round-trips.
+if [ "${#PKGS_TO_NOTARIZE[@]}" -gt 0 ]; then
+    if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+        echo ""
+        echo "Submitting ${#PKGS_TO_NOTARIZE[@]} package(s) for notarization in parallel..."
+        NOTARIZE_DIR=$(mktemp -d)
+        NOTARIZE_PIDS=()
+        for i in "${!PKGS_TO_NOTARIZE[@]}"; do
+            pkg="${PKGS_TO_NOTARIZE[$i]}"
+            log_file="$NOTARIZE_DIR/notarize_${i}.log"
+            status_file="$NOTARIZE_DIR/notarize_${i}.status"
+            (
+                set +e
+                xcrun notarytool submit "$pkg" \
+                    --apple-id "$APPLE_ID" \
+                    --password "$APPLE_APP_PASSWORD" \
+                    --team-id "$APPLE_TEAM_ID" \
+                    --verbose \
+                    --wait > "$log_file" 2>&1
+                echo "$?" > "$status_file"
+            ) &
+            NOTARIZE_PIDS+=("$!")
+        done
+
+        for pid in "${NOTARIZE_PIDS[@]}"; do
+            wait "$pid" || true
+        done
+
+        NOTARIZE_FAILED=0
+        for i in "${!PKGS_TO_NOTARIZE[@]}"; do
+            pkg="${PKGS_TO_NOTARIZE[$i]}"
+            log_file="$NOTARIZE_DIR/notarize_${i}.log"
+            status_file="$NOTARIZE_DIR/notarize_${i}.status"
+            NOTARIZE_STATUS=$(cat "$status_file" 2>/dev/null || echo 1)
+            NOTARIZE_OUTPUT=$(cat "$log_file" 2>/dev/null || true)
+
+            echo ""
+            echo "=== Notarization output for $pkg ==="
+            echo "$NOTARIZE_OUTPUT"
+
+            SUBMISSION_ID=$(echo "$NOTARIZE_OUTPUT" | grep -E "^\s*id:" | head -1 | awk '{print $2}')
+
+            if [ "$NOTARIZE_STATUS" -ne 0 ] || echo "$NOTARIZE_OUTPUT" | grep -q "status: Invalid"; then
+                echo ""
+                echo "Notarization failed for $pkg (exit status: $NOTARIZE_STATUS, submission id: ${SUBMISSION_ID:-<none>})."
+                if [ -n "$SUBMISSION_ID" ]; then
+                    echo "Fetching detailed notarization log from Apple..."
+                    xcrun notarytool log "$SUBMISSION_ID" \
+                        --apple-id "$APPLE_ID" \
+                        --password "$APPLE_APP_PASSWORD" \
+                        --team-id "$APPLE_TEAM_ID" || \
+                        echo "(failed to fetch notarytool log for $SUBMISSION_ID)"
+                else
+                    echo "No submission id was returned by notarytool — this usually indicates a"
+                    echo "transport-level failure (network/upload error or Apple service outage)"
+                    echo "rather than a problem with the package itself. Check Apple System Status:"
+                    echo "  https://www.apple.com/support/systemstatus/"
+                fi
+                NOTARIZE_FAILED=1
+            else
+                echo "Stapling notarization ticket to $pkg..."
+                xcrun stapler staple "$pkg"
+            fi
+        done
+
+        rm -rf "$NOTARIZE_DIR"
+        if [ "$NOTARIZE_FAILED" -ne 0 ]; then
+            exit 1
+        fi
+        echo "Notarization complete for all packages."
+    else
+        echo "Skipping notarization (APPLE_ID, APPLE_APP_PASSWORD, or APPLE_TEAM_ID not set)"
+    fi
+fi
 
 echo ""
 echo "Package creation completed successfully!"
