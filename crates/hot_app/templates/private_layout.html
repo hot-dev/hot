@@ -106,21 +106,12 @@
         </div>
         <div class="flex items-center space-x-4">
             <!-- Theme Toggle -->
-            <button type="button" role="switch" aria-label="Dark mode" aria-checked="true" title="Switch color theme" class="flex flex-col items-center cursor-pointer focus-ring rounded" id="theme-toggle-container">
-                <div class="w-14 flex justify-between text-gray-600 dark:text-gray-300 text-xs mb-1 pointer-events-none">
-                    <span class="group relative inline-flex">
-                        <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
-                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Light</span>
-                    </span>
-                    <span class="group relative inline-flex">
-                        <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
-                        <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Dark</span>
-                    </span>
-                </div>
-                <div class="relative pointer-events-none rounded-full">
-                    <div class="w-14 h-3 bg-gray-500 dark:bg-gray-700 rounded-full"></div>
-                    <div id="theme-thumb" class="absolute top-0 left-0 h-3 w-7 bg-white dark:bg-gray-300 rounded-full transition-transform duration-200 shadow-sm"></div>
-                </div>
+            <button type="button" role="switch" aria-label="Dark mode" aria-checked="true" title="Switch color theme" class="inline-flex items-center gap-1.5 px-1.5 py-1 cursor-pointer focus-ring rounded-full text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors" id="theme-toggle-container">
+                <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
+                <span class="relative pointer-events-none inline-block w-10 h-5 bg-gray-300 dark:bg-gray-700 rounded-full transition-colors">
+                    <span id="theme-thumb" class="absolute top-0.5 left-0.5 h-4 w-4 bg-white dark:bg-gray-200 rounded-full transition-transform duration-200 shadow-sm"></span>
+                </span>
+                <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
             </button>
 
             <!-- User Menu Dropdown -->

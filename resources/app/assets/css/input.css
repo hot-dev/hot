@@ -837,6 +837,7 @@ pre,
 }
 
 /* Theme toggle thumb follows html.dark immediately on first paint (no jump after DOMContentLoaded) */
+/* Track is w-10 (40px), thumb is w-4 (16px) inset by 2px each side -> 20px travel = 125% of thumb width */
 .dark #theme-thumb {
-  transform: translateX(100%);
+  transform: translateX(1.25rem);
 }
