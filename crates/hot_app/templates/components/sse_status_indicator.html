@@ -31,13 +31,20 @@
     </defs>
 </svg>
 
-<div id="sse-status-indicator" class="flex items-center h-6" x-data="sseStatus()" x-init="init()" role="status" aria-live="polite">
+<!-- The chips are mutually exclusive states of one indicator. They share one
+     grid cell (grid-area: 1 / 1) so enter/leave transitions cross-fade in
+     place — two chips can never render side by side. Alpine 3 invokes init()
+     automatically on the x-data object; do not add x-init="init()". -->
+<div id="sse-status-indicator" class="grid items-center h-6" x-data="sseStatus()" role="status" aria-live="polite">
     <!-- Updating indicator - pill with text left, icon right -->
-    <div x-show="isUpdating" x-cloak
+    <div x-show="isConnected && isUpdating" x-cloak style="grid-area: 1 / 1;"
          x-transition:enter="transition ease-out duration-150"
          x-transition:enter-start="opacity-0"
          x-transition:enter-end="opacity-100"
-         class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 rounded-full cursor-default"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         class="justify-self-start md:justify-self-end inline-flex items-center gap-1.5 px-2 py-0.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 rounded-full cursor-default"
          title="Refreshing data...">
         <span class="text-xs font-medium text-red-700 dark:text-red-300 whitespace-nowrap">Updating</span>
         <svg class="hot-flame hot-flame-active" viewBox="0 0 1800 1800" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -47,11 +54,14 @@
 
     <!-- New Data Available banner - semantic button for keyboard accessibility -->
     <button type="button"
-            x-show="isConnected && hasNewData && !isUpdating && mode === 'manual'" x-cloak
+            x-show="isConnected && hasNewData && !isUpdating && mode === 'manual'" x-cloak style="grid-area: 1 / 1;"
             x-transition:enter="transition ease-out duration-150"
             x-transition:enter-start="opacity-0"
             x-transition:enter-end="opacity-100"
-            class="inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 rounded-full cursor-pointer hover:bg-red-100 dark:hover:bg-red-900/40 focus-ring transition-colors"
+            x-transition:leave="transition ease-in duration-100"
+            x-transition:leave-start="opacity-100"
+            x-transition:leave-end="opacity-0"
+            class="justify-self-start md:justify-self-end inline-flex items-center gap-1.5 px-2.5 py-0.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800/50 rounded-full cursor-pointer hover:bg-red-100 dark:hover:bg-red-900/40 focus-ring transition-colors"
             title="Click to refresh with latest data"
             @click="refreshAndClear()">
         <span class="text-xs font-medium text-red-700 dark:text-red-300 whitespace-nowrap">New Data</span>
@@ -61,11 +71,14 @@
     </button>
 
     <!-- SSE Connected indicator (idle) - pill with text left, icon right -->
-    <div x-show="isConnected && !isUpdating && !hasNewData" x-cloak
+    <div x-show="isConnected && !isUpdating && !hasNewData" x-cloak style="grid-area: 1 / 1;"
          x-transition:enter="transition ease-out duration-150"
          x-transition:enter-start="opacity-0"
          x-transition:enter-end="opacity-100"
-         class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800/50 rounded-full cursor-default"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         class="justify-self-start md:justify-self-end inline-flex items-center gap-1.5 px-2 py-0.5 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800/50 rounded-full cursor-default"
          title="Connected — updates automatically">
         <span class="text-xs text-green-700 dark:text-green-400 whitespace-nowrap">Live</span>
         <svg class="hot-flame hot-flame-idle" viewBox="0 0 1800 1800" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -74,11 +87,14 @@
     </div>
 
     <!-- SSE Disconnected/Reconnecting indicator - pill with text left, icon right -->
-    <div x-show="!isConnected && !isUpdating" x-cloak
+    <div x-show="!isConnected" x-cloak style="grid-area: 1 / 1;"
          x-transition:enter="transition ease-out duration-150"
          x-transition:enter-start="opacity-0"
          x-transition:enter-end="opacity-100"
-         class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-full cursor-default"
+         x-transition:leave="transition ease-in duration-100"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         class="justify-self-start md:justify-self-end inline-flex items-center gap-1.5 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-full cursor-default"
          title="Connection lost — attempting to reconnect">
         <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">Reconnecting</span>
         <svg class="hot-flame hot-flame-dim" viewBox="0 0 1800 1800" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -161,11 +177,21 @@
 function sseStatus() {
     return {
         isConnected: false,
+        hasConnectedOnce: false,
+        wasDisconnected: false,
         isUpdating: false,
         hasNewData: false,
         mode: 'auto', // 'auto' or 'manual'
         sseConnection: null,
         updateTimeout: null,
+        maxWaitTimer: null,
+        updateClearTimer: null,
+        reconnectTimer: null,
+        disconnectGraceTimer: null,
+        reconnectDelayMs: 1000,
+        pendingReconnectOnVisible: false,
+        boundDisconnect: null,
+        boundVisibilityChange: null,
         filterStream: null,
         filterRun: null,
         filterEvent: null,
@@ -186,28 +212,81 @@ function sseStatus() {
 
             this.connect();
 
-            // Cleanup on page unload
-            window.addEventListener('beforeunload', () => this.disconnect());
+            // Cleanup on page unload and resume paused backoff when tab refocuses
+            this.boundDisconnect = () => this.disconnect();
+            this.boundVisibilityChange = () => {
+                if (!document.hidden && this.pendingReconnectOnVisible) {
+                    this.pendingReconnectOnVisible = false;
+                    this.connect();
+                }
+            };
+            window.addEventListener('beforeunload', this.boundDisconnect);
+            document.addEventListener('visibilitychange', this.boundVisibilityChange);
         },
 
         connect() {
             if (this.sseConnection) return;
+            if (this.reconnectTimer) {
+                clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = null;
+            }
+            this.pendingReconnectOnVisible = false;
 
             this.sseConnection = new EventSource('/env/subscribe');
 
             this.sseConnection.onopen = () => {
+                if (this.disconnectGraceTimer) {
+                    clearTimeout(this.disconnectGraceTimer);
+                    this.disconnectGraceTimer = null;
+                }
+                const recoveredFromOutage = this.hasConnectedOnce && this.wasDisconnected;
+                this.hasConnectedOnce = true;
+                this.wasDisconnected = false;
+                this.reconnectDelayMs = 1000;
                 this.isConnected = true;
                 // Shared flag so pages can decide whether to run fallback polling.
                 window.__sseConnected = true;
+
+                // Catch up once after an actual disconnect (> grace period), without
+                // triggering extra fetches on seamless 5-minute server recycles.
+                if (recoveredFromOutage && this.mode === 'auto') {
+                    this.runRefresh(false);
+                }
             };
 
             this.sseConnection.onerror = () => {
-                this.isConnected = false;
                 window.__sseConnected = false;
-                this.sseConnection.close();
-                this.sseConnection = null;
-                // Reconnect after delay
-                setTimeout(() => this.connect(), 3000);
+
+                if (this.sseConnection && this.sseConnection.readyState === EventSource.CLOSED) {
+                    // Fatal failure (e.g. non-2xx / 503 / expired session): the browser
+                    // will not retry on its own. Mark disconnected and retry manually
+                    // with exponential backoff (1s -> 2s -> 4s -> 8s -> 15s).
+                    this.markDisconnected();
+                    this.sseConnection.close();
+                    this.sseConnection = null;
+
+                    const delay = this.reconnectDelayMs;
+                    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 15000);
+
+                    if (document.hidden) {
+                        this.pendingReconnectOnVisible = true;
+                    } else {
+                        this.reconnectTimer = setTimeout(() => {
+                            this.reconnectTimer = null;
+                            if (document.hidden) {
+                                this.pendingReconnectOnVisible = true;
+                                return;
+                            }
+                            this.connect();
+                        }, delay);
+                    }
+                    return;
+                }
+
+                // Transient drop (including the server's 5-minute recycle): EventSource
+                // is already auto-reconnecting using the server's retry hint. Only flip
+                // the visible chip to "Reconnecting" if the drop lasts > 2.5s.
+                this.markDisconnectedSoon();
             };
 
             // Listen for all relevant event types
@@ -223,8 +302,56 @@ function sseStatus() {
             });
         },
 
+        markDisconnected() {
+            if (this.disconnectGraceTimer) {
+                clearTimeout(this.disconnectGraceTimer);
+                this.disconnectGraceTimer = null;
+            }
+            if (this.hasConnectedOnce) {
+                this.wasDisconnected = true;
+            }
+            this.isConnected = false;
+            // A stale "Updating" chip must not outlive the connection.
+            this.isUpdating = false;
+        },
+
+        // Debounce the visible disconnect so a fast successful reconnect (the
+        // normal case for periodic server-side stream recycling) is seamless.
+        markDisconnectedSoon() {
+            if (this.disconnectGraceTimer || !this.isConnected) return;
+            this.disconnectGraceTimer = setTimeout(() => {
+                this.disconnectGraceTimer = null;
+                this.markDisconnected();
+            }, 2500);
+        },
+
         disconnect() {
             window.__sseConnected = false;
+            this.pendingReconnectOnVisible = false;
+            [
+                this.reconnectTimer,
+                this.disconnectGraceTimer,
+                this.updateTimeout,
+                this.maxWaitTimer,
+                this.updateClearTimer
+            ].forEach(t => {
+                if (t) clearTimeout(t);
+            });
+            this.reconnectTimer = null;
+            this.disconnectGraceTimer = null;
+            this.updateTimeout = null;
+            this.maxWaitTimer = null;
+            this.updateClearTimer = null;
+            this.isConnected = false;
+            this.isUpdating = false;
+            if (this.boundDisconnect) {
+                window.removeEventListener('beforeunload', this.boundDisconnect);
+                this.boundDisconnect = null;
+            }
+            if (this.boundVisibilityChange) {
+                document.removeEventListener('visibilitychange', this.boundVisibilityChange);
+                this.boundVisibilityChange = null;
+            }
             if (this.sseConnection) {
                 this.sseConnection.close();
                 this.sseConnection = null;
@@ -267,22 +394,53 @@ function sseStatus() {
             }
         },
 
+        scheduleClearUpdating(delayMs) {
+            if (this.updateClearTimer) clearTimeout(this.updateClearTimer);
+            this.updateClearTimer = setTimeout(() => {
+                this.updateClearTimer = null;
+                this.isUpdating = false;
+            }, delayMs);
+        },
+
+        flushFallbackRefresh() {
+            if (this.updateTimeout) {
+                clearTimeout(this.updateTimeout);
+                this.updateTimeout = null;
+            }
+            if (this.maxWaitTimer) {
+                clearTimeout(this.maxWaitTimer);
+                this.maxWaitTimer = null;
+            }
+            this.runRefresh(false);
+        },
+
         triggerAutoRefresh() {
-            // Show updating indicator
             this.isUpdating = true;
 
-            // Clear any pending timeout
-            if (this.updateTimeout) clearTimeout(this.updateTimeout);
-
-            // Debounce the visual state; the scheduler coalesces the real work.
-            this.updateTimeout = setTimeout(() => {
-                this.runRefresh(false);
-
-                // Hide updating indicator after a moment
-                setTimeout(() => {
-                    this.isUpdating = false;
+            if (window.HotRefresh && typeof window.HotRefresh.trigger === 'function') {
+                // HotRefresh owns debounce (400ms), max-wait (2s), throttle (1.5s),
+                // and visibility handling; avoid double-debouncing here.
+                window.HotRefresh.trigger('sse');
+            } else {
+                // Fallback when HotRefresh is unavailable: trailing 500ms debounce
+                // with a 2s max-wait ceiling so steady streams never starve.
+                if (this.updateTimeout) clearTimeout(this.updateTimeout);
+                this.updateTimeout = setTimeout(() => {
+                    this.updateTimeout = null;
+                    this.flushFallbackRefresh();
                 }, 500);
-            }, 500);
+
+                if (!this.maxWaitTimer) {
+                    this.maxWaitTimer = setTimeout(() => {
+                        this.maxWaitTimer = null;
+                        this.flushFallbackRefresh();
+                    }, 2000);
+                }
+            }
+
+            // Tracked hide timer decoupled from refresh debounce so bursts extend
+            // the indicator smoothly without flickering or getting stuck.
+            this.scheduleClearUpdating(1000);
         },
 
         refreshAndClear() {
@@ -292,10 +450,7 @@ function sseStatus() {
             // User explicitly asked for fresh data: refresh immediately.
             this.runRefresh(true);
 
-            // Hide updating indicator after a moment
-            setTimeout(() => {
-                this.isUpdating = false;
-            }, 500);
+            this.scheduleClearUpdating(500);
         }
     };
 }

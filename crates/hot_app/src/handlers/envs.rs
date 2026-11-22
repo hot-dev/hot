@@ -567,6 +567,15 @@ pub async fn env_subscribe_handler(
         let mut revalidate = tokio::time::interval(std::time::Duration::from_secs(30));
         let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
         let start_time = tokio::time::Instant::now();
+        let deadline = start_time + stream_timeout;
+
+        // Tell the browser to reconnect quickly after this stream ends. The
+        // periodic recycle below closes the connection cleanly; with a 1s
+        // retry hint the client's EventSource re-subscribes fast enough that
+        // the status indicator never leaves its "Live" state.
+        yield Ok(SseEvent::default()
+            .retry(tokio::time::Duration::from_secs(1))
+            .comment("connected"));
 
         const FAST_NONE_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
         const MAX_CONSECUTIVE_FAST_NONES: u32 = 3;
@@ -583,6 +592,10 @@ pub async fn env_subscribe_handler(
             if let Some(ref mut sub) = subscriber {
                 let poll_start = tokio::time::Instant::now();
                 tokio::select! {
+                    _ = tokio::time::sleep_until(deadline) => {
+                        tracing::debug!("Dashboard SSE env subscription reached recycle deadline for env {}", env_id);
+                        break;
+                    }
                     _ = revalidate.tick() => {
                         let allowed = hot::db::Org::resolve_user_access(&auth_db, &org_id, &user_id).await
                             .ok().flatten().is_some_and(|access| access.runtime_allowed);
