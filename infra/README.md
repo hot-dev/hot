@@ -2261,6 +2261,9 @@ delivers secrets again:
     --zone ZONE --max-surge 0 --max-unavailable 1 --replacement-method recreate
   ```
 
+  A replace names the group's version (`0/<time>`). The stack ignores that name, so
+  the next plan shows no change to the group.
+
 A deploy delivers them too, after it has pulled the release's images and copied its
 `hotbox`, so a release refused at either step leaves the services' files as they were,
 and a rotated or removed entry does not reach the running release through it. A deploy
