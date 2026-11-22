@@ -321,9 +321,18 @@ select:not([multiple], [size]) {
   background-size: 1rem;
 }
 
+/* Modern Chromium paints ::picker-icon even when appearance is none. */
+select:not([multiple], [size])::picker-icon {
+  display: none;
+}
+
 /* Forced-colors mode drops background images, so keep the native arrow. */
 @media (forced-colors: active) {
   select:not([multiple], [size]) {
     appearance: auto;
+  }
+
+  select:not([multiple], [size])::picker-icon {
+    display: revert;
   }
 }

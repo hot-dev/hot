@@ -412,7 +412,7 @@ pub async fn project_docs_index_handler(
     let template = templates::ProjectDocsIndex {
         title: &format!("{} - Documentation", project_name),
         page_context: templates::PrivatePageContext::with_breadcrumbs(
-            "docs",
+            "projects",
             &session,
             breadcrumbs,
         ),

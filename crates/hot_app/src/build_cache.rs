@@ -79,6 +79,12 @@ impl BuildDocsCache {
         }
     }
 
+    /// Insert pre-built docs into the in-memory cache for HTTP integration tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn insert_test_docs(&self, cached: CachedBuildDocs) {
+        self.add_to_memory_cache(cached).await;
+    }
+
     /// Get docs for a build, using cache if available
     pub async fn get_build_docs(
         &self,

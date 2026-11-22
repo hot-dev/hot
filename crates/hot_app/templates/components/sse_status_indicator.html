@@ -87,7 +87,7 @@
     </div>
 
     <!-- SSE Disconnected/Reconnecting indicator - pill with text left, icon right -->
-    <div x-show="!isConnected" x-cloak style="grid-area: 1 / 1;"
+    <div x-show="!isConnected && showDisconnected" x-cloak style="grid-area: 1 / 1;"
          x-transition:enter="transition ease-out duration-150"
          x-transition:enter-start="opacity-0"
          x-transition:enter-end="opacity-100"
@@ -177,6 +177,7 @@
 function sseStatus() {
     return {
         isConnected: false,
+        showDisconnected: false,
         hasConnectedOnce: false,
         wasDisconnected: false,
         isUpdating: false,
@@ -232,6 +233,17 @@ function sseStatus() {
             }
             this.pendingReconnectOnVisible = false;
 
+            // Avoid flashing "Reconnecting" during normal initial handshake;
+            // reveal it only if initial connect takes longer than 1.5s.
+            if (!this.hasConnectedOnce && !this.showDisconnected && !this.disconnectGraceTimer) {
+                this.disconnectGraceTimer = setTimeout(() => {
+                    this.disconnectGraceTimer = null;
+                    if (!this.isConnected) {
+                        this.showDisconnected = true;
+                    }
+                }, 1500);
+            }
+
             this.sseConnection = new EventSource('/env/subscribe');
 
             this.sseConnection.onopen = () => {
@@ -242,6 +254,7 @@ function sseStatus() {
                 const recoveredFromOutage = this.hasConnectedOnce && this.wasDisconnected;
                 this.hasConnectedOnce = true;
                 this.wasDisconnected = false;
+                this.showDisconnected = false;
                 this.reconnectDelayMs = 1000;
                 this.isConnected = true;
                 // Shared flag so pages can decide whether to run fallback polling.
@@ -311,6 +324,7 @@ function sseStatus() {
                 this.wasDisconnected = true;
             }
             this.isConnected = false;
+            this.showDisconnected = true;
             // A stale "Updating" chip must not outlive the connection.
             this.isUpdating = false;
         },

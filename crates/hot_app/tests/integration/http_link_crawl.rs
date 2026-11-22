@@ -5,9 +5,16 @@
 //! link). Its element ids must be unique, and the sidebar and org tabs must highlight the
 //! page's own section and tab and nothing else. Links the page renders must lead somewhere: a
 //! 404 from our own navigation is a bug.
-use hot::db::{TestData, insert_test_data};
+use ahash::AHashMap;
+use hot::db::{Build, DatabaseScope, TestData, insert_test_data};
+use hot::pkg::docs::{
+    DocFunction, DocNamespace, DocType, FunctionParam, FunctionSignature, PkgDocs, PkgMeta,
+    ProjectDocs, TypeField,
+};
+use hot_app::build_cache::{CachedBuildDocs, get_build_docs_cache, init_build_docs_cache};
 use hot_app::test_support::TestClient;
 use std::collections::{BTreeSet, VecDeque};
+use uuid::Uuid;
 
 const PAGE_LIMIT: usize = 250;
 
@@ -59,7 +66,128 @@ fn start_pages(td: &TestData, slug: &str) -> Vec<String> {
     }
     pages.push(format!("/runs/{}", td.run_id));
     pages.push(format!("/streams/{}", td.stream_id));
+    pages.push("/projects/test-project/docs".to_string());
     pages
+}
+
+/// Seed a deployed bundle build with documented project and dependency
+/// namespaces so the link crawl exercises `/docs/{project}/project/*`,
+/// `/docs/{project}/pkg/*`, and `/projects/{project}/docs`.
+async fn seed_documented_build(client: &TestClient, td: &TestData) {
+    let scoped = client.db().with_scope(DatabaseScope::Environment {
+        org_id: td.org_id,
+        env_id: td.env_id,
+    });
+    let docs_build_id = Uuid::now_v7();
+    Build::insert_build(
+        &scoped,
+        &docs_build_id,
+        &td.project_id,
+        "docs-crawl-hash",
+        128,
+        Build::BUILD_TYPE_BUNDLE,
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    Build::deploy_build(&scoped, &docs_build_id, &td.user_id)
+        .await
+        .unwrap();
+    Build::mark_runtime_ready(&scoped, &docs_build_id)
+        .await
+        .unwrap();
+
+    if get_build_docs_cache().is_none() {
+        init_build_docs_cache(hot::val!({}));
+    }
+    let cache = get_build_docs_cache().expect("build docs cache initialized");
+    let demo_fn = DocFunction {
+        name: "greet".into(),
+        doc: Some("Return a greeting.".into()),
+        is_core: false,
+        signatures: vec![FunctionSignature {
+            params: vec![FunctionParam {
+                name: "name".into(),
+                type_annotation: Some("Str".into()),
+                is_lazy: false,
+                is_variadic: false,
+            }],
+            return_type: Some("Str".into()),
+            precondition: None,
+        }],
+        ctx: None,
+        box_req: None,
+        schedule: None,
+        on_event: None,
+        webhook: None,
+        mcp: None,
+        sends: vec![],
+        alias_of: None,
+    };
+    let demo_type = DocType {
+        name: "Greeting".into(),
+        doc: Some("A greeting payload.".into()),
+        is_core: false,
+        fields: vec![TypeField {
+            name: "message".into(),
+            type_annotation: Some("Str".into()),
+        }],
+        constructors: vec![],
+        type_alias: None,
+        refinement: None,
+        alias_of: None,
+    };
+    let project_ns = DocNamespace {
+        name: "demo".into(),
+        namespace: "::demo".into(),
+        doc: Some("Demo project namespace.".into()),
+        no_doc: false,
+        functions: vec![demo_fn.clone()],
+        types: vec![demo_type],
+        values: vec![],
+        ctx: None,
+        box_req: None,
+    };
+    let pkg_ns = DocNamespace {
+        name: "demo-pkg".into(),
+        namespace: "::demo-pkg".into(),
+        doc: Some("Demo package namespace.".into()),
+        no_doc: false,
+        functions: vec![demo_fn],
+        types: vec![],
+        values: vec![],
+        ctx: None,
+        box_req: None,
+    };
+    let mut dependency_docs = AHashMap::new();
+    dependency_docs.insert(
+        "hot.dev/demo-pkg".to_string(),
+        PkgDocs {
+            meta: PkgMeta {
+                org: "hot.dev".into(),
+                name: "demo-pkg".into(),
+                version: "1.0.0".into(),
+                description: "Demo dependency package".into(),
+                ..Default::default()
+            },
+            readme: Some("# Demo Pkg\n\nExample README.".into()),
+            license: None,
+            namespaces: vec![pkg_ns],
+            type_index: AHashMap::new(),
+        },
+    );
+    cache
+        .insert_test_docs(CachedBuildDocs {
+            build_id: docs_build_id,
+            project_docs: ProjectDocs {
+                name: "test-project".into(),
+                namespaces: vec![project_ns],
+                type_index: AHashMap::new(),
+            },
+            dependency_docs,
+            cached_at: std::time::Instant::now(),
+        })
+        .await;
 }
 
 /// Same-origin `href`s in a page, without query strings or fragments.
@@ -102,14 +230,14 @@ fn without(html: &str, open: &str, close: &str) -> String {
 
 /// Problems with the page's `<main>`: missing or repeated, or closed early by stray `</div>`s.
 fn main_problems(body: &str) -> Option<String> {
-    let mains = body.matches("<main").count();
+    let stripped = without(&without(body, "<script", "</script>"), "<!--", "-->");
+    let mains = stripped.matches("<main").count();
     if mains != 1 {
         return Some(format!("{mains} <main> elements"));
     }
-    let start = body.find("<main").unwrap();
-    let end = body[start..].find("</main>").map(|end| start + end)?;
-    // Scripts and inline templates may build markup in strings; only count real tags.
-    let html = without(&body[start..end], "<script", "</script>");
+    let start = stripped.find("<main").unwrap();
+    let end = stripped[start..].find("</main>").map(|end| start + end)?;
+    let html = &stripped[start..end];
     let mut depth = 0i64;
     let mut position = 0;
     while let Some(index) = html[position..].find("div") {
@@ -286,6 +414,7 @@ fn the_checks_catch_repeated_ids_and_wrong_highlights() {
 async fn app_pages_render_one_main_and_their_links_resolve() {
     let mut client = TestClient::new().await;
     let td = insert_test_data(client.db()).await.unwrap();
+    seed_documented_build(&client, &td).await;
     let org = hot::db::Org::get_org(client.db(), &td.org_id)
         .await
         .unwrap();
@@ -336,5 +465,15 @@ async fn app_pages_render_one_main_and_their_links_resolve() {
         }
     }
     assert!(visited > 30, "the crawl reached only {visited} pages");
+    assert!(
+        seen.iter()
+            .any(|p| p.starts_with("/docs/test-project/project/")),
+        "the crawl did not reach any project namespace docs page"
+    );
+    assert!(
+        seen.iter()
+            .any(|p| p.starts_with("/docs/test-project/pkg/")),
+        "the crawl did not reach any package docs page"
+    );
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
 }

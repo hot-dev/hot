@@ -4863,9 +4863,15 @@ select:not([multiple], [size]) {
   background-position: right 0.5rem center;
   background-size: 1rem;
 }
+select:not([multiple], [size])::picker-icon {
+  display: none;
+}
 @media (forced-colors: active) {
   select:not([multiple], [size]) {
     appearance: auto;
+  }
+  select:not([multiple], [size])::picker-icon {
+    display: revert;
   }
 }
 @font-face {

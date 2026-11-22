@@ -2816,17 +2816,39 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return terminalTaskWithoutFinalizedRun ? 'empty' : status;
     }
 
+    async fetchHierarchyPayload() {
+        if (this._hierarchyFetchPromise) {
+            return this._hierarchyFetchPromise;
+        }
+        const promise = (async () => {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            if (!response.ok) {
+                return { ok: false, status: response.status, statusText: response.statusText };
+            }
+            const result = await response.json();
+            return { ok: true, result };
+        })();
+        this._hierarchyFetchPromise = promise;
+        try {
+            return await promise;
+        } finally {
+            if (this._hierarchyFetchPromise === promise) {
+                this._hierarchyFetchPromise = null;
+            }
+        }
+    }
+
     async loadHierarchyData() {
         try {
-            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            const payload = await this.fetchHierarchyPayload();
 
-            if (!response.ok) {
-                console.error('Hierarchy API error:', response.status, response.statusText);
-                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${response.status}</div>`;
+            if (!payload.ok) {
+                console.error('Hierarchy API error:', payload.status, payload.statusText);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${payload.status}</div>`;
                 return;
             }
 
-            const result = await response.json();
+            const result = payload.result;
 
             if (result.success) {
                 // Store retention metadata
@@ -2864,15 +2886,15 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     async loadTimelineData() {
         try {
-            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            const payload = await this.fetchHierarchyPayload();
 
-            if (!response.ok) {
-                console.error('Timeline API error:', response.status, response.statusText);
-                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`);
+            if (!payload.ok) {
+                console.error('Timeline API error:', payload.status, payload.statusText);
+                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${payload.status}</div>`);
                 return;
             }
 
-            const result = await response.json();
+            const result = payload.result;
 
             if (result.success) {
                 // Store retention metadata (may already be set by hierarchy loader)

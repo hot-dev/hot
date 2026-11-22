@@ -81,24 +81,24 @@
     </div>
     {% else %}
         {% if has_docs %}
+        <div id="docs-index-body" data-docs-generating="{{ docs_generating }}">
             {% if docs_generating %}
                 <!-- Loading indicator for docs being generated -->
                 <div class="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-                    <div class="flex items-center">
-                        <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600 dark:text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <div>
-                            <p class="text-blue-800 dark:text-blue-200 font-medium">Generating documentation...</p>
-                            <p class="text-blue-600 dark:text-blue-300 text-sm">This may take a moment. The page will auto-refresh when ready.</p>
+                    <div class="flex items-center justify-between gap-4">
+                        <div class="flex items-center">
+                            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600 dark:text-blue-400 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <div>
+                                <p class="text-blue-800 dark:text-blue-200 font-medium">Generating documentation...</p>
+                                <p class="text-blue-600 dark:text-blue-300 text-sm">This may take a moment. This section will update automatically when ready.</p>
+                            </div>
                         </div>
+                        <button type="button" data-docs-refresh-btn class="btn btn-secondary btn-sm flex-shrink-0">Refresh</button>
                     </div>
                 </div>
-                <script>
-                    // Auto-refresh page after a few seconds to check if docs are ready
-                    setTimeout(function() { location.reload(); }, 5000);
-                </script>
             {% endif %}
             <!-- Project Namespaces -->
             <div class="mb-6">
@@ -190,6 +190,82 @@
                 <p>The <span class="font-mono">hot-std</span> standard library documentation will appear in Packages when loaded.</p>
             </div>
             {% endif %}
+        </div>
+        {% if docs_generating %}
+        <script>
+            // Poll in-place while docs are generating so scroll position, header
+            // state, and open menus stay intact (pauses while tab is hidden).
+            (function() {
+                const container = document.getElementById('docs-index-body');
+                if (!container) return;
+
+                const delaysMs = [3000, 5000, 8000, 10000];
+                const deadlineMs = Date.now() + 120000;
+                let attempt = 0;
+                let timer = null;
+                let inFlight = false;
+
+                function scheduleNext() {
+                    if (container.dataset.docsGenerating !== 'true') return;
+                    if (Date.now() >= deadlineMs) return;
+                    if (document.hidden) return;
+                    if (timer) clearTimeout(timer);
+                    const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)];
+                    timer = setTimeout(pollOnce, delay);
+                }
+
+                async function pollOnce() {
+                    if (inFlight || container.dataset.docsGenerating !== 'true') return;
+                    inFlight = true;
+                    attempt += 1;
+                    try {
+                        const resp = await fetch(window.location.href, {
+                            credentials: 'same-origin',
+                            cache: 'no-store',
+                            headers: { 'X-Requested-With': 'fetch' }
+                        });
+                        if (window.HotRefresh && window.HotRefresh.handleAuthRedirect && window.HotRefresh.handleAuthRedirect(resp)) {
+                            return;
+                        }
+                        if (!resp.ok) return;
+                        const html = await resp.text();
+                        const doc = new DOMParser().parseFromString(html, 'text/html');
+                        const updated = doc.getElementById('docs-index-body');
+                        if (updated) {
+                            container.innerHTML = updated.innerHTML;
+                            container.dataset.docsGenerating = updated.dataset.docsGenerating || 'false';
+                        }
+                    } catch (e) {
+                        // Retry on next backoff interval
+                    } finally {
+                        inFlight = false;
+                        scheduleNext();
+                    }
+                }
+
+                container.addEventListener('click', function(e) {
+                    if (e.target.closest('[data-docs-refresh-btn]')) {
+                        if (timer) {
+                            clearTimeout(timer);
+                            timer = null;
+                        }
+                        pollOnce();
+                    }
+                });
+
+                document.addEventListener('visibilitychange', function() {
+                    if (!document.hidden && container.dataset.docsGenerating === 'true') {
+                        scheduleNext();
+                    } else if (document.hidden && timer) {
+                        clearTimeout(timer);
+                        timer = null;
+                    }
+                });
+
+                scheduleNext();
+            })();
+        </script>
+        {% endif %}
 
         {% else %}
             <div class="empty-state bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
