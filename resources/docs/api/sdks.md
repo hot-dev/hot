@@ -53,7 +53,7 @@ Python 3.10+. Import as `hot`.
 #### **Go**
 
 ```bash
-go get github.com/hot-dev/hot-go@v1.3.0
+go get github.com/hot-dev/hot-go@v1.4.0
 ```
 
 Go 1.23+. Zero dependencies.
@@ -69,15 +69,15 @@ Async on tokio; TLS via rustls. Import as `hot_dev`.
 
 To pass your own HTTP client, build it with the re-exported
 `hot_dev::reqwest::Client::builder()`, so it matches the SDK's `reqwest`.
-After upgrading to 1.3.0, run
-`cargo update -p rustls -p rustls-webpki -p webpki-roots` to pick up the TLS
-security floors.
+After upgrading to 1.4.0, run
+`cargo update -p rustls -p rustls-webpki -p webpki-roots -p url` to pick up the
+TLS and URL security floors.
 
 #### **Java**
 
 ```text
 // Gradle
-implementation("dev.hot:hot-sdk:1.3.0")
+implementation("dev.hot:hot-sdk:1.4.0")
 ```
 
 ```xml
@@ -85,7 +85,7 @@ implementation("dev.hot:hot-sdk:1.3.0")
 <dependency>
   <groupId>dev.hot</groupId>
   <artifactId>hot-sdk</artifactId>
-  <version>1.3.0</version>
+  <version>1.4.0</version>
 </dependency>
 ```
 
@@ -337,7 +337,7 @@ runs, streams and orgs. On Hot 3.0.14+, `ApiKey.status` also includes
 `"issuer_inactive"`, and `"suspended"`), key responses include
 `previous_secret_expires_at` while a rotation overlap is active, and starting a
 second overlapping rotation returns `409 rotation_overlap_running` unless
-`overlap_seconds` is `0` (typed fields ship in upcoming SDK 1.4.0). Each SDK's
+`overlap_seconds` is `0`. Each SDK's
 README documents these in its own idiom.
 
 Over plain HTTP, the same calls look like this:
@@ -621,11 +621,10 @@ All five SDKs follow the same conventions:
   optional client-chosen UUID `event_id`
   ([Sending a Publish Again](/docs/api#sending-a-publish-again)) so retrying
   after a timeout or `5xx` returns the original `201` event instead of creating
-  a duplicate (typed fields ship in upcoming SDK 1.4.0). A
-  `503 event_publish_in_progress` error means an earlier publish of that
-  `event_id` has not finished yet (retry after `retry_after` seconds);
-  `409 event_id_conflict` means the `event_id` is already in use by a different
-  event or environment and should not be retried as-is.
+  a duplicate. The SDKs automatically retry `503 event_publish_in_progress`
+  after `retry_after` seconds while an earlier publish of that `event_id` is
+  still in flight; `409 event_id_conflict` means the `event_id` is already in
+  use by a different event or environment and is not retried.
 - **Reconnects.** Durable waiters (`runs.wait`, `tasks.wait`,
   `subscribeWithEvent`, `callHot`, `waitForRunResult`) stop at once on
   permanent errors, meaning any 4xx except 408 and 429 (including
@@ -655,14 +654,13 @@ All five SDKs follow the same conventions:
 - **Run listing filters.** On Hot 3.0.14+, `runs.list`
   ([List Runs](/docs/api#list-runs)) accepts `project_id`, `stream_id`, and
   `function` query filters alongside `status`, `type`, `time_range`, `limit`,
-  and `offset` (typed filter options ship in upcoming SDK 1.4.0).
+  and `offset`.
 - **Durable task waiting.** `tasks.wait` (or the language-equivalent method)
   reads `task:update` snapshots, reconnects across transport interruptions, and
   cannot miss a task that became terminal before subscription setup.
 - **Identification.** Each SDK sends `User-Agent: hot-sdk-<lang>/<version>`.
 - **Health status.** `status()` calls the unauthenticated
-  [`GET /status`](/docs/api#get-api-status) endpoint at the server root (ships
-  in upcoming SDK 1.4.0).
+  [`GET /status`](/docs/api#get-api-status) endpoint at the server root.
 - **Escape hatches.** A `request(...)` method, plus a raw-response variant,
   covers endpoints that do not yet have a resource helper. In JavaScript these
   are `hot.request` and `hot.requestRaw`, with paths relative to `/v1`.
