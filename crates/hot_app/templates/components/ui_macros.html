@@ -36,8 +36,8 @@
     </div>
     <div class="hidden md:flex-1 md:flex md:items-center md:justify-between">
         <div>
-            <p class="text-xs sm:text-sm text-gray-700 dark:text-gray-300">
-                Showing <span class="font-medium">{{ shown }}</span> of <span class="font-medium">{{ total }}</span> {{ noun }}
+            <p class="text-xs sm:text-sm text-gray-700 dark:text-gray-300 tabular-nums">
+                Showing <span class="font-medium" data-stat-number="{{ shown }}">{{ shown }}</span> of <span class="font-medium" data-stat-number="{{ total }}">{{ total }}</span> {{ noun }}
             </p>
         </div>
         <div>

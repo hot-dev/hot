@@ -108,7 +108,7 @@
          class="flex flex-col rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800">
 
         <!-- Tab bar header -->
-        <div class="border-b border-gray-200 dark:border-gray-700 px-4 flex items-center justify-between">
+        <div class="border-b border-gray-200 dark:border-gray-700 px-4 flex flex-wrap items-center justify-between gap-2 overflow-x-auto">
             <nav class="-mb-px flex gap-6" aria-label="Tabs">
                 <a href="?tab=graph"
                    class="inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-hot-red-500 text-hot-red-700 dark:text-hot-red-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
@@ -160,7 +160,7 @@
 
         <!-- Tab content -->
         {% if active_tab == "graph" %}
-        <div class="flex flex-row flex-1 min-h-0">
+        <div class="flex flex-col lg:flex-row flex-1 min-h-0">
             <!-- Graph section -->
             <div class="flex-1 min-w-0 overflow-hidden">
                 <div id="agent-detail-graph" data-url="/data/workflow-graph/agents/{{ agent.qualified_name }}" data-max-height="700"></div>
@@ -174,7 +174,7 @@
                  x-transition:leave="transition ease-in duration-150"
                  x-transition:leave-start="opacity-100"
                  x-transition:leave-end="opacity-0"
-                 class="w-80 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 overflow-y-auto" style="min-width: 20rem;">
+                 class="w-full lg:w-80 flex-shrink-0 border-t lg:border-t-0 lg:border-l border-gray-200 dark:border-gray-700 overflow-y-auto max-h-96 lg:max-h-none">
                 <template x-if="!inspectorData">
                     <div class="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-8 h-8 text-gray-300 dark:text-gray-600 mb-3">
@@ -264,8 +264,8 @@
                                     <div class="mt-3">
                                         <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Handled by</div>
                                         <template x-for="fn in inspectorData.handledBy" :key="fn.id">
-                                            <button @click="selectNode(fn.id)"
-                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                            <button type="button" @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                                 <span class="font-mono text-xs" x-text="fn.name"></span>
                                                 <template x-if="fn.agent_name">
                                                     <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>
@@ -279,8 +279,8 @@
                                     <div class="mt-3">
                                         <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Sent by</div>
                                         <template x-for="fn in inspectorData.sentBy" :key="fn.id">
-                                            <button @click="selectNode(fn.id)"
-                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                            <button type="button" @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                                 <span class="font-mono text-xs" x-text="fn.name"></span>
                                                 <template x-if="fn.agent_name">
                                                     <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>
@@ -330,8 +330,8 @@
                                     <div class="mt-3">
                                         <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Triggers</div>
                                         <template x-for="fn in inspectorData.triggers" :key="fn.id">
-                                            <button @click="selectNode(fn.id)"
-                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                            <button type="button" @click="selectNode(fn.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                                 <span class="font-mono text-xs" x-text="fn.name"></span>
                                                 <template x-if="fn.agent_name">
                                                     <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>
@@ -397,7 +397,7 @@
                             </span>
                         </td>
                         <td class="py-2.5 px-4">
-                            <code class="{% if h.handler_type == "Event" %}bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded{% else %}bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 px-2 py-1 rounded{% endif %} text-xs">{{ h.trigger }}</code>
+                            <code class="{% if h.handler_type == "Event" %}bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded{% else %}bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-2 py-1 rounded{% endif %} text-xs">{{ h.trigger }}</code>
                         </td>
                         <td class="py-2.5 px-4">
                             <code class="language-hot text-red-600 dark:text-red-400">{{ h.function }}</code>

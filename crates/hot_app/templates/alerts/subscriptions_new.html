@@ -136,11 +136,11 @@ function prepareForm() {
     
     // Validate at least one of each is selected
     if (!channelIds) {
-        alert('Please select at least one alert channel.');
+        showAlert('Selection Required', 'Please select at least one alert channel.', 'warning');
         return false;
     }
     if (!destIds) {
-        alert('Please select at least one destination.');
+        showAlert('Selection Required', 'Please select at least one destination.', 'warning');
         return false;
     }
     

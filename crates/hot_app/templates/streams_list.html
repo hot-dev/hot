@@ -331,7 +331,7 @@ window.sseRefreshCallback = function() {
                 <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
                     <div>
                         <p class="text-sm text-gray-700 dark:text-gray-300">
-                            Showing <span class="font-medium">{{ streams.len() }}</span> of <span class="font-medium">{{ total_streams }}</span> streams
+                            Showing <span class="font-medium" data-stat-number="{{ streams.len() }}">{{ streams.len() }}</span> of <span class="font-medium" data-stat-number="{{ total_streams }}">{{ total_streams }}</span> streams
                         </p>
                     </div>
                     <div>

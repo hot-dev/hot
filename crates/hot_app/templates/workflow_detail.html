@@ -52,6 +52,11 @@
                         this.inspectorOpen = true;
                     }
                 });
+                document.addEventListener('agent-graph:inspect-close', (e) => {
+                    if (e.detail.containerId === 'workflow-detail-graph') {
+                        this.closeInspector();
+                    }
+                });
             },
             closeInspector() {
                 this.inspectorOpen = false;
@@ -97,12 +102,12 @@
         </div>
 
         {% if active_tab == "graph" %}
-        <div class="flex flex-row flex-1 min-h-0">
+        <div class="flex flex-col lg:flex-row flex-1 min-h-0">
             <div class="flex-1 min-w-0 overflow-hidden">
                 <div id="workflow-detail-graph" data-url="{{ graph_data_url }}" data-max-height="700"></div>
             </div>
             <div x-show="inspectorOpen" x-cloak
-                 class="w-80 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 overflow-y-auto" style="min-width: 20rem;">
+                 class="w-full lg:w-80 flex-shrink-0 border-t lg:border-t-0 lg:border-l border-gray-200 dark:border-gray-700 overflow-y-auto max-h-96 lg:max-h-none">
                 <template x-if="!inspectorData">
                     <div class="flex flex-col items-center justify-center h-full py-12 px-4 text-center">
                         <p class="text-sm text-gray-500 dark:text-gray-400">Select a node for details</p>
@@ -157,7 +162,7 @@
                             </span>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
-                            <code class="{% if h.handler_type == "Event" %}bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded{% else %}bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 px-2 py-1 rounded{% endif %} text-xs">{{ h.trigger }}</code>
+                            <code class="{% if h.handler_type == "Event" %}bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded{% else %}bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-2 py-1 rounded{% endif %} text-xs">{{ h.trigger }}</code>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
                             <code class="language-hot text-red-600 dark:text-red-400">{{ h.function }}</code>

@@ -62,10 +62,7 @@ pub(crate) struct CheckOptions<'a> {
 /// Whether check output gets ANSI colors: only in local development, on a
 /// terminal, and when `NO_COLOR` is unset.
 fn use_color() -> bool {
-    use std::io::IsTerminal;
-    hot::env::is_local_dev()
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
-        && std::io::stdout().is_terminal()
+    super::should_use_color()
 }
 
 /// Whether a path is, or holds, at least one `.hot` file.
@@ -388,7 +385,6 @@ pub(crate) async fn run_check_watch(
 
     let conf = options.conf;
     let global_options = options.global_options;
-    let mut last_run = Instant::now();
 
     // A run that cannot start (for example a project with no .hot files yet)
     // is reported and watching continues.
@@ -421,49 +417,60 @@ pub(crate) async fn run_check_watch(
             &global_options.test_paths,
         ));
     }
+    let mut watched_count = 0usize;
     for p in watched {
         let pb = PathBuf::from(p);
         if pb.exists() {
             watcher
                 .watch(&pb, RecursiveMode::Recursive)
                 .map_err(|e| e.to_string())?;
+            watched_count += 1;
         }
     }
 
+    eprintln!(
+        "Watching {} path(s) for .hot changes (Ctrl-C to stop)...",
+        watched_count
+    );
+
     let debounce = Duration::from_millis(debounce_ms.max(50));
-    let mut pending = false;
+    let mut last_event: Option<Instant> = None;
 
     loop {
-        match rx.recv() {
-            Ok(Ok(event)) => {
-                // filter to .hot files only
-                let is_hot = event
-                    .paths
-                    .iter()
-                    .any(|p| p.extension().and_then(|e| e.to_str()) == Some("hot"));
-                if is_hot {
-                    match event.kind {
-                        EventKind::Modify(_)
-                        | EventKind::Create(_)
-                        | EventKind::Remove(_)
-                        | EventKind::Any => {
-                            pending = true;
-                        }
-                        _ => {}
-                    }
-                }
-                if pending && last_run.elapsed() >= debounce {
-                    pending = false;
-                    last_run = Instant::now();
+        let recv_result = if let Some(since) = last_event {
+            let remaining = debounce.saturating_sub(since.elapsed());
+            match rx.recv_timeout(remaining) {
+                Ok(ev) => Some(ev),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    last_event = None;
                     run();
+                    continue;
                 }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
             }
-            Ok(Err(_e)) => {
-                // Watch error - ignore and continue
+        } else {
+            match rx.recv() {
+                Ok(ev) => Some(ev),
+                Err(_) => return Ok(0),
             }
-            Err(_e) => {
-                // Channel closed or error - exit gracefully
-                return Ok(0);
+        };
+
+        if let Some(Ok(event)) = recv_result {
+            // filter to .hot files only
+            let is_hot = event
+                .paths
+                .iter()
+                .any(|p| p.extension().and_then(|e| e.to_str()) == Some("hot"));
+            if is_hot {
+                match event.kind {
+                    EventKind::Modify(_)
+                    | EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Any => {
+                        last_event = Some(Instant::now());
+                    }
+                    _ => {}
+                }
             }
         }
     }

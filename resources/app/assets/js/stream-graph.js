@@ -40,6 +40,18 @@ function renderStreamGraph(containerId, graphDataJson, inspectorCallbackName = '
         return;
     }
 
+    // Keep the filter in sync with the page's search box. The run, stream and
+    // event pages each use their own input id. With no search box, keep the
+    // term across re-renders of the same container and drop it for a new one.
+    const searchInput = document.getElementById('stream-graph-search')
+        || document.getElementById('stream-detail-graph-search')
+        || document.getElementById('event-detail-graph-search');
+    if (searchInput) {
+        window.streamGraphState.searchTerm = (searchInput.value || '').toLowerCase();
+    } else if (window.streamGraphState.containerId !== containerId) {
+        window.streamGraphState.searchTerm = '';
+    }
+
     // Store state for re-rendering with filters
     window.streamGraphState.graphData = graphData;
     window.streamGraphState.containerId = containerId;
@@ -340,15 +352,16 @@ function renderGraphCell(lineInfo) {
             break;
 
         case 'end':
-            // End of branch - curved line from parent lane to dot
-            if (parentX !== myX) {
-                // Curved connection from parent lane
-                svg += `<path d="M${parentX},0 L${parentX},${centerY - 4} Q${parentX},${centerY} ${parentX + 4},${centerY} L${myX},${centerY}"
+            // End of branch - curved line from parent lane to dot (leaf nodes branch right like 'through')
+            const endX = lineInfo.myLane >= 0 ? myX : parentX + 14;
+            if (parentX !== endX) {
+                const ctrlX = endX > parentX ? parentX + 4 : parentX - 4;
+                svg += `<path d="M${parentX},0 L${parentX},${centerY - 4} Q${parentX},${centerY} ${ctrlX},${centerY} L${endX},${centerY}"
                          fill="none" stroke="${lineColor}" stroke-width="${strokeWidth}"/>`;
             } else {
                 svg += `<line x1="${parentX}" y1="0" x2="${parentX}" y2="${centerY}" stroke="${lineColor}" stroke-width="${strokeWidth}"/>`;
             }
-            svg += `<circle cx="${myX}" cy="${centerY}" r="${dotRadius}" fill="${nodeColor}"/>`;
+            svg += `<circle cx="${endX}" cy="${centerY}" r="${dotRadius}" fill="${nodeColor}"/>`;
             break;
 
         case 'through':

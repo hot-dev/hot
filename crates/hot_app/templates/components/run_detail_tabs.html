@@ -585,6 +585,15 @@
     color: rgba(107, 114, 128, 1);
     transform: translateX(-50%);
     bottom: 4px;
+    white-space: nowrap;
+}
+
+.timeline-axis-label:first-child {
+    transform: translateX(0);
+}
+
+.timeline-axis-label:last-child {
+    transform: translateX(-100%);
 }
 
 .dark .timeline-axis-label {
@@ -2190,8 +2199,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
         url.searchParams.set('tab', tabName);
         window.history.replaceState({}, '', url);
 
-        // Handle inspector state for the new tab
-        this.restoreOrClearInspector(tabName);
+        // Handle inspector state for the new tab. Restoring a saved selection
+        // opens the panel (or a modal on mobile), so only do it while the side
+        // panel is already open. A closed panel restores when it is toggled open.
+        if (this.inspectorOpen && window.innerWidth >= 768) {
+            this.restoreOrClearInspector(tabName);
+        }
     }
 
     openInspector(content) {
@@ -2203,6 +2216,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             this.showInspectorInModal(content);
         } else {
             // On desktop, use side panel
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.inspectorContent.innerHTML = content;
@@ -2322,9 +2336,19 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     closeInspector() {
         this.inspector.classList.remove('open');
+        this.inspector.style.width = '';
         this.resizeHandle.classList.remove('visible');
         this.inspectorOpen = false;
         this.updateInspectorState();
+    }
+
+    // closeInspector() clears the inline width so the panel can collapse.
+    // Every path that opens the panel reapplies a width the user dragged to.
+    applyInspectorWidth() {
+        if (!this.customInspectorWidth) return;
+        const maxWidth = this.inspector.parentElement.offsetWidth * 0.6;
+        const width = maxWidth > 250 ? Math.min(this.customInspectorWidth, maxWidth) : this.customInspectorWidth;
+        this.inspector.style.width = `${width}px`;
     }
 
     toggleInspector() {
@@ -2333,6 +2357,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         } else {
             // Open inspector with current tab's state
             this.restoreOrClearInspector(this.currentTab);
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.inspectorOpen = true;
@@ -2343,6 +2368,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     applyInspectorState() {
         // Apply the initial state from URL
         if (this.inspectorOpen) {
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.restoreOrClearInspector(this.currentTab);
@@ -2430,7 +2456,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
             timeline: 'Click on a timeline item to view details',
             hierarchy: 'Click on a call or flow to view details',
             table: 'Click on a variable row to view details',
-            flow: 'Click on a run or event to view details',
+            'stream-graph': 'Click on a run or event to view details',
+            tasks: 'Click on a task to view details',
             files: 'Click on a file to view details'
         };
 
@@ -2448,9 +2475,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
     }
 
     restoreTimelineSelection(itemId, itemType) {
-        // For now, just show a prompt since we don't have the item data cached
-        // In a full implementation, we could cache the item data
-        this.showInspectorPrompt('timeline');
+        const node = this.findNodeInTimeline(itemId);
+        if (node) {
+            this.showNodeInInspector(node);
+        } else {
+            this.showInspectorPrompt('timeline');
+        }
     }
 
     restoreHierarchySelection(nodeId, nodeType) {
@@ -2571,6 +2601,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 this.showInspectorInModal(html);
             } else {
                 // On desktop, show in side panel
+                this.applyInspectorWidth();
                 this.inspector.classList.add('open');
                 this.resizeHandle.classList.add('visible');
                 this.inspectorOpen = true;
@@ -2661,6 +2692,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 this.showInspectorInModal(html);
             } else {
                 // On desktop, show in side panel
+                this.applyInspectorWidth();
                 this.inspector.classList.add('open');
                 this.resizeHandle.classList.add('visible');
                 this.inspectorOpen = true;
@@ -2799,17 +2831,39 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return terminalTaskWithoutFinalizedRun ? 'empty' : status;
     }
 
+    async fetchHierarchyPayload() {
+        if (this._hierarchyFetchPromise) {
+            return this._hierarchyFetchPromise;
+        }
+        const promise = (async () => {
+            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            if (!response.ok) {
+                return { ok: false, status: response.status, statusText: response.statusText };
+            }
+            const result = await response.json();
+            return { ok: true, result };
+        })();
+        this._hierarchyFetchPromise = promise;
+        try {
+            return await promise;
+        } finally {
+            if (this._hierarchyFetchPromise === promise) {
+                this._hierarchyFetchPromise = null;
+            }
+        }
+    }
+
     async loadHierarchyData() {
         try {
-            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            const payload = await this.fetchHierarchyPayload();
 
-            if (!response.ok) {
-                console.error('Hierarchy API error:', response.status, response.statusText);
-                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${response.status}</div>`;
+            if (!payload.ok) {
+                console.error('Hierarchy API error:', payload.status, payload.statusText);
+                this.hierarchyTree.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-4">API Error: ${payload.status}</div>`;
                 return;
             }
 
-            const result = await response.json();
+            const result = payload.result;
 
             if (result.success) {
                 // Store retention metadata
@@ -2847,15 +2901,15 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     async loadTimelineData() {
         try {
-            const response = await fetch(`/data/runs/${this.runId}/hierarchy`);
+            const payload = await this.fetchHierarchyPayload();
 
-            if (!response.ok) {
-                console.error('Timeline API error:', response.status, response.statusText);
-                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`);
+            if (!payload.ok) {
+                console.error('Timeline API error:', payload.status, payload.statusText);
+                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${payload.status}</div>`);
                 return;
             }
 
-            const result = await response.json();
+            const result = payload.result;
 
             if (result.success) {
                 // Store retention metadata (may already be set by hierarchy loader)
@@ -3985,14 +4039,13 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
         const extraIndent = condPrefix.extraIndent;
         const totalIndentPx = (item.depth * (isMobile ? 12 : 20)) + extraIndent;
-        const finalIndentStyle = totalIndentPx > 0 ? `margin-left: ${totalIndentPx}px; border-left: 2px solid rgba(239, 68, 68, 0.3);` : '';
+        const titleIndentStyle = totalIndentPx > 0 ? `padding-left: ${totalIndentPx}px; border-left: 2px solid rgba(239, 68, 68, 0.3);` : '';
 
         return `
             <div class="timeline-bar ${this.selectedNode === item.id ? 'selected' : ''} ${flowBorderClass} ${resultMatchClass} ${extraClass}"
-                 data-item-id="${item.id}" data-item-type="${item.type}"
-                 style="${finalIndentStyle}">
+                 data-item-id="${item.id}" data-item-type="${item.type}">
                 <div class="timeline-bar-header">
-                    <div class="timeline-bar-title">
+                    <div class="timeline-bar-title" style="${titleIndentStyle}">
                         ${condPrefix.html}${displayName ? `<span>${this.escapeHtml(displayName)}</span>` : ''}${flowPill}
                     </div>
                     <div class="timeline-bar-duration">${resultMatchBadge}${this.formatDuration(item.duration_us)}</div>
@@ -4347,6 +4400,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
         const maxWidth = containerWidth * 0.6;
         if (newWidth >= 250 && newWidth <= maxWidth) {
+            this.customInspectorWidth = newWidth;
             this.inspector.style.width = `${newWidth}px`;
         }
     }

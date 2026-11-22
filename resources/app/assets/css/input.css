@@ -736,13 +736,14 @@ pre,
 }
 
 .ag-edge-sends {
-  stroke: #94a3b8;
+  stroke: #64748b;
   stroke-width: 2;
 }
 
 .ag-edge-triggers {
-  stroke: #94a3b8;
-  stroke-width: 1.5;
+  stroke: #16a34a;
+  stroke-dasharray: 2 3;
+  stroke-width: 1.75;
 }
 
 .ag-edge.ag-dimmed {
@@ -756,8 +757,8 @@ pre,
 
 /* Arrow markers */
 .ag-arrow-handles { fill: #cbd5e1; }
-.ag-arrow-sends { fill: #94a3b8; }
-.ag-arrow-triggers { fill: #94a3b8; }
+.ag-arrow-sends { fill: #64748b; }
+.ag-arrow-triggers { fill: #16a34a; }
 
 /* --- Tooltip ------------------------------------------------------- */
 
@@ -818,19 +819,25 @@ pre,
 .dark .ag-node-agent,
 .dark .ag-node-detail { color: #94a3b8; }
 
-.dark .ag-edge { stroke: #3a3a42; }
-.dark .ag-edge-handles { stroke: #3a3a42; }
-.dark .ag-edge-sends { stroke: #475569; }
-.dark .ag-edge-triggers { stroke: #475569; }
-.dark .ag-edge.ag-highlighted { stroke: #94a3b8; }
+.dark .ag-edge { stroke: #64748b; }
+.dark .ag-edge-handles { stroke: #64748b; }
+.dark .ag-edge-sends { stroke: #94a3b8; }
+.dark .ag-edge-triggers { stroke: #4ade80; }
+.dark .ag-edge.ag-highlighted { stroke: #e2e8f0; }
 
-.dark .ag-arrow-handles { fill: #3a3a42; }
-.dark .ag-arrow-sends { fill: #475569; }
-.dark .ag-arrow-triggers { fill: #475569; }
+.dark .ag-arrow-handles { fill: #64748b; }
+.dark .ag-arrow-sends { fill: #94a3b8; }
+.dark .ag-arrow-triggers { fill: #4ade80; }
 
 .dark .ag-tooltip {
   background: var(--color-gray-900);
   border-color: var(--color-gray-700);
   color: #e5e7eb;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* Theme toggle thumb follows html.dark immediately on first paint (no jump after DOMContentLoaded) */
+/* Track is w-10 (40px), thumb is w-4 (16px) inset by 2px each side -> 20px travel = 125% of thumb width */
+.dark #theme-thumb {
+  transform: translateX(1.25rem);
 }

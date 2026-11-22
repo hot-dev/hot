@@ -238,8 +238,8 @@ html.dark .deps-code-block, html.dark .docs-content .deps-code-block, html.dark 
         </div>
     </aside>
 
-    <!-- Main Content -->
-    <main class="flex-1 min-w-0 px-4 sm:px-8 py-8">
+    <!-- Main Content (div to avoid nesting a second <main> inside private_layout's <main>) -->
+    <div class="flex-1 min-w-0 px-4 sm:px-8 py-8">
         <div class="max-w-4xl docs-content">
             {{ content|safe }}
         </div>
@@ -272,7 +272,7 @@ html.dark .deps-code-block, html.dark .docs-content .deps-code-block, html.dark 
             {% endmatch %}
         </div>
         {% endif %}
-    </main>
+    </div>
 
     <!-- Right Sidebar TOC -->
     {% if !toc.is_empty() %}
@@ -287,7 +287,7 @@ html.dark .deps-code-block, html.dark .docs-content .deps-code-block, html.dark 
                     </div>
                     {% for item in section.items %}
                     <a href="#{{ item.anchor }}"
-                       class="block px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-hot-red-700 dark:hover:text-hot-red-400 transition-colors rounded"
+                       class="toc-link block px-2 py-1 text-sm text-gray-600 dark:text-gray-400 hover:text-hot-red-700 dark:hover:text-hot-red-400 transition-colors rounded"
                        style="{% if item.indent > 0 %}padding-left: {{ item.indent * 12 + 8 }}px{% endif %}">
                         {{ item.name }}
                         {% if item.is_core %}
@@ -361,6 +361,10 @@ function loadSearchIndex() {
         .then(function(res) { return res.json(); })
         .then(function(data) {
             searchIndex = data.items || [];
+            var input = document.getElementById('search-input');
+            if (input && input.value && input.value.length >= 2) {
+                onSearchInput(input.value);
+            }
         })
         .catch(function(err) {
             console.error('Failed to load search index:', err);

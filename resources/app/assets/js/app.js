@@ -1257,10 +1257,9 @@
      * Copy text to clipboard
      */
     function copyToClipboard(text) {
-        navigator.clipboard.writeText(text).then(function() {
-            // Success
-        }).catch(function(err) {
+        return navigator.clipboard.writeText(text).catch(function(err) {
             console.error('Failed to copy:', err);
+            throw err;
         });
     }
 
@@ -1292,23 +1291,18 @@
      * Handle UUID copy button clicks (via event delegation)
      */
     function handleUuidCopyClick(e) {
-        if (e.target.closest('.uuid-copy-btn')) {
-            e.preventDefault();
-            var button = e.target.closest('.uuid-copy-btn');
-            var uuid = button.getAttribute('data-uuid');
-            if (uuid) {
-                copyToClipboard(uuid);
-
-                // Visual feedback
-                var originalTitle = button.title;
-                button.title = 'Copied!';
-                button.classList.add('text-green-700', 'dark:text-green-400');
-
-                setTimeout(function() {
-                    button.title = originalTitle;
-                    button.classList.remove('text-green-700', 'dark:text-green-400');
-                }, 1000);
-            }
+        var button = e.target.closest('.uuid-copy-btn');
+        if (!button || button.dataset.copyInitialized) return;
+        e.preventDefault();
+        var uuid = button.getAttribute('data-uuid');
+        if (uuid) {
+            copyToClipboard(uuid).then(function() {
+                if (typeof window.showCopiedFeedback === 'function') {
+                    window.showCopiedFeedback(button);
+                }
+            }).catch(function() {
+                // Error already logged by copyToClipboard
+            });
         }
     }
 
@@ -1416,6 +1410,10 @@
             sidebar.classList.add('sidebar-mobile-open');
             if (mobileOverlay) mobileOverlay.classList.add('active');
             document.body.style.overflow = 'hidden';
+            var closeBtn = document.getElementById('sidebar-mobile-close-btn');
+            if (closeBtn) {
+                setTimeout(function() { closeBtn.focus(); }, 50);
+            }
         }
 
         function closeMobileDrawer() {
@@ -1497,6 +1495,42 @@
                 if (isMobile()) closeMobileDrawer();
             });
         }
+
+        // Close mobile drawer on explicit close button click
+        var mobileCloseBtn = document.getElementById('sidebar-mobile-close-btn');
+        if (mobileCloseBtn) {
+            mobileCloseBtn.addEventListener('click', function() {
+                closeMobileDrawer();
+                sidebarToggleBtn.focus();
+            });
+        }
+
+        // Close mobile drawer on Escape and trap Tab focus while open
+        document.addEventListener('keydown', function(e) {
+            if (!sidebar.classList.contains('sidebar-mobile-open')) return;
+            if (e.key === 'Escape') {
+                closeMobileDrawer();
+                sidebarToggleBtn.focus();
+            } else if (e.key === 'Tab') {
+                // Only rendered elements can take focus; skip closed dropdowns
+                // and blocks hidden at this breakpoint.
+                var focusables = Array.from(sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+                    .filter(function(el) { return el.getClientRects().length > 0; });
+                if (focusables.length === 0) return;
+                var first = focusables[0];
+                var last = focusables[focusables.length - 1];
+                if (!sidebar.contains(document.activeElement)) {
+                    e.preventDefault();
+                    (e.shiftKey ? last : first).focus();
+                } else if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault();
+                    last.focus();
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            }
+        });
 
         // Close mobile drawer when navigating
         var sidebarLinks = sidebar.querySelectorAll('a');
@@ -1813,6 +1847,9 @@
     // ============================================
 
     function init() {
+        if (window.__hotInitialValueFormat) {
+            initModalFormat(window.__hotInitialValueFormat);
+        }
         initUuidDisplay();
         initSidebar();
 

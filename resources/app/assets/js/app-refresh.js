@@ -28,6 +28,8 @@
 
     // Debounce window: collapse short bursts of triggers into one refresh.
     var DEBOUNCE_MS = 400;
+    // Maximum wait under a steady stream before forcing a refresh cycle.
+    var MAX_WAIT_MS = 2000;
     // Throttle floor: never run full refresh cycles closer together than this.
     var THROTTLE_MS = 1500;
 
@@ -40,6 +42,9 @@
     var keyedGenerations = new Map();
 
     var debounceTimer = null;
+    var maxWaitTimer = null;
+    var throttleTimer = null;
+    var pendingReason = null;
     var lastRunAt = 0;
     var pendingWhileHidden = false;
 
@@ -91,8 +96,37 @@
     }
 
     // ============================================
-    // Scheduler (debounce + throttle + visibility)
+    // Scheduler (debounce + max-wait + throttle + visibility)
     // ============================================
+
+    function clearPendingTimers() {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+        }
+        if (maxWaitTimer) {
+            clearTimeout(maxWaitTimer);
+            maxWaitTimer = null;
+        }
+        if (throttleTimer) {
+            clearTimeout(throttleTimer);
+            throttleTimer = null;
+        }
+    }
+
+    function flush() {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+        }
+        if (maxWaitTimer) {
+            clearTimeout(maxWaitTimer);
+            maxWaitTimer = null;
+        }
+        var reason = pendingReason;
+        pendingReason = null;
+        fire(reason);
+    }
 
     function trigger(reason) {
         // Pause while hidden; remember that work is pending for refocus.
@@ -100,15 +134,23 @@
             pendingWhileHidden = true;
             return;
         }
+        pendingReason = reason || pendingReason;
+
+        // If a throttle cooldown is already scheduled, let it run on time
+        // rather than cancelling and starving it under steady streams.
+        if (throttleTimer) {
+            return;
+        }
+
         if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(function () {
-            fire(reason);
-        }, DEBOUNCE_MS);
+        debounceTimer = setTimeout(flush, DEBOUNCE_MS);
+
+        if (!maxWaitTimer) {
+            maxWaitTimer = setTimeout(flush, MAX_WAIT_MS);
+        }
     }
 
     function fire(reason) {
-        debounceTimer = null;
-
         if (document.hidden) {
             pendingWhileHidden = true;
             return;
@@ -117,10 +159,17 @@
         var now = Date.now();
         var sinceLast = now - lastRunAt;
         if (sinceLast < THROTTLE_MS) {
-            // Too soon since the last refresh; wait out the remaining interval.
-            debounceTimer = setTimeout(function () {
-                fire(reason);
-            }, THROTTLE_MS - sinceLast);
+            // Too soon since the last refresh; wait out the remaining interval
+            // on a dedicated timer so new triggers cannot reset or starve it.
+            pendingReason = reason || pendingReason;
+            if (!throttleTimer) {
+                throttleTimer = setTimeout(function () {
+                    throttleTimer = null;
+                    var nextReason = pendingReason;
+                    pendingReason = null;
+                    fire(nextReason);
+                }, THROTTLE_MS - sinceLast);
+            }
             return;
         }
 
@@ -128,12 +177,10 @@
         runRegions(reason);
     }
 
-    /** Force an immediate refresh, bypassing debounce (still respects hidden). */
+    /** Force an immediate refresh, bypassing debounce/throttle (still respects hidden). */
     function refreshNow(reason) {
-        if (debounceTimer) {
-            clearTimeout(debounceTimer);
-            debounceTimer = null;
-        }
+        clearPendingTimers();
+        pendingReason = null;
         if (document.hidden) {
             pendingWhileHidden = true;
             return;
@@ -143,7 +190,13 @@
     }
 
     document.addEventListener('visibilitychange', function () {
-        if (!document.hidden && pendingWhileHidden) {
+        if (document.hidden) {
+            if (debounceTimer || maxWaitTimer || throttleTimer) {
+                clearPendingTimers();
+                pendingReason = null;
+                pendingWhileHidden = true;
+            }
+        } else if (pendingWhileHidden) {
             pendingWhileHidden = false;
             // One catch-up refresh after returning to the tab.
             trigger('visible');
@@ -331,6 +384,6 @@
         fetchJson: fetchJson,
         handleAuthRedirect: handleAuthRedirect,
         // Tuning knobs exposed for tests/diagnostics.
-        _config: { debounceMs: DEBOUNCE_MS, throttleMs: THROTTLE_MS },
+        _config: { debounceMs: DEBOUNCE_MS, maxWaitMs: MAX_WAIT_MS, throttleMs: THROTTLE_MS },
     };
 })();
