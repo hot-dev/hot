@@ -14,7 +14,7 @@ Official client libraries for the Hot API, released in lockstep versions:
 | Rust | [`hot-dev`](https://crates.io/crates/hot-dev) (crates.io) | [hot-dev/hot-rust](https://github.com/hot-dev/hot-rust) | [docs.rs](https://docs.rs/hot-dev) |
 | Java | `dev.hot:hot-sdk` (Maven Central) | [hot-dev/hot-java](https://github.com/hot-dev/hot-java) | [javadoc.io](https://javadoc.io/doc/dev.hot/hot-sdk) |
 
-Every SDK covers the thirteen runtime API v1 resources ([Endpoints](/docs/api#endpoints)),
+Every SDK covers the fourteen runtime API v1 resources ([Endpoints](/docs/api#endpoints)),
 plus the [org API](/docs/api/management) (`orgs`, `apiKeys`) for org API keys,
 SSE run-stream subscriptions with automatic reconnection across the API's
 5-minute stream timeout, durable run and task waiters, structured API errors,
@@ -332,7 +332,13 @@ HotClient customer = HotClient.builder((String) key.get("token")).build();
 
 Each SDK also has `apiKeys.get`, `update`, `revoke` and `rotate` (`rotate`
 takes `overlap_seconds`), `orgs.usage(parentOrgId)`, and `purgeCalls` on env,
-runs, streams and orgs. Each SDK's README documents these in its own idiom.
+runs, streams and orgs. On Hot 3.0.14+, `ApiKey.status` also includes
+`"disabled"` (alongside `"active"`, `"revoked"`, `"expired"`,
+`"issuer_inactive"`, and `"suspended"`), key responses include
+`previous_secret_expires_at` while a rotation overlap is active, and starting a
+second overlapping rotation returns `409 rotation_overlap_running` unless
+`overlap_seconds` is `0` (typed fields ship in upcoming SDK 1.4.0). Each SDK's
+README documents these in its own idiom.
 
 Over plain HTTP, the same calls look like this:
 
@@ -610,7 +616,16 @@ All five SDKs follow the same conventions:
   `retry_after`. Idempotent requests (GET, PUT, DELETE) also retry on 502, 503
   and 504. Raw requests, uploads and downloads are not retried. JSON requests
   time out after 60 seconds by default in JavaScript, Python, Rust and Java;
-  Go uses context deadlines.
+  Go supports both `Config.Timeout` for JSON requests and context deadlines.
+- **Idempotent event publishes.** On Hot 3.0.14+, `events.publish` accepts an
+  optional client-chosen UUID `event_id`
+  ([Sending a Publish Again](/docs/api#sending-a-publish-again)) so retrying
+  after a timeout or `5xx` returns the original `201` event instead of creating
+  a duplicate (typed fields ship in upcoming SDK 1.4.0). A
+  `503 event_publish_in_progress` error means an earlier publish of that
+  `event_id` has not finished yet (retry after `retry_after` seconds);
+  `409 event_id_conflict` means the `event_id` is already in use by a different
+  event or environment and should not be retried as-is.
 - **Reconnects.** Durable waiters (`runs.wait`, `tasks.wait`,
   `subscribeWithEvent`, `callHot`, `waitForRunResult`) stop at once on
   permanent errors, meaning any 4xx except 408 and 429 (including
@@ -637,14 +652,22 @@ All five SDKs follow the same conventions:
 - **Durable run waiting.** `runs.wait` (or the language-equivalent method)
   reads `run:update` snapshots and reconnects without missing a run that became
   terminal before subscription setup.
+- **Run listing filters.** On Hot 3.0.14+, `runs.list`
+  ([List Runs](/docs/api#list-runs)) accepts `project_id`, `stream_id`, and
+  `function` query filters alongside `status`, `type`, `time_range`, `limit`,
+  and `offset` (typed filter options ship in upcoming SDK 1.4.0).
 - **Durable task waiting.** `tasks.wait` (or the language-equivalent method)
   reads `task:update` snapshots, reconnects across transport interruptions, and
   cannot miss a task that became terminal before subscription setup.
 - **Identification.** Each SDK sends `User-Agent: hot-sdk-<lang>/<version>`.
+- **Health status.** `status()` calls the unauthenticated
+  [`GET /status`](/docs/api#get-api-status) endpoint at the server root (ships
+  in upcoming SDK 1.4.0).
 - **Escape hatches.** A `request(...)` method, plus a raw-response variant,
   covers endpoints that do not yet have a resource helper. In JavaScript these
   are `hot.request` and `hot.requestRaw`, with paths relative to `/v1`.
-- **Large downloads.** In Python, `hot.files.download_stream(file_id)` and
+- **Large downloads.** In Python, `hot.files.download_stream(file_id)`,
+  `hot.blobs.download_stream(blob_ref_id)`, and
   `hot.builds.download_stream(project, build_id)` stream large bodies;
   `download()` reads the whole body.
 

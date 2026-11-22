@@ -14,9 +14,9 @@
 
 ## Resolve the Installed SDK
 
-The SDKs release independently. Inspect the application's dependency manifest,
-lockfile, and installed package instead of assuming SDK source repositories are
-present:
+The official SDKs release in lockstep versions, though an application may pin
+an older release. Inspect the application's dependency manifest, lockfile, and
+installed package instead of assuming SDK source repositories are present:
 
 | Language | Package | Verify the selected version |
 | --- | --- | --- |
@@ -32,15 +32,24 @@ and verify the resulting lockfile. Do not require a clone of an SDK repository.
 
 ## Shared API Contract
 
-Every SDK mirrors the Hot API v1 resources:
+Every SDK covers the fourteen runtime Hot API v1 resources plus the org API
+and server health check:
 
 - events, streams, runs, and tasks;
-- files, projects, and builds;
+- files, blobs, projects, and builds;
 - context, domains, sessions, and service keys;
-- organization and environment.
+- organization and environment;
+- the org API (`orgs` and `apiKeys`, plus `orgs.env(org, env)` for
+  sub-organization projects, context, and builds) using an org API key;
+- call-trace purging (`purgeCalls` / `purge_calls` on env, runs, streams, and
+  orgs) and root health status (`status()`, `GET /status`).
 
 Authenticated clients belong on trusted servers. Do not expose a Hot API key
-or provider key in a browser bundle.
+or provider key in a browser bundle. Calling a runtime route with an org key,
+or an org route with an environment key, returns `403 key_scope_mismatch`,
+which each SDK surfaces as a typed scope error (`HotKeyScopeError` in JS and
+Python, `*hot.KeyScopeError` in Go, `error.required_scope()` in Rust,
+`HotKeyScopeException` in Java) naming the required scope (`org` or `env`).
 
 Core request and response payloads preserve Hot wire keys:
 
@@ -57,16 +66,23 @@ Core request and response payloads preserve Hot wire keys:
 ```
 
 The SDK never rewrites keys inside `event_data`. SDK-only configuration uses
-the target language's normal casing.
+the target language's normal casing. For idempotent publishing via
+`events.publish`, supply a client-chosen UUID `event_id`: retrying the same
+payload returns the original `201` event, `503 event_publish_in_progress`
+means an earlier publish is still completing (retry after `retry_after`
+seconds), and `409 event_id_conflict` means that `event_id` is already in use
+by a different event or environment and must not be retried as-is.
 
 Recognize these stream events:
 
 - `event:published`: contains the accepted event and stream ids;
 - `stream:data`: application payload under `data_type` and `payload`;
 - `run:stop`, `run:fail`, or `run:cancel`: inspect `run.result` or the SDK's
-  structured run failure;
+  structured run failure. A `run:fail` with `run.status === "pending_retry"`
+  is not terminal — wait for the retry run (linked through `origin_run_id`,
+  and named in `retry_run_id` on replays after the retry starts);
 - `run:update`: a durable run snapshot from a run-specific subscription;
-- `stream:complete`: the current SSE connection ended.
+- `stream:complete`: the current SSE connection ended;
 - `task:update`: a durable task snapshot. `completed`, `failed`, `cancelled`,
   and `timed_out` are terminal task states.
 
@@ -111,10 +127,17 @@ For a multi-turn browser session:
    replay missed data.
 
 The high-level `subscribeWithEvent` / `subscribe_with_event` helpers are
-one-run iterators: they stop after their published event's terminal run. A
-persistent multi-turn UI should consume the raw BFF subscribe-with-event
-response for its first connection, publish later turns separately, and
-reattach through the existing-stream subscribe endpoint.
+one-run iterators: they stop after their published event's terminal run.
+Likewise, `@hot-dev/sdk/proxy`'s `createHotProxyRoute` ignores browser
+`streamId` by default (`allowStreamId: false`) and filters SSE output to the
+published event's run (a one-run proxy). Do not pass `streamId` to
+`createHotProxyRoute` expecting subsequent turns to arrive on that same
+response. Instead, a persistent multi-turn UI should open one raw SSE stream
+directly from its own authenticated server route (for example via
+`hot.requestRaw`, or by using `hot.streams.subscribeWithEvent` /
+`hot.streams.subscribe` on the server), publish later turns separately via
+`hot.events.publish`, and reattach through the existing-stream subscribe
+endpoint after the 5-minute `stream:complete` cap.
 
 Two simultaneous subscribers can cause the same reply to render twice.
 Closing the subscription after one `reply:end` can miss later workflow output,
@@ -141,9 +164,15 @@ Install `@hot-dev/sdk`. Use subpath exports:
 | `@hot-dev/sdk` | `HotClient`, resources, core types |
 | `@hot-dev/sdk/streaming` | SSE parsing and stream event types |
 | `@hot-dev/sdk/agent` | event payloads, slash commands, reply folding |
+| `@hot-dev/sdk/webhook` | webhook helpers |
 | `@hot-dev/sdk/proxy` | backend-for-frontend route helpers |
 
-Keep the token in a server route:
+Keep the token in a server route. For a one-run BFF proxy, always pass
+`allowEventTypes` (`createHotProxyRoute` throws `TypeError` at startup in
+`@hot-dev/sdk` v1.3.0+ if omitted; `hot:` event types such as `hot:call` are
+blocked by default unless listed explicitly). Add an `authorize` hook and back
+the route with a per-user session or scoped service key rather than a
+full-access API key:
 
 ```ts
 import { HotClient } from "@hot-dev/sdk";
@@ -154,10 +183,12 @@ const hot = new HotClient({
   token: process.env.HOT_API_KEY ?? "",
 });
 
-export const POST = createHotProxyRoute(hot);
+export const POST = createHotProxyRoute(hot, {
+  allowEventTypes: ["support:ask"],
+});
 ```
 
-Consume the proxied SSE response in browser code:
+Consume that one-run proxied SSE response in browser code:
 
 ```ts
 import {
@@ -168,7 +199,6 @@ import {
 export function ask(
   eventType: string,
   eventData: Record<string, unknown>,
-  streamId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
   return consumeSseResponse(
@@ -178,7 +208,7 @@ export function ask(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify({ eventType, eventData, streamId }),
+      body: JSON.stringify({ eventType, eventData }),
       signal,
     }),
     { signal },
@@ -186,13 +216,22 @@ export function ask(
 }
 ```
 
-For later turns on an already subscribed stream, publish from a server route:
+`createHotProxyRoute` ignores browser-supplied `streamId` by default
+(`allowStreamId: false`) and filters SSE output to the published event's run,
+so do not pass `streamId` to it expecting later turns to arrive on that same
+response. For a persistent multi-turn UI, open one raw SSE stream directly
+from your own authenticated server route — relaying
+`POST /v1/streams/subscribe-with-event` and
+`GET /v1/streams/{stream_id}/subscribe` via `hot.requestRaw`, or driving
+`hot.streams.subscribeWithEvent` / `hot.streams.subscribe` on the server —
+and publish subsequent turns into that stream from a server route:
 
 ```ts
 await hot.events.publish({
   event_type: eventType,
   event_data: eventData,
   stream_id: streamId,
+  event_id: eventId, // optional client-chosen UUID for idempotent retries
 });
 ```
 
@@ -323,12 +362,17 @@ Close `StreamEvents` and avoid whole-request timeouts on SSE.
 ## Client Review Checklist
 
 - Keep credentials server-side.
+- Pass explicit `allowEventTypes` (plus `authorize` and a scoped session or
+  service key) to `createHotProxyRoute`, and use a dedicated raw stream route
+  rather than `createHotProxyRoute` for persistent multi-turn subscriptions.
 - Verify the installed SDK version and use its exact method names.
 - Preserve wire-format payload keys.
 - Use an atomic first publish and subscription.
 - Maintain one subscriber per multi-turn stream.
 - Correlate messages with stable session and message ids.
-- Handle every terminal run event and structured run failure.
+- Handle every terminal run event and structured run failure; treat `run:fail`
+  with `status: "pending_retry"` as non-terminal and follow the retry run
+  (`origin_run_id` / `retry_run_id`).
 - Use the run waiter when only a known run's durable terminal record matters.
 - Return task ids from asynchronous runs and use the SDK task waiter.
 - Treat the first `task:update` as the durable source of truth after reconnect.
