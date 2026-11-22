@@ -89,6 +89,18 @@ where
 // Shared Helper Functions
 // ============================================================================
 
+/// The longest configured wait honored for a public call. It only keeps a
+/// misconfigured value from overflowing a deadline: an installation that sets
+/// a long timeout on purpose gets it.
+const MAX_CONF_TIMEOUT_SECS: i64 = 24 * 60 * 60;
+
+/// A configured timeout in seconds: at least one second, so a zero or
+/// negative setting cannot wrap into an unbounded wait.
+pub(crate) fn conf_timeout_secs(conf: &hot::val::Val, key: &str, default_secs: i64) -> u64 {
+    conf.get_int_or_default(key, default_secs)
+        .clamp(1, MAX_CONF_TIMEOUT_SECS) as u64
+}
+
 use axum::{Json, http::StatusCode};
 use hot::db::{DatabasePool, api_key::ApiKey, project::Project};
 use uuid::Uuid;
@@ -311,6 +323,19 @@ pub(crate) async fn resolve_stream_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_timeouts_keep_long_values_and_floor_at_one_second() {
+        let conf = hot::val!({"mcp": {"timeout": 900}, "webhook": {"timeout": -5}});
+        assert_eq!(conf_timeout_secs(&conf, "mcp.timeout", 60), 900);
+        assert_eq!(conf_timeout_secs(&conf, "webhook.timeout", 30), 1);
+        assert_eq!(conf_timeout_secs(&conf, "missing.timeout", 30), 30);
+        let huge = hot::val!({"mcp": {"timeout": 9_000_000_000_000_i64}});
+        assert_eq!(
+            conf_timeout_secs(&huge, "mcp.timeout", 60),
+            MAX_CONF_TIMEOUT_SECS as u64
+        );
+    }
     use chrono::Utc;
     use hot::db::{self, Project, api_key::ApiKey};
 

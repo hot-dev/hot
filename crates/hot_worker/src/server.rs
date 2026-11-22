@@ -2840,10 +2840,11 @@ impl ClaimFence {
                 self.last_confirmed = confirmed_at;
                 None
             }
-            // Acknowledged while this worker's keepalive is still active:
-            // this worker only ACKs after dropping `EventKeepaliveGuard`, so an
-            // Acked observation means another worker (or startup purge) already
-            // took over and settled this delivery.
+            // Acknowledged while this worker's handlers are still running:
+            // the touch loop stops observing once they are done and this
+            // worker settles the delivery (see `settling_delivery`), so an
+            // Acked observation means another worker (or startup purge)
+            // already took over and settled it.
             Some(PendingTouch::Acked | PendingTouch::Reclaimed) => Some(ClaimLoss::Lost),
             // Trimmed from the stream: no other worker can be handed the
             // delivery any more, so this copy's runs continue.
@@ -2885,6 +2886,33 @@ struct EventKeepaliveGuard {
     pickup: Option<tokio::sync::oneshot::Receiver<Option<hot::queue::streams::PendingTouch>>>,
     /// The delivery's stream entry id.
     delivery_id: String,
+    /// Set once the delivery's handlers are done and this worker settles it
+    /// (see `settling_delivery`): the touch loop then stops without a verdict.
+    settling: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Run a delivery's `worker`, then mark the delivery as settling before the
+/// queue acknowledges it. The keepalive guard outlives that acknowledgement,
+/// so without the mark a touch landing just after it would find the entry
+/// acknowledged and report this worker's own ACK as a lost claim.
+fn settling_delivery<'a, F, Fut, R>(
+    settling: Option<Arc<std::sync::atomic::AtomicBool>>,
+    worker: F,
+) -> impl FnOnce(Message) -> futures::future::BoxFuture<'a, Result<R, WorkerError>> + Send
+where
+    F: FnOnce(Message) -> Fut + Send + 'a,
+    Fut: std::future::Future<Output = Result<R, WorkerError>> + Send + 'a,
+    R: Send + Sync,
+{
+    move |message| {
+        Box::pin(async move {
+            let result = worker(message).await;
+            if let Some(settling) = settling {
+                settling.store(true, std::sync::atomic::Ordering::Release);
+            }
+            result
+        })
+    }
 }
 
 /// How long an executor waits for the pickup touch before it starts the
@@ -2895,6 +2923,11 @@ impl EventKeepaliveGuard {
     /// The claim fence's verdict for this delivery, for its runs to watch.
     fn claim(&self) -> tokio::sync::watch::Receiver<Option<ClaimLoss>> {
         self.claim.clone()
+    }
+
+    /// The mark `settling_delivery` sets when the handlers are done.
+    fn settling(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.settling)
     }
 
     /// What the first touch found, once it has answered. `None` when it
@@ -3008,6 +3041,8 @@ fn spawn_event_lease_keepalive(
     let delivery_id = keepalive.msg_id().to_string();
     let (pickup_tx, pickup) = tokio::sync::oneshot::channel();
     let mut pickup_tx = Some(pickup_tx);
+    let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handlers_done = Arc::clone(&settling);
     let touch_loop = tokio::spawn(async move {
         use hot::queue::streams::PendingTouch;
         // First touch immediately: the delivery may have accrued idle in the
@@ -3020,6 +3055,12 @@ fn spawn_event_lease_keepalive(
             tokio::time::sleep(delay).await;
             let touch_started = tokio::time::Instant::now();
             let touched = keepalive.touch().await;
+            // The handlers are done and this worker is settling the delivery:
+            // an entry found acknowledged now is its own ACK, and no run is
+            // left for a verdict to stop.
+            if handlers_done.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             let unconfirmed = fence.verdict().is_some();
             if let Some(loss) = fence.observe_at(
                 touched.as_ref().ok().copied(),
@@ -3105,6 +3146,7 @@ fn spawn_event_lease_keepalive(
         claim,
         pickup: Some(pickup),
         delivery_id,
+        settling,
     })
 }
 
@@ -3507,6 +3549,28 @@ async fn park_event_with_epoch(
     message: &EventMessage,
     epoch: Option<&str>,
 ) -> Result<(), WorkerError> {
+    park_event_until(db, message, epoch, chrono::Utc::now()).await
+}
+
+/// Park an event whose project is inactive. Replay tells an inactive project
+/// by the parked row's build, and an event that names only its project has
+/// none: replay would hand it straight back, to be parked again. Such an
+/// event waits out the project back-off before its next try instead.
+async fn park_event_for_inactive_project(
+    db: &DatabasePool,
+    message: &EventMessage,
+) -> Result<(), WorkerError> {
+    let retry_at = chrono::Utc::now() + chrono::Duration::seconds(PARKED_PROJECT_BACKOFF_SECS);
+    park_event_until(db, message, None, retry_at).await
+}
+
+/// Park `message` until `leased_until`, when replay looks at it next.
+async fn park_event_until(
+    db: &DatabasePool,
+    message: &EventMessage,
+    epoch: Option<&str>,
+    leased_until: chrono::DateTime<chrono::Utc>,
+) -> Result<(), WorkerError> {
     let mut parked = message.clone();
     // Replayed parked events arrive as fresh queue deliveries (`redelivered == false`),
     // so mark them repeatable to ensure multi-handler runs check `earlier_deliveries`.
@@ -3522,7 +3586,6 @@ async fn park_event_with_epoch(
     // that races with `replay_parked_events`'s trailing guarded DELETE
     // (`WHERE message_id=$1 AND leased_until=$2`) never matches the replay lease
     // and gets silently deleted.
-    let leased_until = chrono::Utc::now();
     let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload,quota_epoch,leased_until) \
         VALUES($1,$2,$3,$4,$5,$6) \
         ON CONFLICT(message_id) DO UPDATE SET \
@@ -3810,7 +3873,9 @@ async fn hydrate_event_message_from_db(
 
     let (target_project_id, target_project_name) =
         if let Some(project_id) = event_message.body.event.target_project_id {
-            let project = match Project::get_project(db, &project_id).await {
+            // `get_project` returns active projects only: an inactive one
+            // must be found to be parked for, not taken for a missing one.
+            let project = match Project::get_project_including_inactive(db, &project_id).await {
                 Ok(project) => project,
                 Err(hot::db::project::ProjectError::Database(e)) => {
                     return Err(worker_infrastructure_retry_error(
@@ -3835,12 +3900,14 @@ async fn hydrate_event_message_from_db(
                 )));
             }
             if !project.active {
-                park_event(db, &event_message).await.map_err(|e| {
-                    worker_infrastructure_retry_error(
-                        format!("Failed to park event for inactive project: {e}"),
-                        infra_retry_backoff_ms,
-                    )
-                })?;
+                park_event_for_inactive_project(db, &event_message)
+                    .await
+                    .map_err(|e| {
+                        worker_infrastructure_retry_error(
+                            format!("Failed to park event for inactive project: {e}"),
+                            infra_retry_backoff_ms,
+                        )
+                    })?;
                 return Err(Box::new(ParkedEvent));
             }
             (Some(project.project_id), Some(project.name))
@@ -3878,7 +3945,7 @@ async fn hydrate_event_message_from_db(
                 build_id, event_id, e
             ))
         })?;
-        let project = Project::get_project(db, &build.project_id)
+        let project = Project::get_project_including_inactive(db, &build.project_id)
             .await
             .map_err(|e| {
                 worker_error(format!(
@@ -3906,7 +3973,7 @@ async fn hydrate_event_message_from_db(
         .as_ref()
         .is_some_and(|(_, project)| !project.active)
     {
-        park_event(db, &event_message).await?;
+        park_event_for_inactive_project(db, &event_message).await?;
         return Err(Box::new(ParkedEvent));
     }
     if !(0..=100).contains(&claimed_context.retry_attempt) {
@@ -4830,7 +4897,9 @@ async fn settle_orphaned_event_runs(
     // streams that have no queue message to redeliver them, without touching
     // concurrent healthy sibling event runs that have their own `event_id`.
     for stream_id in &stream_ids {
-        match hot::db::run::Run::fail_orphaned_runs_by_stream_id(db, stream_id, reason).await {
+        match hot::db::run::Run::fail_orphaned_non_event_runs_by_stream_id(db, stream_id, reason)
+            .await
+        {
             Ok(0) => {}
             Ok(count) => info!(
                 "hot.dev: WORKER marked {} orphaned non-event run(s) as failed for stream {}",
@@ -10760,6 +10829,8 @@ pub async fn run_with_components_shared_context_and_db(
                                 let redis_delivery_id = _keepalive_guard
                                     .as_ref()
                                     .map(|guard| guard.delivery_id.clone());
+                                let delivery_settling =
+                                    _keepalive_guard.as_ref().map(EventKeepaliveGuard::settling);
                                 // The delivery waited for this executor with no
                                 // keepalive: start it only once the first touch
                                 // says it is still this worker's to run.
@@ -10799,7 +10870,7 @@ pub async fn run_with_components_shared_context_and_db(
                                     .as_deref()
                                     .map(|id| running_event_deliveries_clone.enter(id));
                                 // Process ONE event message (atomic operation)
-                                match lease.process(|message| {
+                                match lease.process(settling_delivery(delivery_settling, |message| {
                                 let db_ref = db_clone.clone();
                                 let blob_store_ref = blob_store_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
@@ -12505,7 +12576,7 @@ pub async fn run_with_components_shared_context_and_db(
                                     // Return some value as the processing result
                                     Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
                                 }
-                            }).await {
+                            })).await {
                                 Ok(Some(_)) => {
                                 },
                                 Ok(None) => {
@@ -14254,6 +14325,32 @@ mod tests {
         assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
     }
 
+    /// The delivery is marked as settling only once its handlers are done,
+    /// whatever they returned, so the touch loop tells this worker's own ACK
+    /// from another worker's.
+    #[tokio::test]
+    async fn settling_delivery_marks_the_delivery_after_its_handlers() {
+        for fails in [false, true] {
+            let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = Arc::clone(&settling);
+            let worker =
+                settling_delivery(Some(Arc::clone(&settling)), move |_message: Message| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        assert!(!seen.load(std::sync::atomic::Ordering::Acquire));
+                        if fails {
+                            Err(worker_error("handler failed".to_string()))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                });
+            let message: Message = hot::lang::event::MaintenanceMessage::single_task("test").into();
+            assert_eq!(worker(message).await.is_err(), fails);
+            assert!(settling.load(std::sync::atomic::Ordering::Acquire));
+        }
+    }
+
     /// A delivery acknowledged while this worker's keepalive is still active
     /// (whether on the first touch or a later one) means another worker has
     /// already reclaimed and settled it: the claim is lost.
@@ -14346,6 +14443,7 @@ mod tests {
             claim: tokio::sync::watch::channel(None).1,
             pickup,
             delivery_id: "1-0".to_string(),
+            settling: Default::default(),
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -15413,6 +15511,7 @@ mod tests {
             claim: tokio::sync::watch::channel(None).1,
             pickup: None,
             delivery_id: String::new(),
+            settling: Default::default(),
         };
         drop(guard);
 
@@ -17270,6 +17369,88 @@ handler fn () { initialized }
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;
         }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// An event that names an inactive project waits for it instead of
+    /// failing as if the project were missing, and waits out the project
+    /// back-off: replay cannot tell its project is inactive without a build.
+    #[tokio::test]
+    async fn event_for_an_inactive_target_project_is_parked_with_a_backoff() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_time = chrono::Utc::now();
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "order:created",
+            &serde_json::json!({"order": 1}),
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE project SET active = 0 WHERE project_id = ?")
+            .bind(test_data.project_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: test_data.env_id,
+                    stream_id,
+                    event_type: "order:created".to_string(),
+                    event_data: val!({"event_id": event_id.to_string()}),
+                    event_time,
+                    target_project_id: Some(test_data.project_id),
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Event.as_id(),
+                    Some(test_data.env_id),
+                    Some(Uuid::now_v7()),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let before = chrono::Utc::now();
+        let held = hydrate_event_message_from_db(0, &db, None, message.clone(), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            held.downcast_ref::<ParkedEvent>().is_some(),
+            "an inactive project parks its events: {held}"
+        );
+        let leased_until: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT leased_until FROM parked_event WHERE message_id = ?")
+                .bind(message.id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(
+            leased_until >= before + chrono::Duration::seconds(PARKED_PROJECT_BACKOFF_SECS),
+            "{leased_until}"
+        );
+
+        pool.close().await;
         let _ = std::fs::remove_file(db_path);
     }
 

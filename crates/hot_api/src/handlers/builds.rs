@@ -984,7 +984,8 @@ pub async fn upload_build(
 
     let storage_backend = storage.storage_type().to_string();
 
-    // Insert build record into database; clean up stored object if insertion fails.
+    // Insert build record into database; clean up the stored object if the
+    // insertion fails and no row owns it.
     if let Err(e) = Build::insert_build_with_storage(
         &db,
         &build_id,
@@ -998,14 +999,25 @@ pub async fn upload_build(
     )
     .await
     {
-        let _ = storage
-            .delete_build(&build_id, &env.org_id, &api_key.env_id)
-            .await;
         let is_unique_conflict = matches!(
             &e,
             hot::db::build::BuildError::Database(sqlx::Error::Database(db_err))
                 if db_err.is_unique_violation()
         );
+        // The object's key is the build ID, so a concurrent or retried upload
+        // of the same build shares it. A unique conflict means that upload's
+        // row now owns the object: deleting it would leave a build with no
+        // file. Remove it only when no row exists; an unreadable row keeps it.
+        let unowned = !is_unique_conflict
+            && matches!(
+                Build::get_build(&db, &build_id).await,
+                Err(hot::db::build::BuildError::NotFound)
+            );
+        if unowned {
+            let _ = storage
+                .delete_build(&build_id, &env.org_id, &api_key.env_id)
+                .await;
+        }
         if is_unique_conflict {
             return Err((
                 StatusCode::CONFLICT,

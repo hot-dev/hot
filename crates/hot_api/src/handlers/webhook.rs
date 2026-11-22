@@ -835,8 +835,8 @@ async fn webhook_handler_inner(
     );
 
     // Wait for the result synchronously (no SSE streaming for webhooks)
-    // Webhook timeout: 30 seconds (configurable, clamped to 1..=300s to prevent wrap/panic)
-    let timeout_seconds = conf.get_int_or_default("webhook.timeout", 30).clamp(1, 300) as u64;
+    // Webhook timeout: 30 seconds unless configured (see `conf_timeout_secs`).
+    let timeout_seconds = super::conf_timeout_secs(conf, "webhook.timeout", 30);
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_seconds);
     let (outcome, timed_out) = wait_for_webhook_outcome(
         db,

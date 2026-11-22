@@ -145,19 +145,31 @@ impl Drop for FileServerHandle {
         #[cfg(not(all(target_os = "linux", feature = "kata")))]
         let uds_cleanup: Option<PathBuf> = None;
 
-        if cleanup_dir.is_some() || uds_cleanup.is_some() {
-            let do_cleanup = move || {
-                if let Some(dir) = cleanup_dir {
-                    let _ = std::fs::remove_dir_all(&dir);
+        // A redelivered task starts a new server at these same paths, so they
+        // must be free when `drop` returns: a removal left to the blocking
+        // pool could run after that server bound its socket, and delete it.
+        // Unlinking the socket and renaming the directory are one syscall
+        // each; only removing the directory, which walks it, is deferred.
+        if let Some(uds_path) = uds_cleanup {
+            let _ = std::fs::remove_file(&uds_path);
+        }
+        if let Some(dir) = cleanup_dir {
+            let mut doomed = dir.clone().into_os_string();
+            doomed.push(format!(".removing-{}", Uuid::new_v4().simple()));
+            let doomed = PathBuf::from(doomed);
+            if std::fs::rename(&dir, &doomed).is_err() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn_blocking(move || {
+                        let _ = std::fs::remove_dir_all(&doomed);
+                    });
                 }
-                if let Some(uds_path) = uds_cleanup {
-                    let _ = std::fs::remove_file(&uds_path);
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(&doomed);
                 }
-            };
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn_blocking(do_cleanup);
-            } else {
-                do_cleanup();
             }
         }
     }

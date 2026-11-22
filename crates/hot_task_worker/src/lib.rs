@@ -266,6 +266,21 @@ const ZOMBIE_HEARTBEAT_STALE_SECS: i64 = 4 * HEARTBEAT_INTERVAL.as_secs() as i64
 /// the row is leaked forever without a periodic re-check.
 const ZOMBIE_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long container zombies wait for the box backend's first answer, so
+/// that containers a previous worker left running are adopted rather than
+/// failed and run again. A backend still silent after this is not coming back
+/// soon: the reaper then fails and retries them as it does code tasks, rather
+/// than leave them running, with their quota reserved, for as long as it is
+/// down. Recovery removes a container whose task has ended since.
+const CONTAINER_RECOVERY_REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Whether the zombie reaper may fail container tasks: once the startup
+/// container recovery ran, or gave the box backend
+/// [`CONTAINER_RECOVERY_REAP_GRACE`] to answer.
+fn container_zombies_reapable(recovery_done: bool, waited: std::time::Duration) -> bool {
+    recovery_done || waited >= CONTAINER_RECOVERY_REAP_GRACE
+}
+
 /// Bounded retry budget for the DB reads/writes that container adoption
 /// depends on. Adoption runs at worker startup, often against a database
 /// still riding out the same fault that killed the previous worker; a single
@@ -567,6 +582,19 @@ fn validate_egress_proxy_backend(
     backend: Backend,
     conf: &Val,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_box_network_backend(backend, conf, hot::env::is_local_dev())
+}
+
+/// [`validate_egress_proxy_backend`] for a known environment. Docker box
+/// guests apply none of the outbound rules either. Outside local development
+/// that refuses to start; in local development, where Docker is the box
+/// backend and a project's rules are usually written for its deployment, it
+/// only warns, so `hot dev` keeps working with the project's own config.
+fn validate_box_network_backend(
+    backend: Backend,
+    conf: &Val,
+    local_dev: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let proxy = hot::outbound::egress_proxy_setting(conf)?;
     let box_enabled = hot::lang::hot::r#box::is_box_enabled_from_conf(conf);
     if backend == Backend::Docker && box_enabled {
@@ -580,21 +608,28 @@ fn validate_egress_proxy_backend(
         }
         let has_cidr_policy = !hot::outbound::conf_list(conf, "network.deny-cidrs").is_empty()
             || !hot::outbound::conf_list(conf, "network.allow-cidrs").is_empty();
-        if has_cidr_policy {
-            return Err(
+        let unenforced = if has_cidr_policy {
+            Some(
                 "network.deny-cidrs / network.allow-cidrs are set, but box tasks on the Docker \
                  backend do not enforce guest egress CIDR policies. Set HOT_BOX_BACKEND=kata, \
-                 turn Hot Box off with HOT_BOX_ENABLED=false, or clear the CIDR settings"
-                    .into(),
-            );
-        }
-        if conf.get_bool_or_default("engine.isolation", false) {
-            return Err(
-                "engine.isolation is enabled, but box tasks on the Docker backend share the host \
-                 kernel without VM isolation. Set HOT_BOX_BACKEND=kata or turn Hot Box off with \
-                 HOT_BOX_ENABLED=false"
-                    .into(),
-            );
+                 turn Hot Box off with HOT_BOX_ENABLED=false, or clear the CIDR settings",
+            )
+        } else if conf.get_bool_or_default("engine.isolation", false) {
+            Some(
+                "engine.isolation is enabled, but box tasks on the Docker backend do not apply \
+                 its public-only outbound policy: a guest can reach private, link-local and \
+                 metadata addresses. Set HOT_BOX_BACKEND=kata or turn Hot Box off with \
+                 HOT_BOX_ENABLED=false",
+            )
+        } else {
+            None
+        };
+        match unenforced {
+            Some(problem) if local_dev => {
+                tracing::warn!("{problem}. Continuing because this is local development");
+            }
+            Some(problem) => return Err(problem.into()),
+            None => {}
         }
     }
 
@@ -1480,7 +1515,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // that are not mounted by any adopted container. Without a box executor
     // yet, this runs once the backend answers. Gate container zombie reaping
     // on initial recovery completing so a briefly unavailable daemon cannot
-    // cause `reap_zombie_tasks` to fail live containers before adoption runs.
+    // cause `reap_zombie_tasks` to fail live containers before adoption runs
+    // (see `container_zombies_reapable` for how long that gate holds).
+    let container_recovery_wait_started = std::time::Instant::now();
     let initial_container_recovery_done = Arc::new(AtomicBool::new(
         !hot::lang::hot::r#box::is_box_enabled_from_conf(&config.worker_conf),
     ));
@@ -1541,7 +1578,10 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         &stream_publisher,
         &task_queue_arc,
         &coordinator,
-        initial_container_recovery_done.load(Ordering::Acquire),
+        container_zombies_reapable(
+            initial_container_recovery_done.load(Ordering::Acquire),
+            container_recovery_wait_started.elapsed(),
+        ),
     )
     .await;
 
@@ -1612,7 +1652,10 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                     &reaper_pub,
                     &reaper_queue,
                     &reaper_coordinator,
-                    reaper_recovery_done.load(Ordering::Acquire),
+                    container_zombies_reapable(
+                        reaper_recovery_done.load(Ordering::Acquire),
+                        container_recovery_wait_started.elapsed(),
+                    ),
                 )
                 .await;
                 if let Some(executor) = reaper_boxes.executor() {
@@ -6677,15 +6720,43 @@ async fn process_code_task(
                             let _ = inbox_tx_clone.try_send(val);
                             break;
                         }
-                        // Non-blocking send so an unread inbox (256 messages)
-                        // can never wedge this loop and block `$cancel` delivery.
                         match inbox_tx_clone.try_send(val) {
                             Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                tracing::warn!(
-                                    task_id = %task_id_for_sub,
-                                    "Task inbox channel full (256 unread messages); dropping inbound message to preserve cancel responsiveness"
-                                );
+                            Err(mpsc::error::TrySendError::Full(val)) => {
+                                // The inbox holds 256 unread messages. Wait
+                                // for room instead of dropping this one, but
+                                // keep watching the row: a cancel must not
+                                // wait behind an inbox the task is not
+                                // reading. `Task::cancel` flips the row before
+                                // it publishes `$cancel`, so the poll sees it.
+                                let mut held = Some(val);
+                                let mut stop = false;
+                                while held.is_some() {
+                                    tokio::select! {
+                                        biased;
+                                        permit = inbox_tx_clone.reserve() => match permit {
+                                            Ok(permit) => {
+                                                if let Some(val) = held.take() {
+                                                    permit.send(val);
+                                                }
+                                            }
+                                            Err(_) => {
+                                                stop = true;
+                                                break;
+                                            }
+                                        },
+                                        _ = db_poll.tick() => {
+                                            if container_cancel::row_is_cancelled(&db_for_cancel, &task_id_for_sub).await {
+                                                cancel_notify_fwd.notify_one();
+                                                stop = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if stop {
+                                    break;
+                                }
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
                         }
@@ -14297,6 +14368,58 @@ flaky fn (args: Any): Map {
         ] {
             assert!(validate_egress_proxy_backend(Backend::Docker, &conf).is_ok());
         }
+    }
+
+    #[test]
+    fn docker_backend_refuses_outbound_rules_it_would_not_apply_except_in_local_dev() {
+        for (conf, named) in [
+            (
+                val!({"box": {"enabled": true}, "network": {"deny-cidrs": "10.0.0.0/8"}}),
+                "network.deny-cidrs",
+            ),
+            (
+                val!({"box": {"enabled": true}, "network": {"allow-cidrs": ["10.1.0.0/16"]}}),
+                "network.allow-cidrs",
+            ),
+            (
+                val!({"box": {"enabled": true}, "engine": {"isolation": true}}),
+                "public-only outbound policy",
+            ),
+        ] {
+            let err = validate_box_network_backend(Backend::Docker, &conf, false)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(named), "{err}");
+            assert!(err.contains("HOT_BOX_BACKEND=kata"), "{err}");
+            // A project's deployment rules must not stop `hot dev`.
+            assert!(validate_box_network_backend(Backend::Docker, &conf, true).is_ok());
+        }
+
+        // An egress proxy is refused in local development too, as before.
+        let proxied = val!({
+            "box": {"enabled": true},
+            "network": {"egress-proxy": "http://proxy.internal:3128"},
+        });
+        assert!(validate_box_network_backend(Backend::Docker, &proxied, true).is_err());
+
+        // With Hot Box off there are no guests to leave unrestricted.
+        let no_box = val!({"box": {"enabled": false}, "engine": {"isolation": true}});
+        assert!(validate_box_network_backend(Backend::Docker, &no_box, false).is_ok());
+    }
+
+    #[test]
+    fn container_zombies_wait_for_recovery_only_so_long() {
+        let grace = CONTAINER_RECOVERY_REAP_GRACE;
+        assert!(container_zombies_reapable(true, std::time::Duration::ZERO));
+        assert!(!container_zombies_reapable(
+            false,
+            std::time::Duration::ZERO
+        ));
+        assert!(!container_zombies_reapable(
+            false,
+            grace - std::time::Duration::from_secs(1)
+        ));
+        assert!(container_zombies_reapable(false, grace));
     }
 
     #[test]

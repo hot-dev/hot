@@ -1903,7 +1903,7 @@ async fn mcp_handler_inner(
         return Ok(StatusCode::ACCEPTED.into_response());
     }
 
-    let mcp_timeout = conf.get_int_or_default("mcp.timeout", 60).clamp(1, 300) as u64;
+    let mcp_timeout = super::conf_timeout_secs(conf, "mcp.timeout", 60);
 
     match request.method.as_str() {
         "initialize" if !protocol.is_modern() => {

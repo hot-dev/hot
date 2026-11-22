@@ -376,6 +376,11 @@ impl RunEnd {
     }
 }
 
+/// How much `stream:data` a subscription holds for runs its project filter
+/// cannot judge yet (see `StreamSubscription::held_data`).
+const MAX_HELD_DATA_RUNS: usize = 64;
+const MAX_HELD_DATA_PER_RUN: usize = 1024;
+
 /// What one SSE stream subscription has told its client.
 ///
 /// Every run the subscription reports gets `run:start` before any of its
@@ -396,6 +401,10 @@ struct StreamSubscription {
     ended: ahash::AHashSet<Uuid>,
     /// Runs of pushed `stream:data` that had no row to announce them.
     unknown: ahash::AHashSet<Uuid>,
+    /// `stream:data` of runs the project filter cannot judge yet, because
+    /// their row is not visible: sent once the run is announced, dropped if
+    /// the filter rejects it. Bounded by `MAX_HELD_DATA_*`.
+    held_data: ahash::AHashMap<Uuid, Vec<SseEvent>>,
     /// When the poll first saw each run's end, while pub/sub is delivering.
     polled_ends: ahash::AHashMap<Uuid, Instant>,
     task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion>,
@@ -419,6 +428,7 @@ impl StreamSubscription {
             rejected: Default::default(),
             ended: Default::default(),
             unknown: Default::default(),
+            held_data: Default::default(),
             polled_ends: Default::default(),
             task_versions: Default::default(),
         }
@@ -487,11 +497,28 @@ impl StreamSubscription {
         }
         if !self.passes_filter(run) {
             self.rejected.insert(run.run_id);
+            self.held_data.remove(&run.run_id);
             return;
         }
         if let Some(event) = self.run_event("run:start", run, retry).await {
             tracing::debug!("SSE: run:start for {}", run.run_id);
             out.push(event);
+        }
+        if let Some(held) = self.held_data.remove(&run.run_id) {
+            out.extend(held);
+        }
+    }
+
+    /// Keep `stream:data` of a run the project filter cannot judge yet. Past
+    /// the bounds it is dropped, as all of it was before the run's row
+    /// appeared.
+    fn hold_data(&mut self, run_id: Uuid, event: SseEvent) {
+        if !self.held_data.contains_key(&run_id) && self.held_data.len() >= MAX_HELD_DATA_RUNS {
+            return;
+        }
+        let held = self.held_data.entry(run_id).or_default();
+        if held.len() < MAX_HELD_DATA_PER_RUN {
+            held.push(event);
         }
     }
 
@@ -604,11 +631,13 @@ impl StreamSubscription {
                     self.unknown.remove(&run_id);
                     self.announce(&run, out).await;
                 }
-                if self.project_filter.is_some()
-                    && (self.rejected.contains(&run_id) || !self.started.contains(&run_id))
-                {
+                // With a project filter, a run's data follows its `run:start`:
+                // a rejected run's is dropped, and a run with no row yet has
+                // its data held until the row says which project it is in.
+                if self.project_filter.is_some() && self.rejected.contains(&run_id) {
                     return;
                 }
+                let hold = self.project_filter.is_some() && !self.started.contains(&run_id);
                 let event = StreamEvent::StreamData {
                     stream_data_id,
                     run_id,
@@ -621,7 +650,12 @@ impl StreamSubscription {
                         stream_data_id,
                         run_id
                     );
-                    out.push(SseEvent::default().event("stream:data").data(json));
+                    let event = SseEvent::default().event("stream:data").data(json);
+                    if hold {
+                        self.hold_data(run_id, event);
+                    } else {
+                        out.push(event);
+                    }
                 }
                 return;
             }
@@ -1021,4 +1055,89 @@ pub async fn subscribe_with_event(
         guard_permissions,
     ))
     .keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data_event(run: &Run, run_id: Uuid) -> PubSubEvent {
+        PubSubEvent::StreamData {
+            stream_data_id: Uuid::now_v7(),
+            run_id,
+            env_id: Some(run.env_id),
+            stream_id: run.stream_id,
+            data_type: "text".to_string(),
+            payload: serde_json::json!("chunk"),
+        }
+    }
+
+    /// A project-filtered subscription cannot tell which project a run with
+    /// no row yet belongs to. Its early `stream:data` is held, then sent
+    /// after `run:start` or dropped once the row says.
+    #[tokio::test]
+    async fn filtered_subscription_holds_data_until_the_run_is_judged() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let db = Arc::new(db);
+        let row = Run::get_run(&db, &data.run_id).await.unwrap();
+        let mut subscription = StreamSubscription::new(
+            Arc::clone(&db),
+            None,
+            row.env_id,
+            row.stream_id,
+            Some(data.project_id),
+        );
+
+        // Two runs whose rows are not visible yet: nothing is sent or lost.
+        let (wanted, other) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut out = Vec::new();
+        for run_id in [wanted, wanted, other] {
+            subscription
+                .pushed(data_event(&row, run_id), &mut out)
+                .await;
+        }
+        assert!(out.is_empty());
+
+        // The filter's project: `run:start`, then the held data in order.
+        let mut late = Run::get_run(&db, &data.run_id).await.unwrap();
+        late.run_id = wanted;
+        late.project_id = Some(data.project_id);
+        subscription.announce_with(&late, None, &mut out).await;
+        assert_eq!(out.len(), 3);
+        subscription
+            .pushed(data_event(&row, wanted), &mut out)
+            .await;
+        assert_eq!(out.len(), 4);
+
+        // Another project's run: its held data is dropped, as is later data.
+        let mut rejected = Run::get_run(&db, &data.run_id).await.unwrap();
+        rejected.run_id = other;
+        rejected.project_id = Some(Uuid::now_v7());
+        subscription.announce_with(&rejected, None, &mut out).await;
+        subscription.pushed(data_event(&row, other), &mut out).await;
+        assert_eq!(out.len(), 4);
+        assert!(subscription.held_data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_data_is_bounded() {
+        let db = Arc::new(hot::db::test_db().await);
+        let mut subscription = StreamSubscription::new(
+            db,
+            None,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Some(Uuid::now_v7()),
+        );
+        let run_id = Uuid::now_v7();
+        for _ in 0..MAX_HELD_DATA_PER_RUN + 10 {
+            subscription.hold_data(run_id, SseEvent::default());
+        }
+        assert_eq!(subscription.held_data[&run_id].len(), MAX_HELD_DATA_PER_RUN);
+        for _ in 0..MAX_HELD_DATA_RUNS + 10 {
+            subscription.hold_data(Uuid::now_v7(), SseEvent::default());
+        }
+        assert_eq!(subscription.held_data.len(), MAX_HELD_DATA_RUNS);
+    }
 }

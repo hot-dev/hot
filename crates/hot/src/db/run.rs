@@ -2016,15 +2016,40 @@ impl Run {
         Ok(rows_affected)
     }
 
-    /// Fail all runs in a stream that are still in "running" status.
-    /// This is used during orphaned event recovery - when a worker crashes,
-    /// all runs in the affected stream(s) that were in progress should be marked as failed.
+    /// Fail all runs in a stream that are still in "running" status, whatever
+    /// started them. Only for a caller that knows nothing else is executing
+    /// in the stream, such as a local dev session reconciling the work its
+    /// previous process abandoned.
     ///
     /// Returns the number of runs that were marked as failed.
     pub async fn fail_orphaned_runs_by_stream_id(
         db: &crate::db::DatabasePool,
         stream_id: &Uuid,
         error_message: &str,
+    ) -> Result<u64, RunError> {
+        Self::fail_orphaned_stream_runs(db, stream_id, error_message, false).await
+    }
+
+    /// Fail the runs in a stream that are still in "running" status and belong
+    /// to no event (`event_id IS NULL`). Used by orphaned event recovery while
+    /// other workers may be running sibling events in the same stream: an
+    /// event's own runs are settled by event id, and a run without an event
+    /// has no queue message to redeliver it.
+    ///
+    /// Returns the number of runs that were marked as failed.
+    pub async fn fail_orphaned_non_event_runs_by_stream_id(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+        error_message: &str,
+    ) -> Result<u64, RunError> {
+        Self::fail_orphaned_stream_runs(db, stream_id, error_message, true).await
+    }
+
+    async fn fail_orphaned_stream_runs(
+        db: &crate::db::DatabasePool,
+        stream_id: &Uuid,
+        error_message: &str,
+        non_event_only: bool,
     ) -> Result<u64, RunError> {
         let stop_time = Utc::now();
         // Use proper Hot type format: {$type: "::hot::run/Failure", $val: {msg: ..., err: ...}}
@@ -2038,30 +2063,36 @@ impl Run {
 
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                let result = sqlx::query(
-                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE stream_id = $1 AND status_id = $5 AND event_id IS NULL",
-                )
-                .bind(stream_id)
-                .bind(stop_time)
-                .bind(RunStatus::Failed.as_id())
-                .bind(&result_val)
-                .bind(RunStatus::Running.as_id())
-                .execute(pg_pool)
-                .await?;
+                let sql = if non_event_only {
+                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE stream_id = $1 AND status_id = $5 AND event_id IS NULL"
+                } else {
+                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE stream_id = $1 AND status_id = $5"
+                };
+                let result = sqlx::query(sql)
+                    .bind(stream_id)
+                    .bind(stop_time)
+                    .bind(RunStatus::Failed.as_id())
+                    .bind(&result_val)
+                    .bind(RunStatus::Running.as_id())
+                    .execute(pg_pool)
+                    .await?;
                 result.rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let result_json = result_val.to_string();
-                let result = sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE stream_id = ? AND status_id = ? AND event_id IS NULL",
-                )
-                .bind(stop_time)
-                .bind(RunStatus::Failed.as_id())
-                .bind(&result_json)
-                .bind(stream_id)
-                .bind(RunStatus::Running.as_id())
-                .execute(sqlite_pool)
-                .await?;
+                let sql = if non_event_only {
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE stream_id = ? AND status_id = ? AND event_id IS NULL"
+                } else {
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE stream_id = ? AND status_id = ?"
+                };
+                let result = sqlx::query(sql)
+                    .bind(stop_time)
+                    .bind(RunStatus::Failed.as_id())
+                    .bind(&result_json)
+                    .bind(stream_id)
+                    .bind(RunStatus::Running.as_id())
+                    .execute(sqlite_pool)
+                    .await?;
                 result.rows_affected()
             }
         };
