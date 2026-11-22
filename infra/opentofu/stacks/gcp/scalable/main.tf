@@ -329,8 +329,10 @@ resource "google_compute_region_instance_group_manager" "role" {
     # No instance_redistribution_type: each of these groups has an autoscaler,
     # and Google allows that setting only on groups without one.
   }
-  # Autoscaled roles set their own size.
-  lifecycle { ignore_changes = [target_size] }
+  # Autoscaled roles set their own size. A rolling replace names the version
+  # (`0/<time>`) to roll the instances; the stack sets no name, so it leaves
+  # that name as it is rather than plan a change after every replace.
+  lifecycle { ignore_changes = [target_size, version[0].name] }
 }
 # The scheduler: one instance, replaced stop-before-start so two schedulers
 # never run at once.
@@ -349,6 +351,8 @@ resource "google_compute_instance_group_manager" "scheduler" {
     max_unavailable_fixed = 1
     replacement_method    = "RECREATE"
   }
+  # As the other roles: the name a rolling replace gives the version stays.
+  lifecycle { ignore_changes = [version[0].name] }
 }
 # App and API follow CPU. Workers and task-workers keep fixed counts unless a
 # maximum above the minimum is set. Workers then also follow the jobs waiting

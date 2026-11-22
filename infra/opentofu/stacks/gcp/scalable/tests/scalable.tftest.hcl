@@ -710,6 +710,19 @@ run "compute_waits_for_its_api" {
   }
 }
 
+# A rolling replace, the way to deliver a rotated secret on GCP, names the group's
+# version. A plan cannot show a change made outside it, so this reads the configuration.
+run "a_rolling_replace_leaves_no_drift" {
+  command = plan
+  assert {
+    condition = alltrue([for group in [
+      "google_compute_region_instance_group_manager\" \"role",
+      "google_compute_instance_group_manager\" \"scheduler",
+    ] : strcontains(regex("(?s)resource \"${group}\" \\{.*?\\n\\}", file("${path.module}/main.tf")), "version[0].name]")])
+    error_message = "Each instance group must ignore its version's name, or every plan after a rolling replace shows a change to the group."
+  }
+}
+
 # expect_failures does not see a refusal's message, so this reads the configuration
 # too. The last runs below show that this flag does get past both refusals.
 run "each_storage_refusal_names_the_way_past" {
