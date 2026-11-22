@@ -1349,6 +1349,10 @@
     --tw-border-style: dashed;
     border-style: dashed;
   }
+  .border-dotted {
+    --tw-border-style: dotted;
+    border-style: dotted;
+  }
   .border-solid {
     --tw-border-style: solid;
     border-style: solid;
@@ -1386,6 +1390,9 @@
   .border-gray-400 {
     border-color: var(--color-gray-400);
   }
+  .border-gray-500 {
+    border-color: var(--color-gray-500);
+  }
   .border-green-200 {
     border-color: var(--color-green-200);
   }
@@ -1400,6 +1407,9 @@
   }
   .border-green-400 {
     border-color: var(--color-green-400);
+  }
+  .border-green-600 {
+    border-color: var(--color-green-600);
   }
   .border-hot-red-500 {
     border-color: var(--color-hot-red-500);
@@ -2098,6 +2108,9 @@
   }
   .opacity-60 {
     opacity: 60%;
+  }
+  .opacity-70 {
+    opacity: 70%;
   }
   .opacity-75 {
     opacity: 75%;
@@ -3400,6 +3413,11 @@
       border-color: var(--color-blue-800);
     }
   }
+  .dark\:border-gray-400 {
+    &:where(.dark, .dark *) {
+      border-color: var(--color-gray-400);
+    }
+  }
   .dark\:border-gray-500 {
     &:where(.dark, .dark *) {
       border-color: var(--color-gray-500);
@@ -3426,6 +3444,11 @@
   .dark\:border-gray-800 {
     &:where(.dark, .dark *) {
       border-color: var(--color-gray-800);
+    }
+  }
+  .dark\:border-green-400 {
+    &:where(.dark, .dark *) {
+      border-color: var(--color-green-400);
     }
   }
   .dark\:border-green-600 {
@@ -5397,12 +5420,13 @@ html {
   stroke-width: 1.5;
 }
 .ag-edge-sends {
-  stroke: #94a3b8;
+  stroke: #64748b;
   stroke-width: 2;
 }
 .ag-edge-triggers {
-  stroke: #94a3b8;
-  stroke-width: 1.5;
+  stroke: #16a34a;
+  stroke-dasharray: 2 3;
+  stroke-width: 1.75;
 }
 .ag-edge.ag-dimmed {
   opacity: 0.08;
@@ -5415,10 +5439,10 @@ html {
   fill: #cbd5e1;
 }
 .ag-arrow-sends {
-  fill: #94a3b8;
+  fill: #64748b;
 }
 .ag-arrow-triggers {
-  fill: #94a3b8;
+  fill: #16a34a;
 }
 .ag-tooltip {
   position: absolute;
@@ -5481,28 +5505,28 @@ html {
   color: #94a3b8;
 }
 .dark .ag-edge {
-  stroke: #3a3a42;
+  stroke: #64748b;
 }
 .dark .ag-edge-handles {
-  stroke: #3a3a42;
+  stroke: #64748b;
 }
 .dark .ag-edge-sends {
-  stroke: #475569;
-}
-.dark .ag-edge-triggers {
-  stroke: #475569;
-}
-.dark .ag-edge.ag-highlighted {
   stroke: #94a3b8;
 }
+.dark .ag-edge-triggers {
+  stroke: #4ade80;
+}
+.dark .ag-edge.ag-highlighted {
+  stroke: #e2e8f0;
+}
 .dark .ag-arrow-handles {
-  fill: #3a3a42;
+  fill: #64748b;
 }
 .dark .ag-arrow-sends {
-  fill: #475569;
+  fill: #94a3b8;
 }
 .dark .ag-arrow-triggers {
-  fill: #475569;
+  fill: #4ade80;
 }
 .dark .ag-tooltip {
   background: var(--color-gray-900);

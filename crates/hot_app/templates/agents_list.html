@@ -28,7 +28,7 @@
     {% if !workflow_cards.is_empty() || !search_query.is_empty() || status_filter != "all" %}
     <div x-data="agentsFilter"
          data-search="{{ search_query }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="flex flex-wrap items-center gap-3">
             <div class="relative flex-1 min-w-[200px]">
                 <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -99,7 +99,7 @@
                 </svg>
                 {% endif %}
                 <span class="text-base font-semibold text-gray-900 dark:text-white group-hover:text-hot-red-700 dark:group-hover:text-hot-red-400 transition-colors">{{ card.display_name }}</span>
-                <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ card.kind_label }}</span>
+                <span class="ml-auto badge badge-neutral">{{ card.kind_label }}</span>
             </div>
 
             {% if !card.qualified_name.is_empty() %}
@@ -299,9 +299,9 @@
                     Trigger
                 </span>
                 <span class="border-l border-gray-300 dark:border-gray-600 h-3 mx-0.5"></span>
-                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-dashed border-gray-300 dark:border-gray-600"></span> handles</span>
-                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-solid border-gray-400 dark:border-gray-500"></span> sends</span>
-                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-solid border-gray-400 dark:border-gray-500"></span> triggers</span>
+                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-dashed border-gray-400 dark:border-gray-500"></span> handles</span>
+                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-solid border-gray-500 dark:border-gray-400"></span> sends</span>
+                <span class="flex items-center gap-1.5"><span class="inline-block w-4 border-t-2 border-dotted border-green-600 dark:border-green-400"></span> triggers</span>
             </div>
         </div>
     </div>
