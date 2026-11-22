@@ -834,3 +834,8 @@ pre,
   color: #e5e7eb;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
+
+/* Theme toggle thumb follows html.dark immediately on first paint (no jump after DOMContentLoaded) */
+.dark #theme-thumb {
+  transform: translateX(100%);
+}

@@ -59,6 +59,7 @@
     // Modal state
     let confirmModalCallback = null;
     let confirmModalIsAlert = false;
+    let confirmModalTriggerEl = null;
 
     /**
      * Show a confirmation dialog
@@ -75,9 +76,10 @@
             const messageEl = document.getElementById('confirm-modal-message');
             const confirmBtn = document.getElementById('confirm-modal-confirm');
             const cancelBtn = document.getElementById('confirm-modal-cancel');
-            const iconContainer = document.getElementById('confirm-modal-icon');
 
             if (!modal) return resolve(false);
+
+            confirmModalTriggerEl = document.activeElement;
 
             // Set content
             titleEl.textContent = title;
@@ -91,7 +93,8 @@
 
             // Icon severity and action semantics are intentionally independent.
             const type = options.type || 'warning';
-            setModalType(type, options.destructive === true);
+            const isDestructive = options.destructive === true;
+            setModalType(type, isDestructive);
 
             // Store callback
             confirmModalCallback = (confirmed) => {
@@ -104,8 +107,9 @@
             modal.classList.remove('hidden');
             document.body.style.overflow = 'hidden';
 
-            // Focus confirm button
-            setTimeout(() => confirmBtn.focus(), 50);
+            // Focus Cancel for destructive dialogs so accidental Enter does not destroy data.
+            const initialFocusBtn = isDestructive ? cancelBtn : confirmBtn;
+            setTimeout(() => initialFocusBtn.focus(), 50);
         });
     }
 
@@ -125,6 +129,8 @@
             const cancelBtn = document.getElementById('confirm-modal-cancel');
 
             if (!modal) return resolve();
+
+            confirmModalTriggerEl = document.activeElement;
 
             // Set content
             titleEl.textContent = title;
@@ -207,17 +213,36 @@
                 confirmModalCallback(confirmed);
                 confirmModalCallback = null;
             }
+
+            if (confirmModalTriggerEl && typeof confirmModalTriggerEl.focus === 'function') {
+                confirmModalTriggerEl.focus();
+                confirmModalTriggerEl = null;
+            }
         }
     }
 
-    // Handle keyboard events
+    // Handle Escape and trap Tab focus within the open modal; native button activation handles Enter
     document.addEventListener('keydown', function(event) {
         const modal = document.getElementById('confirmModal');
         if (modal && !modal.classList.contains('hidden')) {
             if (event.key === 'Escape') {
                 closeConfirmModal(false);
-            } else if (event.key === 'Enter') {
-                closeConfirmModal(true);
+            } else if (event.key === 'Tab') {
+                const focusables = Array.from(modal.querySelectorAll('button:not(.hidden):not([disabled])'));
+                if (focusables.length > 0) {
+                    const first = focusables[0];
+                    const last = focusables[focusables.length - 1];
+                    if (!modal.contains(document.activeElement)) {
+                        event.preventDefault();
+                        (event.shiftKey ? last : first).focus();
+                    } else if (event.shiftKey && document.activeElement === first) {
+                        event.preventDefault();
+                        last.focus();
+                    } else if (!event.shiftKey && document.activeElement === last) {
+                        event.preventDefault();
+                        first.focus();
+                    }
+                }
             }
         }
     });

@@ -31,9 +31,11 @@ fn main() {
     let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
 
     let input_css = workspace_root.join("resources/app/assets/css/input.css");
+    let hot_ui_css = workspace_root.join("resources/app/assets/css/hot-ui.css");
     let output_css = workspace_root.join("resources/app/assets/css/styles.css");
 
     println!("cargo:rerun-if-changed={}", input_css.display());
+    println!("cargo:rerun-if-changed={}", hot_ui_css.display());
 
     // Watch all template files for changes (including subdirectories like components/)
     let template_dir = Path::new(&manifest_dir).join("templates");

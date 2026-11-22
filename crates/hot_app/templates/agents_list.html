@@ -391,6 +391,12 @@
                     <div class="flex items-center justify-between mb-3">
                         <span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider"
                               x-text="({'handler':'Function','event_type':'Event','schedule':'Schedule','webhook':'Webhook','mcp_tool':'MCP Tool'})[inspectorData.node.node_type] || inspectorData.node.node_type"></span>
+                        <button type="button" @click="closeInspector()" aria-label="Close inspector" title="Close inspector"
+                                class="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 focus-ring transition-colors">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
                     </div>
 
                     <!-- Node name -->
@@ -419,7 +425,7 @@
                             </template>
                             <template x-if="inspectorData.node.source_file">
                                 <button type="button"
-                                        class="text-xs link hover:underline font-mono mb-1 truncate max-w-full text-left"
+                                        class="text-xs link hover:underline font-mono mb-1 break-all text-left"
                                         :title="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"
                                         @click.stop="openSourceBrowser({ buildId: inspectorData.node.source_build_id, file: inspectorData.node.source_file, line: inspectorData.node.source_line, title: inspectorData.node.name })"
                                         x-text="inspectorData.node.source_file + (inspectorData.node.source_line ? ':' + inspectorData.node.source_line : '')"></button>
@@ -435,8 +441,8 @@
                                 <div class="mt-3">
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Triggered by</div>
                                     <template x-for="t in inspectorData.triggeredBy" :key="t.node.id">
-                                        <button @click="selectNode(t.node.id)"
-                                                class="block w-full text-left px-2 py-1 rounded text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 mb-1 font-mono text-xs transition-colors"
+                                        <button type="button" @click="selectNode(t.node.id)"
+                                                class="block w-full text-left px-2 py-1 rounded text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-900/40 border border-amber-200/70 dark:border-amber-700/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 mb-1 font-mono text-xs transition-colors break-all"
                                                 x-text="t.node.name"></button>
                                     </template>
                                 </div>
@@ -446,8 +452,8 @@
                                 <div class="mt-3">
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Handles</div>
                                     <template x-for="h in inspectorData.handles" :key="h.node.id">
-                                        <button @click="selectNode(h.node.id)"
-                                                class="block w-full text-left px-2 py-1 rounded text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/40 mb-1 font-mono text-xs transition-colors"
+                                        <button type="button" @click="selectNode(h.node.id)"
+                                                class="block w-full text-left px-2 py-1 rounded text-green-800 dark:text-green-200 bg-green-50 dark:bg-green-900/40 border border-green-200/70 dark:border-green-700/60 hover:bg-green-100 dark:hover:bg-green-900/60 mb-1 font-mono text-xs transition-colors break-all"
                                                 x-text="h.node.name"></button>
                                     </template>
                                 </div>
@@ -458,8 +464,8 @@
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Sends</div>
                                     <template x-for="s in inspectorData.sends" :key="s.node.id">
                                         <div class="mb-1">
-                                            <button @click="selectNode(s.node.id)"
-                                                    class="block w-full text-left px-2 py-1 rounded text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/40 font-mono text-xs transition-colors"
+                                            <button type="button" @click="selectNode(s.node.id)"
+                                                    class="block w-full text-left px-2 py-1 rounded text-purple-800 dark:text-purple-200 bg-purple-50 dark:bg-purple-900/40 border border-purple-200/70 dark:border-purple-700/60 hover:bg-purple-100 dark:hover:bg-purple-900/60 font-mono text-xs transition-colors break-all"
                                                     x-text="s.node.name"></button>
                                             <template x-if="s.edge.doc">
                                                 <div class="text-xs text-gray-500 dark:text-gray-400 italic pl-2 mt-0.5" x-text="s.edge.doc"></div>
@@ -486,8 +492,8 @@
                                 <div class="mt-3">
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Handled by</div>
                                     <template x-for="fn in inspectorData.handledBy" :key="fn.id">
-                                        <button @click="selectNode(fn.id)"
-                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                        <button type="button" @click="selectNode(fn.id)"
+                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                             <span class="font-mono text-xs" x-text="fn.name"></span>
                                             <template x-if="fn.agent_name">
                                                 <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>
@@ -502,8 +508,8 @@
                                 <div class="mt-3">
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Sent by</div>
                                     <template x-for="fn in inspectorData.sentBy" :key="fn.id">
-                                        <button @click="selectNode(fn.id)"
-                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                        <button type="button" @click="selectNode(fn.id)"
+                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                             <span class="font-mono text-xs" x-text="fn.name"></span>
                                             <template x-if="fn.agent_name">
                                                 <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>
@@ -555,8 +561,8 @@
                                 <div class="mt-3">
                                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Triggers</div>
                                     <template x-for="fn in inspectorData.triggers" :key="fn.id">
-                                        <button @click="selectNode(fn.id)"
-                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
+                                        <button type="button" @click="selectNode(fn.id)"
+                                                class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700/70 hover:bg-gray-200 dark:hover:bg-gray-700 mb-1 transition-colors">
                                             <span class="font-mono text-xs" x-text="fn.name"></span>
                                             <template x-if="fn.agent_name">
                                                 <span class="text-xs text-gray-500 dark:text-gray-400 ml-1" x-text="fn.agent_name"></span>

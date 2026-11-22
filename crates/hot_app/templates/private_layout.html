@@ -106,14 +106,14 @@
         </div>
         <div class="flex items-center space-x-4">
             <!-- Theme Toggle -->
-            <button type="button" aria-label="Toggle color theme" class="flex flex-col items-center cursor-pointer focus-ring rounded" id="theme-toggle-container">
-                <div class="w-14 flex justify-between text-gray-300 text-xs mb-1 pointer-events-none">
+            <button type="button" role="switch" aria-label="Dark mode" aria-checked="true" title="Switch color theme" class="flex flex-col items-center cursor-pointer focus-ring rounded" id="theme-toggle-container">
+                <div class="w-14 flex justify-between text-gray-600 dark:text-gray-300 text-xs mb-1 pointer-events-none">
                     <span class="group relative inline-flex">
-                        <svg aria-label="Light" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
+                        <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707z"/></svg>
                         <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Light</span>
                     </span>
                     <span class="group relative inline-flex">
-                        <svg aria-label="Dark" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
+                        <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
                         <span class="absolute top-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded bg-gray-800 text-white text-xs dark:bg-gray-200 dark:text-black opacity-0 group-hover:opacity-100 transition pointer-events-none z-20">Dark</span>
                     </span>
                 </div>
@@ -171,6 +171,18 @@
 
         <!-- Collapsible Sidebar -->
         <aside id="sidebar" class="glass backdrop-blur-md bg-white/90 dark:bg-black/90 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 ease-in-out flex-shrink-0 overflow-hidden flex flex-col" style="backdrop-filter: blur(10px); width: 240px;">
+            <!-- Mobile drawer header with explicit close button -->
+            <div class="md:hidden flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+                <a href="/" class="flex items-center">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo-200w.webp" alt="hot.dev logo" class="h-7 w-auto block dark:hidden" width="200" height="54">
+                    <img src="{{ page_context.assets_prefix }}img/hot_logo_white-200w.webp" alt="hot.dev logo" class="h-7 w-auto hidden dark:block" width="200" height="54">
+                </a>
+                <button type="button" id="sidebar-mobile-close-btn" aria-label="Close navigation" class="p-1.5 rounded text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 focus-ring transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
             <nav class="pt-2 pb-4 h-full overflow-y-auto custom-scrollbar flex flex-col">
                 <!-- Dashboard Link -->
                 <a href="/" class="flex items-center px-4 py-1.5 mb-0.5 {% if page_context.current_page == "dashboard" %}sidebar-active border-l-2 border-hot-red-500 dark:border-hot-red-400{% else %}text-gray-800 dark:text-white border-l-2 border-transparent{% endif %} hover:text-hot-red-700 dark:hover:text-hot-red-400 hover:translate-x-0.5 transition-all duration-200" title="Dashboard">
@@ -248,7 +260,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
                         </svg>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-white dark:bg-black rounded-sm">
                             <path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd" />
                         </svg>
                     </div>
@@ -262,7 +274,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" />
                         </svg>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-[0.7rem] h-[0.7rem] absolute -bottom-0 -right-0 bg-white dark:bg-black rounded-sm">
                             <path fill-rule="evenodd" d="M4.5 5.653c0-1.427 1.529-2.33 2.779-1.643l11.54 6.347c1.295.712 1.295 2.573 0 3.286L7.28 19.99c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clip-rule="evenodd" />
                         </svg>
                     </div>
@@ -339,7 +351,7 @@
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
                         </svg>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-[0.55rem] h-[0.55rem] absolute -bottom-0 -right-0 bg-gray-100 dark:bg-gray-800">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-[0.55rem] h-[0.55rem] absolute -bottom-0 -right-0 bg-white dark:bg-black rounded-sm">
                             <path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" />
                         </svg>
                     </div>
@@ -368,7 +380,7 @@
             <main id="main-content" tabindex="-1" {% if page_context.workspace_held %}data-workspace-held="true" {% endif %}class="flex-1 min-w-0 overflow-y-auto px-4 pb-4 dark:text-gray-200 custom-scrollbar outline-none">
         <!-- Global Notices -->
         {% for notice in page_context.global_notices %}
-        <div class="mb-4 {{ notice.notice_type.bg_class() }} border rounded-lg px-4 py-3 flex items-center justify-between">
+        <div class="mt-3 mb-4 {{ notice.notice_type.bg_class() }} border rounded-lg px-4 py-3 flex items-center justify-between">
             <div class="flex items-center">
                 <svg class="h-5 w-5 {{ notice.notice_type.icon_class() }} mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -397,18 +409,18 @@
                 <!-- Organization Selector -->
                 {% if page_context.user_orgs.len() > 0 %}
                 <div class="relative inline-flex items-center" x-data="{ open: false, query: '' }">
-                    <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
+                    <button @click="open = !open; if (open) { $nextTick(() => $refs.orgSearch && $refs.orgSearch.focus()); }" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}Select Org{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
                             <path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd" />
                         </svg>
                     </button>
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
-                        <input type="search" x-model="query" placeholder="Find organization" aria-label="Find organization" class="w-full px-4 py-2 bg-transparent">
+                        <input x-ref="orgSearch" type="search" x-model="query" placeholder="Find organization..." aria-label="Find organization" class="w-full px-3 py-2 text-sm bg-transparent border-b border-gray-200 dark:border-gray-700 placeholder:text-gray-400 focus:outline-none">
                         <div style="max-height: 20rem; overflow-y: auto">
                         {% for org in page_context.user_orgs %}
                         <form action="/switch-org/{{ org.org_id }}" method="post" x-show="$el.textContent.toLowerCase().includes(query.toLowerCase())">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800{% else %}text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700{% endif %}{% when None %}text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <div class="min-w-0">
                                         <span class="truncate block">{% if org.is_child() %}↳ {% endif %}{{ org.name }}{% if org.is_individual() %} <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>{% endif %}</span>
@@ -452,7 +464,7 @@
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
                         {% for env in page_context.current_org_envs %}
                         <form action="/envs/{{ env.env_id }}/switch" method="post">
-                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
+                            <button type="submit" class="block w-full text-left px-4 py-2 text-sm transition-colors duration-200 focus-ring {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}bg-hot-red-700 text-white hover:bg-hot-red-800{% else %}text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700{% endif %}{% when None %}text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <span class="truncate">{{ env.name }}</span>
                                     {% match page_context.current_env %}{% when Some with (current) %}{% if current.env_id == env.env_id %}
@@ -558,8 +570,16 @@
             border-radius: 3px;
         }
 
-        .uuid-container:hover .uuid-copy-btn {
+        .uuid-container:hover .uuid-copy-btn,
+        .uuid-container:focus-within .uuid-copy-btn,
+        .uuid-copy-btn:focus-visible {
             opacity: 1;
+        }
+
+        @media (hover: none) {
+            .uuid-copy-btn {
+                opacity: 0.85;
+            }
         }
 
         .uuid-copy-btn:hover {
@@ -568,29 +588,6 @@
 
         .dark .uuid-copy-btn:hover {
             background-color: rgba(255, 255, 255, 0.05);
-        }
-
-        /* Tooltip enhancement */
-        .uuid-display[title]:hover::after {
-            content: attr(title);
-            position: absolute;
-            bottom: 100%;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 4px 8px;
-            background: rgba(0, 0, 0, 0.9);
-            color: white;
-            border-radius: 4px;
-            font-size: 11px;
-            white-space: nowrap;
-            z-index: 1000;
-            pointer-events: none;
-            margin-bottom: 4px;
-        }
-
-        .dark .uuid-display[title]:hover::after {
-            background: rgba(255, 255, 255, 0.9);
-            color: black;
         }
 
         /* File Attachment Styles */
@@ -808,10 +805,13 @@
     <!-- Core App Utilities -->
     <script src="{{ page_context.asset("js/app.js") }}" defer></script>
     <script>
-        // Initialize modal format from page context
-        if (typeof initModalFormat === 'function') {
-            initModalFormat({{ page_context.value_format|js|safe }});
-        }
+        // Initialize modal format from page context after deferred app.js loads
+        window.__hotInitialValueFormat = {{ page_context.value_format|js|safe }};
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof initModalFormat === 'function') {
+                initModalFormat(window.__hotInitialValueFormat);
+            }
+        });
     </script>
 
     <!-- Content Modal for Full Display -->
@@ -987,5 +987,4 @@
     });
     </script>
 </body>
-</html>
 </html>

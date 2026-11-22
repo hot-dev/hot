@@ -16,8 +16,10 @@ function addCopyButtons() {
 
     // Create copy button
     var button = document.createElement('button');
+    button.type = 'button';
     button.className = 'copy-button';
-    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    button.setAttribute('aria-label', 'Copy code');
+    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
     button.title = 'Copy code';
 
     button.addEventListener('click', function() {
@@ -53,24 +55,25 @@ function initScrollSpy() {
 
   if (headings.length === 0) return;
 
-  // Header offset (sticky header height)
-  var headerOffset = 80;
+  // In hot_app, <main id="main-content"> is the scroll container; elsewhere it is window.
+  var scrollContainer = document.getElementById('main-content');
+  var usesMainScroll = scrollContainer && getComputedStyle(scrollContainer).overflowY !== 'visible';
+  var headerOffset = 100;
 
   function updateActiveLink() {
-    var scrollPos = window.scrollY + headerOffset + 20;
+    var containerTop = usesMainScroll ? scrollContainer.getBoundingClientRect().top : 0;
     var activeHeading = null;
 
-    // Find the heading that's closest to (but above) the scroll position
+    // Find the last heading that has scrolled above the header threshold
     for (var i = headings.length - 1; i >= 0; i--) {
       var rect = headings[i].element.getBoundingClientRect();
-      var headingTop = rect.top + window.scrollY;
-      if (headingTop <= scrollPos) {
+      if (rect.top - containerTop <= headerOffset) {
         activeHeading = headings[i];
         break;
       }
     }
 
-    // If no heading is above scroll pos, use first heading
+    // If no heading is above threshold, use first heading
     if (!activeHeading && headings.length > 0) {
       activeHeading = headings[0];
     }
@@ -82,12 +85,13 @@ function initScrollSpy() {
     }
   }
 
-  // Debounce scroll events
+  // Debounce scroll events on the active scroll container
   var scrollTimeout;
-  window.addEventListener('scroll', function() {
+  var scrollTarget = usesMainScroll ? scrollContainer : window;
+  scrollTarget.addEventListener('scroll', function() {
     if (scrollTimeout) clearTimeout(scrollTimeout);
     scrollTimeout = setTimeout(updateActiveLink, 10);
-  });
+  }, { passive: true });
 
   // Initial update
   updateActiveLink();
@@ -231,7 +235,10 @@ document.addEventListener('keydown', function(e) {
     openSearch();
   }
   if (e.key === 'Escape') {
-    closeSearch();
+    var modal = document.getElementById('search-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+      closeSearch();
+    }
   }
 });
 </script>

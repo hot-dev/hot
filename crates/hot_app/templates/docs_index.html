@@ -128,8 +128,8 @@
                                     <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 italic">No description provided.</p>
                                 {% endif %}
                                 <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-                                    <span>{{ ns.function_count }} Functions</span>
-                                    <span>{{ ns.type_count }} Types</span>
+                                    <span>{{ ns.function_count }} Function{% if ns.function_count != 1 %}s{% endif %}</span>
+                                    <span>{{ ns.type_count }} Type{% if ns.type_count != 1 %}s{% endif %}</span>
                                 </div>
                             </a>
                         {% endfor %}
@@ -176,7 +176,7 @@
                                     <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 italic">No description provided.</p>
                                 {% endif %}
                                 <div class="text-xs text-gray-500 dark:text-gray-400">
-                                    {{ dep.namespace_count }} Namespaces
+                                    {{ dep.namespace_count }} Namespace{% if dep.namespace_count != 1 %}s{% endif %}
                                 </div>
                             </a>
                         {% endfor %}

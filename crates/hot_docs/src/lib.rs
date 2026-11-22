@@ -156,14 +156,14 @@ async fn render_docs_page(state: Arc<DocsState>, path: &str) -> Html<String> {
         r#"
         <div class="docs-shell">
             <aside class="sidebar">{}</aside>
-            <main class="content docs-content">
+            <article class="content docs-content">
                 {}
                 {}
                 <nav class="pager">
                     {}
                     {}
                 </nav>
-            </main>
+            </article>
             <aside class="toc">{}</aside>
         </div>
         "#,
@@ -274,7 +274,7 @@ async fn pkg_docs_route_handler(
         r#"
         <div class="docs-shell">
             <aside class="sidebar">{}</aside>
-            <main class="content docs-content">{}</main>
+            <article class="content docs-content">{}</article>
             <aside class="toc">
                 <div class="version">Version {}</div>
                 {}

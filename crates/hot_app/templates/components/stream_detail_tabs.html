@@ -759,10 +759,10 @@ function initializeStreamTabs() {
             this.classList.add('active');
             document.getElementById(tabName + '-tab').classList.add('active');
 
-            // Update URL parameter
+            // Update URL parameter without polluting browser Back history
             const url = new URL(window.location);
             url.searchParams.set('tab', tabName);
-            window.history.pushState({}, '', url);
+            window.history.replaceState({}, '', url);
 
             // Clear the inspector when switching tabs
             clearInspector();
@@ -884,14 +884,14 @@ function toggleStreamInspector() {
         streamInspectorOpen = true;
     }
 
-    // Update URL parameter
+    // Update URL parameter without polluting browser Back history
     const url = new URL(window.location);
     if (streamInspectorOpen) {
         url.searchParams.set('inspector', '1');
     } else {
         url.searchParams.delete('inspector');
     }
-    window.history.pushState({}, '', url);
+    window.history.replaceState({}, '', url);
 }
 
 function displayInspectorContent(data) {
@@ -935,8 +935,8 @@ function displayInspectorContent(data) {
             html += `
                 <div>
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Type</div>
-                    <div class="badge badge-neutral">
-                        <span class="px-2 py-1 rounded-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200">${escapedType}</span>
+                    <div>
+                        <span class="badge badge-neutral">${escapedType}</span>
                     </div>
                 </div>
             `;
@@ -949,11 +949,11 @@ function displayInspectorContent(data) {
                                data.status === 'running' ? 'badge badge-running' :
                                data.status === 'pending_retry' ? 'badge badge-pending' :
                                'badge badge-neutral';
-            const escapedStatus = escapeHtml(data.status);
+            const escapedStatus = escapeHtml(data.status === 'pending_retry' ? 'pending retry' : data.status);
             html += `
                 <div>
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
-                    <div class="badge badge-neutral">
+                    <div>
                         <span class="${statusClass}">${escapedStatus}</span>
                     </div>
                 </div>

@@ -40,6 +40,10 @@ function renderStreamGraph(containerId, graphDataJson, inspectorCallbackName = '
         return;
     }
 
+    // Reset stale search state when switching containers/streams; keep synced with any visible search input
+    const searchInput = document.getElementById('stream-graph-search');
+    window.streamGraphState.searchTerm = searchInput ? (searchInput.value || '').toLowerCase() : '';
+
     // Store state for re-rendering with filters
     window.streamGraphState.graphData = graphData;
     window.streamGraphState.containerId = containerId;
@@ -340,15 +344,16 @@ function renderGraphCell(lineInfo) {
             break;
 
         case 'end':
-            // End of branch - curved line from parent lane to dot
-            if (parentX !== myX) {
-                // Curved connection from parent lane
-                svg += `<path d="M${parentX},0 L${parentX},${centerY - 4} Q${parentX},${centerY} ${parentX + 4},${centerY} L${myX},${centerY}"
+            // End of branch - curved line from parent lane to dot (leaf nodes branch right like 'through')
+            const endX = lineInfo.myLane >= 0 ? myX : parentX + 14;
+            if (parentX !== endX) {
+                const ctrlX = endX > parentX ? parentX + 4 : parentX - 4;
+                svg += `<path d="M${parentX},0 L${parentX},${centerY - 4} Q${parentX},${centerY} ${ctrlX},${centerY} L${endX},${centerY}"
                          fill="none" stroke="${lineColor}" stroke-width="${strokeWidth}"/>`;
             } else {
                 svg += `<line x1="${parentX}" y1="0" x2="${parentX}" y2="${centerY}" stroke="${lineColor}" stroke-width="${strokeWidth}"/>`;
             }
-            svg += `<circle cx="${myX}" cy="${centerY}" r="${dotRadius}" fill="${nodeColor}"/>`;
+            svg += `<circle cx="${endX}" cy="${centerY}" r="${dotRadius}" fill="${nodeColor}"/>`;
             break;
 
         case 'through':

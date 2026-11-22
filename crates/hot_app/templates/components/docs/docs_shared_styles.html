@@ -740,8 +740,16 @@
   transition: all 0.2s ease;
 }
 
-.docs-content pre:hover .copy-button {
+.docs-content pre:hover .copy-button,
+.docs-content pre:focus-within .copy-button,
+.copy-button:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .copy-button {
+    opacity: 0.85;
+  }
 }
 
 .copy-button:hover {

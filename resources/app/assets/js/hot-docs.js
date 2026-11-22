@@ -3,8 +3,10 @@ function addCopyButtons() {
     if (pre.querySelector('.copy-button')) return;
 
     var button = document.createElement('button');
+    button.type = 'button';
     button.className = 'copy-button';
-    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    button.setAttribute('aria-label', 'Copy code');
+    button.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
     button.title = 'Copy code';
 
     button.addEventListener('click', function() {
@@ -54,6 +56,26 @@ function initScrollSpy() {
 
   window.addEventListener('scroll', updateActiveLink, { passive: true });
   updateActiveLink();
+}
+
+function copyDepsToClipboard() {
+  var code = document.querySelector('.add-to-project .deps-code-block code');
+  var btn = document.querySelector('.add-to-project .copy-btn');
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent.trim()).then(function() {
+    if (!btn) return;
+    var copyIcon = btn.querySelector('.copy-icon');
+    var checkIcon = btn.querySelector('.check-icon');
+    var copyText = btn.querySelector('.copy-text');
+    if (copyIcon) copyIcon.classList.add('hidden');
+    if (checkIcon) checkIcon.classList.remove('hidden');
+    if (copyText) copyText.textContent = 'Copied!';
+    setTimeout(function() {
+      if (copyIcon) copyIcon.classList.remove('hidden');
+      if (checkIcon) checkIcon.classList.add('hidden');
+      if (copyText) copyText.textContent = 'Copy';
+    }, 2000);
+  });
 }
 
 window.addEventListener('load', function() {

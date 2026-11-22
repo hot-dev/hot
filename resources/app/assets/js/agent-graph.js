@@ -655,14 +655,26 @@
     fetchAndRender(containerId);
   }
 
+  function getFilterState(filterEl) {
+    if (!filterEl) return null;
+    if (window.Alpine && typeof window.Alpine.$data === 'function') {
+      try {
+        return window.Alpine.$data(filterEl);
+      } catch (_) {
+        // Fall through if Alpine hasn't initialized this element yet
+      }
+    }
+    return filterEl.__x ? filterEl.__x.$data : null;
+  }
+
   function fetchAndRender(containerId) {
     var inst = instances[containerId];
     if (!inst) return;
     var url = inst.url;
 
     var filterEl = document.getElementById('agent-graph-filters');
-    if (filterEl && filterEl.__x) {
-      var state = filterEl.__x.$data;
+    var state = getFilterState(filterEl);
+    if (state) {
       var params = [];
       if (state.workflow) params.push('workflow=' + encodeURIComponent(state.workflow));
       if (state.agent) params.push('agent=' + encodeURIComponent(state.agent));
@@ -680,10 +692,11 @@
         inst.renderResult = render(inst.el, data, inst.direction);
         if (inst.renderResult) {
           bindEvents(containerId);
-          if (filterEl && filterEl.__x) {
-            var result = search(containerId, filterEl.__x.$data.search);
-            filterEl.__x.$data.searchMatches = result.matches;
-            filterEl.__x.$data.searchIndex = result.index;
+          var currentState = getFilterState(filterEl);
+          if (currentState) {
+            var result = search(containerId, currentState.search);
+            currentState.searchMatches = result.matches;
+            currentState.searchIndex = result.index;
           }
         }
       })
@@ -719,15 +732,18 @@
       });
     });
 
-    // Click empty space → close inspector
-    inst.el.addEventListener('click', function (evt) {
-      if (evt.target === inst.el ||
-          evt.target.classList.contains('ag-viewport') ||
-          evt.target.classList.contains('ag-canvas')) {
-        clearHighlight(inst);
-        dispatchInspectorClose(containerId);
-      }
-    });
+    // Click empty space → close inspector (attach once per persistent container)
+    if (!inst.canvasClickBound) {
+      inst.canvasClickBound = true;
+      inst.el.addEventListener('click', function (evt) {
+        if (evt.target === inst.el ||
+            evt.target.classList.contains('ag-viewport') ||
+            evt.target.classList.contains('ag-canvas')) {
+          clearHighlight(inst);
+          dispatchInspectorClose(containerId);
+        }
+      });
+    }
   }
 
   function dispatchInspector(cid, data) {
