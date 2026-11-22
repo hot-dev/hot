@@ -79,6 +79,8 @@ jobs:
       - name: OpenTofu validation and mock-provider tests
         run: |
           set -euo pipefail
+          export TF_PLUGIN_CACHE_DIR="$RUNNER_TEMP/tofu-plugin-cache"
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
           for root in infra/opentofu/modules/* infra/opentofu/bootstrap/* infra/opentofu/stacks/*/*; do
             [ -d "$root" ] || continue
             echo "::group::$root"
@@ -122,6 +124,7 @@ jobs:
         run: |
           scripts/capture-git-revision.sh
           docker buildx build --platform linux/amd64 --load \
+            --cache-from type=registry,ref=ghcr.io/hot-dev/hot-runtime:buildcache \
             -f infra/images/containers/runtime.Dockerfile -t hot-runtime:ci .
 
       - name: Smoke test the image

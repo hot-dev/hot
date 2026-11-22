@@ -6,13 +6,9 @@
 //! `HOT_TEST_POSTGRES_URI` it skips, and it must name a login that can create
 //! databases and roles.
 
-#[allow(dead_code, unused_macros)]
-#[path = "../../hot/tests/support/privileged_fixture.rs"]
-mod privileged_fixture;
-
+use crate::privileged_fixture::{self, PrivilegedDb, TestResult};
 use hot::db::{self, DatabasePool};
 use hot_app::test_support::TestClient;
-use privileged_fixture::{PrivilegedDb, TestResult};
 use uuid::Uuid;
 
 #[tokio::test]

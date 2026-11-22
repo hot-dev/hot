@@ -1,8 +1,6 @@
 //! `hot check` and `hot watch`: the secret-shape scan honours the build
 //! allowlist and is reported next to the real diagnostics, output formats
 //! and exit codes, and a watch that re-runs on change.
-#![cfg(unix)]
-
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

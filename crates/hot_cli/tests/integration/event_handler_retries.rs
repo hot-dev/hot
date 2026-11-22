@@ -3,8 +3,6 @@
 //! handler runs on the retry.
 //!
 //! `HOT_TEST_POSTGRES_URI` adds a PostgreSQL pass, in its own database.
-#![cfg(unix)]
-
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};

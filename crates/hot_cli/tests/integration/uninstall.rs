@@ -1,7 +1,5 @@
 //! `hot uninstall` against temporary installs. The PATH lines come from the
 //! real `add_to_path` in `install.sh`, so the two can't drift apart.
-#![cfg(unix)]
-
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

@@ -137,12 +137,39 @@ skill_test_project() {
     echo "$project"
 }
 
+# Build `hot` once (or reuse $HOT_BIN) and return its absolute path so every
+# sub-step invokes the binary directly without repeating Cargo checks/relinks.
+ensure_hot_bin() {
+    if [[ -n "${HOT_BIN:-}" && -x "$HOT_BIN" ]]; then
+        echo "$HOT_BIN"
+        return 0
+    fi
+    local bin
+    bin="$(cd "$PROJECT_ROOT" && cargo build --quiet --locked --bin hot --message-format json | python3 -c '
+import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("target", {}).get("name") == "hot" and message.get("executable"):
+        print(message["executable"])
+')"
+    if [[ -z "$bin" ]]; then
+        echo -e "${RED}✗ cargo build did not report the hot executable${NC}" >&2
+        return 1
+    fi
+    echo "$bin"
+}
+
 # Command: check - run Hot static checks and verify doc snippets
 cmd_check() {
     local errors=0
 
     echo "Running Hot static checks..."
     echo "============================"
+
+    # Build `hot` once up front and share it with all sub-steps and child scripts.
+    local hot_bin
+    hot_bin="$(ensure_hot_bin)" || return 1
+    export HOT_BIN="$hot_bin"
 
     # In CI, use the context file with placeholder API keys
     local ctx_args=""
@@ -153,11 +180,11 @@ cmd_check() {
     # 1. Run hot check on the default project and doc example files.
     echo ""
     echo -e "${YELLOW}Step 1: Default project check${NC}"
-    if cargo run --quiet -- check --with-tests true $ctx_args 2>/dev/null; then
+    if "$hot_bin" check --with-tests true $ctx_args 2>/dev/null; then
         echo -e "${GREEN}✓ Default project and doc examples pass static check${NC}"
     else
         echo -e "${RED}✗ Default project static check failed${NC}"
-        cargo run -- check --with-tests true $ctx_args
+        "$hot_bin" check --with-tests true $ctx_args
         errors=$((errors + 1))
     fi
 
@@ -165,11 +192,11 @@ cmd_check() {
     # without making the default hot-dev project depend on every package.
     echo ""
     echo -e "${YELLOW}Step 2: Package aggregate check${NC}"
-    if cargo run --quiet -- check -p hot-pkg-all --with-tests true $ctx_args 2>/dev/null; then
+    if "$hot_bin" check -p hot-pkg-all --with-tests true $ctx_args 2>/dev/null; then
         echo -e "${GREEN}✓ Package aggregate passes static check${NC}"
     else
         echo -e "${RED}✗ Package aggregate static check failed${NC}"
-        cargo run -- check -p hot-pkg-all --with-tests true $ctx_args
+        "$hot_bin" check -p hot-pkg-all --with-tests true $ctx_args
         errors=$((errors + 1))
     fi
 
@@ -225,11 +252,11 @@ cmd_check() {
         if ! find "$skill_source" -type f -name '*.hot' -print -quit | grep -q .; then
             continue
         fi
-        if cargo run --quiet -- check "$skill_source" --check.raw $ctx_args 2>/dev/null; then
+        if "$hot_bin" check "$skill_source" --check.raw $ctx_args 2>/dev/null; then
             echo -e "${GREEN}✓ ${skill_source#"$PROJECT_ROOT/"} passes static check${NC}"
         else
             echo -e "${RED}✗ ${skill_source#"$PROJECT_ROOT/"} failed static check${NC}"
-            cargo run -- check "$skill_source" --check.raw $ctx_args
+            "$hot_bin" check "$skill_source" --check.raw $ctx_args
             skill_source_errors=$((skill_source_errors + 1))
         fi
     done < <(find "$skills_root" -mindepth 2 -maxdepth 2 -type d \( -name test -o -name examples \) -print | sort)
@@ -244,20 +271,6 @@ cmd_check() {
     echo ""
     echo -e "${YELLOW}Step 5b: Bundled skill source loads and its tests pass${NC}"
     local skill_test_errors=0
-    # Build here: cargo run from the throwaway project would miss
-    # .cargo/config.toml and rebuild with other flags.
-    local hot_bin
-    hot_bin="$(cd "$PROJECT_ROOT" && cargo build --quiet --locked --bin hot --message-format json | python3 -c '
-import json, sys
-for line in sys.stdin:
-    message = json.loads(line)
-    if message.get("target", {}).get("name") == "hot" and message.get("executable"):
-        print(message["executable"])
-')"
-    if [[ -z "$hot_bin" ]]; then
-        echo -e "${RED}✗ cargo build did not report the hot executable${NC}"
-        errors=$((errors + 1))
-    fi
     # Test against this checkout's hot-std, not an installed one.
     local skill_hot_home
     skill_hot_home="$(mktemp -d)"
@@ -343,7 +356,13 @@ cmd_fmt() {
 
     echo "Checking Hot formatting..."
     echo "=========================="
-    if (cd "$PROJECT_ROOT" && cargo run --quiet -- fmt --check "${paths[@]}"); then
+    local fmt_ok=0
+    if [[ -n "${HOT_BIN:-}" && -x "$HOT_BIN" ]]; then
+        (cd "$PROJECT_ROOT" && "$HOT_BIN" fmt --check "${paths[@]}") || fmt_ok=$?
+    else
+        (cd "$PROJECT_ROOT" && cargo run --quiet -- fmt --check "${paths[@]}") || fmt_ok=$?
+    fi
+    if [[ $fmt_ok -eq 0 ]]; then
         echo -e "${GREEN}All Hot source is formatted.${NC}"
         echo "(run 'cargo run -- fmt <path>' to fix)"
         return 0

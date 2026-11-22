@@ -1,0 +1,48 @@
+# Nextest configuration for Hot workspace tests.
+#
+# Most unit and integration tests run in parallel across all available cores.
+# Tests that mutate the shared default PostgreSQL schema (`HOT_TEST_POSTGRES_URI`)
+# or allocate >256 MiB payloads per test are serialized in dedicated groups so
+# parallel per-test processes never race on DDL or exhaust runner RAM.
+
+[test-groups]
+postgres-shared = { max-threads = 1 }
+heavy-memory = { max-threads = 1 }
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 6 }
+status-level = "pass"
+final-status-level = "flaky"
+
+[[profile.default.overrides]]
+filter = '''
+  (package(hot) & (
+    binary(postgres_rls_plans) |
+    test(/^postgres_queue_correctness::/) |
+    test(/^postgres_rls::/) |
+    test(/^activation_event_postgres::/) |
+    test(/^file_upload_postgres::/) |
+    test(/^postgres_advisory_lock::/) |
+    (kind(lib) & (
+      test(/^db::/) |
+      test(/^storage_move::/) |
+      test(/^store::postgres::/)
+    ))
+  )) |
+  (package(hot_cli) & kind(lib) & test(/^command::db::/)) |
+  (package(hot_scheduler) & (
+    binary(postgres_singleton) |
+    (kind(lib) & test(/^server::/))
+  )) |
+  (package(hot_worker) & kind(lib) & test(/^server::/))
+'''
+test-group = "postgres-shared"
+
+[[profile.default.overrides]]
+filter = 'package(hot) & (test(/^oversized_values::/) | test(/^oversized_records::/))'
+test-group = "heavy-memory"
+
+[profile.ci]
+fail-fast = false
+status-level = "skip"
+final-status-level = "slow"

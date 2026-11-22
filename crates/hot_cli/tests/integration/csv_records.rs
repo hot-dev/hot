@@ -1,7 +1,5 @@
 //! End to end: what `::hot::csv` leaves in a run's records, through `hot run`
 //! with a real database, under both the JIT and the interpreter.
-#![cfg(unix)]
-
 use sqlx::Row;
 use std::io::{Read, Write};
 use std::net::TcpListener;
