@@ -186,7 +186,7 @@ pub(crate) async fn setup_live_build_for_dev(
         global_options,
         src_paths,
         test_paths,
-        hot::env::is_local_dev(),
+        super::should_use_color(),
     )
     .await
 }
@@ -233,7 +233,7 @@ pub(crate) async fn setup_live_build_for_dev_with_context(
         test_paths,
         secret_scan_opts,
         DevLiveBuildValidation::RuntimePreflight(available_context_keys),
-        hot::env::is_local_dev(),
+        super::should_use_color(),
     )
     .await
 }
@@ -252,7 +252,7 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
         test_paths,
         secret_scan_opts,
         DevLiveBuildValidation::Structural,
-        hot::env::is_local_dev(),
+        super::should_use_color(),
     )
     .await
 }

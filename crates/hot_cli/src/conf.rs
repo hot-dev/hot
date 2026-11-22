@@ -1250,7 +1250,7 @@ fn eval_conf(namespaced_content: &str) -> Result<hot::val::Val, String> {
         &[],  // test_paths - empty for config-only execution
         None, // conf - no existing config needed for this execution
         None, // project_name - not needed for config execution
-        hot::env::is_local_dev(),
+        crate::command::should_use_color(),
     ) {
         Ok(executed_engine) => {
             tracing::debug!("Configuration executed successfully");
@@ -1494,7 +1494,7 @@ pub(crate) fn load_ctx(
         &[],  // test_paths - empty for ctx-only execution
         None, // conf - no existing config needed for this execution
         None, // project_name - not needed for ctx execution
-        hot::env::is_local_dev(),
+        crate::command::should_use_color(),
     ) {
         Ok(executed_engine) => {
             // Extract context_storage which was populated by ::hot::ctx/set calls

@@ -365,7 +365,7 @@ pub(crate) async fn run_run(
                 embedding_clone,
                 None, // No task queue
                 None, // No stream publisher
-                hot::env::is_local_dev(),
+                super::should_use_color(),
                 None, // No warnings out
             );
             let _ = result_tx.send(r);

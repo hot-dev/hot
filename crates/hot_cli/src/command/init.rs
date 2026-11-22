@@ -318,6 +318,9 @@ async fn run_init_impl(
 
     if !use_logging {
         println!("\nStart the dev server:");
+        if let Some(target) = path {
+            println!("  cd {}", shell_quote_path(target));
+        }
         println!("  hot dev");
         println!("\nTo add AI coding support (AGENTS.md + skills):");
         println!("  hot ai add               # Add to this project");
@@ -327,6 +330,19 @@ async fn run_init_impl(
     }
 
     Ok(())
+}
+
+/// Quote a directory argument for shell display when it contains spaces or shell metacharacters.
+fn shell_quote_path(path: &str) -> String {
+    if !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '@'))
+    {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 /// Where `initialize_database` reports its progress.

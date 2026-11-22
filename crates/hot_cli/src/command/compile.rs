@@ -36,6 +36,7 @@ pub(crate) async fn run_compile(
     let conf_clone = conf.clone();
     let project_name_clone = project_name.to_string();
 
+    let color = super::should_use_color();
     let validation_result = tokio::task::spawn_blocking(move || {
         hot::lang::engine::Engine::run_file_pipeline_with_deps(
             &temp_file_str,
@@ -43,7 +44,7 @@ pub(crate) async fn run_compile(
             &test_paths_clone,
             Some(&conf_clone),
             Some(&project_name_clone),
-            hot::env::is_local_dev(),
+            color,
         )
     })
     .await
@@ -57,9 +58,6 @@ pub(crate) async fn run_compile(
             println!("Project '{}' compiled successfully", project_name);
             Ok(())
         }
-        Err(e) => {
-            eprintln!("Compilation failed: {}", e);
-            Err(format!("Compilation error: {}", e))
-        }
+        Err(e) => Err(format!("Compilation error: {}", e)),
     }
 }

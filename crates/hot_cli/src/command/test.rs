@@ -83,7 +83,7 @@ pub(crate) async fn run_test(
         None, // Private ephemeral database for ordinary unit tests
         None, // No task queue
         None, // No stream publisher
-        hot::env::is_local_dev(),
+        super::should_use_color(),
     )
     .await
     {
@@ -409,7 +409,7 @@ async fn run_integration_test(
         Some(integration_execution),
         task_queue,
         shared_stream_pubsub,
-        hot::env::is_local_dev(),
+        super::should_use_color(),
     )
     .await;
 

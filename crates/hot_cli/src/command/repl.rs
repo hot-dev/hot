@@ -84,35 +84,40 @@ pub(crate) async fn run_repl(
         }
     }
 
+    let color = super::should_use_color();
+
     // Start the REPL loop
-    println!("\n\x1b[91mhot repl\x1b[0m ('ctrl-d' to exit)\n");
+    if color {
+        println!("\n\x1b[91mhot repl\x1b[0m (':help' for commands, ':quit' or Ctrl-D to exit)\n");
+    } else {
+        println!("\nhot repl (':help' for commands, ':quit' or Ctrl-D to exit)\n");
+    }
 
     // Initialize readline editor
     let mut rl =
         DefaultEditor::new().map_err(|e| format!("Failed to initialize readline: {}", e))?;
 
     // Initialize REPL session with incremental execution
-    let mut repl_session = match initialize_repl_session(
+    let mut repl_session = initialize_repl_session(
         &src_paths,
         &test_paths,
         conf,
         &project_name,
         context_storage,
-    ) {
-        Ok(session) => session,
-        Err(e) => {
-            eprintln!("Failed to initialize REPL session: {}", e);
-            return Err(e);
-        }
-    };
+    )
+    .map_err(|e| format!("Failed to initialize REPL session: {}", e))?;
 
     // Track consecutive Ctrl-C presses for helpful exit message
     let mut consecutive_ctrl_c = 0;
     let mut current_namespace = "::hot::dev".to_string();
 
     loop {
-        // Create colored prompt
-        let prompt = format!("\x1b[92m{}>\x1b[0m ", current_namespace);
+        // Create prompt (respecting NO_COLOR / TTY)
+        let prompt = if color {
+            format!("\x1b[92m{}>\x1b[0m ", current_namespace)
+        } else {
+            format!("{}> ", current_namespace)
+        };
 
         // Read user input with readline support
         match rl.readline(&prompt) {
@@ -125,6 +130,23 @@ pub(crate) async fn run_repl(
                 // Skip empty input
                 if input.is_empty() {
                     continue;
+                }
+
+                // Meta-commands (single colon never collides with ::namespace syntax)
+                match input {
+                    ":q" | ":quit" | ":exit" => break,
+                    ":h" | ":help" => {
+                        println!("REPL commands:");
+                        println!("  :help, :h           Show this help");
+                        println!("  :ns                 Show current namespace");
+                        println!("  :quit, :exit, :q    Exit the REPL (or press Ctrl-D)");
+                        continue;
+                    }
+                    ":ns" => {
+                        println!("{}", current_namespace);
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 // Add non-empty input to history
