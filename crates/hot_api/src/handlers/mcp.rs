@@ -271,6 +271,35 @@ pub struct ToolsCallParams {
     pub request_state: Option<String>,
 }
 
+impl ToolsCallParams {
+    fn from_json_value(value: JsonValue) -> Result<Self, String> {
+        let mut obj = match value {
+            JsonValue::Object(map) => map,
+            _ => return Err("invalid type: expected a map".to_string()),
+        };
+        let name = match obj.remove("name") {
+            Some(JsonValue::String(s)) => s,
+            Some(_) => return Err("invalid type for field `name`: expected a string".to_string()),
+            None => return Err("missing field `name`".to_string()),
+        };
+        let arguments = obj.remove("arguments").filter(|v| !v.is_null());
+        let input_responses = obj.remove("inputResponses").filter(|v| !v.is_null());
+        let request_state = match obj.remove("requestState") {
+            None | Some(JsonValue::Null) => None,
+            Some(JsonValue::String(s)) => Some(s),
+            Some(_) => {
+                return Err("invalid type for field `requestState`: expected a string".to_string());
+            }
+        };
+        Ok(Self {
+            name,
+            arguments,
+            input_responses,
+            request_state,
+        })
+    }
+}
+
 /// tools/call result
 #[derive(Debug, Serialize)]
 pub struct ToolsCallResult {
@@ -2174,9 +2203,9 @@ async fn handle_tools_call_streaming(
     headers: &HeaderMap,
     protocol: ProtocolContext,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
-    // Parse params
+    // Parse params directly from the already-parsed JSON object.
     let call_params: ToolsCallParams = match params {
-        Some(p) => match serde_json::from_value(p) {
+        Some(p) => match ToolsCallParams::from_json_value(p) {
             Ok(parsed) => parsed,
             Err(e) => {
                 tracing::warn!("Invalid tools/call params: {}", e);

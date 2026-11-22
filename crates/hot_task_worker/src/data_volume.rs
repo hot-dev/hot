@@ -391,19 +391,14 @@ impl DataVolume {
             )));
         }
 
-        let chmod_output = match Self::killable_command("chmod")
-            .args(["1777", volume.mount_point.to_string_lossy().as_ref()])
-            .output()
-            .await
         {
-            Ok(output) => output,
-            Err(e) => return Err(DataVolumeError::Io(format!("chmod data volume: {e}"))),
-        };
-        if !chmod_output.status.success() {
-            return Err(DataVolumeError::Io(format!(
-                "chmod data volume failed: {}",
-                String::from_utf8_lossy(&chmod_output.stderr)
-            )));
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(
+                &volume.mount_point,
+                std::fs::Permissions::from_mode(0o1777),
+            )
+            .await
+            .map_err(|e| DataVolumeError::Io(format!("chmod data volume: {e}")))?;
         }
 
         Ok(volume)
