@@ -25,10 +25,10 @@ pub async fn checkout_form_handler(
         "Missing plan parameter".to_string(),
     ))?;
 
-    let billing_period = params
-        .get("billing")
-        .cloned()
-        .unwrap_or_else(|| "monthly".to_string());
+    let billing_period = match params.get("billing").map(String::as_str) {
+        Some("annual") => "annual",
+        _ => "monthly",
+    };
 
     // Resolve the org to bill against. Prefer `session.current_org` (set by
     // the cookie) when present, with a fresh DB read as fallback — the
@@ -46,17 +46,41 @@ pub async fn checkout_form_handler(
         } else {
             Some(org.slug.clone())
         }
+    } else if let Ok(orgs) =
+        hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id()).await
+    {
+        let mut resolved = None;
+        // Prefer a root org where the user is an administrator.
+        for org in orgs.iter().filter(|o| !o.is_child()) {
+            if super::billing::is_org_admin(&db, &session.current_user_id(), &org.org_id).await {
+                resolved = Some(org.slug.clone());
+                break;
+            }
+        }
+        // Otherwise fall back to the first root org, or resolve the first child's root.
+        if resolved.is_none() {
+            if let Some(root) = orgs.iter().find(|o| !o.is_child()) {
+                resolved = Some(root.slug.clone());
+            } else if let Some(first) = orgs.first() {
+                let lookup = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+                    hot::db::BootstrapOperation::Membership,
+                ));
+                resolved = hot::db::Org::get_org_uncached(&lookup, &first.billing_owner_id())
+                    .await
+                    .ok()
+                    .map(|root| root.slug);
+            }
+        }
+        resolved
     } else {
-        hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id())
-            .await
-            .ok()
-            .and_then(|orgs| orgs.first().map(|o| o.slug.clone()))
+        None
     };
 
+    let encoded_plan = urlencoding::encode(plan_id);
     if let Some(slug) = org_slug {
         Ok(axum::response::Redirect::to(&format!(
             "/@{}/billing/checkout?plan={}&billing={}",
-            slug, plan_id, billing_period
+            slug, encoded_plan, billing_period
         ))
         .into_response())
     } else {
@@ -66,7 +90,7 @@ pub async fn checkout_form_handler(
         );
         Ok(axum::response::Redirect::to(&format!(
             "/claim-handle?plan={}&billing={}",
-            plan_id, billing_period
+            encoded_plan, billing_period
         ))
         .into_response())
     }
@@ -78,9 +102,17 @@ pub async fn checkout_form_handler(
 pub async fn org_checkout_form_handler(
     Path(org_slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
+    axum::extract::Extension(conf): axum::extract::Extension<Val>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     Query(params): Query<AHashMap<String, String>>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !hot::product::billing_enabled(&conf) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Hot Cloud billing is not enabled for this build or product mode".to_string(),
+        ));
+    }
+
     let org = hot::db::org::Org::get_org_by_slug(&db, &org_slug)
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Organization not found".to_string()))?;
@@ -108,23 +140,37 @@ pub async fn org_checkout_form_handler(
         .filter(|p| !p.plan_name.contains("Self-Host"))
         .collect();
 
+    // Load authoritative current org plan state under billing scope.
+    let current_org_plan = hot::db::OrgPlan::get_by_org_id(&db, &org.org_id).await.ok();
+    let current_subscription_active = current_org_plan.as_ref().is_some_and(|s| s.is_active());
+    let current_billing_period = current_org_plan.as_ref().map(|s| s.billing_period.clone());
+    let current_plan_obj = if let Some(ref sub) = current_org_plan {
+        all_plans
+            .iter()
+            .find(|p| p.plan_uuid == sub.plan_uuid)
+            .cloned()
+    } else {
+        None
+    };
+    let current_plan_name = current_plan_obj
+        .as_ref()
+        .map(|p| p.plan_name.clone())
+        .or_else(|| session.current_org_plan_name.clone());
+    let current_plan_sort_order = current_plan_obj.as_ref().map(|p| p.sort_order);
+
     // If no plan specified, show plan selection page
     let plan_id = match params.get("plan") {
         Some(id) if !id.is_empty() => id,
         _ => {
-            let current_plan_sort_order = session.current_org_plan_name.as_ref().and_then(|name| {
-                all_plans
-                    .iter()
-                    .find(|plan| plan.plan_name == *name)
-                    .map(|plan| plan.sort_order)
-            });
             let template = templates::OrgPlanSelect {
                 title: "Choose a Plan",
                 page_context: templates::PrivatePageContext::new("billing", &session),
                 org: &org,
                 plans: all_plans,
-                current_plan_name: session.current_org_plan_name.clone(),
+                current_plan_name,
                 current_plan_sort_order,
+                current_billing_period,
+                current_subscription_active,
             };
             return Ok(Html(
                 template
@@ -135,25 +181,33 @@ pub async fn org_checkout_form_handler(
         }
     };
 
-    let billing_period = params
-        .get("billing")
-        .cloned()
-        .unwrap_or_else(|| "monthly".to_string());
+    let billing_period = match params.get("billing").map(String::as_str) {
+        Some("annual") => "annual",
+        _ => "monthly",
+    };
 
     // Get plan details by plan_id
     let plan = Plan::get_by_plan_id(&db, plan_id)
         .await
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid plan".to_string()))?;
 
+    let has_active_paid_subscription =
+        current_subscription_active && current_plan_obj.as_ref().is_some_and(|p| !p.is_free_plan());
+
     // The free plan renders the same form (worded as card verification). A GET never
     // creates a provider checkout session; the form's POST does.
     let template = templates::OrgCheckoutForm {
-        title: "Complete Subscription",
+        title: if has_active_paid_subscription {
+            "Change Subscription Plan"
+        } else {
+            "Complete Subscription"
+        },
         page_context: templates::PublicPageContext::new("checkout"),
         org,
         plan,
-        billing_period: billing_period.as_str(),
+        billing_period,
         all_plans,
+        has_active_paid_subscription,
     };
 
     Ok(Html(
@@ -201,10 +255,11 @@ pub async fn org_create_checkout_handler(
         .get("plan_id")
         .ok_or((StatusCode::BAD_REQUEST, "Missing plan_id".to_string()))?;
 
-    let billing_period = form
+    let raw_billing_period = form
         .get("billing_period")
-        .cloned()
-        .unwrap_or_else(|| "monthly".to_string());
+        .map(String::as_str)
+        .unwrap_or("monthly");
+    let billing_period = super::billing::validate_billing_period(raw_billing_period)?;
 
     if let Err(retry_after) =
         crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, plan_id)
@@ -236,7 +291,7 @@ pub async fn org_create_checkout_handler(
             user_id: session.user.user_id,
             user_email: &session.user.email,
             plan_id,
-            billing_period: &billing_period,
+            billing_period,
         })
         .await
         .map_err(|err| err.into_status_message())?;

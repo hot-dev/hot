@@ -3,13 +3,24 @@
 <div class="flex justify-center items-center min-h-[70vh]">
   <div class="max-w-lg w-full mx-4">
     <div class="text-center mb-8">
-      {% if plan.base_price_monthly_cents == 0 %}
-      <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Activate Your Free Plan</h1>
-      <p class="text-gray-600 dark:text-gray-400 mt-2">Verify your card to activate <strong>{{ org.name }}</strong></p>
-      <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">No charge &mdash; card verification only</p>
+      {% if has_active_paid_subscription %}
+        {% if plan.base_price_monthly_cents == 0 %}
+        <h1 id="checkout-heading" class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Switch to Free Plan</h1>
+        <p id="checkout-subtitle" class="text-gray-600 dark:text-gray-400 mt-2">Update <strong>{{ org.name }}</strong> to Hot Cloud Free</p>
+        <p id="checkout-free-note" class="text-xs text-gray-500 dark:text-gray-500 mt-1">Your current paid subscription will be cancelled with prorated credit</p>
+        {% else %}
+        <h1 id="checkout-heading" class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Change Your Plan</h1>
+        <p id="checkout-subtitle" class="text-gray-600 dark:text-gray-400 mt-2">Update <strong>{{ org.name }}</strong> on Hot Cloud</p>
+        <p id="checkout-free-note" class="text-xs text-gray-500 dark:text-gray-500 mt-1 hidden"></p>
+        {% endif %}
+      {% elif plan.base_price_monthly_cents == 0 %}
+      <h1 id="checkout-heading" class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Activate Your Free Plan</h1>
+      <p id="checkout-subtitle" class="text-gray-600 dark:text-gray-400 mt-2">Verify your card to activate <strong>{{ org.name }}</strong></p>
+      <p id="checkout-free-note" class="text-xs text-gray-500 dark:text-gray-500 mt-1">No charge &mdash; card verification only</p>
       {% else %}
-      <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Complete Your Subscription</h1>
-      <p class="text-gray-600 dark:text-gray-400 mt-2">Activate <strong>{{ org.name }}</strong> with Hot Cloud</p>
+      <h1 id="checkout-heading" class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Complete Your Subscription</h1>
+      <p id="checkout-subtitle" class="text-gray-600 dark:text-gray-400 mt-2">Activate <strong>{{ org.name }}</strong> with Hot Cloud</p>
+      <p id="checkout-free-note" class="text-xs text-gray-500 dark:text-gray-500 mt-1 hidden">No charge &mdash; card verification only</p>
       {% endif %}
     </div>
 
@@ -90,8 +101,14 @@
           </div>
         </div>
 
-        <button type="submit" class="btn btn-primary btn-lg w-full">
-          {% if plan.base_price_monthly_cents == 0 %}
+        <button id="checkout-submit-btn" type="submit" class="btn btn-primary btn-lg w-full">
+          {% if has_active_paid_subscription %}
+            {% if plan.base_price_monthly_cents == 0 %}
+            Downgrade to Free
+            {% else %}
+            Confirm Plan Change
+            {% endif %}
+          {% elif plan.base_price_monthly_cents == 0 %}
           Verify Card & Activate
           {% else %}
           Continue to Payment
@@ -99,8 +116,14 @@
         </button>
       </form>
 
-      <p class="text-xs text-gray-500 dark:text-gray-400 text-center mt-4">
-        {% if plan.base_price_monthly_cents == 0 %}
+      <p id="checkout-footer-note" class="text-xs text-gray-500 dark:text-gray-400 text-center mt-4">
+        {% if has_active_paid_subscription %}
+          {% if plan.base_price_monthly_cents == 0 %}
+          Your existing paid subscription will be cancelled immediately
+          {% else %}
+          Your existing subscription will be updated with proration
+          {% endif %}
+        {% elif plan.base_price_monthly_cents == 0 %}
         You'll be redirected to securely verify your card
         {% else %}
         You'll be redirected to securely complete your payment
@@ -152,6 +175,9 @@ function updateSelection(radio) {
   updateSummary();
 }
 
+const HAS_ACTIVE_PAID = {{ has_active_paid_subscription }};
+const ORG_NAME = {{ org.name|js|safe }};
+
 function updateSummary() {
   const selectedRadio = document.querySelector('input[name="plan_id"]:checked');
   if (!selectedRadio) return;
@@ -176,6 +202,45 @@ function updateSummary() {
   } else {
     document.getElementById('summary-price').innerHTML = '$' + monthlyPrice + '<span class="text-base font-normal text-gray-500">/month</span>';
     document.getElementById('summary-savings').classList.add('hidden');
+  }
+
+  const heading = document.getElementById('checkout-heading');
+  const subtitle = document.getElementById('checkout-subtitle');
+  const freeNote = document.getElementById('checkout-free-note');
+  const submitBtn = document.getElementById('checkout-submit-btn');
+  const footerNote = document.getElementById('checkout-footer-note');
+
+  const strongOrg = document.createElement('strong');
+  strongOrg.textContent = ORG_NAME;
+
+  if (HAS_ACTIVE_PAID) {
+    if (isFree) {
+      heading.textContent = 'Switch to Free Plan';
+      subtitle.replaceChildren('Update ', strongOrg, ' to Hot Cloud Free');
+      freeNote.textContent = 'Your current paid subscription will be cancelled with prorated credit';
+      freeNote.classList.remove('hidden');
+      submitBtn.textContent = 'Downgrade to Free';
+      footerNote.textContent = 'Your existing paid subscription will be cancelled immediately';
+    } else {
+      heading.textContent = 'Change Your Plan';
+      subtitle.replaceChildren('Update ', strongOrg, ' on Hot Cloud');
+      freeNote.classList.add('hidden');
+      submitBtn.textContent = 'Confirm Plan Change';
+      footerNote.textContent = 'Your existing subscription will be updated with proration';
+    }
+  } else if (isFree) {
+    heading.textContent = 'Activate Your Free Plan';
+    subtitle.replaceChildren('Verify your card to activate ', strongOrg);
+    freeNote.textContent = 'No charge \u2014 card verification only';
+    freeNote.classList.remove('hidden');
+    submitBtn.textContent = 'Verify Card & Activate';
+    footerNote.textContent = "You'll be redirected to securely verify your card";
+  } else {
+    heading.textContent = 'Complete Your Subscription';
+    subtitle.replaceChildren('Activate ', strongOrg, ' with Hot Cloud');
+    freeNote.classList.add('hidden');
+    submitBtn.textContent = 'Continue to Payment';
+    footerNote.textContent = "You'll be redirected to securely complete your payment";
   }
 }
 </script>

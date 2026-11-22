@@ -403,13 +403,16 @@ impl Features {
             org_id: Some(root_id),
         });
         let plan = match OrgPlan::get_by_org_id(&db, &root_id).await {
-            Ok(subscription) => Some(
+            Ok(subscription) if subscription.is_active() => Some(
                 subscription
                     .get_plan(&db)
                     .await?
                     .features
                     .unwrap_or_else(|| serde_json::json!({})),
             ),
+            // A pending or inactive org_plan still marks a hosted account:
+            // resolve against conservative cloud defaults rather than unlimited.
+            Ok(_) => Some(serde_json::json!({})),
             Err(PlanError::NotFound) => None,
             Err(error) => return Err(error),
         };
@@ -491,15 +494,18 @@ impl Features {
         let db = &db;
         let org_id = &root_id;
 
-        // Get plan features from the org's selected plan.
+        // Get plan features from the org's active plan. A pending or inactive
+        // org_plan still marks a hosted account and must resolve to conservative
+        // cloud defaults rather than self-hosted unlimited defaults.
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
-            Ok(subscription) => match subscription.get_plan(db).await {
+            Ok(subscription) if subscription.is_active() => match subscription.get_plan(db).await {
                 Ok(plan) => Some(plan.features.unwrap_or_else(|| serde_json::json!({}))),
                 Err(error) => {
                     tracing::warn!(%org_id, %error, "Cannot load account entitlement plan");
                     return Self::resolve(None, None);
                 }
             },
+            Ok(_) => Some(serde_json::json!({})),
             Err(super::subscription::PlanError::NotFound) => None,
             Err(error) => {
                 tracing::warn!(%org_id, %error, "Cannot load account subscription");
@@ -547,13 +553,14 @@ impl Features {
         let org_id = &root_id;
 
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
-            Ok(subscription) => match subscription.get_plan(db).await {
+            Ok(subscription) if subscription.is_active() => match subscription.get_plan(db).await {
                 Ok(plan) => Some(plan.features.unwrap_or_else(|| serde_json::json!({}))),
                 Err(error) => {
                     tracing::warn!(%org_id, %error, "Cannot load account entitlement plan");
                     return Self::resolve(None, None);
                 }
             },
+            Ok(_) => Some(serde_json::json!({})),
             Err(super::subscription::PlanError::NotFound) => None,
             Err(error) => {
                 tracing::warn!(%org_id, %error, "Cannot load account subscription");
@@ -1349,5 +1356,106 @@ mod tests {
         let f = Features::resolve(Some(&plan), Some(&org));
         assert_eq!(f.file_upload_max_bytes(), keys::MAX_FILE_UPLOAD_BYTES);
         assert!(f.is_unlimited_file_upload());
+    }
+
+    #[tokio::test]
+    async fn pending_and_inactive_org_plan_resolve_to_cloud_defaults() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db is SQLite");
+        };
+
+        // No org_plan: self-hosted unlimited on resolve_for_org / try_resolve_for_org,
+        // conservative cloud defaults on resolve_for_hosted_org.
+        assert!(
+            Features::resolve_for_org(&db, &data.org_id)
+                .await
+                .is_unlimited_runs()
+        );
+        assert_eq!(
+            Features::resolve_for_hosted_org(&db, &data.org_id)
+                .await
+                .runs_per_month(),
+            0
+        );
+
+        let plan_uuid = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features)
+             VALUES (?, 'pro-test', 'Pro Test', 10000, 100000, 1, 1, '{\"runs_per_month\":1000000,\"storage_bytes\":1000000,\"custom_domains\":5,\"service_keys\":true}')",
+        )
+        .bind(plan_uuid)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // OrgPlan::create starts in Pending (status_id = 0): must resolve to cloud defaults,
+        // NOT the paid plan features and NOT self-hosted unlimited.
+        let org_plan = crate::db::OrgPlan::create(
+            &db,
+            &data.org_id,
+            &plan_uuid,
+            crate::db::BillingPeriod::Monthly,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+
+        for features in [
+            Features::resolve_for_org(&db, &data.org_id).await,
+            Features::resolve_for_hosted_org(&db, &data.org_id).await,
+            Features::try_resolve_for_org(&db, &data.org_id)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(features.runs_per_month(), 0);
+            assert_eq!(features.storage_bytes(), 0);
+            assert!(!features.has_custom_domains());
+            assert!(!features.has_service_keys());
+            assert!(!features.is_unlimited_runs());
+        }
+
+        // Activating the plan grants its features.
+        crate::db::OrgPlan::update_status(
+            &db,
+            &org_plan.org_plan_id,
+            crate::db::OrgPlanStatus::Active,
+            Some(&data.user_id),
+        )
+        .await
+        .unwrap();
+
+        for features in [
+            Features::resolve_for_org(&db, &data.org_id).await,
+            Features::resolve_for_hosted_org(&db, &data.org_id).await,
+            Features::try_resolve_for_org(&db, &data.org_id)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(features.runs_per_month(), 1_000_000);
+            assert_eq!(features.storage_bytes(), 1_000_000);
+            assert_eq!(features.max_custom_domains(), 5);
+            assert!(features.has_service_keys());
+        }
+
+        // Deactivating the plan revokes entitlements back to cloud defaults.
+        crate::db::OrgPlan::cancel_immediately(&db, &org_plan.org_plan_id, &data.user_id)
+            .await
+            .unwrap();
+
+        for features in [
+            Features::resolve_for_org(&db, &data.org_id).await,
+            Features::resolve_for_hosted_org(&db, &data.org_id).await,
+            Features::try_resolve_for_org(&db, &data.org_id)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(features.runs_per_month(), 0);
+            assert_eq!(features.storage_bytes(), 0);
+            assert!(!features.has_custom_domains());
+            assert!(!features.has_service_keys());
+            assert!(!features.is_unlimited_runs());
+        }
     }
 }

@@ -3100,11 +3100,6 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  .md\:grid-cols-3 {
-    @media (width >= 48rem) {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-  }
   .md\:flex-row {
     @media (width >= 48rem) {
       flex-direction: row;
@@ -3243,6 +3238,11 @@
     @media (width >= 64rem) {
       --tw-translate-y: calc(var(--spacing) * 0);
       translate: var(--tw-translate-x) var(--tw-translate-y);
+    }
+  }
+  .lg\:grid-cols-1 {
+    @media (width >= 64rem) {
+      grid-template-columns: repeat(1, minmax(0, 1fr));
     }
   }
   .lg\:grid-cols-2 {
@@ -3753,6 +3753,11 @@
   .dark\:bg-yellow-800 {
     &:where(.dark, .dark *) {
       background-color: var(--color-yellow-800);
+    }
+  }
+  .dark\:bg-yellow-900 {
+    &:where(.dark, .dark *) {
+      background-color: var(--color-yellow-900);
     }
   }
   .dark\:bg-yellow-900\/20 {

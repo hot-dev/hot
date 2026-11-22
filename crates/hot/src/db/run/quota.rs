@@ -66,7 +66,7 @@ impl Run {
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
         );
-        let query = "SELECT CAST(o.features AS TEXT), CAST(p.features AS TEXT), op.current_period_start, op.current_period_end FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1";
+        let query = "SELECT CAST(o.features AS TEXT), CASE WHEN op.org_plan_id IS NULL THEN NULL WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END, op.current_period_start, op.current_period_end FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1";
         let (overrides, plan, start, end): Epoch = match &billing {
             DatabasePool::Postgres(pool) => {
                 sqlx::query_as(query).bind(root).fetch_one(pool).await?
@@ -176,7 +176,7 @@ macro_rules! admission {
                 "SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1"
             ).bind(root_id).fetch_one(&mut *conn).await?;
             let plan: Option<(Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-                "SELECT CAST(COALESCE(p.features,'{}') AS TEXT),op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                "SELECT CASE WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
             ).bind(root_id).fetch_optional(&mut *conn).await?;
             let now = Utc::now();
             let period = crate::db::subscription::monthly_usage_start(now, plan.as_ref().and_then(|p| p.1), plan.as_ref().and_then(|p| p.2));
@@ -394,7 +394,7 @@ mod tests {
         crate::db::OrgPlan::create(&db, &root, &plan, crate::db::BillingPeriod::Annual, &root)
             .await
             .unwrap();
-        sqlx::query("UPDATE org_plan SET current_period_start=? WHERE org_id=?")
+        sqlx::query("UPDATE org_plan SET status_id=1, current_period_start=? WHERE org_id=?")
             .bind(Utc::now() - chrono::Duration::days(40))
             .bind(root)
             .execute(pool)
@@ -540,5 +540,68 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn pending_and_inactive_plans_deny_run_admission_until_activated() {
+        let (db, root, children) = fixture(1).await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        // Clear root org feature overrides so run quota comes strictly from org_plan.
+        sqlx::query("UPDATE org SET features = NULL WHERE org_id = ?")
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let plan = Uuid::now_v7();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'pending-test', 'Pending Test', 2500, 25000, 1000, 1, '{\"runs_per_month\":5}')")
+            .bind(plan)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let org_plan =
+            crate::db::OrgPlan::create(&db, &root, &plan, crate::db::BillingPeriod::Monthly, &root)
+                .await
+                .unwrap();
+
+        let (org, env) = children[0];
+        // Pending plan must deny run admission (cloud default 0 runs).
+        assert!(matches!(
+            Run::admit_execution(&db, &org, &env, &Uuid::now_v7()).await,
+            Err(RunError::QuotaExceeded(_))
+        ));
+
+        let epoch_pending = Run::admission_epoch(&db, root).await.unwrap();
+
+        // Activating the plan changes the admission epoch and admits runs.
+        crate::db::OrgPlan::update_status(
+            &db,
+            &org_plan.org_plan_id,
+            crate::db::OrgPlanStatus::Active,
+            Some(&root),
+        )
+        .await
+        .unwrap();
+        let epoch_active = Run::admission_epoch(&db, root).await.unwrap();
+        assert_ne!(epoch_pending, epoch_active);
+
+        Run::admit_execution(&db, &org, &env, &Uuid::now_v7())
+            .await
+            .expect("active plan admits runs");
+
+        // Deactivating the plan changes the admission epoch again and blocks further runs.
+        crate::db::OrgPlan::cancel_immediately(&db, &org_plan.org_plan_id, &root)
+            .await
+            .unwrap();
+        let epoch_inactive = Run::admission_epoch(&db, root).await.unwrap();
+        assert_ne!(epoch_active, epoch_inactive);
+
+        assert!(matches!(
+            Run::admit_execution(&db, &org, &env, &Uuid::now_v7()).await,
+            Err(RunError::QuotaExceeded(_))
+        ));
     }
 }

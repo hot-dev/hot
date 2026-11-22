@@ -150,7 +150,7 @@ impl Task {
                         .fetch_one(pool)
                         .await?;
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                    "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END,CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(pool).await?;
                 let needs_usage = usage_required(
                     plan.as_ref().and_then(|p| p.0.as_ref()),
@@ -220,7 +220,7 @@ impl Task {
                     return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                    "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END,CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
                 let period = crate::db::subscription::monthly_usage_start(
                     now,
@@ -300,7 +300,7 @@ impl Task {
                     return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<String>> = sqlx::query_as(
-                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+                    "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}') ELSE '{}' END,CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
                 let period = crate::db::subscription::monthly_usage_start(
                     now,

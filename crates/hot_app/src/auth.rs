@@ -938,7 +938,12 @@ fn onboarding_redirect(session: &Session, path: &str) -> Option<String> {
     }
 
     match session.current_org.as_ref() {
-        Some(org) if session.current_org_subscription_status.is_none() => {
+        Some(org)
+            if matches!(
+                session.current_org_subscription_status,
+                None | Some(hot::db::OrgPlanStatus::Pending)
+            ) =>
+        {
             let root = session.billing_org().unwrap_or(org);
             Some(format!("/@{}/billing/checkout", root.slug))
         }
@@ -1424,14 +1429,15 @@ pub async fn guest_only_middleware(
                 .collect();
 
             if let Some(plan) = params.get("plan") {
-                let billing = params
-                    .get("billing")
-                    .map(|s| s.as_str())
-                    .unwrap_or("monthly");
+                let billing = match params.get("billing").map(|s| s.as_str()) {
+                    Some("annual") => "annual",
+                    _ => "monthly",
+                };
                 // Redirect to checkout form with plan params (will use session's current org)
                 return Ok(Redirect::to(&format!(
                     "/billing/create-checkout-form?plan={}&billing={}",
-                    plan, billing
+                    urlencoding::encode(plan),
+                    billing
                 ))
                 .into_response());
             }

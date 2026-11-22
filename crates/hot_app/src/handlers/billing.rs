@@ -38,6 +38,17 @@ fn billing_error(err: crate::billing_provider::BillingProviderError) -> (StatusC
     err.into_status_message()
 }
 
+pub(super) fn validate_billing_period(raw: &str) -> Result<&'static str, (StatusCode, String)> {
+    match raw {
+        "monthly" => Ok("monthly"),
+        "annual" => Ok("annual"),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid billing period; expected 'monthly' or 'annual'".to_string(),
+        )),
+    }
+}
+
 fn is_missing_subscription(err: &PlanError) -> bool {
     matches!(err, PlanError::NotFound)
 }
@@ -126,6 +137,8 @@ pub async fn create_checkout_handler(
         ));
     }
 
+    let billing_period = validate_billing_period(&form.billing_period)?;
+
     let checkout_url = billing_provider()
         .create_checkout(BillingCheckoutRequest {
             db: &db,
@@ -136,7 +149,7 @@ pub async fn create_checkout_handler(
             user_id: session.user.user_id,
             user_email: &session.user.email,
             plan_id: &form.plan_id,
-            billing_period: &form.billing_period,
+            billing_period,
         })
         .await
         .map_err(billing_error)?;
@@ -148,7 +161,7 @@ pub async fn create_checkout_handler(
 pub async fn checkout_success_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(conf): axum::extract::Extension<Val>,
-    axum::extract::Extension(_session): axum::extract::Extension<Session>,
+    axum::extract::Extension(session): axum::extract::Extension<Session>,
     Query(params): Query<AHashMap<String, String>>,
     jar: axum_extra::extract::CookieJar,
 ) -> Result<(axum_extra::extract::CookieJar, Redirect), Redirect> {
@@ -157,14 +170,22 @@ pub async fn checkout_success_handler(
             .checkout_success(BillingCheckoutSuccessRequest {
                 db: &db,
                 conf: &conf,
+                user_id: session.user.user_id,
                 session_id,
             })
             .await
         {
             Ok(Some(success)) => {
-                return Ok(
-                    checkout_success_redirect(&db, jar, success.org_id, &success.org_slug).await,
-                );
+                let env_db = hot::db::org::Org::billing_scope(&db, &success.org_id)
+                    .await
+                    .unwrap_or_else(|_| (*db).clone());
+                return Ok(checkout_success_redirect(
+                    &env_db,
+                    jar,
+                    success.org_id,
+                    &success.org_slug,
+                )
+                .await);
             }
             Ok(None) => {}
             Err(err) => {
@@ -308,7 +329,7 @@ pub async fn view_billing_handler(
         None
     };
 
-    // Check for success/cancel/reactivated messages
+    // Check for success/cancel/reactivated/updated messages
     // Only show full success message if subscription is actually active
     let subscription_is_active = subscription.as_ref().is_some_and(|s| s.is_active());
     let success_message = if params.contains_key("success") {
@@ -319,16 +340,46 @@ pub async fn view_billing_handler(
             // The template will handle showing a refresh state
             "processing"
         }
+    } else if params.contains_key("updated") {
+        "Your subscription plan has been updated."
     } else if params.contains_key("cancelled") {
         "Your subscription has been cancelled and will remain active until the end of the current billing period."
     } else if params.contains_key("reactivated") {
-        "🎉 Your subscription has been reactivated!"
+        "Your subscription has been reactivated."
+    } else {
+        ""
+    };
+    let error_message = if params.contains_key("checkout_error") {
+        "We couldn't start checkout right now. Please select a plan below to try again or contact support."
     } else {
         ""
     };
 
     let billing_provider_configured =
         hot::product::billing_enabled(&conf) && billing_provider().is_configured(&conf);
+
+    let billing_details = if billing_provider_configured && let Some(ref sub) = subscription {
+        match billing_provider()
+            .subscription_details(BillingSubscriptionActionRequest {
+                db: &db,
+                conf: &conf,
+                org_plan: sub,
+            })
+            .await
+        {
+            Ok(details) => details,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load billing provider details for org {}: {}",
+                    org.org_id,
+                    err.message
+                );
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::current("Billing".to_string()));
@@ -340,7 +391,10 @@ pub async fn view_billing_handler(
         subscription,
         plan,
         success_message,
+        error_message,
         billing_provider_configured,
+        cancel_at_period_end: billing_details.cancel_at_period_end,
+        has_provider_subscription: billing_details.has_provider_subscription,
     };
 
     Ok(Html(
@@ -572,6 +626,13 @@ pub async fn cancel_subscription_handler(
             (StatusCode::NOT_FOUND, "No subscription found".to_string())
         })?;
 
+    if !subscription.is_active() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only active subscriptions can be cancelled".to_string(),
+        ));
+    }
+
     billing_provider()
         .cancel_subscription(BillingSubscriptionActionRequest {
             db: &db,
@@ -647,6 +708,13 @@ pub async fn reactivate_subscription_handler(
             );
             (StatusCode::NOT_FOUND, "No subscription found".to_string())
         })?;
+
+    if !subscription.is_active() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only active subscriptions scheduled for cancellation can be reactivated. Please choose a plan to subscribe.".to_string(),
+        ));
+    }
 
     billing_provider()
         .reactivate_subscription(BillingSubscriptionActionRequest {

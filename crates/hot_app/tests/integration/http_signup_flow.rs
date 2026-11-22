@@ -1438,3 +1438,455 @@ async fn invitations_are_emailed_when_email_is_configured() {
         "the email carries the invitation link, got {text_body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Billing lifecycle & plan selection hardening
+// ---------------------------------------------------------------------------
+
+async fn seed_test_plans(db: &DatabasePool) -> (Uuid, Uuid) {
+    let DatabasePool::Sqlite(pool) = db else {
+        panic!("these tests use SQLite");
+    };
+    let free_uuid = Uuid::now_v7();
+    let pro_uuid = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features)
+         VALUES (?, 'hot-free', 'Free', 0, 0, 1, 1, '{\"runs_per_month\":1000,\"storage_bytes\":104857600,\"team_members\":1}')",
+    )
+    .bind(free_uuid)
+    .execute(pool)
+    .await
+    .expect("seed free plan");
+    sqlx::query(
+        "INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features)
+         VALUES (?, 'hot-cloud-pro', 'Pro', 10000, 100000, 2, 1, '{\"runs_per_month\":1000000,\"storage_bytes\":107374182400,\"team_members\":20}')",
+    )
+    .bind(pro_uuid)
+    .execute(pool)
+    .await
+    .expect("seed pro plan");
+    (free_uuid, pro_uuid)
+}
+
+#[tokio::test]
+async fn hot_cloud_org_with_pending_plan_is_redirected_to_plan_selection() {
+    let mut client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
+    let (_free_uuid, pro_uuid) = seed_test_plans(client.db()).await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "pending@example.com",
+        Some("Pending"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+    let org_id = hot_app::handlers::create_org(
+        client.db(),
+        &user_id,
+        "Pending Org",
+        "pending-org",
+        "individual",
+    )
+    .await
+    .expect("create org");
+    hot::db::OrgPlan::create(
+        client.db(),
+        &org_id,
+        &pro_uuid,
+        hot::db::BillingPeriod::Monthly,
+        &user_id,
+    )
+    .await
+    .expect("create pending org_plan");
+
+    client.login_as(&user_id);
+
+    let resp = client.get("/").await;
+    resp.assert_redirect_to("/@pending-org/billing/checkout");
+}
+
+#[tokio::test]
+async fn billing_cancel_and_reactivate_reject_pending_and_inactive_plans() {
+    let mut client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
+    let (_free_uuid, pro_uuid) = seed_test_plans(client.db()).await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "billing-guard@example.com",
+        Some("Guard"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+    let org_id = hot_app::handlers::create_org(
+        client.db(),
+        &user_id,
+        "Guard Org",
+        "guard-org",
+        "organization",
+    )
+    .await
+    .expect("create org");
+    let org_plan = hot::db::OrgPlan::create(
+        client.db(),
+        &org_id,
+        &pro_uuid,
+        hot::db::BillingPeriod::Monthly,
+        &user_id,
+    )
+    .await
+    .expect("create pending org_plan");
+
+    client.login_as(&user_id);
+
+    // Pending plan cannot be reactivated or cancelled.
+    client
+        .post_form("/@guard-org/billing/reactivate", &[])
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    client
+        .post_form("/@guard-org/billing/cancel", &[])
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    let still_pending = hot::db::OrgPlan::get_by_id(client.db(), &org_plan.org_plan_id)
+        .await
+        .expect("reload org_plan");
+    assert_eq!(
+        still_pending.status(),
+        Some(hot::db::OrgPlanStatus::Pending),
+        "reactivate must never activate a pending plan"
+    );
+
+    // Inactive plan cannot be reactivated either.
+    hot::db::OrgPlan::cancel_immediately(client.db(), &org_plan.org_plan_id, &user_id)
+        .await
+        .expect("mark inactive");
+    client
+        .post_form("/@guard-org/billing/reactivate", &[])
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    let still_inactive = hot::db::OrgPlan::get_by_id(client.db(), &org_plan.org_plan_id)
+        .await
+        .expect("reload org_plan");
+    assert_eq!(
+        still_inactive.status(),
+        Some(hot::db::OrgPlanStatus::Inactive),
+        "reactivate must never activate an inactive plan"
+    );
+}
+
+#[tokio::test]
+async fn org_billing_template_displays_annual_price_and_cancel_reactivate_states() {
+    use askama::Template;
+
+    let client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
+    let (_free_uuid, pro_uuid) = seed_test_plans(client.db()).await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "annual@example.com",
+        Some("Annual"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+    let org_id = hot_app::handlers::create_org(
+        client.db(),
+        &user_id,
+        "Annual Org",
+        "annual-org",
+        "organization",
+    )
+    .await
+    .expect("create org");
+    let org = hot::db::Org::get_org_uncached(client.db(), &org_id)
+        .await
+        .expect("load org");
+    let plan = hot::db::Plan::get_by_id(client.db(), &pro_uuid)
+        .await
+        .expect("load plan");
+    let org_plan = hot::db::OrgPlan::create(
+        client.db(),
+        &org_id,
+        &pro_uuid,
+        hot::db::BillingPeriod::Annual,
+        &user_id,
+    )
+    .await
+    .expect("create org_plan");
+    let user = hot::db::User::get_user(client.db(), &user_id)
+        .await
+        .expect("load user");
+    let session = hot_app::auth::Session {
+        user,
+        user_initials: "AN".to_string(),
+        user_name: "Annual".to_string(),
+        current_org: Some(org.clone()),
+        user_orgs: vec![org.clone()],
+        is_current_org_admin: true,
+        current_env: None,
+        current_org_envs: vec![],
+        display_timezone: "UTC".to_string(),
+        timezone_abbreviation: "UTC".to_string(),
+        current_org_subscription_status: Some(hot::db::OrgPlanStatus::Active),
+        current_org_plan_name: Some(plan.plan_name.clone()),
+        current_org_features: hot::db::Features::empty(),
+        value_format: "hot".to_string(),
+        product_experience: hot::product::ProductExperienceMode::HotCloud,
+        billing_enabled: true,
+        product_web_url: "https://hot.dev".to_string(),
+        product_pricing_url: "https://hot.dev/pricing".to_string(),
+        product_support_email: "support@hot.dev".to_string(),
+        current_org_hold: None,
+    };
+
+    // Pending annual plan: shows $1000/year and no Cancel button.
+    let pending_html = hot_app::templates::OrgBilling {
+        title: "Billing",
+        page_context: hot_app::templates::PrivatePageContext::new("billing", &session),
+        org: &org,
+        subscription: Some(org_plan.clone()),
+        plan: Some(plan.clone()),
+        success_message: "",
+        error_message: "",
+        billing_provider_configured: true,
+        cancel_at_period_end: false,
+        has_provider_subscription: false,
+    }
+    .render()
+    .expect("render pending org_billing");
+    assert!(
+        pending_html.contains("$1000/year"),
+        "pending annual must display $1000/year"
+    );
+    assert!(
+        !pending_html.contains("onclick=\"showCancelModal()\""),
+        "pending subscription must not show Cancel Subscription trigger"
+    );
+
+    // Active annual plan with provider subscription: shows $1000/year and Cancel trigger.
+    let now = Utc::now();
+    hot::db::OrgPlan::update_after_checkout(
+        client.db(),
+        &org_plan.org_plan_id,
+        &pro_uuid,
+        "annual",
+        now,
+        now + Duration::days(365),
+        &user_id,
+    )
+    .await
+    .expect("activate annual plan");
+    let active_plan = hot::db::OrgPlan::get_by_id(client.db(), &org_plan.org_plan_id)
+        .await
+        .expect("reload active org_plan");
+
+    let active_html = hot_app::templates::OrgBilling {
+        title: "Billing",
+        page_context: hot_app::templates::PrivatePageContext::new("billing", &session),
+        org: &org,
+        subscription: Some(active_plan.clone()),
+        plan: Some(plan.clone()),
+        success_message: "",
+        error_message: "",
+        billing_provider_configured: true,
+        cancel_at_period_end: false,
+        has_provider_subscription: true,
+    }
+    .render()
+    .expect("render active org_billing");
+    assert!(active_html.contains("$1000/year"));
+    assert!(active_html.contains("onclick=\"showCancelModal()\""));
+
+    // Scheduled cancellation: shows Cancelling badge and Reactivate button instead of Cancel.
+    let cancelling_html = hot_app::templates::OrgBilling {
+        title: "Billing",
+        page_context: hot_app::templates::PrivatePageContext::new("billing", &session),
+        org: &org,
+        subscription: Some(active_plan),
+        plan: Some(plan),
+        success_message: "",
+        error_message: "",
+        billing_provider_configured: true,
+        cancel_at_period_end: true,
+        has_provider_subscription: true,
+    }
+    .render()
+    .expect("render cancelling org_billing");
+    assert!(cancelling_html.contains("Cancelling"));
+    assert!(cancelling_html.contains("Reactivate Subscription"));
+    assert!(!cancelling_html.contains("onclick=\"showCancelModal()\""));
+}
+
+#[tokio::test]
+async fn org_plan_select_allows_period_switch_and_pending_reselection() {
+    let mut client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
+    let (_free_uuid, pro_uuid) = seed_test_plans(client.db()).await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "switcher@example.com",
+        Some("Switcher"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+    let org_id = hot_app::handlers::create_org(
+        client.db(),
+        &user_id,
+        "Switch Org",
+        "switch-org",
+        "organization",
+    )
+    .await
+    .expect("create org");
+    let org_plan = hot::db::OrgPlan::create(
+        client.db(),
+        &org_id,
+        &pro_uuid,
+        hot::db::BillingPeriod::Monthly,
+        &user_id,
+    )
+    .await
+    .expect("create pending org_plan");
+
+    client.login_as(&user_id);
+
+    // While Pending on Pro, the Pro tier must still be selectable (not locked as Current Plan).
+    let pending_page = client.get("/@switch-org/billing/checkout").await;
+    pending_page.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        !pending_page.body.contains("data-is-current-plan=\"true\""),
+        "pending org_plan should not lock current tier as active"
+    );
+
+    // Once Active on Pro monthly, the page marks Pro as the current plan with monthly period,
+    // allowing JS to switch to Annual.
+    let now = Utc::now();
+    hot::db::OrgPlan::update_after_checkout(
+        client.db(),
+        &org_plan.org_plan_id,
+        &pro_uuid,
+        "monthly",
+        now,
+        now + Duration::days(30),
+        &user_id,
+    )
+    .await
+    .expect("activate org_plan");
+
+    let active_page = client.get("/@switch-org/billing/checkout").await;
+    active_page.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        active_page.body.contains("data-is-current-plan=\"true\""),
+        "active org_plan should mark current tier"
+    );
+    assert!(
+        active_page.body.contains("Switch to Annual"),
+        "plan selector should include billing-period switch label"
+    );
+}
+
+#[tokio::test]
+async fn new_org_post_rejects_invalid_plan_and_billing_before_creating_org() {
+    let mut client = TestClient::new_with_conf(hot_cloud_billing_conf()).await;
+    let (free_uuid, _pro_uuid) = seed_test_plans(client.db()).await;
+
+    let user_id = Uuid::now_v7();
+    hot::db::User::insert_user(
+        client.db(),
+        &user_id,
+        "creator@example.com",
+        Some("Creator"),
+        Some(&user_id),
+    )
+    .await
+    .expect("insert user");
+    // Give the user an existing active org so onboarding middleware allows /orgs/new.
+    let existing_org_id = hot_app::handlers::create_org(
+        client.db(),
+        &user_id,
+        "Primary Org",
+        "primary-org",
+        "organization",
+    )
+    .await
+    .expect("create existing org");
+    let existing_plan = hot::db::OrgPlan::create(
+        client.db(),
+        &existing_org_id,
+        &free_uuid,
+        hot::db::BillingPeriod::Monthly,
+        &user_id,
+    )
+    .await
+    .expect("create existing org_plan");
+    hot::db::OrgPlan::activate_free(client.db(), &existing_plan.org_plan_id)
+        .await
+        .expect("activate existing org_plan");
+
+    client.login_as(&user_id);
+
+    let post_url = format!("/orgs/new?org_id={}", existing_org_id);
+
+    // Invalid plan_id must be rejected without creating the org.
+    let bad_plan_resp = client
+        .post_form(
+            &post_url,
+            &[
+                ("org_name", "Ghost Org"),
+                ("org_slug", "ghost-org"),
+                ("plan_id", "nonexistent-plan"),
+                ("billing_period", "monthly"),
+            ],
+        )
+        .await;
+    bad_plan_resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        bad_plan_resp.body.contains("Please select a valid plan"),
+        "expected invalid plan error, got snippet: {}",
+        bad_plan_resp.body.chars().take(500).collect::<String>()
+    );
+    assert!(
+        hot::db::org::Org::get_org_by_slug(client.db(), "ghost-org")
+            .await
+            .is_err(),
+        "invalid plan must not create an orphan org"
+    );
+
+    // Invalid billing_period must also be rejected without creating the org.
+    let bad_period_resp = client
+        .post_form(
+            &post_url,
+            &[
+                ("org_name", "Ghost Org 2"),
+                ("org_slug", "ghost-org-2"),
+                ("plan_id", "hot-free"),
+                ("billing_period", "weekly"),
+            ],
+        )
+        .await;
+    bad_period_resp.assert_status(axum::http::StatusCode::OK);
+    assert!(
+        bad_period_resp.body.contains("Invalid billing period"),
+        "expected invalid billing period error, got snippet: {}",
+        bad_period_resp.body.chars().take(500).collect::<String>()
+    );
+    assert!(
+        hot::db::org::Org::get_org_by_slug(client.db(), "ghost-org-2")
+            .await
+            .is_err(),
+        "invalid billing period must not create an orphan org"
+    );
+}

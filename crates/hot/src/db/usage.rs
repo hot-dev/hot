@@ -559,7 +559,7 @@ pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDri
                     .fetch_one(pool)
                     .await?;
             let plan: Option<serde_json::Value> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
+                "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
             )
             .bind(root)
             .fetch_optional(pool)
@@ -642,7 +642,7 @@ pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDri
                     .fetch_one(pool)
                     .await?;
             let plan: Option<String> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
+                "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}') ELSE '{}' END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
             )
             .bind(root)
             .fetch_optional(pool)

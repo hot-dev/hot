@@ -2191,7 +2191,10 @@ pub struct OrgBilling<'a> {
     pub subscription: Option<hot::db::OrgPlan>,
     pub plan: Option<hot::db::Plan>,
     pub success_message: &'a str,
+    pub error_message: &'a str,
     pub billing_provider_configured: bool,
+    pub cancel_at_period_end: bool,
+    pub has_provider_subscription: bool,
 }
 
 #[derive(Template)]
@@ -2230,6 +2233,8 @@ pub struct OrgPlanSelect<'a> {
     pub plans: Vec<hot::db::Plan>,
     pub current_plan_name: Option<String>,
     pub current_plan_sort_order: Option<i32>,
+    pub current_billing_period: Option<String>,
+    pub current_subscription_active: bool,
 }
 
 #[derive(Template)]
@@ -2271,6 +2276,7 @@ pub struct OrgCheckoutForm<'a> {
     pub plan: hot::db::Plan,
     pub billing_period: &'a str,
     pub all_plans: Vec<hot::db::Plan>,
+    pub has_active_paid_subscription: bool,
 }
 
 #[derive(Template)]

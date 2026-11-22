@@ -793,15 +793,24 @@ async fn determine_oauth_redirect(
     db: &DatabasePool,
     user: &User,
 ) -> String {
-    let has_active_subscription = if plan.is_some() && !is_new_user {
+    let requested_billing = match billing {
+        Some("annual") => "annual",
+        _ => "monthly",
+    };
+    let already_on_requested_plan = if let Some(requested_plan) = plan
+        && !is_new_user
+    {
         let user_orgs = hot::db::org::Org::get_orgs_by_user(db, &user.user_id)
             .await
             .unwrap_or_default();
 
         let mut found = false;
-        for org in &user_orgs {
+        for org in user_orgs.iter().filter(|o| !o.is_child()) {
             if let Ok(sub) = hot::db::OrgPlan::get_by_org_id(db, &org.org_id).await
                 && sub.is_active()
+                && let Ok(active_plan) = sub.get_plan(db).await
+                && active_plan.plan_id.as_deref() == Some(requested_plan)
+                && (active_plan.is_free_plan() || sub.billing_period == requested_billing)
             {
                 found = true;
                 break;
@@ -817,7 +826,7 @@ async fn determine_oauth_redirect(
         plan,
         billing,
         is_new_user,
-        has_active_subscription,
+        already_on_requested_plan,
     )
 }
 
@@ -828,14 +837,21 @@ fn compute_oauth_redirect(
     plan: Option<&str>,
     billing: Option<&str>,
     is_new_user: bool,
-    has_active_subscription: bool,
+    already_on_requested_plan: bool,
 ) -> String {
     // New OAuth users need to claim their handle first
     if is_new_user {
         let mut url = "/claim-handle".to_string();
         if let Some(plan_id) = plan {
-            let billing_period = billing.unwrap_or("monthly");
-            url = format!("/claim-handle?plan={}&billing={}", plan_id, billing_period);
+            let billing_period = match billing {
+                Some("annual") => "annual",
+                _ => "monthly",
+            };
+            url = format!(
+                "/claim-handle?plan={}&billing={}",
+                urlencoding::encode(plan_id),
+                billing_period
+            );
         }
         return url;
     }
@@ -845,12 +861,16 @@ fn compute_oauth_redirect(
     }
 
     if let Some(plan_id) = plan {
-        let billing_period = billing.unwrap_or("monthly");
+        let billing_period = match billing {
+            Some("annual") => "annual",
+            _ => "monthly",
+        };
 
-        if !has_active_subscription {
+        if !already_on_requested_plan {
             return format!(
                 "/billing/create-checkout-form?plan={}&billing={}",
-                plan_id, billing_period
+                urlencoding::encode(plan_id),
+                billing_period
             );
         }
     }
@@ -1271,6 +1291,116 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_existing_free_user_requesting_paid_plan_goes_to_checkout() {
+        let db = hot::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db is SQLite");
+        };
+
+        let free_plan = Uuid::now_v7();
+        let pro_plan = Uuid::now_v7();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'hot-free', 'Free', 0, 0, 1, 1, '{}')")
+            .bind(free_plan)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'hot-cloud-pro', 'Pro', 10000, 100000, 2, 1, '{}')")
+            .bind(pro_plan)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let user_id = Uuid::now_v7();
+        User::insert_user(
+            &db,
+            &user_id,
+            "free@example.com",
+            Some("Free"),
+            Some(&user_id),
+        )
+        .await
+        .unwrap();
+        let user = User::get_user(&db, &user_id).await.unwrap();
+        let org_id =
+            crate::handlers::create_org(&db, &user_id, "Free Org", "free-org", "individual")
+                .await
+                .unwrap();
+        let org_plan = hot::db::OrgPlan::create(
+            &db,
+            &org_id,
+            &free_plan,
+            hot::db::BillingPeriod::Monthly,
+            &user_id,
+        )
+        .await
+        .unwrap();
+        hot::db::OrgPlan::activate_free(&db, &org_plan.org_plan_id)
+            .await
+            .unwrap();
+
+        // Already on hot-free -> requesting hot-free lands on dashboard.
+        assert_eq!(
+            determine_oauth_redirect(None, Some("hot-free"), Some("monthly"), false, &db, &user)
+                .await,
+            "/"
+        );
+
+        // Requesting hot-cloud-pro while on hot-free must redirect to checkout, not dashboard.
+        assert_eq!(
+            determine_oauth_redirect(
+                None,
+                Some("hot-cloud-pro"),
+                Some("annual"),
+                false,
+                &db,
+                &user
+            )
+            .await,
+            "/billing/create-checkout-form?plan=hot-cloud-pro&billing=annual"
+        );
+
+        // Once upgraded to hot-cloud-pro monthly, requesting monthly lands on dashboard
+        // while requesting annual goes to checkout.
+        let now = chrono::Utc::now();
+        hot::db::OrgPlan::update_after_checkout(
+            &db,
+            &org_plan.org_plan_id,
+            &pro_plan,
+            "monthly",
+            now,
+            now + chrono::Duration::days(30),
+            &user_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            determine_oauth_redirect(
+                None,
+                Some("hot-cloud-pro"),
+                Some("monthly"),
+                false,
+                &db,
+                &user
+            )
+            .await,
+            "/"
+        );
+        assert_eq!(
+            determine_oauth_redirect(
+                None,
+                Some("hot-cloud-pro"),
+                Some("annual"),
+                false,
+                &db,
+                &user
+            )
+            .await,
+            "/billing/create-checkout-form?plan=hot-cloud-pro&billing=annual"
         );
     }
 }

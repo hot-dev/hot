@@ -48,12 +48,19 @@ pub struct BillingCheckoutRequest<'a> {
 pub struct BillingCheckoutSuccessRequest<'a> {
     pub db: &'a DatabasePool,
     pub conf: &'a Val,
+    pub user_id: uuid::Uuid,
     pub session_id: &'a str,
 }
 
 pub struct BillingCheckoutSuccess {
     pub org_id: uuid::Uuid,
     pub org_slug: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BillingSubscriptionDetails {
+    pub cancel_at_period_end: bool,
+    pub has_provider_subscription: bool,
 }
 
 pub struct BillingSubscriptionActionRequest<'a> {
@@ -101,6 +108,13 @@ pub trait BillingProvider: Send + Sync {
         _request: BillingSubscriptionActionRequest<'_>,
     ) -> Result<(), BillingProviderError> {
         Err(BillingProviderError::unavailable())
+    }
+
+    async fn subscription_details(
+        &self,
+        _request: BillingSubscriptionActionRequest<'_>,
+    ) -> Result<BillingSubscriptionDetails, BillingProviderError> {
+        Ok(BillingSubscriptionDetails::default())
     }
 
     async fn handle_webhook(

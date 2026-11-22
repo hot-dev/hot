@@ -20,17 +20,19 @@
                         Billing Period
                     </label>
                     <div class="flex gap-4">
-                        <label class="flex items-center">
+                        <label class="flex items-center cursor-pointer">
                             <input type="radio" name="billing_period" value="monthly"
                                    class="h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 focus:ring-hot-red-500"
-                                   {% if selected_billing != "annual" %}checked{% endif %}>
+                                   {% if selected_billing != "annual" %}checked{% endif %}
+                                   onchange="updateNewOrgPlanPrices()">
                             <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
                         </label>
-                        <label class="flex items-center">
+                        <label class="flex items-center cursor-pointer">
                             <input type="radio" name="billing_period" value="annual"
                                    class="h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 focus:ring-hot-red-500"
-                                   {% if selected_billing == "annual" %}checked{% endif %}>
-                            <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-700">(Save ~17%)</span></span>
+                                   {% if selected_billing == "annual" %}checked{% endif %}
+                                   onchange="updateNewOrgPlanPrices()">
+                            <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-700 dark:text-green-400">(Save ~17%)</span></span>
                         </label>
                     </div>
                 </div>
@@ -45,16 +47,25 @@
                         {# Hide Self-Host plans for now - uncomment when ready to launch #}
                         {% if plan.plan_id.is_some() && !plan.plan_name.contains("Self-Host") %}
                         {% let pid = plan.plan_id.as_ref().unwrap() %}
-                        <label class="relative flex items-start p-4 border rounded-lg cursor-pointer hover:border-red-500 transition-colors {% if selected_plan == pid.as_str() %}border-red-500 bg-red-50 dark:bg-red-900/20{% else %}border-gray-300 dark:border-gray-700{% endif %}">
+                        <label class="new-org-plan-option relative flex items-start p-4 border rounded-lg cursor-pointer hover:border-red-500 transition-colors {% if selected_plan == pid.as_str() %}border-red-500 bg-red-50 dark:bg-red-900/20{% else %}border-gray-300 dark:border-gray-700{% endif %}"
+                               data-monthly-price="{{ plan.monthly_price_dollars() }}"
+                               data-annual-price="{{ plan.annual_price_dollars() }}">
                             <input type="radio" name="plan_id" value="{{ pid }}"
                                    class="h-4 w-4 text-hot-red-700 border-gray-300 dark:border-gray-600 focus:ring-hot-red-500 mt-0.5"
                                    {% if selected_plan == pid.as_str() %}checked{% endif %}
+                                   onchange="updateNewOrgPlanSelection(this)"
                                    required>
                             <div class="ml-3 flex-1">
                                 <div class="flex items-center justify-between">
                                     <span class="font-medium text-gray-900 dark:text-white">{{ plan.plan_name }}</span>
-                                    <span class="font-semibold text-gray-900 dark:text-white">
-                                        {% if plan.base_price_monthly_cents == 0 %}Free{% else %}${{ plan.monthly_price_dollars() }}/mo{% endif %}
+                                    <span class="font-semibold text-gray-900 dark:text-white new-org-plan-price">
+                                        {% if plan.base_price_monthly_cents == 0 %}
+                                            Free
+                                        {% elif selected_billing == "annual" %}
+                                            ${{ plan.annual_price_dollars() }}/yr
+                                        {% else %}
+                                            ${{ plan.monthly_price_dollars() }}/mo
+                                        {% endif %}
                                     </span>
                                 </div>
                             </div>
@@ -90,4 +101,37 @@
         </div>
     </div>
 </div>
+{% if !is_local_dev && !plans.is_empty() %}
+<script>
+function updateNewOrgPlanPrices() {
+    const checked = document.querySelector('input[name="billing_period"]:checked');
+    const isAnnual = checked && checked.value === 'annual';
+    document.querySelectorAll('.new-org-plan-option').forEach(option => {
+        const priceEl = option.querySelector('.new-org-plan-price');
+        if (!priceEl) return;
+        const monthlyPrice = parseFloat(option.dataset.monthlyPrice);
+        const annualPrice = parseFloat(option.dataset.annualPrice);
+        if (monthlyPrice === 0) {
+            priceEl.textContent = 'Free';
+        } else if (isAnnual) {
+            priceEl.textContent = '$' + annualPrice + '/yr';
+        } else {
+            priceEl.textContent = '$' + monthlyPrice + '/mo';
+        }
+    });
+}
+
+function updateNewOrgPlanSelection(radio) {
+    document.querySelectorAll('.new-org-plan-option').forEach(option => {
+        option.classList.remove('border-red-500', 'bg-red-50', 'dark:bg-red-900/20');
+        option.classList.add('border-gray-300', 'dark:border-gray-700');
+    });
+    const selectedOption = radio.closest('.new-org-plan-option');
+    if (selectedOption) {
+        selectedOption.classList.remove('border-gray-300', 'dark:border-gray-700');
+        selectedOption.classList.add('border-red-500', 'bg-red-50', 'dark:bg-red-900/20');
+    }
+}
+</script>
+{% endif %}
 {% endblock %}
