@@ -10251,6 +10251,9 @@ async fn cleanup_stale_data_volumes(
     if !data_vol_base.exists() {
         return;
     }
+    // `sockets/` itself is kept, but not what a stopped worker left half
+    // removed in it.
+    file_server::remove_abandoned_socket_dirs(&data_vol_base.join("sockets")).await;
     let Ok(entries) = std::fs::read_dir(data_vol_base) else {
         return;
     };
@@ -15458,6 +15461,8 @@ flaky fn (args: Any): Map {
         let stale_vol = base_path.join("stale-dead-vol");
 
         std::fs::create_dir_all(sockets_dir.join("task-1")).unwrap();
+        let abandoned_socket_dir = sockets_dir.join("task-2.removing-0a1b2c");
+        std::fs::create_dir_all(&abandoned_socket_dir).unwrap();
         std::fs::create_dir_all(&adopted_by_path).unwrap();
         std::fs::create_dir_all(adopted_mnt_vol.join("mnt")).unwrap();
         std::fs::create_dir_all(&adopted_by_task).unwrap();
@@ -15472,6 +15477,14 @@ flaky fn (args: Any): Map {
         cleanup_stale_data_volumes(&base_path, &protected_paths, &protected_task_ids).await;
 
         assert!(sockets_dir.exists(), "sockets/ must be preserved");
+        assert!(
+            sockets_dir.join("task-1").exists(),
+            "a task's socket directory must be preserved"
+        );
+        assert!(
+            !abandoned_socket_dir.exists(),
+            "a socket directory left half removed must be cleaned up"
+        );
         assert!(
             adopted_by_path.exists(),
             "volume matching protected mount path must be preserved"

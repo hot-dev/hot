@@ -27,6 +27,10 @@ use tokio::sync::{Semaphore, oneshot};
 use uuid::Uuid;
 
 const GLOBAL_CONNECTION_LIMIT: usize = 256;
+/// Marks a per-task socket directory renamed aside for removal (see
+/// `FileServerHandle`'s `Drop`). A worker that stops before removing one
+/// leaves it for the next worker's startup cleanup.
+const REMOVING_DIR_MARKER: &str = ".removing-";
 const PER_TASK_CONNECTION_LIMIT: usize = 32;
 #[cfg(all(target_os = "linux", feature = "kata"))]
 const VSOCK_PRE_AUTH_PER_CID_LIMIT: usize = 8;
@@ -155,7 +159,7 @@ impl Drop for FileServerHandle {
         }
         if let Some(dir) = cleanup_dir {
             let mut doomed = dir.clone().into_os_string();
-            doomed.push(format!(".removing-{}", Uuid::new_v4().simple()));
+            doomed.push(format!("{REMOVING_DIR_MARKER}{}", Uuid::new_v4().simple()));
             let doomed = PathBuf::from(doomed);
             if std::fs::rename(&dir, &doomed).is_err() {
                 let _ = std::fs::remove_dir_all(&dir);
@@ -171,6 +175,23 @@ impl Drop for FileServerHandle {
                     let _ = std::fs::remove_dir_all(&doomed);
                 }
             }
+        }
+    }
+}
+
+/// Remove the socket directories under `socket_dir` that a previous worker
+/// renamed aside but stopped before removing.
+pub(crate) async fn remove_abandoned_socket_dirs(socket_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(socket_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let abandoned = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.contains(REMOVING_DIR_MARKER));
+        if abandoned && entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
 }

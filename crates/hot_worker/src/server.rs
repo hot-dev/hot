@@ -3053,11 +3053,16 @@ fn spawn_event_lease_keepalive(
         let mut delay = std::time::Duration::ZERO;
         loop {
             tokio::time::sleep(delay).await;
+            // The handlers are done and this worker is settling the delivery:
+            // there is nothing left to keep alive.
+            if handlers_done.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             let touch_started = tokio::time::Instant::now();
             let touched = keepalive.touch().await;
-            // The handlers are done and this worker is settling the delivery:
-            // an entry found acknowledged now is its own ACK, and no run is
-            // left for a verdict to stop.
+            // They finished while the touch was in flight: an entry found
+            // acknowledged now is this worker's own ACK, and no run is left
+            // for a verdict to stop.
             if handlers_done.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
@@ -3939,20 +3944,44 @@ async fn hydrate_event_message_from_db(
     }
     let target_build_id = persisted_target_build_id.or(claimed_context.build_id);
     let authoritative_build = if let Some(build_id) = target_build_id {
-        let build = Build::get_build(db, &build_id).await.map_err(|e| {
-            worker_error(format!(
-                "Target build {} for event {} is invalid: {}",
-                build_id, event_id, e
-            ))
-        })?;
-        let project = Project::get_project_including_inactive(db, &build.project_id)
-            .await
-            .map_err(|e| {
-                worker_error(format!(
+        // As for the target project above: a database that cannot answer
+        // says nothing about the build, so the delivery is retried.
+        let build = match Build::get_build(db, &build_id).await {
+            Ok(build) => build,
+            Err(hot::db::build::BuildError::Database(e)) => {
+                return Err(worker_infrastructure_retry_error(
+                    format!(
+                        "Failed to load target build {} for event {}: {}",
+                        build_id, event_id, e
+                    ),
+                    infra_retry_backoff_ms,
+                ));
+            }
+            Err(e) => {
+                return Err(worker_error(format!(
+                    "Target build {} for event {} is invalid: {}",
+                    build_id, event_id, e
+                )));
+            }
+        };
+        let project = match Project::get_project_including_inactive(db, &build.project_id).await {
+            Ok(project) => project,
+            Err(hot::db::project::ProjectError::Database(e)) => {
+                return Err(worker_infrastructure_retry_error(
+                    format!(
+                        "Failed to load project {} for target build {}: {}",
+                        build.project_id, build_id, e
+                    ),
+                    infra_retry_backoff_ms,
+                ));
+            }
+            Err(e) => {
+                return Err(worker_error(format!(
                     "Project {} for target build {} is invalid: {}",
                     build.project_id, build_id, e
-                ))
-            })?;
+                )));
+            }
+        };
         if project.env_id != stored_event.env_id {
             return Err(worker_error(format!(
                 "Target build {} does not belong to event environment {}",
@@ -3973,7 +4002,14 @@ async fn hydrate_event_message_from_db(
         .as_ref()
         .is_some_and(|(_, project)| !project.active)
     {
-        park_event_for_inactive_project(db, &event_message).await?;
+        park_event_for_inactive_project(db, &event_message)
+            .await
+            .map_err(|e| {
+                worker_infrastructure_retry_error(
+                    format!("Failed to park event for inactive project: {e}"),
+                    infra_retry_backoff_ms,
+                )
+            })?;
         return Err(Box::new(ParkedEvent));
     }
     if !(0..=100).contains(&claimed_context.retry_attempt) {
