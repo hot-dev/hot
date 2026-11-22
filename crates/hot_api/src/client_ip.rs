@@ -17,6 +17,11 @@ static LEGACY_FORWARDED_WARNING: Once = Once::new();
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientIp(pub String);
 
+/// Whether the direct TCP peer is trusted to supply forwarding headers
+/// (`X-Forwarded-Host`, `X-Forwarded-Proto`) under the configured `ClientIpPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustedProxyPeer(pub bool);
+
 #[derive(Clone, Debug)]
 pub struct ClientIpPolicy {
     trusted_proxy: bool,
@@ -55,48 +60,63 @@ impl ClientIpPolicy {
         })
     }
 
+    /// Whether the direct TCP peer is trusted to supply forwarding headers
+    /// (`X-Forwarded-Host`, `X-Forwarded-Proto`) under this policy.
+    pub fn trusts_forwarded_headers(&self, peer: SocketAddr) -> bool {
+        !self.trusted_proxy || self.is_trusted(peer.ip())
+    }
+
     pub fn resolve(&self, headers: &HeaderMap, peer: SocketAddr) -> Option<ClientIp> {
         if !self.trusted_proxy {
             return legacy_forwarded_value(headers).map(ClientIp);
         }
 
-        let peer_ip = peer.ip();
+        let peer_ip = peer.ip().to_canonical();
         if !self.is_trusted(peer_ip) {
             return Some(ClientIp(peer_ip.to_string()));
         }
 
-        let Some(value) = headers
-            .get(&self.forwarded_header)
-            .and_then(|value| value.to_str().ok())
-        else {
-            return Some(ClientIp(peer_ip.to_string()));
-        };
-
-        let mut chain = Vec::new();
-        for value in value.split(',') {
-            let Ok(ip) = value.trim().parse::<IpAddr>() else {
+        // Walk all matching forwarding header lines from right to left
+        // (closest-to-server first), stopping at the first untrusted IP.
+        // Client-supplied garbage to the left of an untrusted edge IP is never
+        // reached; an unparseable entry adjacent to a trusted proxy fails
+        // closed to `peer_ip`.
+        let mut earliest_trusted: Option<IpAddr> = None;
+        let mut saw_any = false;
+        let values: Vec<_> = headers.get_all(&self.forwarded_header).iter().collect();
+        for header_val in values.into_iter().rev() {
+            let Ok(raw) = header_val.to_str() else {
                 return Some(ClientIp(peer_ip.to_string()));
             };
-            chain.push(ip);
+            for token in raw.rsplit(',') {
+                let token = token.trim();
+                if token.is_empty() {
+                    return Some(ClientIp(peer_ip.to_string()));
+                }
+                let Ok(ip) = token.parse::<IpAddr>() else {
+                    return Some(ClientIp(peer_ip.to_string()));
+                };
+                let ip = ip.to_canonical();
+                saw_any = true;
+                if !self.is_trusted(ip) {
+                    return Some(ClientIp(ip.to_string()));
+                }
+                earliest_trusted = Some(ip);
+            }
         }
-        if chain.is_empty() {
+
+        if !saw_any {
             return Some(ClientIp(peer_ip.to_string()));
         }
 
-        chain.push(peer_ip);
-        let client = chain
-            .iter()
-            .rev()
-            .copied()
-            .find(|ip| !self.is_trusted(*ip))
-            .unwrap_or(chain[0]);
-        Some(ClientIp(client.to_string()))
+        Some(ClientIp(earliest_trusted.unwrap_or(peer_ip).to_string()))
     }
 
     fn is_trusted(&self, ip: IpAddr) -> bool {
+        let canonical = ip.to_canonical();
         self.trusted_proxies
             .iter()
-            .any(|network| network.contains(&ip))
+            .any(|network| network.contains(&ip) || network.contains(&canonical))
     }
 }
 
@@ -166,6 +186,9 @@ pub async fn client_ip_middleware(
             );
         });
     }
+    request
+        .extensions_mut()
+        .insert(TrustedProxyPeer(policy.trusts_forwarded_headers(peer)));
     if let Some(client_ip) = policy.resolve(request.headers(), peer) {
         request.extensions_mut().insert(client_ip);
     }
@@ -313,5 +336,34 @@ mod tests {
             policy.resolve(&headers, peer("127.0.0.1")),
             Some(ClientIp("198.51.100.7".to_string()))
         );
+    }
+
+    #[test]
+    fn enabled_policy_handles_multiple_header_lines_leftmost_garbage_and_mapped_v6() {
+        let policy = ClientIpPolicy::from_conf(&hot::val!({
+            "network": {
+                "client-ip": {
+                    "trusted-proxy": true,
+                    "trusted-proxies": ["127.0.0.1/32", "10.0.0.0/8"],
+                },
+            },
+        }))
+        .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "x-forwarded-for",
+            "spoofed-garbage, 198.51.100.7".parse().unwrap(),
+        );
+        headers.append("x-forwarded-for", "10.0.0.8".parse().unwrap());
+
+        // IPv4-mapped IPv6 peer matches IPv4 trusted CIDR, walks across both
+        // header lines right-to-left, and stops at 198.51.100.7 before garbage.
+        assert_eq!(
+            policy.resolve(&headers, peer("::ffff:127.0.0.1")),
+            Some(ClientIp("198.51.100.7".to_string()))
+        );
+        assert!(policy.trusts_forwarded_headers(peer("::ffff:127.0.0.1")));
+        assert!(!policy.trusts_forwarded_headers(peer("203.0.113.5")));
     }
 }

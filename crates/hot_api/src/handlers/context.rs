@@ -92,6 +92,16 @@ pub async fn create_context_variable(
 > {
     super::require_api_key(&auth, "Only API keys can create context variables.")?;
 
+    let key = req.key.trim();
+    if key.is_empty() || key.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "Context variable key must be between 1 and 255 characters",
+            )),
+        ));
+    }
+
     let project = get_and_verify_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Get org_id for encryption
@@ -117,17 +127,35 @@ pub async fn create_context_variable(
         &db,
         &context_id,
         &project.project_id,
-        &req.key,
+        key,
         &encrypted_value,
         req.description.as_deref(),
         &api_key.created_by_user_id,
     )
     .await
-    .map_err(|e| {
-        (
+    .map_err(|e| match e {
+        hot::db::context::ContextError::AlreadyExists => (
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse::new(
+                "conflict",
+                "Context variable with this key already exists",
+            )),
+        ),
+        hot::db::context::ContextError::Database(sqlx::Error::Database(ref db_err))
+            if db_err.is_unique_violation() =>
+        {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new(
+                    "conflict",
+                    "Context variable with this key already exists",
+                )),
+            )
+        }
+        other => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        )
+            Json(ApiErrorResponse::internal_error(&other.to_string())),
+        ),
     })?;
 
     // Get the created context variable

@@ -533,10 +533,17 @@ impl BytecodeCache {
         &self,
         cache_key: &str,
     ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
+        if cache_key.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cache_key must not be empty",
+            ));
+        }
         // Ensure cache directory exists
         std::fs::create_dir_all(&self.cache_dir)?;
 
-        let lock_path = self.cache_dir.join(format!("{}.lock", &cache_key[..12]));
+        let prefix = &cache_key[..cache_key.len().min(12)];
+        let lock_path = self.cache_dir.join(format!("{}.lock", prefix));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

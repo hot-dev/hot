@@ -34,7 +34,7 @@ use hot::val::Val;
 
 use crate::access_log::OptionalAccessId;
 use crate::auth::{AuthContext, authenticate_or_reject};
-use crate::client_ip::ClientIp;
+use crate::client_ip::{ClientIp, TrustedProxyPeer};
 use crate::domain_resolver::ResolvedDomain;
 use crate::rate_limit::{self, PublicRateLimitMode};
 use once_cell::sync::OnceCell;
@@ -644,7 +644,7 @@ fn normalize_origin(value: &str) -> Option<String> {
     Some(parsed.origin().ascii_serialization())
 }
 
-fn request_origin(headers: &HeaderMap) -> Option<String> {
+fn request_origin(headers: &HeaderMap, trust_forwarded: bool) -> Option<String> {
     let host = headers
         .get("host")?
         .to_str()
@@ -652,17 +652,30 @@ fn request_origin(headers: &HeaderMap) -> Option<String> {
         .split(',')
         .next()?
         .trim();
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| matches!(*value, "http" | "https"))
-        .unwrap_or("http");
+    let scheme = if trust_forwarded {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| matches!(*value, "http" | "https"))
+    } else {
+        None
+    }
+    .unwrap_or("http");
     normalize_origin(&format!("{}://{}", scheme, host))
 }
 
+#[cfg(test)]
 fn validate_mcp_origin(headers: &HeaderMap, conf: &Val) -> Result<(), String> {
+    validate_mcp_origin_with_trust(headers, conf, true)
+}
+
+fn validate_mcp_origin_with_trust(
+    headers: &HeaderMap,
+    conf: &Val,
+    trust_forwarded: bool,
+) -> Result<(), String> {
     let Some(origin_value) = headers.get("origin") else {
         return Ok(());
     };
@@ -672,7 +685,7 @@ fn validate_mcp_origin(headers: &HeaderMap, conf: &Val) -> Result<(), String> {
     let origin = normalize_origin(origin_value)
         .ok_or_else(|| "Origin header is not a valid HTTP(S) origin".to_string())?;
 
-    if request_origin(headers).as_deref() == Some(origin.as_str()) {
+    if request_origin(headers, trust_forwarded).as_deref() == Some(origin.as_str()) {
         return Ok(());
     }
 
@@ -1282,7 +1295,7 @@ fn get_event_queue(
     EVENT_QUEUE.get_or_try_init(|| {
         let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
         let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
-            .unwrap_or(hot::queue::QueueType::Memory);
+            .map_err(|_| format!("Invalid queue.type configuration: '{}'", queue_type_str))?;
 
         let redis_uri_str = conf.get_str_or_default("redis.uri", "");
         let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
@@ -1408,30 +1421,14 @@ async fn resolve_mcp_context(
             ));
         }
 
-        // A grant on one tool reaches the service too; `tools/call` then
-        // checks the tool being called.
+        // A grant on one tool reaches the service too (including wildcards like
+        // `mcp:weather-*`); `tools/call` then checks the specific tool called.
         if !auth_ctx.has_mcp_service_access(&service) {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiErrorResponse::new(
                     "forbidden",
-                    "Credentials do not have MCP access. Required permission: execute on mcp:<service>/* or on one of the service's tools",
-                )),
-            ));
-        }
-
-        if let Some(allowed_services) = auth_ctx.mcp_service_restrictions()
-            && !allowed_services.contains(&service)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    format!(
-                        "Credentials do not have access to MCP service '{}'. Allowed: {}",
-                        service,
-                        allowed_services.join(", ")
-                    ),
+                    "Credentials do not have MCP access to this service",
                 )),
             ));
         }
@@ -1483,30 +1480,14 @@ async fn resolve_mcp_context_from_domain(
             ));
         }
 
-        // A grant on one tool reaches the service too; `tools/call` then
-        // checks the tool being called.
+        // A grant on one tool reaches the service too (including wildcards like
+        // `mcp:weather-*`); `tools/call` then checks the specific tool called.
         if !auth_ctx.has_mcp_service_access(&service) {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiErrorResponse::new(
                     "forbidden",
-                    "Credentials do not have MCP access. Required permission: execute on mcp:<service>/* or on one of the service's tools",
-                )),
-            ));
-        }
-
-        if let Some(allowed_services) = auth_ctx.mcp_service_restrictions()
-            && !allowed_services.contains(&service)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    format!(
-                        "Credentials do not have access to MCP service '{}'. Allowed: {}",
-                        service,
-                        allowed_services.join(", ")
-                    ),
+                    "Credentials do not have MCP access to this service",
                 )),
             ));
         }
@@ -1549,8 +1530,45 @@ pub async fn mcp_handler(
         &db,
         &conf,
         &stream_pubsub,
+        None,
         access_id,
         client_ip.map(|extension| extension.0),
+        true,
+        &headers,
+        request,
+        source,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mcp_handler_route(
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
+    OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    blob_store: Option<Extension<Option<Arc<hot::blob::BlobStore>>>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path((org_slug, env_name, service)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
+        org_slug,
+        env_name,
+        service,
+    };
+    let blob_store = super::blob_store_from_ext(blob_store);
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_handler_inner(
+        &db,
+        &conf,
+        &stream_pubsub,
+        blob_store,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        trust_forwarded,
         &headers,
         request,
         source,
@@ -1586,8 +1604,50 @@ pub async fn mcp_handler_domain(
         &db,
         &conf,
         &stream_pubsub,
+        None,
         access_id,
         client_ip.map(|extension| extension.0),
+        true,
+        &headers,
+        request,
+        source,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mcp_handler_domain_route(
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
+    OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    blob_store: Option<Extension<Option<Arc<hot::blob::BlobStore>>>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path(service): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    let resolved = resolved
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found(
+                    "This endpoint requires a custom domain",
+                )),
+            )
+        })?
+        .0;
+    let source = McpRouteSource::Domain { resolved, service };
+    let blob_store = super::blob_store_from_ext(blob_store);
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_handler_inner(
+        &db,
+        &conf,
+        &stream_pubsub,
+        blob_store,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        trust_forwarded,
         &headers,
         request,
         source,
@@ -1760,13 +1820,15 @@ async fn mcp_handler_inner(
     db: &Arc<hot::db::DatabasePool>,
     conf: &Arc<Val>,
     stream_pubsub: &Option<Arc<hot::stream::StreamPubSub>>,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
     access_id: Option<Uuid>,
     client_ip: Option<ClientIp>,
+    trust_forwarded: bool,
     headers: &HeaderMap,
     request: JsonRpcRequest,
     source: McpRouteSource,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
-    if let Err(message) = validate_mcp_origin(headers, conf) {
+    if let Err(message) = validate_mcp_origin_with_trust(headers, conf, trust_forwarded) {
         return Ok(json_rpc_http_response(
             StatusCode::FORBIDDEN,
             request.id,
@@ -1812,7 +1874,7 @@ async fn mcp_handler_inner(
         return Ok(StatusCode::ACCEPTED.into_response());
     }
 
-    let mcp_timeout = conf.get_int_or_default("mcp.timeout", 60) as u64;
+    let mcp_timeout = conf.get_int_or_default("mcp.timeout", 60).clamp(1, 300) as u64;
 
     match request.method.as_str() {
         "initialize" if !protocol.is_modern() => {
@@ -1911,6 +1973,7 @@ async fn mcp_handler_inner(
                 db,
                 conf,
                 pubsub,
+                blob_store,
                 &ctx,
                 request.id,
                 request.params,
@@ -2001,9 +2064,21 @@ async fn handle_tools_list(
             )
         })?;
 
-    // Convert to MCP tool definitions
+    // Convert to MCP tool definitions, filtering to authorized tools when a
+    // credential is present (unauthenticated discovery remains supported).
     let tool_defs: Vec<McpToolDef> = tools
         .into_iter()
+        .filter(|t| {
+            if let Some((auth_ctx, _)) = ctx.auth.as_ref() {
+                t.is_public()
+                    || auth_ctx.has_permission(
+                        &format!("mcp:{}/{}", ctx.service, t.name),
+                        actions::EXECUTE,
+                    )
+            } else {
+                true
+            }
+        })
         .filter_map(|t| {
             let input_schema = t.input_schema.unwrap_or_else(|| {
                 serde_json::json!({
@@ -2089,6 +2164,7 @@ async fn handle_tools_call_streaming(
     db: &hot::db::DatabasePool,
     conf: &Val,
     stream_pubsub: &Arc<hot::stream::StreamPubSub>,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
     ctx: &McpContext,
     id: Option<JsonValue>,
     params: Option<JsonValue>,
@@ -2100,16 +2176,19 @@ async fn handle_tools_call_streaming(
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
     // Parse params
     let call_params: ToolsCallParams = match params {
-        Some(p) => serde_json::from_value(p).map_err(|e| {
-            tracing::warn!("Invalid tools/call params: {}", e);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ApiErrorResponse::bad_request(&format!(
-                    "Invalid params: {}",
-                    e
-                ))),
-            )
-        })?,
+        Some(p) => match serde_json::from_value(p) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!("Invalid tools/call params: {}", e);
+                return Ok(json_rpc_http_response(
+                    StatusCode::BAD_REQUEST,
+                    id,
+                    INVALID_PARAMS,
+                    format!("Invalid params: {}", e),
+                    None,
+                ));
+            }
+        },
         None => {
             return Ok(Json(JsonRpcResponse::error(
                 id,
@@ -2159,12 +2238,49 @@ async fn handle_tools_call_streaming(
             return Ok(Json(JsonRpcResponse::error(
                 id,
                 INTERNAL_ERROR,
-                format!("Failed to lookup tool: {}", e),
+                "Failed to lookup tool".to_string(),
                 None,
             ))
             .into_response());
         }
     };
+
+    // Per-tool auth check MUST run before header or JSON Schema validation so
+    // unauthenticated callers cannot probe private tool schemas or burn CPU.
+    // Only exact `auth: "none"` is public; missing/unknown values require auth.
+    let mut guard_permissions = Vec::new();
+    if !tool.is_public() {
+        match &ctx.auth {
+            Some((auth_ctx, _)) => {
+                let tool_resource = format!("mcp:{}/{}", ctx.service, call_params.name);
+                if !auth_ctx.has_permission(&tool_resource, actions::EXECUTE) {
+                    return Ok(Json(JsonRpcResponse::error(
+                        id,
+                        INVALID_PARAMS,
+                        format!(
+                            "Credential does not have execute permission for tool '{}'",
+                            call_params.name
+                        ),
+                        None,
+                    ))
+                    .into_response());
+                }
+                guard_permissions.push((tool_resource, actions::EXECUTE.to_string()));
+            }
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(ApiErrorResponse::new(
+                        "unauthorized",
+                        format!(
+                            "Tool '{}' requires authentication. Provide Authorization: Bearer <token>",
+                            call_params.name
+                        ),
+                    )),
+                ));
+            }
+        }
+    }
 
     if protocol.is_modern()
         && let Err(message) = validate_mcp_parameter_headers(
@@ -2211,40 +2327,6 @@ async fn handle_tools_call_streaming(
                 serde_json::to_value(call_result).unwrap_or(JsonValue::Null),
             ))
             .into_response());
-        }
-    }
-
-    // Per-tool auth check: only exact `auth: "none"` is public. Missing,
-    // malformed, or unknown values require auth.
-    if !tool.is_public() {
-        match &ctx.auth {
-            Some((auth_ctx, _)) => {
-                let tool_resource = format!("mcp:{}/{}", ctx.service, call_params.name);
-                if !auth_ctx.has_permission(&tool_resource, actions::EXECUTE) {
-                    return Ok(Json(JsonRpcResponse::error(
-                        id,
-                        INVALID_PARAMS,
-                        format!(
-                            "Credential does not have execute permission for tool '{}'",
-                            call_params.name
-                        ),
-                        None,
-                    ))
-                    .into_response());
-                }
-            }
-            None => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(ApiErrorResponse::new(
-                        "unauthorized",
-                        format!(
-                            "Tool '{}' requires authentication. Provide Authorization: Bearer <token>",
-                            call_params.name
-                        ),
-                    )),
-                ));
-            }
         }
     }
 
@@ -2516,7 +2598,7 @@ async fn handle_tools_call_streaming(
     let stream_auth = ctx.auth.as_ref().map(|(auth, _)| auth.clone());
     let stream_db = Arc::new(db.clone());
     let result_db = stream_db.clone();
-    let result_conf = conf.clone();
+    let result_blob_store = blob_store;
     let result_env = ctx.env.env_id;
     let sse_stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
@@ -2541,7 +2623,11 @@ async fn handle_tools_call_streaming(
             tokio::select! {
                 event = async { subscriber.next().await } => {
                     match event {
-                        StreamNext::Event(StreamEvent::RunStart { run_id: started_run_id, .. }) => {
+                        StreamNext::Event(StreamEvent::RunStart {
+                            run_id: started_run_id,
+                            event_id: started_event_id,
+                            ..
+                        }) if started_event_id == Some(event_id) => {
                             if emit_info_logs {
                                 // Modern logging is explicitly requested per call.
                                 let notification = serde_json::json!({
@@ -2584,22 +2670,36 @@ async fn handle_tools_call_streaming(
                                 }
                             }
                         }
-                        StreamNext::Event(StreamEvent::RunStop { run_id: completed_run, result, .. }) => {
-                            outcome = Some(match super::resolve_stream_result(&result_db, &result_conf, result_env, completed_run, result).await {
+                        StreamNext::Event(StreamEvent::RunStop {
+                            run_id: completed_run,
+                            event_id: completed_event_id,
+                            result,
+                            ..
+                        }) if completed_event_id == Some(event_id) => {
+                            outcome = Some(match super::resolve_stream_result(&result_db, result_blob_store.as_ref(), result_env, completed_run, result).await {
                                 Ok(result) => Outcome::Stopped { result },
                                 Err(error) => Outcome::Failed { error: Some(error) },
                             });
                             break;
                         }
-                        StreamNext::Event(StreamEvent::RunFail { error, .. }) => {
+                        StreamNext::Event(StreamEvent::RunFail {
+                            event_id: failed_event_id,
+                            error,
+                            ..
+                        }) if failed_event_id == Some(event_id) => {
                             outcome = Some(Outcome::Failed { error });
                             break;
                         }
-                        StreamNext::Event(StreamEvent::RunCancel { reason, .. }) => {
+                        StreamNext::Event(StreamEvent::RunCancel {
+                            event_id: cancelled_event_id,
+                            reason,
+                            ..
+                        }) if cancelled_event_id == Some(event_id) => {
                             outcome = Some(Outcome::Cancelled { reason });
                             break;
                         }
-                        StreamNext::Event(StreamEvent::TaskMessage { .. }) => {}
+                        // Ignore child runs on the same stream and TaskMessage events.
+                        StreamNext::Event(_) => {}
                         StreamNext::Idle => {}
                         StreamNext::Closed => {
                             // Subscriber closed unexpectedly
@@ -2771,7 +2871,7 @@ async fn handle_tools_call_streaming(
         stream_db,
         stream_auth,
         stream_scope,
-        Vec::new(),
+        guard_permissions,
     ))
     .keep_alive(KeepAlive::default())
     .into_response();
@@ -2906,6 +3006,32 @@ fn mcp_http_sse_session_timeout(conf: &Val) -> tokio::time::Duration {
 /// The first event is `endpoint` with the URL the client should POST to.
 /// Subsequent events are JSON-RPC responses/notifications routed from
 /// `mcp_http_sse_messages_handler` via the shared pub/sub layer.
+/// Drop guard ensuring MCP HTTP+SSE transport sessions are deleted even when
+/// the client disconnects abruptly and drops the SSE stream future.
+struct McpSseSessionCleanupGuard {
+    pubsub: Arc<hot::stream::StreamPubSub>,
+    transport_session_id: Uuid,
+}
+
+impl Drop for McpSseSessionCleanupGuard {
+    fn drop(&mut self) {
+        let pubsub = Arc::clone(&self.pubsub);
+        let session_id = self.transport_session_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(e) = pubsub.delete_mcp_sse_transport_session(session_id).await {
+                    tracing::warn!(
+                        "MCP HTTP+SSE: failed to delete transport session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+                tracing::info!("MCP HTTP+SSE: transport session {} closed", session_id);
+            });
+        }
+    }
+}
+
 pub async fn mcp_sse_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     resolved: Option<Extension<ResolvedDomain>>,
@@ -2927,6 +3053,37 @@ pub async fn mcp_sse_handler(
         conf,
         stream_pubsub,
         headers,
+        true,
+        messages_path_prefix,
+        source,
+    )
+    .await
+}
+
+pub(crate) async fn mcp_sse_handler_route(
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path((org_slug, env_name, service)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<
+    Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
+    (StatusCode, Json<ApiErrorResponse>),
+> {
+    let messages_path_prefix = format!("/mcp/{}/{}/{}", org_slug, env_name, service);
+    let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
+        org_slug,
+        env_name,
+        service,
+    };
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_sse_handler_core(
+        db,
+        conf,
+        stream_pubsub,
+        headers,
+        trust_forwarded,
         messages_path_prefix,
         source,
     )
@@ -2961,6 +3118,43 @@ pub async fn mcp_sse_handler_domain(
         conf,
         stream_pubsub,
         headers,
+        true,
+        messages_path_prefix,
+        source,
+    )
+    .await
+}
+
+pub(crate) async fn mcp_sse_handler_domain_route(
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path(service): Path<String>,
+    headers: HeaderMap,
+) -> Result<
+    Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
+    (StatusCode, Json<ApiErrorResponse>),
+> {
+    let resolved = resolved.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found(
+                "This endpoint requires a custom domain",
+            )),
+        )
+    })?;
+    let messages_path_prefix = format!("/mcp/{}", service);
+    let source = McpRouteSource::Domain {
+        resolved: resolved.0,
+        service,
+    };
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_sse_handler_core(
+        db,
+        conf,
+        stream_pubsub,
+        headers,
+        trust_forwarded,
         messages_path_prefix,
         source,
     )
@@ -2972,13 +3166,14 @@ async fn mcp_sse_handler_core(
     conf: Arc<Val>,
     stream_pubsub: Option<Arc<hot::stream::StreamPubSub>>,
     headers: HeaderMap,
+    trust_forwarded: bool,
     messages_path_prefix: String,
     source: McpRouteSource,
 ) -> Result<
     Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
-    if let Err(message) = validate_mcp_origin(&headers, &conf) {
+    if let Err(message) = validate_mcp_origin_with_trust(&headers, &conf, trust_forwarded) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiErrorResponse::new("forbidden", message)),
@@ -3006,6 +3201,37 @@ async fn mcp_sse_handler_core(
     })?;
     let ctx = source.resolve(&db, Some(auth)).await?;
     let env_id = ctx.env.env_id;
+    let scoped_db = Arc::new(db.with_scope(hot::db::DatabaseScope::Environment {
+        org_id: ctx.org.org_id,
+        env_id,
+    }));
+    if let Err(exceeded) = rate_limit::check_org_rate_limit(
+        &scoped_db,
+        &ctx.org.org_id,
+        PublicRateLimitMode::from_conf(&conf),
+        "mcp-http-sse",
+    )
+    .await
+    {
+        return Err((
+            exceeded.status_code(),
+            Json(rate_limit::rate_limit_error_body(exceeded)),
+        ));
+    }
+    let auth_ctx_for_limit = ctx
+        .auth
+        .as_ref()
+        .map(|(a, _)| a)
+        .expect("mcp_sse_handler_core requires authenticated context");
+    let connection_guard =
+        rate_limit::acquire_sse_connection(&scoped_db, &conf, auth_ctx_for_limit, "mcp-http-sse")
+            .await
+            .map_err(|exceeded| {
+                (
+                    exceeded.status_code(),
+                    Json(rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
     let principal = mcp_sse_transport_principal_from_context(&ctx)?;
 
     let pubsub = stream_pubsub.as_ref().cloned().ok_or_else(|| {
@@ -3058,15 +3284,22 @@ async fn mcp_sse_handler_core(
         messages_path_prefix
     );
 
-    let pubsub_for_cleanup = Arc::clone(&pubsub);
+    let session_cleanup = McpSseSessionCleanupGuard {
+        pubsub: Arc::clone(&pubsub),
+        transport_session_id,
+    };
     let stream_scope = hot::db::DatabaseScope::Environment {
         org_id: ctx.org.org_id,
         env_id: ctx.env.env_id,
     };
     let stream_auth = ctx.auth.as_ref().map(|(auth, _)| auth.clone());
+    let guard_permissions = vec![(ctx.service.clone(), "mcp_service_access".to_string())];
     let stream_db = db.clone();
     let stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
+
+        let _connection_guard = connection_guard;
+        let _session_cleanup = session_cleanup;
 
         // First event: tell the client where to POST messages
         yield Ok::<SseEvent, Infallible>(
@@ -3109,22 +3342,6 @@ async fn mcp_sse_handler_core(
                 }
             }
         }
-
-        if let Err(e) = pubsub_for_cleanup
-            .delete_mcp_sse_transport_session(transport_session_id)
-            .await
-        {
-            tracing::warn!(
-                "MCP HTTP+SSE: failed to delete transport session {}: {}",
-                transport_session_id,
-                e
-            );
-        }
-
-        tracing::info!(
-            "MCP HTTP+SSE: transport session {} closed",
-            transport_session_id
-        );
     };
 
     Ok(Sse::new(crate::auth::guard_stream(
@@ -3132,7 +3349,7 @@ async fn mcp_sse_handler_core(
         stream_db,
         stream_auth,
         stream_scope,
-        Vec::new(),
+        guard_permissions,
     ))
     .keep_alive(KeepAlive::default()))
 }
@@ -3163,8 +3380,45 @@ pub async fn mcp_http_sse_messages_handler(
     };
     mcp_http_sse_messages_inner(
         state,
+        None,
         access_id,
         client_ip.map(|extension| extension.0),
+        true,
+        query,
+        headers,
+        request,
+        source,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mcp_http_sse_messages_handler_route(
+    State(state): State<ApiStateData>,
+    OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    blob_store: Option<Extension<Option<Arc<hot::blob::BlobStore>>>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path((org_slug, env_name, service)): Path<(String, String, String)>,
+    query: Query<HttpSseMessageQuery>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
+        org_slug,
+        env_name,
+        service,
+    };
+    let blob_store = super::blob_store_from_ext(blob_store);
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_http_sse_messages_inner(
+        state,
+        blob_store,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        trust_forwarded,
         query,
         headers,
         request,
@@ -3198,8 +3452,10 @@ pub async fn mcp_http_sse_messages_handler_domain(
     let source = McpRouteSource::Domain { resolved, service };
     mcp_http_sse_messages_inner(
         state,
+        None,
         access_id,
         client_ip.map(|extension| extension.0),
+        true,
         query,
         headers,
         request,
@@ -3208,10 +3464,53 @@ pub async fn mcp_http_sse_messages_handler_domain(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mcp_http_sse_messages_handler_domain_route(
+    State(state): State<ApiStateData>,
+    OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    blob_store: Option<Extension<Option<Arc<hot::blob::BlobStore>>>>,
+    resolved: Option<Extension<ResolvedDomain>>,
+    Path(service): Path<String>,
+    query: Query<HttpSseMessageQuery>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    let resolved = resolved
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found(
+                    "This endpoint requires a custom domain",
+                )),
+            )
+        })?
+        .0;
+    let source = McpRouteSource::Domain { resolved, service };
+    let blob_store = super::blob_store_from_ext(blob_store);
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    mcp_http_sse_messages_inner(
+        state,
+        blob_store,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        trust_forwarded,
+        query,
+        headers,
+        request,
+        source,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn mcp_http_sse_messages_inner(
     state: ApiStateData,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
     access_id: Option<Uuid>,
     client_ip: Option<ClientIp>,
+    trust_forwarded: bool,
     query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     request: JsonRpcRequest,
@@ -3226,7 +3525,21 @@ async fn mcp_http_sse_messages_inner(
         )
     })?;
 
-    let (db, _storage, _conf, stream_pubsub) = &state;
+    let (db, _storage, conf, stream_pubsub) = &state;
+
+    if let Err(message) = validate_mcp_origin_with_trust(&headers, conf, trust_forwarded) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new("forbidden", message)),
+        ));
+    }
+
+    if !conf.get_bool_or_default("mcp.enabled", true) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorResponse::new("mcp_disabled", "MCP is disabled")),
+        ));
+    }
 
     let pubsub = stream_pubsub.as_ref().ok_or_else(|| {
         (
@@ -3251,6 +3564,23 @@ async fn mcp_http_sse_messages_inner(
     })?;
     let ctx = source.clone().resolve(db, Some(auth)).await?;
     let env_id = ctx.env.env_id;
+    let scoped_db = Arc::new(db.with_scope(hot::db::DatabaseScope::Environment {
+        org_id: ctx.org.org_id,
+        env_id,
+    }));
+    if let Err(exceeded) = rate_limit::check_org_rate_limit(
+        &scoped_db,
+        &ctx.org.org_id,
+        PublicRateLimitMode::from_conf(conf),
+        "mcp-http-sse-messages",
+    )
+    .await
+    {
+        return Err((
+            exceeded.status_code(),
+            Json(rate_limit::rate_limit_error_body(exceeded)),
+        ));
+    }
     let principal = mcp_sse_transport_principal_from_context(&ctx)?;
     let binding = pubsub
         .get_mcp_sse_transport_session(transport_session_id)
@@ -3275,11 +3605,13 @@ async fn mcp_http_sse_messages_inner(
     let pubsub_clone = pubsub.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        process_mcp_http_sse_message_request(
+        process_mcp_http_sse_message_request_with_context(
             state_clone,
+            blob_store,
             headers,
             access_id,
             client_ip,
+            trust_forwarded,
             source,
             request,
             transport_session_id,
@@ -3292,6 +3624,7 @@ async fn mcp_http_sse_messages_inner(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn process_mcp_http_sse_message_request(
     state: ApiStateData,
@@ -3304,14 +3637,46 @@ async fn process_mcp_http_sse_message_request(
     env_id: Uuid,
     pubsub: Arc<hot::stream::StreamPubSub>,
 ) {
+    process_mcp_http_sse_message_request_with_context(
+        state,
+        None,
+        headers,
+        access_id,
+        client_ip,
+        true,
+        source,
+        request,
+        transport_session_id,
+        env_id,
+        pubsub,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_mcp_http_sse_message_request_with_context(
+    state: ApiStateData,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
+    headers: HeaderMap,
+    access_id: Option<Uuid>,
+    client_ip: Option<ClientIp>,
+    trust_forwarded: bool,
+    source: McpRouteSource,
+    request: JsonRpcRequest,
+    transport_session_id: Uuid,
+    env_id: Uuid,
+    pubsub: Arc<hot::stream::StreamPubSub>,
+) {
     let (db, _, conf, stream_pubsub) = &state;
     let request_id = request.id.clone();
     let response = mcp_handler_inner(
         db,
         conf,
         stream_pubsub,
+        blob_store,
         access_id,
         client_ip,
+        trust_forwarded,
         &headers,
         request,
         source,
@@ -4901,89 +5266,147 @@ mod tests {
     }
 
     // ========================================================================
-    // Stream event matching contract tests (bug #5: run_id mismatch)
+    // Stream event matching contract tests (bug #5 + event_id correlation)
     // ========================================================================
     //
     // The worker generates its own run_id, different from the one the MCP handler
-    // creates. The wait_for_run_completion function must accept ANY terminal event
-    // on the stream, not filter by run_id. These tests verify the matching logic
-    // in isolation (without needing a DB).
+    // creates, so matching must NOT filter by run_id — instead it correlates by
+    // the call's event_id so child events emitted onto the same stream_id cannot
+    // hijack the response.
 
-    /// Helper: simulates the event matching logic from wait_for_run_completion.
-    /// Returns Some(run_id) for terminal events, None for non-terminal events.
-    fn match_terminal_event(event: &hot::stream::StreamEvent) -> Option<Uuid> {
+    /// Helper: simulates the event matching logic from handle_tools_call_streaming.
+    /// Returns Some(run_id) for terminal events belonging to `expected_event_id`.
+    fn match_terminal_event(
+        event: &hot::stream::StreamEvent,
+        expected_event_id: Uuid,
+    ) -> Option<Uuid> {
         use hot::stream::StreamEvent;
         match event {
-            StreamEvent::RunStop { run_id, .. }
-            | StreamEvent::RunFail { run_id, .. }
-            | StreamEvent::RunCancel { run_id, .. } => Some(*run_id),
+            StreamEvent::RunStop {
+                run_id, event_id, ..
+            }
+            | StreamEvent::RunFail {
+                run_id, event_id, ..
+            }
+            | StreamEvent::RunCancel {
+                run_id, event_id, ..
+            } if *event_id == Some(expected_event_id) => Some(*run_id),
             _ => None,
         }
     }
 
     #[test]
-    fn test_stream_matching_accepts_any_run_id_on_stop() {
+    fn test_stream_matching_accepts_any_run_id_with_matching_event_id() {
         use hot::stream::StreamEvent;
         let worker_run_id = Uuid::now_v7();
         let stream_id = Uuid::now_v7();
+        let call_event_id = Uuid::now_v7();
 
         let event = StreamEvent::RunStop {
             run_id: worker_run_id,
             env_id: Uuid::now_v7(),
             stream_id,
-            event_id: None,
+            event_id: Some(call_event_id),
             result: Some(serde_json::json!("test result")),
         };
 
-        // The match must return the worker's run_id (not filter by MCP's run_id)
-        let matched = match_terminal_event(&event);
-        assert_eq!(matched, Some(worker_run_id));
+        // Must accept the worker's run_id when event_id matches the call.
+        assert_eq!(
+            match_terminal_event(&event, call_event_id),
+            Some(worker_run_id)
+        );
+    }
+
+    #[test]
+    fn test_stream_matching_ignores_child_event_terminals_on_same_stream() {
+        use hot::stream::StreamEvent;
+        let stream_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let call_event_id = Uuid::now_v7();
+        let child_event_id = Uuid::now_v7();
+
+        let child_stop = StreamEvent::RunStop {
+            run_id: Uuid::now_v7(),
+            env_id,
+            stream_id,
+            event_id: Some(child_event_id),
+            result: Some(serde_json::json!("child result")),
+        };
+        let child_fail = StreamEvent::RunFail {
+            run_id: Uuid::now_v7(),
+            env_id,
+            stream_id,
+            event_id: Some(child_event_id),
+            error: Some("child error".to_string()),
+        };
+        let child_cancel = StreamEvent::RunCancel {
+            run_id: Uuid::now_v7(),
+            env_id,
+            stream_id,
+            event_id: Some(child_event_id),
+            reason: Some("child cancelled".to_string()),
+        };
+        let missing_event_id = StreamEvent::RunStop {
+            run_id: Uuid::now_v7(),
+            env_id,
+            stream_id,
+            event_id: None,
+            result: Some(serde_json::json!("unknown")),
+        };
+
+        assert_eq!(match_terminal_event(&child_stop, call_event_id), None);
+        assert_eq!(match_terminal_event(&child_fail, call_event_id), None);
+        assert_eq!(match_terminal_event(&child_cancel, call_event_id), None);
+        assert_eq!(match_terminal_event(&missing_event_id, call_event_id), None);
     }
 
     #[test]
     fn test_stream_matching_accepts_run_fail() {
         use hot::stream::StreamEvent;
         let run_id = Uuid::now_v7();
+        let call_event_id = Uuid::now_v7();
 
         let event = StreamEvent::RunFail {
             run_id,
             env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
-            event_id: None,
+            event_id: Some(call_event_id),
             error: Some("test error".to_string()),
         };
 
-        assert_eq!(match_terminal_event(&event), Some(run_id));
+        assert_eq!(match_terminal_event(&event, call_event_id), Some(run_id));
     }
 
     #[test]
     fn test_stream_matching_accepts_run_cancel() {
         use hot::stream::StreamEvent;
         let run_id = Uuid::now_v7();
+        let call_event_id = Uuid::now_v7();
 
         let event = StreamEvent::RunCancel {
             run_id,
             env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
-            event_id: None,
+            event_id: Some(call_event_id),
             reason: Some("cancelled".to_string()),
         };
 
-        assert_eq!(match_terminal_event(&event), Some(run_id));
+        assert_eq!(match_terminal_event(&event, call_event_id), Some(run_id));
     }
 
     #[test]
     fn test_stream_matching_skips_run_start() {
         use hot::stream::StreamEvent;
+        let call_event_id = Uuid::now_v7();
 
         let event = StreamEvent::RunStart {
             run_id: Uuid::now_v7(),
             env_id: Uuid::now_v7(),
             stream_id: Uuid::now_v7(),
-            event_id: None,
+            event_id: Some(call_event_id),
         };
 
-        assert_eq!(match_terminal_event(&event), None);
+        assert_eq!(match_terminal_event(&event, call_event_id), None);
     }
 
     // ========================================================================

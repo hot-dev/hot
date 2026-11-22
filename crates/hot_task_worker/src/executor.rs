@@ -44,26 +44,46 @@ const WRITABLE_ROOTFS_CAPS: &[&str] = &[
 /// - Images with denied tags (dind, privileged)
 /// - Empty image names
 pub fn is_image_allowed(image: &str) -> bool {
-    if image.is_empty() {
+    if image.is_empty()
+        || image.starts_with('-')
+        || image.contains("://")
+        || image
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
         return false;
     }
 
-    let image_lower = image.to_lowercase();
+    let image_lower = image.to_ascii_lowercase();
+    // Strip optional @digest so `docker:dind@sha256:...` and `docker@sha256:...`
+    // are checked against the same repository/tag rules.
+    let without_digest = image_lower.split('@').next().unwrap_or(&image_lower);
+    let canonical = without_digest
+        .strip_prefix("index.docker.io/library/")
+        .or_else(|| without_digest.strip_prefix("registry-1.docker.io/library/"))
+        .or_else(|| without_digest.strip_prefix("docker.io/library/"))
+        .or_else(|| without_digest.strip_prefix("index.docker.io/"))
+        .or_else(|| without_digest.strip_prefix("registry-1.docker.io/"))
+        .unwrap_or(without_digest);
 
-    // Check exact deny
-    if DENIED_IMAGES.contains(&image_lower.as_str()) {
-        return false;
-    }
-
-    // Check prefix deny
-    for prefix in DENIED_IMAGE_PREFIXES {
-        if image_lower.starts_with(prefix) {
+    for candidate in [image_lower.as_str(), without_digest, canonical] {
+        // Check exact deny
+        if DENIED_IMAGES.contains(&candidate) {
             return false;
+        }
+
+        // Check prefix deny
+        for prefix in DENIED_IMAGE_PREFIXES {
+            if candidate.starts_with(prefix) {
+                return false;
+            }
         }
     }
 
-    // Check tag deny (after the last ':')
-    if let Some(tag) = image_lower.rsplit(':').next()
+    // Check tag deny (only on the last path segment so a registry port like
+    // `registry:5000/app` is not mistaken for a tag).
+    let last_segment = without_digest.rsplit('/').next().unwrap_or(without_digest);
+    if let Some((_, tag)) = last_segment.rsplit_once(':')
         && DENIED_TAGS.contains(&tag)
     {
         return false;
@@ -1147,10 +1167,12 @@ mod docker {
 
             let container_id = container.id.clone();
 
-            self.docker
-                .start_container(&container_id, None)
-                .await
-                .map_err(|e| ExecutorError::Start(e.to_string()))?;
+            if let Err(e) = self.docker.start_container(&container_id, None).await {
+                // Remove the Created container so failed starts never leak
+                // containers or stall cancellation-quota settlement.
+                self.docker.remove_container(&container_id, None).await.ok();
+                return Err(ExecutorError::Start(e.to_string()));
+            }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
             timings.workload_started_at = Some(chrono::Utc::now());
 
@@ -1245,7 +1267,7 @@ mod docker {
 
         /// Collect stdout and stderr from a container.
         pub async fn collect_logs(&self, container_id: &str) -> ExecutorResult<(String, String)> {
-            let accumulator = LogAccumulator::from_docker(&self.docker, container_id);
+            let accumulator = LogAccumulator::from_docker_snapshot(&self.docker, container_id);
             let (stdout, stderr) = accumulator.finalize().await;
             Ok((stdout, stderr))
         }
@@ -1403,10 +1425,12 @@ mod docker {
             let container_id = container.id.clone();
 
             let exec_start = Instant::now();
-            self.docker
-                .start_container(&container_id, None)
-                .await
-                .map_err(|e| ExecutorError::Start(e.to_string()))?;
+            if let Err(e) = self.docker.start_container(&container_id, None).await {
+                // Remove the Created container so failed starts never leak
+                // containers or stall cancellation-quota settlement.
+                self.docker.remove_container(&container_id, None).await.ok();
+                return Err(ExecutorError::Start(e.to_string()));
+            }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
             timings.workload_started_at = Some(chrono::Utc::now());
 
@@ -1424,8 +1448,21 @@ mod docker {
                     docker_ref.wait_container(container_id_ref, Some(wait_options));
                 let mut exit_code = 0i64;
                 while let Some(wait_result) = wait_stream.next().await {
-                    if let Ok(result) = wait_result {
-                        exit_code = result.status_code;
+                    match wait_result {
+                        Ok(result) => {
+                            exit_code = result.status_code;
+                        }
+                        Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
+                            exit_code = code;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                container_id = %container_id_ref,
+                                error = %e,
+                                "box.container.wait_error"
+                            );
+                            exit_code = -1;
+                        }
                     }
                 }
                 exit_code
@@ -1980,6 +2017,8 @@ try:
     options += ['ro', 'noexec', 'nosuid', 'nodev']
     if mount['type'] == 'ext4':
         options += ['noload']
+    elif mount['type'] == 'xfs':
+        options += ['nouuid', 'norecovery']
     subprocess.run(['mount', '-t', mount['type'], '-o', ','.join(options), mount['source'], str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
     mounted = True
     def read(name):
@@ -2002,7 +2041,9 @@ try:
         sys.exit(3)
 finally:
     if mounted:
-        subprocess.run(['umount', '-l', str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
+        res = subprocess.run(['umount', str(root)], timeout=10, stdout=subprocess.DEVNULL)
+        if res.returncode != 0:
+            subprocess.run(['umount', '-l', str(root)], check=True, timeout=10, stdout=subprocess.DEVNULL)
     root.rmdir()
 "#;
         let mounts: Vec<_> = rootfs.iter().map(|mount| serde_json::json!({"type": mount.r#type, "source": mount.source, "options": mount.options})).collect();
@@ -2014,10 +2055,13 @@ finally:
             .map_err(|error| {
                 ExecutorError::Create(format!("Cannot resolve image USER: {error}"))
             })?;
-        let output =
-            crate::cni::write_stdin_and_wait(child, &serde_json::to_string(&mounts).unwrap())
-                .await
-                .map_err(ExecutorError::Create)?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            crate::cni::write_stdin_and_wait(child, &serde_json::to_string(&mounts).unwrap()),
+        )
+        .await
+        .map_err(|_| ExecutorError::Create("Timed out resolving image USER".to_string()))?
+        .map_err(ExecutorError::Create)?;
         if !output.status.success() {
             // Exit 3: the image's own account files are unusable.
             let image_error = output.status.code() == Some(3);
@@ -2073,6 +2117,7 @@ finally:
         image_maintenance: tokio::sync::Mutex<()>,
         active_images: Arc<parking_lot::Mutex<std::collections::HashMap<String, usize>>>,
         image_last_used: parking_lot::Mutex<std::collections::HashMap<String, i64>>,
+        socket_path: String,
         channel: Channel,
         semaphore: Arc<Semaphore>,
         slot_timeout_secs: u64,
@@ -2086,9 +2131,15 @@ finally:
             slot_timeout_secs: u64,
             vmm: KataVmm,
         ) -> ExecutorResult<Self> {
-            let channel = connect(socket_path)
-                .await
-                .map_err(|e| ExecutorError::Connection(e.to_string()))?;
+            let channel =
+                tokio::time::timeout(std::time::Duration::from_secs(10), connect(socket_path))
+                    .await
+                    .map_err(|_| {
+                        ExecutorError::Connection(format!(
+                            "Timed out connecting to containerd socket {socket_path}"
+                        ))
+                    })?
+                    .map_err(|e| ExecutorError::Connection(e.to_string()))?;
 
             // Verify containerd + devmapper snapshotter are ready before accepting work.
             // The content store may not be initialized immediately after
@@ -2103,17 +2154,24 @@ finally:
                     },
                     NAMESPACE
                 );
-                match snapshots.list(req).await {
-                    Ok(_) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), snapshots.list(req))
+                    .await
+                {
+                    Ok(Ok(_)) => {
                         tracing::debug!("kata.containerd.ready after {attempt} attempt(s)");
                         break;
                     }
-                    Err(e) if attempt == max_attempts => {
+                    Ok(Err(e)) if attempt == max_attempts => {
                         return Err(ExecutorError::Connection(format!(
                             "containerd snapshotter not ready after {max_attempts} attempts: {e}"
                         )));
                     }
-                    Err(e) => {
+                    Err(_) if attempt == max_attempts => {
+                        return Err(ExecutorError::Connection(format!(
+                            "containerd snapshotter timed out after {max_attempts} attempts"
+                        )));
+                    }
+                    Ok(Err(e)) => {
                         tracing::warn!(
                             attempt,
                             error = %e,
@@ -2121,13 +2179,17 @@ finally:
                         );
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
+                    Err(_) => {
+                        tracing::warn!(attempt, "kata.containerd.snapshotter_timeout, retrying...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
                 }
             }
 
-            // Clean up stale CNI state from previous runs (crash recovery).
-            crate::cni::cleanup_stale().await;
-
-            // Ensure iptables MASQUERADE + FORWARD rules exist for the kata bridge.
+            // Ensure iptables MASQUERADE + fail-closed FORWARD rules exist for
+            // the kata bridge BEFORE any orphan VMs are reaped. Stale per-task
+            // CNI/iptables cleanup runs AFTER `cleanup_kata_orphans` reaps
+            // surviving VMs so live orphan VMs never lose firewall protection.
             crate::cni::ensure_iptables()
                 .await
                 .map_err(|e| ExecutorError::Connection(format!("CNI policy setup failed: {e}")))?;
@@ -2144,6 +2206,7 @@ finally:
                 image_maintenance: tokio::sync::Mutex::new(()),
                 active_images: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
                 image_last_used: parking_lot::Mutex::new(std::collections::HashMap::new()),
+                socket_path: socket_path.to_string(),
                 channel,
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
                 slot_timeout_secs,
@@ -2466,6 +2529,7 @@ finally:
                             &mut snapshots,
                             &container_id,
                             None,
+                            None,
                         )
                         .await;
                         return Err(ExecutorError::Start(format!(
@@ -2548,6 +2612,11 @@ finally:
                                 &mut snapshots,
                                 &cid,
                                 Some((&fifos.0, &fifos.1)),
+                                if needs_network && netns_path.is_some() {
+                                    Some(container_id.as_str())
+                                } else {
+                                    None
+                                },
                             )
                             .await;
                             for dir in &[
@@ -2557,38 +2626,37 @@ finally:
                             ] {
                                 let _ = tokio::fs::remove_dir_all(dir).await;
                             }
-
-                            // When using macvtap networking, the failed Kata
-                            // shim may leave a stale macvtap device attached
-                            // to the veth in the netns (its cleanup often
-                            // fails). Tear down and recreate the CNI netns so
-                            // the next attempt gets a clean veth + macvtap.
-                            if needs_network && netns_path.is_some() {
-                                crate::cni::teardown(&container_id).await;
-                                match crate::cni::setup(&container_id).await {
-                                    Ok(path) => {
-                                        tracing::debug!(
-                                            container_id = %container_id,
-                                            attempt = attempt,
-                                            netns = %path,
-                                            "kata.cni.retry_setup.ok"
-                                        );
-                                        netns_path = Some(path);
-                                    }
-                                    Err(e2) => {
-                                        tracing::error!(
-                                            container_id = %container_id,
-                                            error = %e2,
-                                            "kata.cni.retry_setup.failed"
-                                        );
-                                        return Err(ExecutorError::Start(format!(
-                                            "public-only network retry setup failed: {e2}"
-                                        )));
-                                    }
-                                }
+                            if needs_network {
+                                netns_path = None;
                             }
 
                             if is_transient && attempt < MAX_SETUP_ATTEMPTS {
+                                // Recreate the CNI netns only when another attempt
+                                // will actually run — never on a terminal error or
+                                // final attempt.
+                                if needs_network {
+                                    match crate::cni::setup(&container_id).await {
+                                        Ok(path) => {
+                                            tracing::debug!(
+                                                container_id = %container_id,
+                                                attempt = attempt,
+                                                netns = %path,
+                                                "kata.cni.retry_setup.ok"
+                                            );
+                                            netns_path = Some(path);
+                                        }
+                                        Err(e2) => {
+                                            tracing::error!(
+                                                container_id = %container_id,
+                                                error = %e2,
+                                                "kata.cni.retry_setup.failed"
+                                            );
+                                            return Err(ExecutorError::Start(format!(
+                                                "public-only network retry setup failed: {e2}"
+                                            )));
+                                        }
+                                    }
+                                }
                                 let delay =
                                     std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
                                 tokio::time::sleep(delay).await;
@@ -2607,6 +2675,7 @@ finally:
             // loop may produce a different cid for containerd, but the netns
             // is always keyed by the original one.
             let cni_container_id = container_id.clone();
+            let cni_id = needs_network.then_some(cni_container_id.as_str());
 
             let (container_id, stdout_fifo, stderr_fifo) = match setup_result {
                 Ok(result) => result,
@@ -2617,11 +2686,15 @@ finally:
                         } else {
                             retry_container_id(&container_id, attempt)
                         };
-                        self.cleanup(&mut tasks, &mut containers, &mut snapshots, &cid, None)
-                            .await;
-                    }
-                    if needs_network {
-                        crate::cni::teardown(&cni_container_id).await;
+                        self.cleanup(
+                            &mut tasks,
+                            &mut containers,
+                            &mut snapshots,
+                            &cid,
+                            None,
+                            if attempt == 1 { cni_id } else { None },
+                        )
+                        .await;
                     }
                     return Err(e);
                 }
@@ -2644,11 +2717,9 @@ finally:
                                 &mut snapshots,
                                 &container_id,
                                 Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                                cni_id,
                             )
                             .await;
-                            if needs_network {
-                                crate::cni::teardown(&cni_container_id).await;
-                            }
                             return Err(ExecutorError::Other(format!(
                                 "failed to create vsock dir {}: {}",
                                 parent.display(),
@@ -2666,11 +2737,9 @@ finally:
                         &mut snapshots,
                         &container_id,
                         Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                        cni_id,
                     )
                     .await;
-                    if needs_network {
-                        crate::cni::teardown(&cni_container_id).await;
-                    }
                     return Err(ExecutorError::Other(format!("pre-start hook failed: {e}")));
                 }
 
@@ -2690,11 +2759,9 @@ finally:
                                 &mut snapshots,
                                 &container_id,
                                 Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                                cni_id,
                             )
                             .await;
-                            if needs_network {
-                                crate::cni::teardown(&cni_container_id).await;
-                            }
                             return Err(ExecutorError::Other(format!(
                                 "VM vsock {} did not appear after 5s — VM may have failed to boot",
                                 vsock_path.display()
@@ -2721,11 +2788,9 @@ finally:
                     &mut snapshots,
                     &container_id,
                     Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                    cni_id,
                 )
                 .await;
-                if needs_network {
-                    crate::cni::teardown(&cni_container_id).await;
-                }
                 return Err(e);
             }
 
@@ -2763,11 +2828,9 @@ finally:
                         &mut snapshots,
                         &container_id,
                         Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                        cni_id,
                     )
                     .await;
-                    if needs_network {
-                        crate::cni::teardown(&cni_container_id).await;
-                    }
                     return Err(e);
                 }
                 Err(_) => {
@@ -2783,18 +2846,15 @@ finally:
                         timeout_secs = timeout_secs,
                         "kata.container.timeout"
                     );
-                    self.kill_task(&mut tasks, &container_id).await.ok();
                     self.cleanup(
                         &mut tasks,
                         &mut containers,
                         &mut snapshots,
                         &container_id,
                         Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                        cni_id,
                     )
                     .await;
-                    if needs_network {
-                        crate::cni::teardown(&cni_container_id).await;
-                    }
                     return Ok(ContainerOutput {
                         exit_code: -1,
                         stdout,
@@ -2816,11 +2876,9 @@ finally:
                 &mut snapshots,
                 &container_id,
                 Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                cni_id,
             )
             .await;
-            if needs_network {
-                crate::cni::teardown(&cni_container_id).await;
-            }
 
             let oom_killed = exit_code == 137;
 
@@ -2952,13 +3010,14 @@ finally:
                 let output = tokio::process::Command::new("ctr")
                     .args([
                         "--address",
-                        DEFAULT_CONTAINERD_SOCKET,
+                        self.socket_path.as_str(),
                         "-n",
                         NAMESPACE,
                         "images",
                         "pull",
                         "--snapshotter",
                         SNAPSHOTTER,
+                        "--",
                         image,
                     ])
                     .kill_on_drop(true)
@@ -3250,9 +3309,19 @@ finally:
             spec["process"]["cwd"] = serde_json::json!(image_defaults.working_dir);
             if extras.is_some_and(|extra| extra.writable_rootfs) && !image_defaults.user.is_empty()
             {
-                let (passwd, groups) = read_image_accounts(rootfs).await?;
-                let (uid, gid, additional) =
-                    image_user_ids(&image_defaults.user, &passwd, &groups)?;
+                // Skip host-side read-only snapshot mount when USER is already
+                // a fully numeric `uid:gid` pair (no /etc/passwd or /etc/group
+                // lookup needed).
+                let (uid, gid, additional) = if let Some((u, g)) = image_defaults
+                    .user
+                    .split_once(':')
+                    .and_then(|(u, g)| Some((u.parse::<u32>().ok()?, g.parse::<u32>().ok()?)))
+                {
+                    (u, g, Vec::new())
+                } else {
+                    let (passwd, groups) = read_image_accounts(rootfs).await?;
+                    image_user_ids(&image_defaults.user, &passwd, &groups)?
+                };
                 spec["process"]["user"] =
                     serde_json::json!({"uid": uid, "gid": gid, "additionalGids": additional});
             }
@@ -3591,35 +3660,75 @@ finally:
             snapshots: &mut SnapshotsClient<Channel>,
             container_id: &str,
             io_fifos: Option<(&str, &str)>,
+            cni_id: Option<&str>,
         ) {
-            let task_req = with_namespace!(
-                DeleteTaskRequest {
-                    container_id: container_id.to_string(),
-                },
-                NAMESPACE
-            );
-            tasks.delete(task_req).await.ok();
+            // Follow the same bounded `KATA_CLEANUP_STEP_ORDER` as
+            // `cleanup_orphan`: stop the VM and reclaim snapshot + CNI BEFORE
+            // deleting the containerd `Container` record (the sole discovery
+            // key for startup orphan recovery), so a partial failure remains
+            // discoverable on the next worker restart.
+            let [
+                kill,
+                task_record,
+                snapshot,
+                cni,
+                container_record,
+                io_fifos_step,
+            ] = KATA_CLEANUP_STEP_ORDER;
 
-            let container_req = with_namespace!(
-                DeleteContainerRequest {
-                    id: container_id.to_string(),
-                },
-                NAMESPACE
-            );
-            containers.delete(container_req).await.ok();
+            bounded_cleanup_step(container_id, kill, async {
+                let _ = self.kill_task(tasks, container_id).await;
+            })
+            .await;
 
-            let snap_req = with_namespace!(
-                RemoveSnapshotRequest {
-                    snapshotter: SNAPSHOTTER.to_string(),
-                    key: container_id.to_string(),
-                },
-                NAMESPACE
-            );
-            snapshots.remove(snap_req).await.ok();
+            bounded_cleanup_step(container_id, task_record, async {
+                let task_req = with_namespace!(
+                    DeleteTaskRequest {
+                        container_id: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(container_id, task_record, tasks.delete(task_req).await);
+            })
+            .await;
+
+            bounded_cleanup_step(container_id, snapshot, async {
+                let snap_req = with_namespace!(
+                    RemoveSnapshotRequest {
+                        snapshotter: SNAPSHOTTER.to_string(),
+                        key: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(container_id, snapshot, snapshots.remove(snap_req).await);
+            })
+            .await;
+
+            if let Some(cni_id) = cni_id {
+                bounded_cleanup_step(container_id, cni, crate::cni::teardown(cni_id)).await;
+            }
+
+            bounded_cleanup_step(container_id, container_record, async {
+                let container_req = with_namespace!(
+                    DeleteContainerRequest {
+                        id: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(
+                    container_id,
+                    container_record,
+                    containers.delete(container_req).await,
+                );
+            })
+            .await;
 
             if let Some((stdout_fifo, stderr_fifo)) = io_fifos {
-                let _ = tokio::fs::remove_file(stdout_fifo).await;
-                let _ = tokio::fs::remove_file(stderr_fifo).await;
+                bounded_cleanup_step(container_id, io_fifos_step, async {
+                    let _ = tokio::fs::remove_file(stdout_fifo).await;
+                    let _ = tokio::fs::remove_file(stderr_fifo).await;
+                })
+                .await;
             }
         }
 

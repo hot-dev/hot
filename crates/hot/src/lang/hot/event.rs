@@ -53,8 +53,10 @@ pub fn send_event(
         )));
     }
 
-    // Extract event_data argument - can be any value
-    let event_data = args[1].clone();
+    // Extract event_data argument - can be any value.
+    // Strip internal ingress-only fields so user code cannot spoof `hot.request`
+    // (on `hot:call`) or pin an arbitrary build via `_hot_target_build_id`.
+    let event_data = sanitize_user_event_data(&event_type, args[1].clone());
 
     tracing::debug!(
         "send_event: event_type='{}', has_publisher={}, has_context={}",
@@ -270,6 +272,31 @@ pub fn create_event(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::map(event_map))
 }
 
+/// Strip internal ingress-only fields from user-emitted event payloads.
+///
+/// `_hot_target_build_id` is reserved for trusted webhook/MCP build pinning.
+/// `caller` is injected into `hot.request` on `hot:call` events and is reserved
+/// for trusted webhook/MCP ingress (custom events may carry their own `caller`
+/// domain field because the worker only injects `hot.request` for `hot:call`).
+fn sanitize_user_event_data(event_type: &str, mut event_data: Val) -> Val {
+    if let Val::Map(ref mut map) = event_data {
+        let target_key = Val::from("_hot_target_build_id");
+        let caller_key = Val::from("caller");
+        let strip_target = map.contains_key(&target_key);
+        let strip_caller = event_type == "hot:call" && map.contains_key(&caller_key);
+        if strip_target || strip_caller {
+            let owned = std::sync::Arc::make_mut(map);
+            if strip_target {
+                owned.shift_remove(&target_key);
+            }
+            if strip_caller {
+                owned.shift_remove(&caller_key);
+            }
+        }
+    }
+    event_data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +385,30 @@ mod tests {
         assert_eq!(sent.origin_run_id, Some(origin_run_id));
         assert_eq!(sent.run_id, sender_run_id);
         assert_eq!(sent.stream_id, stream_id);
+    }
+
+    #[test]
+    fn sanitize_user_event_data_strips_internal_fields() {
+        let call_payload = crate::val!({
+            "fn": "::app/handler",
+            "args": [],
+            "caller": {"auth": {"type": "api-key"}},
+            "_hot_target_build_id": "01900000-0000-7000-8000-000000000000",
+        });
+        let sanitized_call = sanitize_user_event_data("hot:call", call_payload);
+        assert!(sanitized_call.get("caller").is_none());
+        assert!(sanitized_call.get("_hot_target_build_id").is_none());
+        assert_eq!(sanitized_call.get("fn"), Some(Val::from("::app/handler")));
+
+        let custom_payload = crate::val!({
+            "caller": "+15551234567",
+            "_hot_target_build_id": "01900000-0000-7000-8000-000000000000",
+        });
+        let sanitized_custom = sanitize_user_event_data("phone:ringing", custom_payload);
+        assert_eq!(
+            sanitized_custom.get("caller"),
+            Some(Val::from("+15551234567"))
+        );
+        assert!(sanitized_custom.get("_hot_target_build_id").is_none());
     }
 }

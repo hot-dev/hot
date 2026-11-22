@@ -36,6 +36,9 @@ use crate::models::ApiErrorResponse;
 // Env → Org cache (rarely changes, no TTL)
 // ============================================================================
 
+const MAX_ENV_TO_ORG_ENTRIES: usize = 50_000;
+const MAX_FEATURES_CACHE_ENTRIES: usize = 10_000;
+
 struct EnvToOrgCache {
     cache: Mutex<AHashMap<Uuid, Uuid>>,
 }
@@ -56,10 +59,15 @@ impl EnvToOrgCache {
     }
 
     fn insert(&self, env_id: Uuid, org_id: Uuid) {
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(env_id, org_id);
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= MAX_ENV_TO_ORG_ENTRIES && !cache.contains_key(&env_id) {
+            let drop_count = (cache.len() / 4).max(1);
+            let keys: Vec<Uuid> = cache.keys().take(drop_count).copied().collect();
+            for key in keys {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(env_id, org_id);
     }
 }
 
@@ -98,6 +106,17 @@ impl FeaturesCache {
 
     fn insert(&self, org_id: Uuid, rate_limit_rps: i64) {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= MAX_FEATURES_CACHE_ENTRIES && !cache.contains_key(&org_id) {
+            let ttl = self.ttl;
+            cache.retain(|_, entry| entry.fetched_at.elapsed() < ttl);
+            if cache.len() >= MAX_FEATURES_CACHE_ENTRIES {
+                let mut timestamps: Vec<Instant> = cache.values().map(|e| e.fetched_at).collect();
+                let evict_idx = (timestamps.len() / 4).max(1).min(timestamps.len() - 1);
+                let (_, cutoff, _) = timestamps.select_nth_unstable(evict_idx);
+                let cutoff = *cutoff;
+                cache.retain(|_, entry| entry.fetched_at > cutoff);
+            }
+        }
         cache.insert(
             org_id,
             FeaturesEntry {
@@ -152,17 +171,18 @@ impl SlidingWindowLimiter {
         }
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let cutoff = now - self.window_duration;
+        let cutoff = now.checked_sub(self.window_duration);
 
         // Periodic sweep: remove stale org entries to prevent unbounded memory growth
         {
             let mut last_sweep = self.last_sweep.lock().unwrap_or_else(|e| e.into_inner());
             if now.duration_since(*last_sweep) >= SWEEP_INTERVAL {
-                let stale_cutoff = now - STALE_THRESHOLD;
-                windows.retain(|_, deque| {
-                    // Keep entries that have recent requests or are non-empty with fresh data
-                    deque.back().is_some_and(|t| *t >= stale_cutoff)
-                });
+                if let Some(stale_cutoff) = now.checked_sub(STALE_THRESHOLD) {
+                    windows.retain(|_, deque| {
+                        // Keep entries that have recent requests or are non-empty with fresh data
+                        deque.back().is_some_and(|t| *t >= stale_cutoff)
+                    });
+                }
                 *last_sweep = now;
             }
         }
@@ -170,8 +190,10 @@ impl SlidingWindowLimiter {
         let window = windows.entry(*org_id).or_default();
 
         // Evict expired entries from this org's window
-        while window.front().is_some_and(|t| *t < cutoff) {
-            window.pop_front();
+        if let Some(cutoff) = cutoff {
+            while window.front().is_some_and(|t| *t < cutoff) {
+                window.pop_front();
+            }
         }
 
         if window.len() >= max_rps as usize {
@@ -350,10 +372,10 @@ impl SseConnectionLimiter {
                 "Active SSE connection limit hit"
             );
             if mode == PublicRateLimitMode::Enforce {
-                return Err(RateLimitExceeded {
-                    retry_after_secs: 1,
-                    message: format!("Too many active SSE connections for this {}", scope),
-                });
+                return Err(RateLimitExceeded::rate_limited(
+                    1,
+                    format!("Too many active SSE connections for this {}", scope),
+                ));
             }
         }
 
@@ -434,11 +456,45 @@ impl PublicRateLimitMode {
 pub struct RateLimitExceeded {
     pub retry_after_secs: u64,
     pub message: String,
+    /// True when admission failed due to a transient backend/database error
+    /// rather than an actual quota hit (served as 503 instead of 429).
+    pub unavailable: bool,
+}
+
+impl RateLimitExceeded {
+    pub fn rate_limited(retry_after_secs: u64, message: impl Into<String>) -> Self {
+        Self {
+            retry_after_secs,
+            message: message.into(),
+            unavailable: false,
+        }
+    }
+
+    pub fn unavailable(retry_after_secs: u64, message: impl Into<String>) -> Self {
+        Self {
+            retry_after_secs,
+            message: message.into(),
+            unavailable: true,
+        }
+    }
+
+    pub fn status_code(&self) -> StatusCode {
+        if self.unavailable {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+    }
 }
 
 pub fn rate_limit_error_body(exceeded: RateLimitExceeded) -> ApiErrorResponse {
+    let code = if exceeded.unavailable {
+        "service_unavailable"
+    } else {
+        "rate_limit_exceeded"
+    };
     ApiErrorResponse::new(
-        "rate_limit_exceeded",
+        code,
         format!(
             "{} Retry after {} seconds.",
             exceeded.message, exceeded.retry_after_secs
@@ -448,9 +504,10 @@ pub fn rate_limit_error_body(exceeded: RateLimitExceeded) -> ApiErrorResponse {
 }
 
 pub fn rate_limit_response(exceeded: RateLimitExceeded) -> Response {
+    let status = exceeded.status_code();
     let retry_after_secs = exceeded.retry_after_secs;
     (
-        StatusCode::TOO_MANY_REQUESTS,
+        status,
         [("Retry-After", retry_after_secs.to_string())],
         axum::Json(rate_limit_error_body(exceeded)),
     )
@@ -494,30 +551,28 @@ pub async fn check_org_rate_limit(
     }
     let root_id = hot::db::Org::billing_owner_id_for(db, org_id)
         .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Unable to resolve account request budget".into(),
+        .map_err(|_| {
+            RateLimitExceeded::unavailable(1, "Unable to resolve account request budget")
         })?;
     let rate_limit_rps = org_rate_limit_rps(db, &root_id)
         .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Unable to load account rate limit".into(),
-        })?;
+        .map_err(|_| RateLimitExceeded::unavailable(1, "Unable to load account rate limit"))?;
     let admitted = hot::db::Org::try_acquire_account_request(db, &root_id, rate_limit_rps)
         .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Account request accounting is temporarily unavailable".into(),
+        .map_err(|_| {
+            RateLimitExceeded::unavailable(
+                1,
+                "Account request accounting is temporarily unavailable",
+            )
         })?;
     if admitted {
         return Ok(());
     }
     tracing::debug!(context, %org_id, %root_id, "Account RPS limit reached");
-    Err(RateLimitExceeded {
-        retry_after_secs: 1,
-        message: "Account rate limit exceeded".into(),
-    })
+    Err(RateLimitExceeded::rate_limited(
+        1,
+        "Account rate limit exceeded",
+    ))
 }
 
 pub async fn check_public_org_inflight(
@@ -528,17 +583,13 @@ pub async fn check_public_org_inflight(
 ) -> Result<Option<InFlightGuard>, RateLimitExceeded> {
     let root_id = hot::db::Org::billing_owner_id_for(db, org_id)
         .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Unable to resolve account connection budget".into(),
+        .map_err(|_| {
+            RateLimitExceeded::unavailable(1, "Unable to resolve account connection budget")
         })?;
     let org_id = &root_id;
-    let rate_limit_rps = org_rate_limit_rps(db, org_id)
-        .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Unable to load account connection budget".into(),
-        })?;
+    let rate_limit_rps = org_rate_limit_rps(db, org_id).await.map_err(|_| {
+        RateLimitExceeded::unavailable(1, "Unable to load account connection budget")
+    })?;
     if rate_limit_rps < 0 {
         return Ok(None);
     }
@@ -561,11 +612,10 @@ pub async fn check_public_org_inflight(
                 limit = configured,
                 "Public org in-flight limit hit"
             );
-            Err(RateLimitExceeded {
-                retry_after_secs: 1,
-                message: "Too many requests are currently running for this organization"
-                    .to_string(),
-            })
+            Err(RateLimitExceeded::rate_limited(
+                1,
+                "Too many requests are currently running for this organization",
+            ))
         }
     }
 }
@@ -595,10 +645,10 @@ pub async fn acquire_sse_connection(
                     "Could not resolve organization for SSE connection accounting"
                 );
                 if mode == PublicRateLimitMode::Enforce {
-                    return Err(RateLimitExceeded {
-                        retry_after_secs: 1,
-                        message: "Unable to account for this SSE connection".to_string(),
-                    });
+                    return Err(RateLimitExceeded::unavailable(
+                        1,
+                        "Unable to account for this SSE connection",
+                    ));
                 }
                 // Observe mode must preserve successful SSE behavior. The nil
                 // scope still accounts global and per-credential connections.
@@ -612,10 +662,10 @@ pub async fn acquire_sse_connection(
         // Observe mode keeps the nil account scope rather than rejecting.
         Err(_) if mode == PublicRateLimitMode::Observe => Uuid::nil(),
         Err(_) => {
-            return Err(RateLimitExceeded {
-                retry_after_secs: 1,
-                message: "Unable to resolve account SSE budget".into(),
-            });
+            return Err(RateLimitExceeded::unavailable(
+                1,
+                "Unable to resolve account SSE budget",
+            ));
         }
     };
 
@@ -659,10 +709,10 @@ pub async fn rate_limit_middleware(
                 env.org_id
             }
             Err(_) => {
-                return rate_limit_response(RateLimitExceeded {
-                    retry_after_secs: 1,
-                    message: "Unable to resolve account request budget".into(),
-                });
+                return rate_limit_response(RateLimitExceeded::unavailable(
+                    1,
+                    "Unable to resolve account request budget",
+                ));
             }
         }
     };
@@ -772,10 +822,7 @@ mod tests {
 
     #[test]
     fn rate_limit_error_body_includes_retry_after() {
-        let body = rate_limit_error_body(RateLimitExceeded {
-            retry_after_secs: 3,
-            message: "Rate limit exceeded".to_string(),
-        });
+        let body = rate_limit_error_body(RateLimitExceeded::rate_limited(3, "Rate limit exceeded"));
 
         assert_eq!(body.error.code, "rate_limit_exceeded");
         assert_eq!(body.error.retry_after, Some(3));

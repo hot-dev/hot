@@ -435,9 +435,9 @@ pub mod retry {
         ) -> Option<Self> {
             use crate::val::Val;
 
-            // Get the "retry" key from event data
+            // Get the "retry" key from event data (must be a Map with a valid origin-run-id)
             let retry_val = event_data.get("retry")?;
-            if matches!(retry_val, Val::Null) {
+            if !matches!(retry_val, Val::Map(_)) {
                 return None;
             }
 
@@ -449,7 +449,7 @@ pub mod retry {
             let attempt = retry_val
                 .get("attempt")
                 .and_then(|v| match v {
-                    Val::Int(n) => Some(n.clamp(0, i16::MAX as i64) as i16),
+                    Val::Int(n) => Some(n.clamp(0, 100) as i16),
                     _ => None,
                 })
                 .unwrap_or(1);

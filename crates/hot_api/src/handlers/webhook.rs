@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::ApiStateData;
 use crate::auth::{AuthContext, authenticate_or_reject};
-use crate::client_ip::ClientIp;
+use crate::client_ip::{ClientIp, TrustedProxyPeer};
 use crate::domain_resolver::ResolvedDomain;
 use crate::models::ApiErrorResponse;
 use crate::rate_limit::{self, PublicRateLimitMode};
@@ -68,7 +68,7 @@ fn get_event_queue(
     WEBHOOK_EVENT_QUEUE.get_or_try_init(|| {
         let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
         let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
-            .unwrap_or(hot::queue::QueueType::Memory);
+            .map_err(|_| format!("Invalid queue.type configuration: '{}'", queue_type_str))?;
 
         let redis_uri_str = conf.get_str_or_default("redis.uri", "");
         let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
@@ -195,6 +195,8 @@ pub async fn webhook_catch_all_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     method: Method,
     client_ip: Option<Extension<ClientIp>>,
+    trusted_proxy: Option<Extension<TrustedProxyPeer>>,
+    blob_store: Option<Extension<Option<Arc<hot::blob::BlobStore>>>>,
     resolved_domain: Option<Extension<ResolvedDomain>>,
     OriginalUri(original_uri): OriginalUri,
     Path(full_path): Path<String>,
@@ -202,7 +204,9 @@ pub async fn webhook_catch_all_handler(
     query: Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
-    let original_url = build_original_url(&headers, &original_uri);
+    let trust_forwarded = trusted_proxy.map(|Extension(t)| t.0).unwrap_or(true);
+    let original_url = build_original_url_with_trust(&headers, &original_uri, trust_forwarded);
+    let blob_store = super::blob_store_from_ext(blob_store);
     let segments: Vec<&str> = full_path.trim_matches('/').splitn(4, '/').collect();
 
     let (source, path) = if let Some(Extension(resolved)) = resolved_domain {
@@ -242,6 +246,7 @@ pub async fn webhook_catch_all_handler(
         &db,
         &conf,
         &stream_pubsub,
+        blob_store.as_ref(),
         method,
         path,
         original_url,
@@ -254,22 +259,64 @@ pub async fn webhook_catch_all_handler(
     .await
 }
 
+fn validate_authority_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.contains(['?', '#', '/', '@', '\\'])
+        || trimmed
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return None;
+    }
+    let authority = axum::http::uri::Authority::from_str(trimmed).ok()?;
+    Some(authority.as_str().to_string())
+}
+
 /// Reconstruct the URL the caller originally requested: scheme and host from
 /// the forwarding headers set by Hot's edge (falling back to the Host header),
 /// plus the original path and query verbatim — token segment included, no
 /// re-encoding. Providers that sign the URL they call (Twilio, HubSpot) hash
 /// this exact string, so any normalization here breaks their signatures.
 /// Returns None when no host can be determined.
+#[cfg(test)]
 fn build_original_url(headers: &HeaderMap, original_uri: &Uri) -> Option<String> {
+    build_original_url_with_trust(headers, original_uri, true)
+}
+
+fn build_original_url_with_trust(
+    headers: &HeaderMap,
+    original_uri: &Uri,
+    trust_forwarded: bool,
+) -> Option<String> {
     use super::request::first_forwarded_value;
 
-    let scheme = first_forwarded_value(headers, "x-forwarded-proto")
-        .or_else(|| original_uri.scheme_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "https".to_string());
+    let scheme = if trust_forwarded {
+        first_forwarded_value(headers, "x-forwarded-proto")
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| matches!(s.as_str(), "http" | "https"))
+    } else {
+        None
+    }
+    .or_else(|| {
+        original_uri
+            .scheme_str()
+            .map(str::to_ascii_lowercase)
+            .filter(|s| matches!(s.as_str(), "http" | "https"))
+    })
+    .unwrap_or_else(|| "https".to_string());
 
-    let host = first_forwarded_value(headers, "x-forwarded-host")
-        .or_else(|| first_forwarded_value(headers, "host"))
-        .or_else(|| original_uri.authority().map(|a| a.to_string()))?;
+    let host = if trust_forwarded {
+        first_forwarded_value(headers, "x-forwarded-host").and_then(|h| validate_authority_host(&h))
+    } else {
+        None
+    }
+    .or_else(|| first_forwarded_value(headers, "host").and_then(|h| validate_authority_host(&h)))
+    .or_else(|| {
+        original_uri
+            .authority()
+            .and_then(|a| validate_authority_host(a.as_str()))
+    })?;
 
     // Providers sign the URL as configured, which omits the default port —
     // but proxies sometimes inject it into Host/X-Forwarded-Host. Strip it
@@ -352,6 +399,7 @@ async fn webhook_handler_inner(
     db: &Arc<hot::db::DatabasePool>,
     conf: &Arc<Val>,
     stream_pubsub: &Option<Arc<hot::stream::StreamPubSub>>,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
     method: Method,
     path: String,
     original_url: Option<String>,
@@ -706,6 +754,47 @@ async fn webhook_handler_inner(
 
     let message: hot::data::msg::Message = event_message.into();
 
+    // Require pub/sub and event queue BEFORE inserting the event row so
+    // misconfigured or unavailable infrastructure does not leave orphan rows.
+    let pubsub = match stream_pubsub.as_ref() {
+        Some(p) => p,
+        None => {
+            tracing::error!("Webhook handler requires stream pub/sub but none is configured");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(
+                    "Webhook delivery is temporarily unavailable",
+                )),
+            ));
+        }
+    };
+
+    use hot::queue::Queue;
+    let queue = get_event_queue(conf).map_err(|e| {
+        tracing::error!("Webhook failed to initialize event queue: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(
+                "Webhook delivery is temporarily unavailable",
+            )),
+        )
+    })?;
+
+    // Subscribe to pub/sub BEFORE inserting/enqueueing (prevents race condition)
+    use hot::stream::StreamSubscriberFactory;
+    let subscriber = pubsub
+        .subscribe_in_env(ctx.env.env_id, stream_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(%stream_id, "Webhook failed to subscribe to stream: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(
+                    "Webhook delivery is temporarily unavailable",
+                )),
+            )
+        })?;
+
     // Insert event into database (security: prevents spoofed messages)
     if let Err(e) = hot::db::Event::insert_event(
         db,
@@ -720,60 +809,18 @@ async fn webhook_handler_inner(
     )
     .await
     {
+        tracing::error!(%event_id, "Webhook failed to persist event: {}", e);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to create event: {}",
-                e
-            ))),
+            Json(ApiErrorResponse::internal_error("Internal server error")),
         ));
     }
 
-    // Require pub/sub for webhook calls
-    let pubsub = match stream_pubsub.as_ref() {
-        Some(p) => p,
-        None => {
-            tracing::error!("Webhook handler requires stream pub/sub but none is configured");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(
-                    "Stream pub/sub is not configured. Webhook calls require pub/sub for result delivery.",
-                )),
-            ));
-        }
-    };
-
-    // Subscribe to pub/sub BEFORE enqueueing (prevents race condition)
-    use hot::stream::StreamSubscriberFactory;
-    let subscriber = pubsub
-        .subscribe_in_env(ctx.env.env_id, stream_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to subscribe to stream: {}",
-                    e
-                ))),
-            )
-        })?;
-
-    // Enqueue the message
-    use hot::queue::Queue;
-    let queue = get_event_queue(conf).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e)),
-        )
-    })?;
-
     queue.enqueue(message).await.map_err(|e| {
+        tracing::error!(%event_id, "Webhook failed to enqueue call: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to enqueue webhook call: {}",
-                e
-            ))),
+            Json(ApiErrorResponse::internal_error("Internal server error")),
         )
     })?;
 
@@ -788,63 +835,27 @@ async fn webhook_handler_inner(
     );
 
     // Wait for the result synchronously (no SSE streaming for webhooks)
-    // Webhook timeout: 30 seconds (configurable, but Slack requires < 3s)
-    let timeout_seconds = conf.get_int_or_default("webhook.timeout", 30) as u64;
-
-    use hot::stream::{StreamEvent, StreamNext};
+    // Webhook timeout: 30 seconds (configurable, clamped to 1..=300s to prevent wrap/panic)
+    let timeout_seconds = conf.get_int_or_default("webhook.timeout", 30).clamp(1, 300) as u64;
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_seconds);
-    let mut subscriber = subscriber;
-
-    enum Outcome {
-        Stopped { result: Option<serde_json::Value> },
-        Failed { error: Option<String> },
-        Cancelled { reason: Option<String> },
-    }
-    let mut outcome: Option<Outcome> = None;
-    let mut timed_out = false;
-
-    loop {
-        tokio::select! {
-            event = async { subscriber.next().await } => {
-                match event {
-                    StreamNext::Event(StreamEvent::RunStop { run_id: completed_run, result, .. }) => {
-                        outcome = Some(match super::resolve_stream_result(db, conf, ctx.env.env_id, completed_run, result).await {
-                            Ok(result) => Outcome::Stopped { result },
-                            Err(error) => Outcome::Failed { error: Some(error) },
-                        });
-                        break;
-                    }
-                    StreamNext::Event(StreamEvent::RunFail { error, .. }) => {
-                        outcome = Some(Outcome::Failed { error });
-                        break;
-                    }
-                    StreamNext::Event(StreamEvent::RunCancel { reason, .. }) => {
-                        outcome = Some(Outcome::Cancelled { reason });
-                        break;
-                    }
-                    StreamNext::Event(_) => {
-                        // Ignore other events (RunStart, StreamData, etc.)
-                        continue;
-                    }
-                    StreamNext::Idle => {}
-                    StreamNext::Closed => {
-                        break;
-                    }
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                timed_out = true;
-                break;
-            }
-        }
-    }
+    let (outcome, timed_out) = wait_for_webhook_outcome(
+        db,
+        blob_store,
+        ctx.env.env_id,
+        event_id,
+        subscriber,
+        deadline,
+    )
+    .await;
 
     // Authorization was checked before durable acceptance. Return this
     // execution's outcome so providers do not replay committed side effects.
     // Convert the outcome to an HTTP response
     match outcome {
-        Some(Outcome::Stopped { result }) => build_webhook_response(result, on_custom_domain),
-        Some(Outcome::Failed { error }) => {
+        Some(WebhookOutcome::Stopped { result }) => {
+            build_webhook_response(result, on_custom_domain)
+        }
+        Some(WebhookOutcome::Failed { error }) => {
             let error_text =
                 error.unwrap_or_else(|| "Webhook function execution failed".to_string());
             tracing::warn!("Webhook function failed: {}", error_text);
@@ -854,7 +865,7 @@ async fn webhook_handler_inner(
             )
                 .into_response())
         }
-        Some(Outcome::Cancelled { reason }) => {
+        Some(WebhookOutcome::Cancelled { reason }) => {
             if let Some(ref r) = reason {
                 tracing::warn!("Webhook execution cancelled: {}", r);
             }
@@ -905,6 +916,37 @@ fn shared_host_response_headers(response: &mut axum::response::Response) {
     );
 }
 
+fn is_blocked_framing_header(name: &axum::http::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "keep-alive"
+            | "upgrade"
+            | "te"
+            | "trailer"
+            | "proxy-connection"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+    )
+}
+
+fn is_blocked_shared_host_header(name: &axum::http::HeaderName) -> bool {
+    let s = name.as_str();
+    matches!(
+        s,
+        "set-cookie"
+            | "content-security-policy"
+            | "content-security-policy-report-only"
+            | "x-content-type-options"
+            | "clear-site-data"
+            | "strict-transport-security"
+            | "refresh"
+    ) || s.starts_with("access-control-")
+        || s.starts_with("cross-origin-")
+}
+
 fn build_webhook_response(
     result: Option<serde_json::Value>,
     on_custom_domain: bool,
@@ -943,8 +985,8 @@ fn build_webhook_response(
     };
 
     // A typed `HttpResponse` is always a response. An untyped map is one only
-    // when its `status` is an HTTP status code: `{status: "ok"}` and other
-    // data that happens to have a `status` key is returned as JSON.
+    // when its `status` is a final HTTP status code (200..=599): `{status: "ok"}`
+    // and informational 1xx statuses are never emitted as webhook responses.
     let typed_response = matches!(
         &result,
         serde_json::Value::Object(map)
@@ -958,21 +1000,31 @@ fn build_webhook_response(
             || map
                 .get("status")
                 .and_then(|status| status.as_u64())
-                .is_some_and(|status| (100..=599).contains(&status)))
+                .is_some_and(|status| (200..=599).contains(&status)))
     {
         let status_code = map
             .get("status")
             .and_then(|v| v.as_u64())
+            .filter(|s| (200..=599).contains(s))
             .map(|s| s as u16)
-            .unwrap_or(200);
+            .unwrap_or(if typed_response && map.contains_key("status") {
+                500
+            } else {
+                200
+            });
 
         let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
 
-        let body = map.get("body").cloned().unwrap_or(serde_json::Value::Null);
-
-        // Build response with custom headers if provided
-        let mut response = Json(body).into_response();
-        *response.status_mut() = status;
+        // RFC 9110: 204 No Content and 304 Not Modified must not carry a body.
+        let mut response = if status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED
+        {
+            (status, axum::body::Body::empty()).into_response()
+        } else {
+            let body = map.get("body").cloned().unwrap_or(serde_json::Value::Null);
+            let mut resp = Json(body).into_response();
+            *resp.status_mut() = status;
+            resp
+        };
 
         if let Some(serde_json::Value::Object(headers)) = map.get("headers") {
             for (key, value) in headers {
@@ -982,11 +1034,10 @@ fn build_webhook_response(
                         axum::http::HeaderValue::from_str(v),
                     )
                 {
-                    if !on_custom_domain
-                        && (header_name == axum::http::header::SET_COOKIE
-                            || header_name == axum::http::header::CONTENT_SECURITY_POLICY
-                            || header_name == axum::http::header::X_CONTENT_TYPE_OPTIONS)
-                    {
+                    if is_blocked_framing_header(&header_name) {
+                        continue;
+                    }
+                    if !on_custom_domain && is_blocked_shared_host_header(&header_name) {
                         continue;
                     }
                     response.headers_mut().insert(header_name, header_value);
@@ -1011,6 +1062,79 @@ fn build_webhook_response(
     Ok(plain(result))
 }
 
+#[derive(Debug)]
+enum WebhookOutcome {
+    Stopped { result: Option<serde_json::Value> },
+    Failed { error: Option<String> },
+    Cancelled { reason: Option<String> },
+}
+
+async fn wait_for_webhook_outcome(
+    db: &hot::db::DatabasePool,
+    blob_store: Option<&Arc<hot::blob::BlobStore>>,
+    env_id: Uuid,
+    event_id: Uuid,
+    mut subscriber: Box<dyn hot::stream::StreamSubscriber>,
+    deadline: tokio::time::Instant,
+) -> (Option<WebhookOutcome>, bool) {
+    use hot::stream::{StreamEvent, StreamNext};
+
+    let mut outcome: Option<WebhookOutcome> = None;
+    let mut timed_out = false;
+
+    loop {
+        tokio::select! {
+            event = async { subscriber.next().await } => {
+                match event {
+                    StreamNext::Event(StreamEvent::RunStop {
+                        run_id: completed_run,
+                        event_id: completed_event_id,
+                        result,
+                        ..
+                    }) if completed_event_id == Some(event_id) => {
+                        outcome = Some(match super::resolve_stream_result(db, blob_store, env_id, completed_run, result).await {
+                            Ok(result) => WebhookOutcome::Stopped { result },
+                            Err(error) => WebhookOutcome::Failed { error: Some(error) },
+                        });
+                        break;
+                    }
+                    StreamNext::Event(StreamEvent::RunFail {
+                        event_id: failed_event_id,
+                        error,
+                        ..
+                    }) if failed_event_id == Some(event_id) => {
+                        outcome = Some(WebhookOutcome::Failed { error });
+                        break;
+                    }
+                    StreamNext::Event(StreamEvent::RunCancel {
+                        event_id: cancelled_event_id,
+                        reason,
+                        ..
+                    }) if cancelled_event_id == Some(event_id) => {
+                        outcome = Some(WebhookOutcome::Cancelled { reason });
+                        break;
+                    }
+                    StreamNext::Event(_) => {
+                        // Ignore non-terminal events and terminal events from
+                        // child events emitted on the same stream.
+                        continue;
+                    }
+                    StreamNext::Idle => {}
+                    StreamNext::Closed => {
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                timed_out = true;
+                break;
+            }
+        }
+    }
+
+    (outcome, timed_out)
+}
+
 #[cfg(test)]
 pub(crate) mod postgres_lifecycle;
 
@@ -1018,6 +1142,77 @@ pub(crate) mod postgres_lifecycle;
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn test_wait_for_webhook_outcome_ignores_child_event_terminals_on_same_stream() {
+        use hot::stream::{
+            StreamEvent, StreamPublisher, StreamSubscriberFactory, mem::MemStreamPubSub,
+        };
+
+        let db = hot::db::test_db().await;
+        let pubsub = MemStreamPubSub::new();
+        let env_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let webhook_event_id = Uuid::now_v7();
+        let child_event_id = Uuid::now_v7();
+
+        let subscriber = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
+
+        // Child runs sharing `stream_id` finish/fail/cancel before the webhook itself finishes.
+        pubsub
+            .publish(StreamEvent::RunStop {
+                run_id: Uuid::now_v7(),
+                env_id,
+                stream_id,
+                event_id: Some(child_event_id),
+                result: Some(serde_json::json!({"hijack": "stop"})),
+            })
+            .await
+            .unwrap();
+        pubsub
+            .publish(StreamEvent::RunFail {
+                run_id: Uuid::now_v7(),
+                env_id,
+                stream_id,
+                event_id: Some(child_event_id),
+                error: Some("child failed".to_string()),
+            })
+            .await
+            .unwrap();
+        pubsub
+            .publish(StreamEvent::RunCancel {
+                run_id: Uuid::now_v7(),
+                env_id,
+                stream_id,
+                event_id: Some(child_event_id),
+                reason: Some("child cancelled".to_string()),
+            })
+            .await
+            .unwrap();
+        // Now the webhook's own event completes.
+        pubsub
+            .publish(StreamEvent::RunStop {
+                run_id: Uuid::now_v7(),
+                env_id,
+                stream_id,
+                event_id: Some(webhook_event_id),
+                result: Some(serde_json::json!({"ok": true})),
+            })
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let (outcome, timed_out) =
+            wait_for_webhook_outcome(&db, None, env_id, webhook_event_id, subscriber, deadline)
+                .await;
+        assert!(!timed_out);
+        match outcome {
+            Some(WebhookOutcome::Stopped { result }) => {
+                assert_eq!(result, Some(serde_json::json!({"ok": true})));
+            }
+            other => panic!("expected webhook Stopped outcome, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_event_queue_name_matches_worker() {
@@ -1241,6 +1436,17 @@ mod tests {
         });
         let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert!(
+            body.is_empty(),
+            "RFC 9110: 204 No Content must have empty body"
+        );
+
+        let ok_no_body = serde_json::json!({
+            "status": 200
+        });
+        let response = build_webhook_response(Some(ok_no_body), false).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!(null));
@@ -1479,6 +1685,81 @@ mod tests {
     }
 
     #[test]
+    fn test_original_url_rejects_malformed_and_untrusted_forwarding_headers() {
+        let mut spoofed = HeaderMap::new();
+        spoofed.insert("host", "api.hot.dev".parse().unwrap());
+        spoofed.insert("x-forwarded-host", "evil.com?".parse().unwrap());
+        spoofed.insert("x-forwarded-proto", "javascript".parse().unwrap());
+        assert_eq!(
+            build_original_url_with_trust(&spoofed, &uri("/webhook/svc/abcdef123456"), true),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456".to_string())
+        );
+
+        let mut untrusted_peer = HeaderMap::new();
+        untrusted_peer.insert("host", "api.hot.dev".parse().unwrap());
+        untrusted_peer.insert("x-forwarded-host", "attacker.example".parse().unwrap());
+        untrusted_peer.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert_eq!(
+            build_original_url_with_trust(
+                &untrusted_peer,
+                &uri("/webhook/svc/abcdef123456"),
+                false
+            ),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_response_blocks_framing_shared_headers_1xx_and_204_body() {
+        let resp_204 = build_webhook_response(
+            Some(serde_json::json!({
+                "status": 204,
+                "headers": {
+                    "Content-Length": "999",
+                    "Transfer-Encoding": "chunked",
+                    "Clear-Site-Data": "\"cookies\"",
+                    "Strict-Transport-Security": "max-age=0",
+                    "Access-Control-Allow-Origin": "*",
+                    "X-Safe": "ok"
+                },
+                "body": {"should": "not appear"}
+            })),
+            false,
+        )
+        .unwrap();
+        assert_eq!(resp_204.status(), StatusCode::NO_CONTENT);
+        assert!(resp_204.headers().get("clear-site-data").is_none());
+        assert!(
+            resp_204
+                .headers()
+                .get("strict-transport-security")
+                .is_none()
+        );
+        assert!(
+            resp_204
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        assert!(resp_204.headers().get("transfer-encoding").is_none());
+        assert_eq!(resp_204.headers()["x-safe"], "ok");
+        let bytes = axum::body::to_bytes(resp_204.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(bytes.is_empty(), "204 must have an empty body");
+
+        let resp_101 = build_webhook_response(
+            Some(serde_json::json!({
+                "$type": "::hot::http/HttpResponse",
+                "$val": {"status": 101, "body": "switching"}
+            })),
+            true,
+        )
+        .unwrap();
+        assert_eq!(resp_101.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn test_split_path_long_token_returns_none() {
         // Token too long (13 chars)
         let result = split_path_and_token("hook/abcdef1234567");
@@ -1505,6 +1786,8 @@ mod tests {
         let result = webhook_catch_all_handler(
             State(state),
             Method::POST,
+            None,
+            None,
             None,
             None,
             OriginalUri(uri("/webhook/svc/abcdef123456")),
@@ -1539,6 +1822,8 @@ mod tests {
         let result = webhook_catch_all_handler(
             State(state),
             Method::POST,
+            None,
+            None,
             None,
             Some(Extension(resolved)),
             OriginalUri(uri("/webhook/svc/hook/abcdef123456")),

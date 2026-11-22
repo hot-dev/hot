@@ -357,7 +357,8 @@ impl<T> ApiResponse<T> {
 
 impl<T> ApiListResponse<T> {
     pub fn new(data: Vec<T>, total: i64, limit: i64, offset: i64) -> Self {
-        let has_more = offset + limit < total;
+        let offset = offset.max(0);
+        let has_more = offset.saturating_add(limit) < total;
         Self {
             data,
             pagination: PaginationMeta {
@@ -459,7 +460,10 @@ pub struct FileListQueryParams {
         deserialize_with = "crate::handlers::deserialize_clamped_limit"
     )]
     pub limit: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::handlers::deserialize_clamped_offset"
+    )]
     pub offset: i64,
     #[serde(default)]
     pub prefix: Option<String>,

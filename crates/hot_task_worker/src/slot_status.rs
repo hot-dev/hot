@@ -84,12 +84,27 @@ impl SlotStatus {
     }
 }
 
+fn temp_path_for(path: &Path) -> std::path::PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".tmp");
+    std::path::PathBuf::from(os)
+}
+
 /// Replace `path` with `status`, through a temporary file so a reader never
 /// sees a partial write.
 pub fn write(path: &Path, status: &SlotStatus) -> std::io::Result<()> {
-    let temporary = path.with_extension("tmp");
+    let temporary = temp_path_for(path);
     std::fs::write(&temporary, status.to_json().to_string())?;
     std::fs::rename(&temporary, path)
+}
+
+/// Async variant of [`write`] so periodic status writers never block a Tokio
+/// runtime worker thread.
+pub async fn write_async(path: &Path, status: &SlotStatus) -> std::io::Result<()> {
+    let temporary = temp_path_for(path);
+    let payload = status.to_json().to_string();
+    tokio::fs::write(&temporary, payload).await?;
+    tokio::fs::rename(&temporary, path).await
 }
 
 #[cfg(test)]
@@ -128,7 +143,7 @@ mod tests {
         assert_eq!(written["memory_used_mb"], 1024);
         assert_eq!(written["last_task_at"], 1_700_000_123);
         assert!(written["time"].as_u64().unwrap() > 1_700_000_000);
-        assert!(!path.with_extension("tmp").exists());
+        assert!(!temp_path_for(&path).exists());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

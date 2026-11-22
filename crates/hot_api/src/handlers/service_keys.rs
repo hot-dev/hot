@@ -124,7 +124,7 @@ fn build_response(
 
 /// POST /v1/service-keys — Create a new service key
 pub async fn create_service_key(
-    State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Json(body): Json<CreateServiceKeyRequest>,
@@ -132,7 +132,7 @@ pub async fn create_service_key(
 {
     // Feature gate: service keys require Pro+ plan
     let org_id = super::get_org_id_for_env(&db, &api_key.env_id).await?;
-    let features = hot::db::Features::resolve_for_org(&db, &org_id).await;
+    let features = hot::db::Features::resolve_for_org_with_conf(&db, &conf, &org_id).await;
     if !features.has_service_keys() {
         return Err((
             StatusCode::FORBIDDEN,

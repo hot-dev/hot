@@ -31,7 +31,8 @@ const REAPER_TIMEOUT: Duration = Duration::from_secs(30);
 /// us from treating an unrelated runc shim as a Kata process.
 fn is_target_process(comm: &str, cmdline: &str) -> bool {
     let is_kata_shim = matches!(comm, "containerd-shim" | "containerd-shim-kata-v2")
-        && cmdline.contains("containerd-shim-kata-v2");
+        && cmdline.contains("containerd-shim-kata-v2")
+        && (cmdline.contains("-namespace hot-box") || cmdline.contains("-namespace=hot-box"));
     let is_kata_qemu = comm.starts_with("qemu-system")
         && cmdline.contains("sandbox-")
         && (cmdline.contains("/run/vc/") || cmdline.contains("kata"));
@@ -121,9 +122,15 @@ async fn reap_inner() {
                 .is_some_and(|(current_ppid, current_starttime, _)| {
                     current_ppid == 1 && current_starttime == starttime_ticks
                 });
-        let target_unchanged = read_cmdline(pid)
-            .await
-            .is_some_and(|current_cmdline| is_target_process(&comm, &current_cmdline));
+        let target_unchanged = match (
+            tokio::fs::read_to_string(format!("/proc/{}/comm", pid)).await,
+            read_cmdline(pid).await,
+        ) {
+            (Ok(current_comm), Some(current_cmdline)) => {
+                is_target_process(current_comm.trim(), &current_cmdline)
+            }
+            _ => false,
+        };
         if !identity_unchanged || !target_unchanged {
             skipped_attached += 1;
             continue;

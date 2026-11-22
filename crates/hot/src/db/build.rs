@@ -2043,6 +2043,43 @@ impl Build {
         }
     }
 
+    /// Get all currently deployed, runtime-ready builds for active projects in an environment.
+    pub async fn get_deployed_builds_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+    ) -> Result<Vec<Build>, BuildError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let builds = sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version \
+                     FROM build b \
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id \
+                     JOIN project p ON b.project_id = p.project_id \
+                     WHERE p.env_id = $1 AND p.active = true AND b.deployed = true AND b.runtime_status = 'ready' \
+                     ORDER BY p.created_at DESC, b.build_id"
+                )
+                .bind(env_id)
+                .fetch_all(pg_pool)
+                .await?;
+                Ok(builds)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let builds = sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version \
+                     FROM build b \
+                     JOIN build_type bt ON b.build_type_id = bt.build_type_id \
+                     JOIN project p ON b.project_id = p.project_id \
+                     WHERE p.env_id = ? AND p.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' \
+                     ORDER BY p.created_at DESC, b.build_id"
+                )
+                .bind(env_id)
+                .fetch_all(sqlite_pool)
+                .await?;
+                Ok(builds)
+            }
+        }
+    }
+
     /// Check if this build is currently deployed
     pub fn is_deployed(&self) -> bool {
         self.deployed

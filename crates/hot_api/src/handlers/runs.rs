@@ -20,7 +20,10 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{blob_store_from_ext, deserialize_clamped_limit, rehydrate_payload_json};
+use super::{
+    blob_store_from_ext, deserialize_clamped_limit, deserialize_clamped_offset,
+    rehydrate_payload_json,
+};
 use crate::{auth::AuthContext, rate_limit};
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -98,7 +101,7 @@ pub struct RunFilters {
         deserialize_with = "deserialize_clamped_limit"
     )]
     pub limit: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_clamped_offset")]
     pub offset: i64,
     pub status: Option<String>, // running|succeeded|failed|cancelled
     #[serde(rename = "type")]

@@ -156,16 +156,22 @@ impl TaskShutdownCoordinator {
         }
     }
 
-    /// Like [`register_task`], but refuses to register a task whose
-    /// `task_id` is already in flight. Returns `true` on success and
-    /// `false` if a duplicate was rejected.
+    /// Like [`register_task`], but refuses to register a task once shutdown has
+    /// started or when `task_id` is already in flight. Returns `true` on
+    /// success and `false` if rejected.
     ///
-    /// Guards against the queue redelivering the same `task_id` while a
-    /// previous invocation is still running. Concurrent invocations would
-    /// race on shared per-task resources such as data volumes, container
-    /// labels, and DB rows.
+    /// Guards against both the queue redelivering the same `task_id` while a
+    /// previous invocation is still running, and a processor that finished
+    /// `claim_blocking()` just before shutdown registering a new task after
+    /// `initiate_shutdown` already snapshotted `active_tasks`.
     pub fn try_register_task(&self, task: ActiveTask) -> bool {
+        if self.is_shutting_down() {
+            return false;
+        }
         if let Ok(mut tasks) = self.active_tasks.write() {
+            if self.is_shutting_down() {
+                return false;
+            }
             if tasks.iter().any(|t| t.task_id == task.task_id) {
                 return false;
             }
@@ -302,10 +308,16 @@ impl TaskShutdownCoordinator {
             "Drain timeout reached, finalizing {} interrupted task(s)",
             remaining.len(),
         );
-        for task in remaining {
-            Self::finalize_interrupted_task(db, stream_publisher, task_queue, &task).await;
-            self.unregister_task(&task.task_id);
-        }
+        // Finalize interrupted tasks with bounded concurrency so many active
+        // tasks with slow DB/queue responses cannot serialize past ECS's
+        // 120s stopTimeout.
+        use futures::stream::StreamExt;
+        futures::stream::iter(remaining)
+            .for_each_concurrent(8, |task| async move {
+                Self::finalize_interrupted_task(db, stream_publisher, task_queue, &task).await;
+                self.unregister_task(&task.task_id);
+            })
+            .await;
         tokio::time::sleep(Duration::from_secs(CANCEL_GRACE_SECS)).await;
 
         // Phase 4: clean Redis state only if the consumer has no pending
@@ -358,7 +370,8 @@ impl TaskShutdownCoordinator {
                 "msg": SHUTDOWN_REASON,
                 "err": null,
                 "infra_interrupted": true,
-            }
+            },
+            "compute-units": 0,
         });
         let exhausted_error = serde_json::json!({
             "$type": "::hot::task/Failure",

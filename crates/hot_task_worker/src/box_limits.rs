@@ -167,6 +167,31 @@ impl BoxSize {
         }
         Self::Nano
     }
+
+    /// Smallest size preset whose hardware profile covers every resolved resource dimension.
+    ///
+    /// Used for CUS quota reservation and billing so combining a small `size` preset
+    /// (or omitting `size`) with larger raw overrides (`memory_mb`, `disk_size_mb`,
+    /// `tmp_size_mb`, `cpu_quota`) bills at the effective resource tier, and plan
+    /// caps that shrink all resources below a requested preset do not overcharge.
+    pub fn infer_from_resources(
+        memory_mb: u64,
+        cpu_quota: u64,
+        tmp_size_mb: u64,
+        disk_size_mb: u64,
+    ) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|size| {
+                let p = size.profile();
+                memory_mb <= p.memory_mb
+                    && cpu_quota <= p.cpu_quota
+                    && tmp_size_mb <= p.tmp_size_mb
+                    && disk_size_mb <= p.disk_size_mb
+            })
+            .unwrap_or(Self::X4large)
+    }
 }
 
 impl std::fmt::Display for BoxSize {
@@ -262,36 +287,42 @@ impl BoxLimits {
                 )
             };
 
+        let req_tmp = boxconf_args.get("tmp_size_mb").and_then(|v| v.as_u64());
+        let req_disk = boxconf_args.get("disk_size_mb").and_then(|v| v.as_u64());
+        let req_mem = boxconf_args.get("memory_mb").and_then(|v| v.as_u64());
+        let req_timeout = boxconf_args.get("timeout_secs").and_then(|v| v.as_u64());
+        let req_cpu = boxconf_args.get("cpu_quota").and_then(|v| v.as_u64());
+
         let tmp_size_mb = Self::resolve_numeric(
-            boxconf_args.get("tmp_size_mb").and_then(|v| v.as_u64()),
+            req_tmp,
             default_tmp,
             features.get_i64(features::keys::BOX_TMP_SIZE_MB),
             Self::SYSTEM_MAX_TMP_SIZE_MB,
         );
 
         let disk_size_mb = Self::resolve_numeric(
-            boxconf_args.get("disk_size_mb").and_then(|v| v.as_u64()),
+            req_disk,
             default_disk,
             features.get_i64(features::keys::BOX_DISK_SIZE_MB),
             Self::SYSTEM_MAX_DISK_SIZE_MB,
         );
 
         let memory_mb = Self::resolve_numeric(
-            boxconf_args.get("memory_mb").and_then(|v| v.as_u64()),
+            req_mem,
             default_mem,
             features.get_i64(features::keys::BOX_MEMORY_MB),
             Self::SYSTEM_MAX_MEMORY_MB,
         );
 
         let timeout_secs = Self::resolve_numeric(
-            boxconf_args.get("timeout_secs").and_then(|v| v.as_u64()),
+            req_timeout,
             default_timeout,
             features.get_i64(features::keys::BOX_TIMEOUT_SECS),
             Self::SYSTEM_MAX_TIMEOUT_SECS,
         );
 
         let cpu_quota = Self::resolve_numeric(
-            boxconf_args.get("cpu_quota").and_then(|v| v.as_u64()),
+            req_cpu,
             default_cpu,
             features.get_i64(features::keys::BOX_CPU_QUOTA),
             Self::SYSTEM_MAX_CPU_QUOTA,
@@ -307,7 +338,24 @@ impl BoxLimits {
             _ => features.box_network_allowed(),
         };
 
-        let size = explicit_size.unwrap_or_else(|| BoxSize::infer_from_memory(memory_mb));
+        // Derive the billing tier from the resolved hardware limits.
+        // - When a `size` preset was specified, every dimension started from that
+        //   preset's profile, so all four hardware dimensions determine the tier.
+        // - When no `size` was specified, evaluate resolved `memory_mb` plus any
+        //   hardware dimension explicitly requested in `boxconf_args` so legacy
+        //   compile-time defaults (e.g., DEFAULT_TMP_SIZE_MB = 500) do not
+        //   reclassify default boxes while explicit raw overrides are still billed
+        //   at their effective tier.
+        let size = if explicit_size.is_some() {
+            BoxSize::infer_from_resources(memory_mb, cpu_quota, tmp_size_mb, disk_size_mb)
+        } else {
+            BoxSize::infer_from_resources(
+                memory_mb,
+                if req_cpu.is_some() { cpu_quota } else { 0 },
+                if req_tmp.is_some() { tmp_size_mb } else { 0 },
+                if req_disk.is_some() { disk_size_mb } else { 0 },
+            )
+        };
 
         Self {
             tmp_size_mb,
@@ -637,6 +685,53 @@ mod tests {
         assert_eq!(limits.memory_mb, 256);
         assert_eq!(limits.cpu_quota, 10_000); // from nano preset
         assert_eq!(limits.tmp_size_mb, 32); // from nano preset
+        assert_eq!(limits.size, BoxSize::Small);
+    }
+
+    #[test]
+    fn test_size_preset_cannot_underbill_raw_overrides() {
+        let features = Features::unlimited();
+
+        let big_all = BoxLimits::resolve(
+            &features,
+            &json!({
+                "size": "nano",
+                "memory_mb": 8192,
+                "disk_size_mb": 51200,
+                "tmp_size_mb": 4096,
+                "timeout_secs": 7200
+            }),
+        );
+        assert_eq!(big_all.size, BoxSize::X4large);
+
+        let big_disk =
+            BoxLimits::resolve(&features, &json!({"size": "nano", "disk_size_mb": 51200}));
+        assert_eq!(big_disk.size, BoxSize::Xxlarge);
+
+        let big_tmp = BoxLimits::resolve(&features, &json!({"size": "nano", "tmp_size_mb": 4096}));
+        assert_eq!(big_tmp.size, BoxSize::X4large);
+
+        let big_cpu = BoxLimits::resolve(&features, &json!({"size": "nano", "cpu_quota": 100_000}));
+        assert_eq!(big_cpu.size, BoxSize::Xlarge);
+
+        // Without explicit size, raw disk/tmp overrides still raise billing tier.
+        let no_size_big_disk =
+            BoxLimits::resolve(&features, &json!({"memory_mb": 64, "disk_size_mb": 51200}));
+        assert_eq!(no_size_big_disk.size, BoxSize::Xxlarge);
+
+        // Just below a boundary rounds up to the tier that covers it.
+        let near_max = BoxLimits::resolve(&features, &json!({"memory_mb": 8191}));
+        assert_eq!(near_max.size, BoxSize::X4large);
+
+        // Plan clamping all dimensions below requested preset does not overcharge.
+        let micro_plan = features_from(json!({
+            "box_memory_mb": 128,
+            "box_cpu_quota": 25_000,
+            "box_tmp_size_mb": 64,
+            "box_disk_size_mb": 512
+        }));
+        let clamped = BoxLimits::resolve(&micro_plan, &json!({"size": "4xlarge"}));
+        assert_eq!(clamped.size, BoxSize::Micro);
     }
 
     #[test]

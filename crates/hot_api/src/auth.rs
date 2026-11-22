@@ -49,6 +49,39 @@ pub enum AuthContext {
     },
 }
 
+const CREDENTIAL_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_CREDENTIAL_TOUCH_ENTRIES: usize = 50_000;
+
+static CREDENTIAL_LAST_TOUCHED: once_cell::sync::Lazy<
+    std::sync::Mutex<ahash::AHashMap<Uuid, std::time::Instant>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(ahash::AHashMap::new()));
+
+/// Debounce `last_used_at` updates to at most once per `CREDENTIAL_TOUCH_INTERVAL`
+/// per session or service key, preventing a DB write on every request.
+fn should_touch_credential(id: Uuid) -> bool {
+    let now = std::time::Instant::now();
+    let mut map = CREDENTIAL_LAST_TOUCHED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = map.get(&id)
+        && now.duration_since(*last) < CREDENTIAL_TOUCH_INTERVAL
+    {
+        return false;
+    }
+    if map.len() >= MAX_CREDENTIAL_TOUCH_ENTRIES {
+        map.retain(|_, last| now.duration_since(*last) < CREDENTIAL_TOUCH_INTERVAL);
+        if map.len() >= MAX_CREDENTIAL_TOUCH_ENTRIES {
+            let drop_count = (map.len() / 4).max(1);
+            let keys: Vec<Uuid> = map.keys().take(drop_count).copied().collect();
+            for key in keys {
+                map.remove(&key);
+            }
+        }
+    }
+    map.insert(id, now);
+    true
+}
+
 // A credential the database could not check is unavailable, not invalid:
 // clients retry a 503 but discard a credential that got a 401.
 fn api_key_status(error: hot::db::api_key::ApiKeyError) -> StatusCode {
@@ -458,7 +491,14 @@ where
                     if !admitted { break; }
                     if let Some(principal) = &principal {
                         match principal.revalidate(&db).await {
-                            Ok(current) if requirements.iter().all(|(resource,action)|current.has_permission(resource,action)) => {}
+                            Ok(current)
+                                if requirements.iter().all(|(resource, action)| {
+                                    if action == "mcp_service_access" {
+                                        current.has_mcp_service_access(resource)
+                                    } else {
+                                        current.has_permission(resource, action)
+                                    }
+                                }) => {}
                             Err(status) if status.is_server_error() => continue,
                             _ => break,
                         }
@@ -509,15 +549,19 @@ pub async fn authenticate_token(
             match &auth_ctx {
                 AuthContext::Session { session, .. } => {
                     let id = session.session_id;
-                    tokio::spawn(async move {
-                        Session::touch(&touch_db, &id).await;
-                    });
+                    if should_touch_credential(id) {
+                        tokio::spawn(async move {
+                            Session::touch(&touch_db, &id).await;
+                        });
+                    }
                 }
                 AuthContext::ServiceKey { service_key, .. } => {
                     let id = service_key.service_key_id;
-                    tokio::spawn(async move {
-                        ServiceKey::touch(&touch_db, &id).await;
-                    });
+                    if should_touch_credential(id) {
+                        tokio::spawn(async move {
+                            ServiceKey::touch(&touch_db, &id).await;
+                        });
+                    }
                 }
                 AuthContext::ApiKey(_) => {}
             }
@@ -605,7 +649,7 @@ async fn authenticate_token_inner(
             }
             Err(e) => {
                 error!("Error validating API key: {:?}", e);
-                Err(StatusCode::INTERNAL_SERVER_ERROR)
+                Err(api_key_status(e))
             }
         }
     } else {
@@ -1309,5 +1353,67 @@ mod scope_tests {
         assert!(authenticate_token(&db, &token).await.is_err());
         assert!(authenticate_token(&db, &session_token).await.is_err());
         assert!(narrowed.revalidate(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn encoded_dot_dot_in_file_upload_path_cannot_escape_prefix_grant() {
+        use axum::{Router, routing::put};
+        use tower::ServiceExt;
+
+        let now = Utc::now();
+        let env_id = Uuid::now_v7();
+        let auth = AuthContext::ApiKey(ApiKey {
+            api_key_id: Uuid::now_v7(),
+            env_id,
+            description: "scoped file upload key".to_string(),
+            key_data: json!({"hash": "test"}),
+            active: true,
+            created_by_user_id: Uuid::now_v7(),
+            created_at: now,
+            updated_at: now,
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            permissions: json!({"file:allowed/*": ["create"]}),
+        });
+        let scope = DatabaseScope::Environment {
+            org_id: Uuid::now_v7(),
+            env_id,
+        };
+
+        let app = Router::new()
+            .route("/v1/files/upload/{*path}", put(|| async { StatusCode::OK }))
+            .route_layer(axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let auth = auth.clone();
+                    let scope = scope.clone();
+                    async move {
+                        req.extensions_mut().insert(auth);
+                        req.extensions_mut().insert(scope);
+                        match authorize_request(req).await {
+                            Ok(r) => next.run(r).await,
+                            Err(resp) => *resp,
+                        }
+                    }
+                },
+            ));
+
+        // Encoded traversal out of `allowed/` must be denied at route authorization.
+        let escaped = axum::http::Request::builder()
+            .method("PUT")
+            .uri("/v1/files/upload/allowed/%2e%2e/private/x")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(escaped).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Staying under `allowed/` must be permitted.
+        let allowed = axum::http::Request::builder()
+            .method("PUT")
+            .uri("/v1/files/upload/allowed/sub/x")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(allowed).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

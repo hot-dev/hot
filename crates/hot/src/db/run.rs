@@ -2039,7 +2039,7 @@ impl Run {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let result = sqlx::query(
-                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE stream_id = $1 AND status_id = $5",
+                    "UPDATE run SET stop_time = $2, status_id = $3, result = $4 WHERE stream_id = $1 AND status_id = $5 AND event_id IS NULL",
                 )
                 .bind(stream_id)
                 .bind(stop_time)
@@ -2053,7 +2053,7 @@ impl Run {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let result_json = result_val.to_string();
                 let result = sqlx::query(
-                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE stream_id = ? AND status_id = ?",
+                    "UPDATE run SET stop_time = ?, status_id = ?, result = ? WHERE stream_id = ? AND status_id = ? AND event_id IS NULL",
                 )
                 .bind(stop_time)
                 .bind(RunStatus::Failed.as_id())

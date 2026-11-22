@@ -59,7 +59,7 @@ pub struct ListQueryParams {
         deserialize_with = "deserialize_clamped_limit"
     )]
     pub limit: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_clamped_offset")]
     pub offset: i64,
 }
 
@@ -75,6 +75,14 @@ where
 {
     let v = i64::deserialize(deserializer)?;
     Ok(v.clamp(1, MAX_LIST_LIMIT))
+}
+
+pub fn deserialize_clamped_offset<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = i64::deserialize(deserializer)?;
+    Ok(v.max(0))
 }
 
 // ============================================================================
@@ -283,7 +291,7 @@ pub async fn get_org_id_for_env(
 /// committed run row; the worker flushes that row before publishing the notice.
 pub(crate) async fn resolve_stream_result(
     db: &DatabasePool,
-    conf: &hot::val::Val,
+    blob_store: Option<&std::sync::Arc<hot::blob::BlobStore>>,
     env_id: Uuid,
     run_id: Uuid,
     inline: Option<serde_json::Value>,
@@ -297,8 +305,7 @@ pub(crate) async fn resolve_stream_result(
     if run.env_id != env_id {
         return Err("Run is outside the authorized environment".into());
     }
-    let blob_store = hot::blob::blob_store_from_conf(std::sync::Arc::new(db.clone()), conf).await;
-    Ok(rehydrate_payload_json(db, blob_store.as_ref(), env_id, run.result).await)
+    Ok(rehydrate_payload_json(db, blob_store, env_id, run.result).await)
 }
 
 #[cfg(test)]
@@ -340,22 +347,21 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let conf = hot::val!({"blob":{"mode":"off"}});
         assert_eq!(
-            resolve_stream_result(&db, &conf, data.env_id, data.run_id, None)
+            resolve_stream_result(&db, None, data.env_id, data.run_id, None)
                 .await
                 .unwrap(),
             Some(result)
         );
         assert!(
-            resolve_stream_result(&db, &conf, Uuid::now_v7(), data.run_id, None)
+            resolve_stream_result(&db, None, Uuid::now_v7(), data.run_id, None)
                 .await
                 .is_err()
         );
         assert_eq!(
             resolve_stream_result(
                 &db,
-                &conf,
+                None,
                 data.env_id,
                 Uuid::now_v7(),
                 Some(serde_json::json!(42))

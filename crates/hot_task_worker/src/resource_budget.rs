@@ -5,8 +5,8 @@
 //! budget is available, the call waits (with timeout) until another container
 //! releases its resources.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
 
 /// Account for writable snapshot/rootfs metadata and image unpacking in
@@ -19,12 +19,17 @@ pub fn disk_admission_mb(data_mb: u64) -> u64 {
         .saturating_add(data_mb / 4)
 }
 
+#[derive(Debug, Default)]
+struct Allocated {
+    memory_mb: u64,
+    disk_mb: u64,
+}
+
 #[derive(Debug)]
 pub struct ResourceBudget {
     total_memory_mb: u64,
     total_disk_mb: u64,
-    allocated_memory_mb: AtomicU64,
-    allocated_disk_mb: AtomicU64,
+    allocated: Mutex<Allocated>,
     notify: Notify,
 }
 
@@ -33,8 +38,7 @@ impl ResourceBudget {
         Arc::new(Self {
             total_memory_mb,
             total_disk_mb,
-            allocated_memory_mb: AtomicU64::new(0),
-            allocated_disk_mb: AtomicU64::new(0),
+            allocated: Mutex::new(Allocated::default()),
             notify: Notify::new(),
         })
     }
@@ -59,54 +63,28 @@ impl ResourceBudget {
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
-            // Pin and enable the waiter *before* reading the allocated atomics
-            // so a concurrent `release()` cannot fire `notify_waiters()` in the
-            // gap between the check and `.await` and cause a lost wakeup.
+            // Pin and enable the waiter *before* locking `allocated` so a
+            // concurrent `release()` cannot fire `notify_waiters()` in the gap
+            // between the check and `.await` and cause a lost wakeup.
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
 
-            let cur_mem = self.allocated_memory_mb.load(Ordering::Acquire);
-            let cur_disk = self.allocated_disk_mb.load(Ordering::Acquire);
-
-            if cur_mem + memory_mb <= self.total_memory_mb
-                && cur_disk + disk_mb <= self.total_disk_mb
-            {
-                // Try CAS for memory
-                if self
-                    .allocated_memory_mb
-                    .compare_exchange_weak(
-                        cur_mem,
-                        cur_mem + memory_mb,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
+            let (cur_mem, cur_disk) = {
+                let mut allocated = self.allocated.lock();
+                if allocated.memory_mb.saturating_add(memory_mb) <= self.total_memory_mb
+                    && allocated.disk_mb.saturating_add(disk_mb) <= self.total_disk_mb
                 {
-                    // Try CAS for disk
-                    if self
-                        .allocated_disk_mb
-                        .compare_exchange_weak(
-                            cur_disk,
-                            cur_disk + disk_mb,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        return Ok(ResourceGuard {
-                            budget: Arc::clone(self),
-                            memory_mb,
-                            disk_mb,
-                        });
-                    }
-                    // Disk CAS failed, rollback memory
-                    self.allocated_memory_mb
-                        .fetch_sub(memory_mb, Ordering::AcqRel);
+                    allocated.memory_mb += memory_mb;
+                    allocated.disk_mb += disk_mb;
+                    return Ok(ResourceGuard {
+                        budget: Arc::clone(self),
+                        memory_mb,
+                        disk_mb,
+                    });
                 }
-                // CAS failed, retry immediately
-                continue;
-            }
+                (allocated.memory_mb, allocated.disk_mb)
+            };
 
             // Not enough resources — wait for notification or timeout
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -128,19 +106,21 @@ impl ResourceBudget {
     }
 
     pub fn available_memory_mb(&self) -> u64 {
-        self.total_memory_mb
-            .saturating_sub(self.allocated_memory_mb.load(Ordering::Acquire))
+        let allocated = self.allocated.lock();
+        self.total_memory_mb.saturating_sub(allocated.memory_mb)
     }
 
     pub fn available_disk_mb(&self) -> u64 {
-        self.total_disk_mb
-            .saturating_sub(self.allocated_disk_mb.load(Ordering::Acquire))
+        let allocated = self.allocated.lock();
+        self.total_disk_mb.saturating_sub(allocated.disk_mb)
     }
 
     fn release(&self, memory_mb: u64, disk_mb: u64) {
-        self.allocated_memory_mb
-            .fetch_sub(memory_mb, Ordering::AcqRel);
-        self.allocated_disk_mb.fetch_sub(disk_mb, Ordering::AcqRel);
+        {
+            let mut allocated = self.allocated.lock();
+            allocated.memory_mb = allocated.memory_mb.saturating_sub(memory_mb);
+            allocated.disk_mb = allocated.disk_mb.saturating_sub(disk_mb);
+        }
         self.notify.notify_waiters();
     }
 }

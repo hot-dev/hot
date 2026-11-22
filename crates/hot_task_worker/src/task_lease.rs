@@ -654,26 +654,59 @@ impl RedisTaskLease {
     }
 
     /// Spawn the heartbeat task. Runs until aborted by the guard's `Drop`
-    /// or until the lease is observed lost (extend returns `false`).
+    /// or until the lease is observed lost (extend returns `false` or the
+    /// local monotonic TTL fence expires without a confirmed refresh).
     fn spawn_heartbeat(
         inner: Arc<RedisLeaseInner>,
         task_id: Uuid,
         token: String,
         ttl: Duration,
+        acquired_at: tokio::time::Instant,
         lost: Arc<AtomicBool>,
         lost_notify: Arc<Notify>,
     ) -> JoinHandle<()> {
         let interval = inner.heartbeat_interval;
         tokio::spawn(async move {
+            let mut last_confirmed_at = acquired_at;
             // Stagger the first tick so a burst of new acquires doesn't
             // all hit Redis on the same wall-clock millisecond.
             let mut ticker =
                 tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
+                let deadline = last_confirmed_at + ttl;
+                tokio::select! {
+                    biased;
+                    () = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            ttl_secs = ttl.as_secs(),
+                            "Task lease TTL fence elapsed without a confirmed refresh — marking lease lost"
+                        );
+                        lost.store(true, Ordering::Release);
+                        lost_notify.notify_waiters();
+                        return;
+                    }
+                    _ = ticker.tick() => {}
+                }
+                // Stamp pre-RPC so slow Redis responses never overstate the
+                // remaining server-side TTL.
+                let attempt_started = tokio::time::Instant::now();
                 match inner.extend(&task_id, &token, ttl).await {
                     Ok(true) => {
+                        last_confirmed_at = attempt_started;
+                        if tokio::time::Instant::now().saturating_duration_since(last_confirmed_at)
+                            >= ttl
+                        {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                ttl_secs = ttl.as_secs(),
+                                "Task lease refresh exceeded TTL window — marking lease lost"
+                            );
+                            lost.store(true, Ordering::Release);
+                            lost_notify.notify_waiters();
+                            return;
+                        }
                         tracing::trace!(
                             task_id = %task_id,
                             ttl_secs = ttl.as_secs(),
@@ -697,8 +730,21 @@ impl RedisTaskLease {
                         return;
                     }
                     Err(e) => {
-                        // Transient — keep ticking. As long as Redis
-                        // recovers before `ttl` we keep the lease.
+                        if tokio::time::Instant::now().saturating_duration_since(last_confirmed_at)
+                            >= ttl
+                        {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                ttl_secs = ttl.as_secs(),
+                                error = %e,
+                                "Task lease heartbeat failed past local TTL fence — marking lease lost"
+                            );
+                            lost.store(true, Ordering::Release);
+                            lost_notify.notify_waiters();
+                            return;
+                        }
+                        // Transient — keep ticking while inside the local TTL
+                        // window. If Redis recovers before `ttl` we keep it.
                         tracing::debug!(
                             task_id = %task_id,
                             error = %e,
@@ -728,6 +774,7 @@ impl TaskLease for RedisTaskLease {
         let mut cmd = redis::cmd("SET");
         cmd.arg(&key).arg(&token).arg("NX").arg("PX").arg(ttl_ms);
 
+        let acquired_at = tokio::time::Instant::now();
         let result = self.inner.run_cmd(&cmd).await?;
         let acquired = match &result {
             redis::Value::Okay => true,
@@ -752,6 +799,7 @@ impl TaskLease for RedisTaskLease {
             task_id,
             token.clone(),
             ttl,
+            acquired_at,
             Arc::clone(&lost),
             Arc::clone(&lost_notify),
         );

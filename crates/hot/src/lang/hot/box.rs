@@ -488,7 +488,7 @@ fn validate_and_parse(args: &[Val]) -> Result<BoxConf, HotResult<Val>> {
     let timeout_secs = input
         .get(&Val::from("timeout"))
         .and_then(|v| match v {
-            Val::Int(n) => Some((*n as u64).clamp(1, 86_400)),
+            Val::Int(n) => Some((*n).clamp(1, 86_400) as u64),
             _ => None,
         })
         .unwrap_or(60);

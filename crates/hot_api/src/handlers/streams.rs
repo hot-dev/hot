@@ -220,9 +220,17 @@ pub async fn subscribe_to_stream(
         "Credential does not have read access to this stream",
     )?;
 
-    // Optional: resolve project filter to project_id
+    // Optional: resolve project filter to project_id (require project read permission
+    // so scoped stream-only credentials cannot probe project names/IDs).
     let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
         let project = get_and_verify_project(&db, &api_key, project_name_or_id).await?;
+        let project_resource = format!("project:{}", project.project_id);
+        super::require_permission(
+            &auth,
+            &project_resource,
+            actions::READ,
+            "Credential does not have read access to this project",
+        )?;
         Some(project.project_id)
     } else {
         None
@@ -232,7 +240,7 @@ pub async fn subscribe_to_stream(
             .await
             .map_err(|exceeded| {
                 (
-                    StatusCode::TOO_MANY_REQUESTS,
+                    exceeded.status_code(),
                     Json(rate_limit::rate_limit_error_body(exceeded)),
                 )
             })?;
@@ -382,6 +390,8 @@ struct StreamSubscription {
     project_filter: Option<Uuid>,
     /// Runs announced with `run:start` (or skipped by the project filter).
     started: ahash::AHashSet<Uuid>,
+    /// Runs excluded by `project_filter` (must also drop their `stream:data`).
+    rejected: ahash::AHashSet<Uuid>,
     /// Runs whose end was sent (or skipped by the project filter).
     ended: ahash::AHashSet<Uuid>,
     /// Runs of pushed `stream:data` that had no row to announce them.
@@ -406,6 +416,7 @@ impl StreamSubscription {
             stream_id,
             project_filter,
             started: Default::default(),
+            rejected: Default::default(),
             ended: Default::default(),
             unknown: Default::default(),
             polled_ends: Default::default(),
@@ -471,7 +482,11 @@ impl StreamSubscription {
         retry: Option<Option<Uuid>>,
         out: &mut Vec<SseEvent>,
     ) {
-        if !self.started.insert(run.run_id) || !self.passes_filter(run) {
+        if !self.started.insert(run.run_id) {
+            return;
+        }
+        if !self.passes_filter(run) {
+            self.rejected.insert(run.run_id);
             return;
         }
         if let Some(event) = self.run_event("run:start", run, retry).await {
@@ -588,6 +603,11 @@ impl StreamSubscription {
                 {
                     self.unknown.remove(&run_id);
                     self.announce(&run, out).await;
+                }
+                if self.project_filter.is_some()
+                    && (self.rejected.contains(&run_id) || !self.started.contains(&run_id))
+                {
+                    return;
                 }
                 let event = StreamEvent::StreamData {
                     stream_data_id,
@@ -837,6 +857,7 @@ pub async fn subscribe_with_event(
     let blob_store = blob_store_from_ext(blob_store);
     let env_id = auth.env_id();
     super::events::require_external_event_type(&req.event_type)?;
+    super::events::reject_reserved_external_event_fields(&req.event_type, &req.event_data)?;
 
     // Step 1: Determine stream_id - use provided or create new
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
@@ -871,7 +892,7 @@ pub async fn subscribe_with_event(
             .await
             .map_err(|exceeded| {
                 (
-                    StatusCode::TOO_MANY_REQUESTS,
+                    exceeded.status_code(),
                     Json(rate_limit::rate_limit_error_body(exceeded)),
                 )
             })?;
@@ -880,6 +901,13 @@ pub async fn subscribe_with_event(
     // scope below: a bad `?project=` must fail with nothing published.
     let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
         let project = get_and_verify_project(&db, &api_key, project_name_or_id).await?;
+        let project_resource = format!("project:{}", project.project_id);
+        super::require_permission(
+            &auth,
+            &project_resource,
+            actions::READ,
+            "Credential does not have read access to this project",
+        )?;
         Some(project.project_id)
     } else {
         None

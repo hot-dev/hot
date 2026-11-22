@@ -1065,6 +1065,13 @@ pub async fn update_api_key(
     let caller_org = principal.key.org_id;
     let response = match target {
         Target::Org(key) => {
+            let status = key.status(&db).await.map_err(|e| key_error(e, "API key"))?;
+            if matches!(status, KeyStatus::Revoked | KeyStatus::Expired) {
+                return Err(conflict(
+                    "key_inactive",
+                    "Revoked or expired API keys cannot be updated",
+                ));
+            }
             let grants = Permissions::from_json(&body.permissions)
                 .map_err(|e| bad_request(&e.to_string()))?;
             grants
@@ -1085,6 +1092,23 @@ pub async fn update_api_key(
             org_key_response(&db, &updated).await?
         }
         Target::Env { key, env } => {
+            let lookup =
+                db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+            let state = ApiKey::get_credential_state(&lookup, &key.api_key_id)
+                .await
+                .map_err(|e| internal(format!("{e:?}")))?;
+            let issuer = OrgApiKey::issuer_of_env_key(&lookup, key.api_key_id)
+                .await
+                .map_err(internal)?;
+            let status = OrgApiKey::env_key_status(&lookup, &key, &state, issuer, &env)
+                .await
+                .map_err(|e| key_error(e, "API key"))?;
+            if matches!(status, KeyStatus::Revoked | KeyStatus::Expired) {
+                return Err(conflict(
+                    "key_inactive",
+                    "Revoked or expired API keys cannot be updated",
+                ));
+            }
             let grants = Permissions::from_json_validated(&body.permissions)
                 .map_err(|e| bad_request(&e.to_string()))?;
             grants
@@ -1172,6 +1196,13 @@ pub async fn rotate_api_key(
     require_descendant(&db, &principal, &target, actions::UPDATE).await?;
     let (mut response, rotated) = match &target {
         Target::Org(key) => {
+            let status = key.status(&db).await.map_err(|e| key_error(e, "API key"))?;
+            if matches!(status, KeyStatus::Revoked | KeyStatus::Expired) {
+                return Err(conflict(
+                    "key_inactive",
+                    "Revoked or expired API keys cannot be rotated",
+                ));
+            }
             let rotated = key
                 .rotate(&db, overlap)
                 .await
@@ -1179,6 +1210,23 @@ pub async fn rotate_api_key(
             (org_key_response(&db, key).await?, rotated)
         }
         Target::Env { key, env } => {
+            let lookup =
+                db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+            let state = ApiKey::get_credential_state(&lookup, &key.api_key_id)
+                .await
+                .map_err(|e| internal(format!("{e:?}")))?;
+            let issuer = OrgApiKey::issuer_of_env_key(&lookup, key.api_key_id)
+                .await
+                .map_err(internal)?;
+            let status = OrgApiKey::env_key_status(&lookup, key, &state, issuer, env)
+                .await
+                .map_err(|e| key_error(e, "API key"))?;
+            if matches!(status, KeyStatus::Revoked | KeyStatus::Expired) {
+                return Err(conflict(
+                    "key_inactive",
+                    "Revoked or expired API keys cannot be rotated",
+                ));
+            }
             let scoped = db.with_scope(DatabaseScope::Environment {
                 org_id: env.org_id,
                 env_id: env.env_id,
@@ -1199,7 +1247,8 @@ pub async fn rotate_api_key(
         }
     };
     response.token = Some(rotated.token);
-    response.previous_secret_expires_at = Some(rotated.previous_secret_expires_at);
+    response.previous_secret_expires_at =
+        (!overlap.is_zero()).then_some(rotated.previous_secret_expires_at);
     tracing::info!(org_api_key_id = %principal.key.org_api_key_id, api_key_id = %key_id, action = "api-key.rotate", "org API mutation");
     Ok(Json(ApiResponse::new(response)))
 }
