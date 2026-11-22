@@ -93,7 +93,7 @@
                             </svg>
                             <div>
                                 <p class="text-blue-800 dark:text-blue-200 font-medium">Generating documentation...</p>
-                                <p class="text-blue-600 dark:text-blue-300 text-sm">This may take a moment. This section will update automatically when ready.</p>
+                                <p data-docs-status-text class="text-blue-600 dark:text-blue-300 text-sm">This may take a moment. This section will update automatically when ready.</p>
                             </div>
                         </div>
                         <button type="button" data-docs-refresh-btn class="btn btn-secondary btn-sm flex-shrink-0">Refresh</button>
@@ -205,9 +205,20 @@
                 let timer = null;
                 let inFlight = false;
 
+                // Past the deadline the page stops checking by itself, so say so.
+                function showPollingStopped() {
+                    const status = container.querySelector('[data-docs-status-text]');
+                    if (status) {
+                        status.textContent = 'Still generating. Automatic checks have stopped. Use Refresh to check again.';
+                    }
+                }
+
                 function scheduleNext() {
                     if (container.dataset.docsGenerating !== 'true') return;
-                    if (Date.now() >= deadlineMs) return;
+                    if (Date.now() >= deadlineMs) {
+                        showPollingStopped();
+                        return;
+                    }
                     if (document.hidden) return;
                     if (timer) clearTimeout(timer);
                     const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)];

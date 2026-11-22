@@ -1512,7 +1512,10 @@
                 closeMobileDrawer();
                 sidebarToggleBtn.focus();
             } else if (e.key === 'Tab') {
-                var focusables = Array.from(sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+                // Only rendered elements can take focus; skip closed dropdowns
+                // and blocks hidden at this breakpoint.
+                var focusables = Array.from(sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+                    .filter(function(el) { return el.getClientRects().length > 0; });
                 if (focusables.length === 0) return;
                 var first = focusables[0];
                 var last = focusables[focusables.length - 1];

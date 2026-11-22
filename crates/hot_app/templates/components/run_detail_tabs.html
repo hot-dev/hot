@@ -2199,8 +2199,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
         url.searchParams.set('tab', tabName);
         window.history.replaceState({}, '', url);
 
-        // Handle inspector state for the new tab
-        this.restoreOrClearInspector(tabName);
+        // Handle inspector state for the new tab. Restoring a saved selection
+        // opens the panel (or a modal on mobile), so only do it while the side
+        // panel is already open. A closed panel restores when it is toggled open.
+        if (this.inspectorOpen && window.innerWidth >= 768) {
+            this.restoreOrClearInspector(tabName);
+        }
     }
 
     openInspector(content) {
@@ -2212,6 +2216,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             this.showInspectorInModal(content);
         } else {
             // On desktop, use side panel
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.inspectorContent.innerHTML = content;
@@ -2337,15 +2342,22 @@ window.ObservabilityTabs = class ObservabilityTabs {
         this.updateInspectorState();
     }
 
+    // closeInspector() clears the inline width so the panel can collapse.
+    // Every path that opens the panel reapplies a width the user dragged to.
+    applyInspectorWidth() {
+        if (!this.customInspectorWidth) return;
+        const maxWidth = this.inspector.parentElement.offsetWidth * 0.6;
+        const width = maxWidth > 250 ? Math.min(this.customInspectorWidth, maxWidth) : this.customInspectorWidth;
+        this.inspector.style.width = `${width}px`;
+    }
+
     toggleInspector() {
         if (this.inspectorOpen) {
             this.closeInspector();
         } else {
             // Open inspector with current tab's state
             this.restoreOrClearInspector(this.currentTab);
-            if (this.customInspectorWidth) {
-                this.inspector.style.width = `${this.customInspectorWidth}px`;
-            }
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.inspectorOpen = true;
@@ -2356,6 +2368,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     applyInspectorState() {
         // Apply the initial state from URL
         if (this.inspectorOpen) {
+            this.applyInspectorWidth();
             this.inspector.classList.add('open');
             this.resizeHandle.classList.add('visible');
             this.restoreOrClearInspector(this.currentTab);
@@ -2588,6 +2601,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 this.showInspectorInModal(html);
             } else {
                 // On desktop, show in side panel
+                this.applyInspectorWidth();
                 this.inspector.classList.add('open');
                 this.resizeHandle.classList.add('visible');
                 this.inspectorOpen = true;
@@ -2678,6 +2692,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 this.showInspectorInModal(html);
             } else {
                 // On desktop, show in side panel
+                this.applyInspectorWidth();
                 this.inspector.classList.add('open');
                 this.resizeHandle.classList.add('visible');
                 this.inspectorOpen = true;

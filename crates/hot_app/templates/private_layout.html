@@ -799,13 +799,8 @@
     <!-- Core App Utilities -->
     <script src="{{ page_context.asset("js/app.js") }}" defer></script>
     <script>
-        // Initialize modal format from page context after deferred app.js loads
+        // Modal format from page context. The deferred app.js reads this in init().
         window.__hotInitialValueFormat = {{ page_context.value_format|js|safe }};
-        document.addEventListener('DOMContentLoaded', function() {
-            if (typeof initModalFormat === 'function') {
-                initModalFormat(window.__hotInitialValueFormat);
-            }
-        });
     </script>
 
     <!-- Content Modal for Full Display -->

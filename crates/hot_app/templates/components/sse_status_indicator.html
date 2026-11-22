@@ -189,9 +189,17 @@ function sseStatus() {
         updateClearTimer: null,
         reconnectTimer: null,
         disconnectGraceTimer: null,
+        confirmOpenTimer: null,
         reconnectDelayMs: 1000,
+        // A stream that opens and then ends within STABLE_OPEN_MS is not a
+        // healthy connection (access revoked, pub/sub closed). Two in a row
+        // switch to the manual backoff path instead of the browser's 1s retry.
+        STABLE_OPEN_MS: 5000,
+        openedAt: null,
+        shortLivedCount: 0,
         pendingReconnectOnVisible: false,
-        boundDisconnect: null,
+        boundPageHide: null,
+        boundPageShow: null,
         boundVisibilityChange: null,
         filterStream: null,
         filterRun: null,
@@ -213,15 +221,23 @@ function sseStatus() {
 
             this.connect();
 
-            // Cleanup on page unload and resume paused backoff when tab refocuses
-            this.boundDisconnect = () => this.disconnect();
+            // Close the stream when the page is really going away. pagehide is
+            // used instead of beforeunload, which also fires for downloads and
+            // cancelled leave prompts where the page stays. A page restored
+            // from the back/forward cache reconnects on pageshow.
+            this.boundPageHide = () => this.suspend();
+            this.boundPageShow = (e) => {
+                if (e.persisted) this.connect();
+            };
+            // Resume paused backoff when the tab refocuses
             this.boundVisibilityChange = () => {
                 if (!document.hidden && this.pendingReconnectOnVisible) {
                     this.pendingReconnectOnVisible = false;
                     this.connect();
                 }
             };
-            window.addEventListener('beforeunload', this.boundDisconnect);
+            window.addEventListener('pagehide', this.boundPageHide);
+            window.addEventListener('pageshow', this.boundPageShow);
             document.addEventListener('visibilitychange', this.boundVisibilityChange);
         },
 
@@ -233,9 +249,10 @@ function sseStatus() {
             }
             this.pendingReconnectOnVisible = false;
 
-            // Avoid flashing "Reconnecting" during normal initial handshake;
-            // reveal it only if initial connect takes longer than 1.5s.
-            if (!this.hasConnectedOnce && !this.showDisconnected && !this.disconnectGraceTimer) {
+            // Avoid flashing "Reconnecting" during a normal handshake (first
+            // load, or a page restored from the back/forward cache); reveal it
+            // only if connecting takes longer than 1.5s.
+            if (!this.isConnected && !this.showDisconnected && !this.disconnectGraceTimer) {
                 this.disconnectGraceTimer = setTimeout(() => {
                     this.disconnectGraceTimer = null;
                     if (!this.isConnected) {
@@ -244,38 +261,51 @@ function sseStatus() {
                 }, 1500);
             }
 
+            this.openedAt = null;
             this.sseConnection = new EventSource('/env/subscribe');
 
             this.sseConnection.onopen = () => {
-                if (this.disconnectGraceTimer) {
-                    clearTimeout(this.disconnectGraceTimer);
-                    this.disconnectGraceTimer = null;
+                this.openedAt = Date.now();
+                if (this.shortLivedCount >= 2) {
+                    // Recent streams ended right after opening. Keep showing
+                    // "Reconnecting" until this one proves stable.
+                    if (this.confirmOpenTimer) clearTimeout(this.confirmOpenTimer);
+                    this.confirmOpenTimer = setTimeout(() => {
+                        this.confirmOpenTimer = null;
+                        this.markConnected();
+                    }, this.STABLE_OPEN_MS);
+                    return;
                 }
-                const recoveredFromOutage = this.hasConnectedOnce && this.wasDisconnected;
-                this.hasConnectedOnce = true;
-                this.wasDisconnected = false;
-                this.showDisconnected = false;
-                this.reconnectDelayMs = 1000;
-                this.isConnected = true;
-                // Shared flag so pages can decide whether to run fallback polling.
-                window.__sseConnected = true;
-
-                // Catch up once after an actual disconnect (> grace period), without
-                // triggering extra fetches on seamless 5-minute server recycles.
-                if (recoveredFromOutage && this.mode === 'auto') {
-                    this.runRefresh(false);
-                }
+                this.markConnected();
             };
 
             this.sseConnection.onerror = () => {
                 window.__sseConnected = false;
+                if (this.confirmOpenTimer) {
+                    clearTimeout(this.confirmOpenTimer);
+                    this.confirmOpenTimer = null;
+                }
 
-                if (this.sseConnection && this.sseConnection.readyState === EventSource.CLOSED) {
-                    // Fatal failure (e.g. non-2xx / 503 / expired session): the browser
-                    // will not retry on its own. Mark disconnected and retry manually
-                    // with exponential backoff (1s -> 2s -> 4s -> 8s -> 15s).
+                // Classify the stream that just ended. Errors while still
+                // connecting (openedAt === null) do not count either way.
+                if (this.openedAt !== null) {
+                    if (Date.now() - this.openedAt >= this.STABLE_OPEN_MS) {
+                        this.shortLivedCount = 0;
+                        this.reconnectDelayMs = 1000;
+                    } else {
+                        this.shortLivedCount += 1;
+                    }
+                    this.openedAt = null;
+                }
+
+                const closed = this.sseConnection && this.sseConnection.readyState === EventSource.CLOSED;
+                if (closed || this.shortLivedCount >= 2) {
+                    // Fatal failure (e.g. non-2xx / 503 / expired session), where
+                    // the browser will not retry on its own, or a stream that keeps
+                    // ending right after it opens. Mark disconnected and retry
+                    // manually with exponential backoff (1s -> 2s -> 4s -> 8s -> 15s).
                     this.markDisconnected();
-                    this.sseConnection.close();
+                    if (this.sseConnection) this.sseConnection.close();
                     this.sseConnection = null;
 
                     const delay = this.reconnectDelayMs;
@@ -315,6 +345,34 @@ function sseStatus() {
             });
         },
 
+        markConnected() {
+            if (this.disconnectGraceTimer) {
+                clearTimeout(this.disconnectGraceTimer);
+                this.disconnectGraceTimer = null;
+            }
+            const isReopen = this.hasConnectedOnce;
+            const recoveredFromOutage = isReopen && this.wasDisconnected;
+            this.hasConnectedOnce = true;
+            this.wasDisconnected = false;
+            this.showDisconnected = false;
+            this.isConnected = true;
+            // Shared flag so pages can decide whether to run fallback polling.
+            window.__sseConnected = true;
+
+            // The subscription has no replay, so events published while no
+            // stream was open are lost. That includes the short gap of every
+            // 5-minute server recycle. Catch up on each reopen: one refresh in
+            // auto mode; in manual mode flag new data only after a real outage
+            // so the chip does not light up on every recycle.
+            if (isReopen) {
+                if (this.mode === 'auto') {
+                    this.runRefresh(false);
+                } else if (recoveredFromOutage) {
+                    this.hasNewData = true;
+                }
+            }
+        },
+
         markDisconnected() {
             if (this.disconnectGraceTimer) {
                 clearTimeout(this.disconnectGraceTimer);
@@ -339,12 +397,15 @@ function sseStatus() {
             }, 2500);
         },
 
-        disconnect() {
+        // Close the stream and stop every timer, keeping the page listeners so
+        // a page restored from the back/forward cache can reconnect.
+        suspend() {
             window.__sseConnected = false;
             this.pendingReconnectOnVisible = false;
             [
                 this.reconnectTimer,
                 this.disconnectGraceTimer,
+                this.confirmOpenTimer,
                 this.updateTimeout,
                 this.maxWaitTimer,
                 this.updateClearTimer
@@ -353,22 +414,36 @@ function sseStatus() {
             });
             this.reconnectTimer = null;
             this.disconnectGraceTimer = null;
+            this.confirmOpenTimer = null;
             this.updateTimeout = null;
             this.maxWaitTimer = null;
             this.updateClearTimer = null;
+            if (this.hasConnectedOnce) {
+                this.wasDisconnected = true;
+            }
             this.isConnected = false;
+            this.showDisconnected = false;
             this.isUpdating = false;
-            if (this.boundDisconnect) {
-                window.removeEventListener('beforeunload', this.boundDisconnect);
-                this.boundDisconnect = null;
+            this.openedAt = null;
+            if (this.sseConnection) {
+                this.sseConnection.close();
+                this.sseConnection = null;
+            }
+        },
+
+        disconnect() {
+            this.suspend();
+            if (this.boundPageHide) {
+                window.removeEventListener('pagehide', this.boundPageHide);
+                this.boundPageHide = null;
+            }
+            if (this.boundPageShow) {
+                window.removeEventListener('pageshow', this.boundPageShow);
+                this.boundPageShow = null;
             }
             if (this.boundVisibilityChange) {
                 document.removeEventListener('visibilitychange', this.boundVisibilityChange);
                 this.boundVisibilityChange = null;
-            }
-            if (this.sseConnection) {
-                this.sseConnection.close();
-                this.sseConnection = null;
             }
         },
 

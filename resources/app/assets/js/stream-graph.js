@@ -40,9 +40,17 @@ function renderStreamGraph(containerId, graphDataJson, inspectorCallbackName = '
         return;
     }
 
-    // Reset stale search state when switching containers/streams; keep synced with any visible search input
-    const searchInput = document.getElementById('stream-graph-search');
-    window.streamGraphState.searchTerm = searchInput ? (searchInput.value || '').toLowerCase() : '';
+    // Keep the filter in sync with the page's search box. The run, stream and
+    // event pages each use their own input id. With no search box, keep the
+    // term across re-renders of the same container and drop it for a new one.
+    const searchInput = document.getElementById('stream-graph-search')
+        || document.getElementById('stream-detail-graph-search')
+        || document.getElementById('event-detail-graph-search');
+    if (searchInput) {
+        window.streamGraphState.searchTerm = (searchInput.value || '').toLowerCase();
+    } else if (window.streamGraphState.containerId !== containerId) {
+        window.streamGraphState.searchTerm = '';
+    }
 
     // Store state for re-rendering with filters
     window.streamGraphState.graphData = graphData;
