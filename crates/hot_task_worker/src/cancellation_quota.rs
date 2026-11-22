@@ -116,7 +116,7 @@ pub(super) async fn settle(
 
 /// [`settle`] for a row owned by `owner`, or by no worker when `None`: a row
 /// that `Task::release_worker` let go before the cancel reached it.
-async fn settle_owned_by(
+pub(super) async fn settle_owned_by(
     db: &DatabasePool,
     task_id: &Uuid,
     owner: Option<&str>,
@@ -127,10 +127,11 @@ async fn settle_owned_by(
         tracing::warn!(%task_id, "Cancelled execution termination is unconfirmed; retaining account quota reservation");
         return false;
     }
-    let reservation = match Task::quota_reservation(db, task_id).await {
-        Ok(reservation) if reservation.duration_ms > 0 => reservation,
-        _ => return false,
-    };
+    let reservation =
+        match tokio::time::timeout(DB_CALL_TIMEOUT, Task::quota_reservation(db, task_id)).await {
+            Ok(Ok(reservation)) if reservation.duration_ms > 0 => reservation,
+            _ => return false,
+        };
     let (compute_units, duration_ms) =
         measured.unwrap_or((reservation.compute_units, reservation.duration_ms));
     if compute_units < 0 || duration_ms < 0 {
@@ -156,22 +157,35 @@ async fn settle_owned_by(
     });
     let settled = match owner {
         Some(worker_id) => {
-            Task::complete(
-                db,
-                task_id,
-                &TaskStatus::Cancelled,
-                Some(&result),
-                Some(duration_ms),
-                Some(worker_id),
+            tokio::time::timeout(
+                DB_CALL_TIMEOUT,
+                Task::complete(
+                    db,
+                    task_id,
+                    &TaskStatus::Cancelled,
+                    Some(&result),
+                    Some(duration_ms),
+                    Some(worker_id),
+                ),
             )
             .await
         }
-        None => Task::settle_ownerless_cancelled(db, task_id, &result, duration_ms).await,
+        None => {
+            tokio::time::timeout(
+                DB_CALL_TIMEOUT,
+                Task::settle_ownerless_cancelled(db, task_id, &result, duration_ms),
+            )
+            .await
+        }
     };
     match settled {
-        Ok(settled) => settled,
-        Err(error) => {
+        Ok(Ok(settled)) => settled,
+        Ok(Err(error)) => {
             tracing::warn!(%task_id, %error, "Failed to settle cancelled execution; quota reservation retained");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(%task_id, "Timed out settling cancelled execution; quota reservation retained");
             false
         }
     }
@@ -185,13 +199,19 @@ pub(super) async fn reap(
     coordinator: &shutdown::TaskShutdownCoordinator,
     current_worker: &str,
 ) {
-    let candidates = match Task::unsettled_cancelled_containers(db).await {
-        Ok(tasks) => tasks,
-        Err(error) => {
-            tracing::warn!(%error, "Cannot discover unsettled cancelled executions");
-            return;
-        }
-    };
+    let candidates =
+        match tokio::time::timeout(DB_CALL_TIMEOUT, Task::unsettled_cancelled_containers(db)).await
+        {
+            Ok(Ok(tasks)) => tasks,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Cannot discover unsettled cancelled executions");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("Timed out discovering unsettled cancelled executions");
+                return;
+            }
+        };
     if candidates.is_empty() {
         return;
     }
@@ -257,9 +277,9 @@ pub(super) async fn reap(
             Termination::Unconfirmed if state.is_none() => {
                 // The owning runtime may have settled it since this pass
                 // listed it; then nothing needs recovery.
-                if Task::quota_reservation(db, &task.task_id)
+                if tokio::time::timeout(DB_CALL_TIMEOUT, Task::quota_reservation(db, &task.task_id))
                     .await
-                    .is_ok_and(|reservation| reservation.duration_ms == 0)
+                    .is_ok_and(|res| res.is_ok_and(|reservation| reservation.duration_ms == 0))
                 {
                     continue;
                 }
@@ -271,7 +291,9 @@ pub(super) async fn reap(
             }
             Termination::Unconfirmed | Termination::Confirmed | Termination::AlreadyEnded => {}
         }
-        let Ok(env) = Env::get_env_uncached(db, &task.env_id).await else {
+        let Ok(Ok(env)) =
+            tokio::time::timeout(DB_CALL_TIMEOUT, Env::get_env_uncached(db, &task.env_id)).await
+        else {
             continue;
         };
         let exact = db.with_scope(DatabaseScope::Environment {

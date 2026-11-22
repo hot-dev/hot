@@ -139,9 +139,14 @@ impl GuestNetworkPolicy {
         let Some((host, port)) = &self.proxy else {
             return Ok(Vec::new());
         };
-        let mut addrs: Vec<Ipv4Addr> = tokio::net::lookup_host((host.as_str(), *port))
-            .await
-            .map_err(|e| format!("failed to resolve egress proxy {host}: {e}"))?
+        let lookup = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::lookup_host((host.as_str(), *port)),
+        )
+        .await
+        .map_err(|_| format!("timed out resolving egress proxy {host}"))?
+        .map_err(|e| format!("failed to resolve egress proxy {host}: {e}"))?;
+        let mut addrs: Vec<Ipv4Addr> = lookup
             .filter_map(|addr| match addr.ip() {
                 IpAddr::V4(ip) => Some(ip),
                 IpAddr::V6(ip) => ip.to_ipv4_mapped(),

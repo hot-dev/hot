@@ -59,7 +59,7 @@ pub struct ListQueryParams {
         deserialize_with = "deserialize_clamped_limit"
     )]
     pub limit: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_clamped_offset")]
     pub offset: i64,
 }
 
@@ -77,9 +77,29 @@ where
     Ok(v.clamp(1, MAX_LIST_LIMIT))
 }
 
+pub fn deserialize_clamped_offset<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = i64::deserialize(deserializer)?;
+    Ok(v.max(0))
+}
+
 // ============================================================================
 // Shared Helper Functions
 // ============================================================================
+
+/// The longest configured wait honored for a public call. It only keeps a
+/// misconfigured value from overflowing a deadline: an installation that sets
+/// a long timeout on purpose gets it.
+const MAX_CONF_TIMEOUT_SECS: i64 = 24 * 60 * 60;
+
+/// A configured timeout in seconds: at least one second, so a zero or
+/// negative setting cannot wrap into an unbounded wait.
+pub(crate) fn conf_timeout_secs(conf: &hot::val::Val, key: &str, default_secs: i64) -> u64 {
+    conf.get_int_or_default(key, default_secs)
+        .clamp(1, MAX_CONF_TIMEOUT_SECS) as u64
+}
 
 use axum::{Json, http::StatusCode};
 use hot::db::{DatabasePool, api_key::ApiKey, project::Project};
@@ -283,7 +303,7 @@ pub async fn get_org_id_for_env(
 /// committed run row; the worker flushes that row before publishing the notice.
 pub(crate) async fn resolve_stream_result(
     db: &DatabasePool,
-    conf: &hot::val::Val,
+    blob_store: Option<&std::sync::Arc<hot::blob::BlobStore>>,
     env_id: Uuid,
     run_id: Uuid,
     inline: Option<serde_json::Value>,
@@ -297,13 +317,25 @@ pub(crate) async fn resolve_stream_result(
     if run.env_id != env_id {
         return Err("Run is outside the authorized environment".into());
     }
-    let blob_store = hot::blob::blob_store_from_conf(std::sync::Arc::new(db.clone()), conf).await;
-    Ok(rehydrate_payload_json(db, blob_store.as_ref(), env_id, run.result).await)
+    Ok(rehydrate_payload_json(db, blob_store, env_id, run.result).await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_timeouts_keep_long_values_and_floor_at_one_second() {
+        let conf = hot::val!({"mcp": {"timeout": 900}, "webhook": {"timeout": -5}});
+        assert_eq!(conf_timeout_secs(&conf, "mcp.timeout", 60), 900);
+        assert_eq!(conf_timeout_secs(&conf, "webhook.timeout", 30), 1);
+        assert_eq!(conf_timeout_secs(&conf, "missing.timeout", 30), 30);
+        let huge = hot::val!({"mcp": {"timeout": 9_000_000_000_000_i64}});
+        assert_eq!(
+            conf_timeout_secs(&huge, "mcp.timeout", 60),
+            MAX_CONF_TIMEOUT_SECS as u64
+        );
+    }
     use chrono::Utc;
     use hot::db::{self, Project, api_key::ApiKey};
 
@@ -340,22 +372,21 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        let conf = hot::val!({"blob":{"mode":"off"}});
         assert_eq!(
-            resolve_stream_result(&db, &conf, data.env_id, data.run_id, None)
+            resolve_stream_result(&db, None, data.env_id, data.run_id, None)
                 .await
                 .unwrap(),
             Some(result)
         );
         assert!(
-            resolve_stream_result(&db, &conf, Uuid::now_v7(), data.run_id, None)
+            resolve_stream_result(&db, None, Uuid::now_v7(), data.run_id, None)
                 .await
                 .is_err()
         );
         assert_eq!(
             resolve_stream_result(
                 &db,
-                &conf,
+                None,
                 data.env_id,
                 Uuid::now_v7(),
                 Some(serde_json::json!(42))

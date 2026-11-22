@@ -111,6 +111,38 @@ pub(super) fn require_external_event_type(
     Ok(())
 }
 
+/// Reject internal ingress-only keys on externally published event payloads.
+///
+/// `_hot_target_build_id` pins worker build routing for webhook/MCP calls and
+/// must never come from external event publishers. `caller` is injected by the
+/// worker as `hot.request` on `hot:call` events and is reserved for trusted
+/// webhook/MCP ingress.
+pub(super) fn reject_reserved_external_event_fields(
+    event_type: &str,
+    event_data: &serde_json::Value,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    let Some(map) = event_data.as_object() else {
+        return Ok(());
+    };
+    if map.contains_key("_hot_target_build_id") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "Event data field '_hot_target_build_id' is reserved for internal routing",
+            )),
+        ));
+    }
+    if event_type == EXTERNAL_CALL_EVENT_TYPE && map.contains_key("caller") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "Event data field 'caller' is reserved on 'hot:call' events",
+            )),
+        ));
+    }
+    Ok(())
+}
+
 /// Internal function to publish an event - reused by both publish_event and subscribe_with_event
 ///
 /// This handles:
@@ -582,6 +614,7 @@ pub async fn publish_event(
     Json(req): Json<PublishEventRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<EventResponse>>), (StatusCode, Json<ApiErrorResponse>)> {
     require_external_event_type(&req.event_type)?;
+    reject_reserved_external_event_fields(&req.event_type, &req.event_data)?;
     let event_resource = format!("event:{}", req.event_type);
     super::require_permission(
         &auth,
@@ -684,6 +717,18 @@ pub async fn list_events(
     )))
 }
 
+fn has_any_event_read_grant(auth: &AuthContext) -> bool {
+    let Some(perms) = auth.get_permissions() else {
+        return false;
+    };
+    if perms.has_permission("event:*", actions::READ) {
+        return true;
+    }
+    perms.inner().keys().any(|resource| {
+        resource.starts_with("event:") && perms.has_permission(resource, actions::READ)
+    })
+}
+
 pub async fn get_event(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -692,12 +737,15 @@ pub async fn get_event(
     Path(event_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<EventResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     let blob_store = blob_store_from_ext(blob_store);
-    super::require_permission(
-        &auth,
-        "event:*",
-        actions::READ,
-        "Credential does not have read access to events",
-    )?;
+    if !has_any_event_read_grant(&auth) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new(
+                "forbidden",
+                "Credential does not have read access to events",
+            )),
+        ));
+    }
 
     let event = Event::get_event(&db, &event_id)
         .await
@@ -719,6 +767,14 @@ pub async fn get_event(
             Json(ApiErrorResponse::not_found("Event")),
         ));
     }
+
+    let event_resource = format!("event:{}", event.event_type);
+    super::require_permission(
+        &auth,
+        &event_resource,
+        actions::READ,
+        "Credential does not have read access to this event type",
+    )?;
 
     let mut event_data = rehydrate_payload_json(
         &db,
@@ -750,12 +806,15 @@ pub async fn get_event_runs(
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     let blob_store = blob_store_from_ext(blob_store);
-    super::require_permission(
-        &auth,
-        "event:*",
-        actions::READ,
-        "Credential does not have read access to events",
-    )?;
+    if !has_any_event_read_grant(&auth) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new(
+                "forbidden",
+                "Credential does not have read access to events",
+            )),
+        ));
+    }
 
     // First verify the event exists and belongs to this environment
     let event = Event::get_event(&db, &event_id)
@@ -777,6 +836,14 @@ pub async fn get_event_runs(
             Json(ApiErrorResponse::not_found("Event")),
         ));
     }
+
+    let event_resource = format!("event:{}", event.event_type);
+    super::require_permission(
+        &auth,
+        &event_resource,
+        actions::READ,
+        "Credential does not have read access to this event type",
+    )?;
 
     let runs = Event::get_runs_by_event(&db, &event_id, Some(params.limit), Some(params.offset))
         .await
@@ -860,6 +927,53 @@ mod tests {
         assert!(require_external_event_type("hot:schedule").is_err());
         assert!(require_external_event_type("hot:mcp:call").is_err());
         assert!(require_external_event_type("user:created").is_ok());
+    }
+
+    #[test]
+    fn reserved_external_event_fields_are_rejected() {
+        let hot_call_with_caller = serde_json::json!({
+            "fn": "::app/run",
+            "args": [],
+            "caller": {"auth": {"type": "api-key"}}
+        });
+        assert_eq!(
+            reject_reserved_external_event_fields("hot:call", &hot_call_with_caller)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let hot_call_with_target = serde_json::json!({
+            "fn": "::app/run",
+            "args": [],
+            "_hot_target_build_id": Uuid::now_v7().to_string()
+        });
+        assert_eq!(
+            reject_reserved_external_event_fields("hot:call", &hot_call_with_target)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let custom_with_target = serde_json::json!({
+            "_hot_target_build_id": Uuid::now_v7().to_string()
+        });
+        assert_eq!(
+            reject_reserved_external_event_fields("order:created", &custom_with_target)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Domain `caller` on non-`hot:call` events is allowed because the worker
+        // only injects `hot.request` for `hot:call`.
+        let custom_with_caller = serde_json::json!({"caller": "+15551234567"});
+        assert!(
+            reject_reserved_external_event_fields("phone:ringing", &custom_with_caller).is_ok()
+        );
+
+        let clean_hot_call = serde_json::json!({"fn": "::app/run", "args": [1, 2]});
+        assert!(reject_reserved_external_event_fields("hot:call", &clean_hot_call).is_ok());
     }
 
     fn test_api_key(data: &hot::db::TestData) -> ApiKey {

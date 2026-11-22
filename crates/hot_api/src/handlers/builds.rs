@@ -401,13 +401,28 @@ pub async fn deploy_build(
         ));
     }
 
-    // A grant to execute this build must not reactivate a different project
-    // supplied in the URL, even when the deployment ultimately returns 404.
-    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
-
-    // Validate ctx requirements for bundle builds before deploying
+    // Validate bundle requirements BEFORE reactivating an inactive project, and
+    // retrieve the bundle once instead of once per validator.
     if build.is_bundle() {
         let org_id = super::get_org_id_for_env(&db, &api_key.env_id).await?;
+        let build_data = storage
+            .retrieve_build(&build_id, &org_id, &api_key.env_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "Deploy blocked: failed to read build file {}: {}",
+                    build_id,
+                    e
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiErrorResponse::bad_request(&format!(
+                        "Failed to read build file: {}",
+                        e
+                    ))),
+                )
+            })?;
+
         tracing::debug!(
             "Validating ctx requirements for build {} before deploy",
             build_id
@@ -419,13 +434,11 @@ pub async fn deploy_build(
         let strict = std::env::var("HOT_DEPLOY_STRICT_CTX")
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-        if let Err(e) = hot::build::validate_ctx_requirements_for_deploy(
+        if let Err(e) = hot::build::check_ctx_requirements(
             &db,
-            &build_id,
+            &build_data,
             &project.project_id,
             &org_id,
-            &api_key.env_id,
-            storage.as_ref().as_ref(),
             strict,
         )
         .await
@@ -438,15 +451,7 @@ pub async fn deploy_build(
         }
         tracing::debug!("Ctx requirements validation passed for build {}", build_id);
 
-        if let Err(e) = hot::build::validate_box_requirements_for_deploy(
-            &db,
-            &build_id,
-            &org_id,
-            &api_key.env_id,
-            storage.as_ref().as_ref(),
-        )
-        .await
-        {
+        if let Err(e) = hot::build::check_box_requirements(&db, &build_data, &org_id).await {
             tracing::warn!("Deploy blocked due to box resource requirements: {}", e);
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -455,13 +460,12 @@ pub async fn deploy_build(
         }
         tracing::debug!("Box requirements validation passed for build {}", build_id);
 
-        if let Err(e) = hot::build::validate_schedule_requirements_for_deploy(
+        if let Err(e) = hot::build::check_schedule_requirements(
             &db,
-            &build_id,
+            &build_data,
             &org_id,
-            &api_key.env_id,
+            &project.project_id,
             &_conf,
-            storage.as_ref().as_ref(),
         )
         .await
         {
@@ -476,6 +480,10 @@ pub async fn deploy_build(
             build_id
         );
     }
+
+    // Only reactivate an inactive project after verifying build ownership and
+    // passing all deploy validations.
+    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
 
     // A schedule-cap denial is the caller's to fix; a database failure is not,
     // and its text stays in the log.
@@ -548,6 +556,45 @@ pub async fn deploy_build(
     ))))
 }
 
+const MAX_BUILD_METADATA_FIELD_BYTES: usize = 4 * 1024;
+
+async fn read_bounded_text_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    field_name: &str,
+    max_bytes: usize,
+) -> Result<String, (StatusCode, Json<ApiErrorResponse>)> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field.chunk().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(&format!(
+                "Failed to read {}: {}",
+                field_name, e
+            ))),
+        )
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ApiErrorResponse::bad_request(&format!(
+                    "Field '{}' exceeds maximum size of {} bytes",
+                    field_name, max_bytes
+                ))),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(&format!(
+                "Field '{}' is not valid UTF-8",
+                field_name
+            ))),
+        )
+    })
+}
+
 pub async fn upload_build(
     State((db, storage, conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -564,7 +611,10 @@ pub async fn upload_build(
 > {
     super::require_api_key(&auth, "Only API keys can upload builds.")?;
 
-    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
+    // Verify project ownership without reactivating an inactive project until
+    // upload slot admission and multipart payload validation succeed.
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
     let _upload_permit = acquire_build_upload_slot(&conf)?;
 
     // The multipart body is streamed to a request-scoped temporary directory.
@@ -612,6 +662,14 @@ pub async fn upload_build(
 
         match name.as_str() {
             "file" => {
+                if build_file_size.is_some() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiErrorResponse::bad_request(
+                            "Duplicate multipart field: file",
+                        )),
+                    ));
+                }
                 let mut staged = tokio::fs::File::create(&build_path).await.map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -674,39 +732,15 @@ pub async fn upload_build(
                 build_file_size = Some(size);
             }
             "hash" => {
-                let text = field.text().await.map_err(|e| {
-                    tracing::error!(
-                        "Build upload failed: could not read hash field for project {} by user {}: {}",
-                        project.name,
-                        api_key.created_by_user_id,
-                        e
-                    );
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiErrorResponse::bad_request(&format!(
-                            "Failed to read hash: {}",
-                            e
-                        ))),
-                    )
-                })?;
+                let text =
+                    read_bounded_text_field(&mut field, "hash", MAX_BUILD_METADATA_FIELD_BYTES)
+                        .await?;
                 provided_hash = Some(text);
             }
             "build_id" => {
-                let text = field.text().await.map_err(|e| {
-                    tracing::error!(
-                        "Build upload failed: could not read build_id field for project {} by user {}: {}",
-                        project.name,
-                        api_key.created_by_user_id,
-                        e
-                    );
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiErrorResponse::bad_request(&format!(
-                            "Failed to read build_id: {}",
-                            e
-                        ))),
-                    )
-                })?;
+                let text =
+                    read_bounded_text_field(&mut field, "build_id", MAX_BUILD_METADATA_FIELD_BYTES)
+                        .await?;
                 provided_build_id = Some(text);
             }
             _ => {
@@ -730,19 +764,22 @@ pub async fn upload_build(
         )
     })?;
 
-    let build_hash = provided_hash.ok_or_else(|| {
-        tracing::error!(
-            "Build upload failed: missing hash field for project {} by user {}",
-            project.name,
-            api_key.created_by_user_id
-        );
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiErrorResponse::bad_request(
-                "Missing required field: hash",
-            )),
-        )
-    })?;
+    let build_hash = provided_hash
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Build upload failed: missing or empty hash field for project {} by user {}",
+                project.name,
+                api_key.created_by_user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::bad_request(
+                    "Missing required field: hash",
+                )),
+            )
+        })?;
 
     let file_size = i32::try_from(file_size).map_err(|_| {
         (
@@ -774,6 +811,8 @@ pub async fn upload_build(
     } else {
         Uuid::now_v7()
     };
+
+    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Check if build already exists (idempotency check)
     // SECURITY: Must verify the existing build belongs to this project to prevent
@@ -945,8 +984,9 @@ pub async fn upload_build(
 
     let storage_backend = storage.storage_type().to_string();
 
-    // Insert build record into database
-    Build::insert_build_with_storage(
+    // Insert build record into database; clean up the stored object if the
+    // insertion fails and no row owns it.
+    if let Err(e) = Build::insert_build_with_storage(
         &db,
         &build_id,
         &project.project_id,
@@ -958,21 +998,45 @@ pub async fn upload_build(
         Some(&storage_backend),
     )
     .await
-    .map_err(|e| {
+    {
+        let is_unique_conflict = matches!(
+            &e,
+            hot::db::build::BuildError::Database(sqlx::Error::Database(db_err))
+                if db_err.is_unique_violation()
+        );
+        // The object's key is the build ID, so a concurrent or retried upload
+        // of the same build shares it. A unique conflict means that upload's
+        // row now owns the object: deleting it would leave a build with no
+        // file. Remove it only when no row exists; an unreadable row keeps it.
+        let unowned = !is_unique_conflict
+            && matches!(
+                Build::get_build(&db, &build_id).await,
+                Err(hot::db::build::BuildError::NotFound)
+            );
+        if unowned {
+            let _ = storage
+                .delete_build(&build_id, &env.org_id, &api_key.env_id)
+                .await;
+        }
+        if is_unique_conflict {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new("conflict", "Build ID already exists")),
+            ));
+        }
         tracing::error!(
             "Build upload failed: database error for project {} by user {}: {}",
             project.name,
             api_key.created_by_user_id,
             e
         );
-        (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to create build record: {}",
-                e
-            ))),
-        )
-    })?;
+            Json(ApiErrorResponse::internal_error(
+                "Failed to create build record",
+            )),
+        ));
+    }
 
     // Load event handlers and schedules from the build into the database
     tracing::info!(

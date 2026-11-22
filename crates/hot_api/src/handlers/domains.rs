@@ -120,6 +120,42 @@ fn domain_to_response(d: &Domain) -> DomainResponse {
     }
 }
 
+static DOMAIN_MAINTENANCE_QUEUE: once_cell::sync::OnceCell<
+    Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>,
+> = once_cell::sync::OnceCell::new();
+
+fn get_domain_maintenance_queue(
+    conf: &hot::val::Val,
+) -> Result<&'static Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>, String> {
+    use std::str::FromStr;
+    DOMAIN_MAINTENANCE_QUEUE.get_or_try_init(|| {
+        let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
+        let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
+            .map_err(|_| format!("Invalid queue.type configuration: '{}'", queue_type_str))?;
+
+        let redis_uri_str = conf.get_str_or_default("redis.uri", "");
+        let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
+            None
+        } else {
+            Some(redis_uri_str)
+        };
+        let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
+        let serialization_str = conf.get_str_or_default("serialization.type", "zstdjson");
+        let serialization = hot::data::serialization::Serialization::from_str(&serialization_str)
+            .unwrap_or_default();
+
+        let queue = hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
+            queue_type,
+            "hot:event".to_string(),
+            redis_uri,
+            redis_cluster,
+            serialization,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Arc::new(queue))
+    })
+}
+
 /// Enqueue a maintenance task to the worker queue (best-effort, fire-and-forget).
 fn enqueue_domain_task(conf: &Arc<hot::val::Val>, task: &str) {
     let conf = Arc::clone(conf);
@@ -133,35 +169,11 @@ fn enqueue_domain_task(conf: &Arc<hot::val::Val>, task: &str) {
 
 async fn enqueue_maintenance_task_inner(conf: &hot::val::Val, task: &str) -> Result<(), String> {
     use hot::queue::Queue;
-    use std::str::FromStr;
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
-    let queue_type =
-        hot::queue::QueueType::from_str(&queue_type_str).unwrap_or(hot::queue::QueueType::Memory);
-
-    let redis_uri_str = conf.get_str_or_default("redis.uri", "");
-    let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
-        None
-    } else {
-        Some(redis_uri_str)
-    };
-    let redis_cluster = conf.get_bool_or_default("redis.cluster", false);
-    let serialization_str = conf.get_str_or_default("serialization.type", "zstdjson");
-    let serialization =
-        hot::data::serialization::Serialization::from_str(&serialization_str).unwrap_or_default();
-
-    let queue = hot::queue::ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
-        queue_type,
-        "hot:event".to_string(),
-        redis_uri,
-        redis_cluster,
-        serialization,
-    )
-    .map_err(|e| e.to_string())?;
-
+    let queue = get_domain_maintenance_queue(conf)?;
     let msg = hot::lang::event::MaintenanceMessage::single_task(task);
     let message: hot::data::msg::Message = msg.into();
-    Queue::enqueue(&queue, message)
+    Queue::enqueue(queue.as_ref(), message)
         .await
         .map_err(|e| e.to_string())
 }
@@ -170,9 +182,10 @@ async fn enqueue_maintenance_task_inner(conf: &hot::val::Val, task: &str) -> Res
 /// Returns the resolved features on success (for limit checking).
 async fn require_custom_domains_feature(
     db: &hot::db::DatabasePool,
+    conf: &hot::val::Val,
     org_id: &Uuid,
 ) -> Result<Features, (StatusCode, Json<ApiErrorResponse>)> {
-    let features = Features::resolve_for_org(db, org_id).await;
+    let features = Features::resolve_for_org_with_conf(db, conf, org_id).await;
     if !features.has_custom_domains() {
         return Err((
             StatusCode::FORBIDDEN,
@@ -250,7 +263,7 @@ pub async fn create_domain(
 
     // Check custom domains feature requirement and limit
     let org_id = get_org_id_for_env(&db, &api_key.env_id).await?;
-    let features = require_custom_domains_feature(&db, &org_id).await?;
+    let features = require_custom_domains_feature(&db, &conf, &org_id).await?;
     check_domain_limit(&db, &org_id, &features).await?;
 
     // Create the domain record
@@ -347,7 +360,7 @@ pub async fn list_domains(
     let total = data.len() as i64;
     let paged = data
         .into_iter()
-        .skip(params.offset as usize)
+        .skip(params.offset.max(0) as usize)
         .take(params.limit as usize)
         .collect();
 

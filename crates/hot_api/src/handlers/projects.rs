@@ -85,13 +85,23 @@ pub async fn create_project(
 {
     super::require_api_key(&auth, "Only API keys can create projects.")?;
 
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "Project name must be between 1 and 255 characters",
+            )),
+        ));
+    }
+
     let project_id = Uuid::now_v7();
 
     let project = Project::insert_or_get_project(
         &db,
         &project_id,
         &api_key.env_id,
-        &req.name,
+        name,
         &api_key.created_by_user_id,
     )
     .await
@@ -124,23 +134,46 @@ pub async fn update_project(
 ) -> Result<Json<ApiResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can update projects.")?;
 
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "Project name must be between 1 and 255 characters",
+            )),
+        ));
+    }
+
     let project =
         get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     // Update the project
-    Project::update_name(
-        &db,
-        &project.project_id,
-        &req.name,
-        &api_key.created_by_user_id,
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        )
-    })?;
+    Project::update_name(&db, &project.project_id, name, &api_key.created_by_user_id)
+        .await
+        .map_err(|e| match e {
+            ProjectError::AlreadyExists => (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new(
+                    "conflict",
+                    "A project with this name already exists in this environment",
+                )),
+            ),
+            ProjectError::Database(sqlx::Error::Database(ref db_err))
+                if db_err.is_unique_violation() =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    Json(ApiErrorResponse::new(
+                        "conflict",
+                        "A project with this name already exists in this environment",
+                    )),
+                )
+            }
+            other => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&other.to_string())),
+            ),
+        })?;
 
     // Get updated project
     let updated_project = Project::get_project_including_inactive(&db, &project.project_id)

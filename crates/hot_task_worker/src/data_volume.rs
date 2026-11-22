@@ -158,8 +158,13 @@ fn volume_disk(path: &Path) -> std::io::Result<VolumeDisk> {
         }
         stat.assume_init()
     };
+    let block_size = if stat.f_frsize > 0 {
+        stat.f_frsize as u64
+    } else {
+        stat.f_bsize as u64
+    };
     Ok(VolumeDisk {
-        available_bytes: (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64),
+        available_bytes: (stat.f_bavail as u64).saturating_mul(block_size),
         on_tmpfs: stat.f_type as u64 == libc::TMPFS_MAGIC as u64,
     })
 }
@@ -175,6 +180,9 @@ pub struct DataVolume {
     backing_file: PathBuf,
     /// True when backed by a real ext4 loop mount (Linux); false for plain directory fallback.
     is_loop_mount: bool,
+    /// True once `mount` actually succeeded so pre-mount error drops do not
+    /// spawn needless `umount`/`umount -l` subprocesses on an unmounted path.
+    mounted: bool,
     /// Set once `cleanup()` has run to completion. `Drop` then no-ops
     /// entirely — no thread is spawned and the umount/remove sequence is
     /// never re-run.
@@ -241,6 +249,7 @@ impl DataVolume {
             mount_point: vol_dir.clone(),
             backing_file: vol_dir,
             is_loop_mount: false,
+            mounted: false,
             cleaned: AtomicBool::new(false),
             #[cfg(test)]
             drop_thread: None,
@@ -268,10 +277,11 @@ impl DataVolume {
         // Take ownership of cleanup as soon as the top-level directory
         // exists. Every error return and cancellation after this point drops
         // the guard and schedules removal of any partially-created resource.
-        let volume = Self {
+        let mut volume = Self {
             mount_point,
             backing_file,
             is_loop_mount: true,
+            mounted: false,
             cleaned: AtomicBool::new(false),
             #[cfg(test)]
             drop_thread: None,
@@ -360,8 +370,11 @@ impl DataVolume {
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
+        volume.mounted = true;
 
-        // Make writable by container user (nobody = 65534)
+        // Make writable by container users: default `nobody` (65534) as well as
+        // arbitrary non-root image `USER`s (e.g. node=1000, postgres=999) inside
+        // this per-task isolated volume.
         let output = match Self::killable_command("chown")
             .args(["65534:65534", volume.mount_point.to_string_lossy().as_ref()])
             .output()
@@ -376,6 +389,16 @@ impl DataVolume {
                 "chown data volume failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )));
+        }
+
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(
+                &volume.mount_point,
+                std::fs::Permissions::from_mode(0o1777),
+            )
+            .await
+            .map_err(|e| DataVolumeError::Io(format!("chmod data volume: {e}")))?;
         }
 
         Ok(volume)
@@ -422,16 +445,18 @@ impl DataVolume {
     /// Explicitly clean up the volume.
     pub async fn cleanup(&self) {
         if self.is_loop_mount {
-            let unmounted = Self::killable_command("umount")
-                .arg(self.mount_point.to_string_lossy().to_string())
-                .output()
-                .await
-                .is_ok_and(|output| output.status.success());
-            if !unmounted {
-                let _ = Self::killable_command("umount")
-                    .args(["-l", self.mount_point.to_string_lossy().as_ref()])
+            if self.mounted {
+                let unmounted = Self::killable_command("umount")
+                    .arg(self.mount_point.to_string_lossy().to_string())
                     .output()
-                    .await;
+                    .await
+                    .is_ok_and(|output| output.status.success());
+                if !unmounted {
+                    let _ = Self::killable_command("umount")
+                        .args(["-l", self.mount_point.to_string_lossy().as_ref()])
+                        .output()
+                        .await;
+                }
             }
             let _ = tokio::fs::remove_file(&self.backing_file).await;
             if let Some(parent) = self.backing_file.parent() {
@@ -466,6 +491,7 @@ impl DataVolume {
             mount_point,
             backing_file,
             self.is_loop_mount,
+            self.mounted,
             #[cfg(test)]
             drop_thread,
         )
@@ -485,6 +511,7 @@ impl DataVolume {
         mount_point: PathBuf,
         backing_file: PathBuf,
         is_loop_mount: bool,
+        mounted: bool,
         #[cfg(test)] drop_thread: Option<
             std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
         >,
@@ -508,7 +535,7 @@ impl DataVolume {
                 if let Some(probe) = &drop_thread {
                     *probe.lock().unwrap() = Some(std::thread::current().id());
                 }
-                Self::cleanup_sync(is_loop_mount, &mount_point, &backing_file);
+                Self::cleanup_sync(is_loop_mount, mounted, &mount_point, &backing_file);
             }) {
             Ok(handle) => Some(handle),
             Err(e) => {
@@ -526,17 +553,19 @@ impl DataVolume {
     /// The synchronous umount/remove sequence. Only ever executed on the
     /// dedicated `hot-datavol-drop` thread — never on the thread that drops
     /// the volume, where a hung umount would pin a tokio runtime thread.
-    fn cleanup_sync(is_loop_mount: bool, mount_point: &Path, backing_file: &Path) {
+    fn cleanup_sync(is_loop_mount: bool, mounted: bool, mount_point: &Path, backing_file: &Path) {
         if is_loop_mount {
-            let mount_str = mount_point.to_string_lossy().to_string();
-            let unmounted = std::process::Command::new("umount")
-                .arg(&mount_str)
-                .output()
-                .is_ok_and(|output| output.status.success());
-            if !unmounted {
-                let _ = std::process::Command::new("umount")
-                    .args(["-l", &mount_str])
-                    .output();
+            if mounted {
+                let mount_str = mount_point.to_string_lossy().to_string();
+                let unmounted = std::process::Command::new("umount")
+                    .arg(&mount_str)
+                    .output()
+                    .is_ok_and(|output| output.status.success());
+                if !unmounted {
+                    let _ = std::process::Command::new("umount")
+                        .args(["-l", &mount_str])
+                        .output();
+                }
             }
             let _ = std::fs::remove_file(backing_file);
             if let Some(parent) = backing_file.parent() {
@@ -568,6 +597,7 @@ impl Drop for DataVolume {
             mount_point,
             backing_file,
             self.is_loop_mount,
+            self.mounted,
             #[cfg(test)]
             drop_thread,
         );
@@ -620,6 +650,7 @@ mod tests {
             mount_point: mount_point.clone(),
             backing_file: mount_point.clone(),
             is_loop_mount: false,
+            mounted: false,
             cleaned: AtomicBool::new(false),
             drop_thread: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
             drop_join: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),

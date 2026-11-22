@@ -2540,7 +2540,7 @@ pub async fn check_schedule_requirements(
     conf: &crate::val::Val,
 ) -> Result<(), String> {
     let scheduled_functions = extract_scheduled_functions_from_build(build_data)?;
-    let features = crate::db::Features::resolve_for_org(db, org_id).await;
+    let features = crate::db::Features::resolve_for_org_with_conf(db, conf, org_id).await;
     let policy = crate::db::SchedulePolicy::from_conf(conf).with_features(&features);
 
     for cron_expression in scheduled_functions.keys() {
@@ -2761,8 +2761,9 @@ pub async fn check_ctx_requirements(
         );
     }
 
-    // Get the project to find its env_id
-    let project = crate::db::Project::get_project(db, project_id)
+    // Get the project (including inactive, since deploy validation runs before
+    // reactivating an inactive project) to find its env_id.
+    let project = crate::db::Project::get_project_including_inactive(db, project_id)
         .await
         .map_err(|e| format!("Failed to get project: {}", e))?;
 

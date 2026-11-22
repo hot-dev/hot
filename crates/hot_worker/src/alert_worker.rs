@@ -89,50 +89,38 @@ pub fn spawn_alert_worker(
                 break;
             }
 
-            // Process pending deliveries with a timeout so we can check for shutdown
-            // This ensures we don't block shutdown for too long
-            // EmailSender implements AlertEmailSender trait, so we can pass it directly
+            // Process pending deliveries without cancelling mid-flight on shutdown so
+            // outbound HTTP/SMTP sends that already completed are not left unmarked
+            // (`mark_sent`) and duplicated 2 minutes later.
             let email_sender_ref: Option<&dyn hot::db::alert::AlertEmailSender> = if email_available
             {
                 Some(&email_sender)
             } else {
                 None
             };
-            let process_future = process_pending_deliveries(
+            let result = process_pending_deliveries(
                 &db,
                 &http_client,
                 hot::outbound::DestinationPolicy::for_alert_delivery(&conf),
                 email_sender_ref,
                 &email_config,
                 config.batch_size,
-            );
+            )
+            .await;
 
-            tokio::select! {
-                biased; // Check shutdown first
-
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        tracing::info!("Alert delivery worker shutting down (interrupted during processing)");
-                        break;
+            match result {
+                Ok((total, success, failure)) => {
+                    if total > 0 {
+                        tracing::info!(
+                            "Alert worker processed {} deliveries ({} success, {} failure)",
+                            total,
+                            success,
+                            failure
+                        );
                     }
                 }
-
-                result = process_future => {
-                    match result {
-                        Ok((total, success, failure)) => {
-                            if total > 0 {
-                                tracing::info!(
-                                    "Alert worker processed {} deliveries ({} success, {} failure)",
-                                    total,
-                                    success,
-                                    failure
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Alert worker error: {}", e);
-                        }
-                    }
+                Err(e) => {
+                    tracing::error!("Alert worker error: {}", e);
                 }
             }
 

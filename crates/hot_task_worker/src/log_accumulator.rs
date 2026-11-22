@@ -24,13 +24,17 @@ const TRUNCATION_NOTICE: &str = "\n[hot-task-worker] output truncated at 10 MB\n
 
 /// Store text that is safe for Postgres JSONB, within the output budget.
 /// Both Docker and FIFO output can contain arbitrary bytes.
-fn append_log(buf: &mut String, bytes: &[u8]) {
+/// Returns `true` when truncation has occurred (either on this call or earlier).
+fn append_log(buf: &mut String, bytes: &[u8]) -> bool {
     if buf.len() >= MAX_LOG_BYTES {
         // Output that filled the budget exactly was whole until more came.
-        if !bytes.is_empty() && !buf.ends_with(TRUNCATION_NOTICE) {
-            buf.push_str(TRUNCATION_NOTICE);
+        if !bytes.is_empty() {
+            if !buf.ends_with(TRUNCATION_NOTICE) {
+                buf.push_str(TRUNCATION_NOTICE);
+            }
+            return true;
         }
-        return;
+        return false;
     }
     let text = String::from_utf8_lossy(bytes);
     let text = if text.contains('\0') {
@@ -41,6 +45,7 @@ fn append_log(buf: &mut String, bytes: &[u8]) {
     let remaining = MAX_LOG_BYTES - buf.len();
     if text.len() <= remaining {
         buf.push_str(&text);
+        false
     } else {
         let mut end = remaining;
         while !text.is_char_boundary(end) {
@@ -48,6 +53,7 @@ fn append_log(buf: &mut String, bytes: &[u8]) {
         }
         buf.push_str(&text[..end]);
         buf.push_str(TRUNCATION_NOTICE);
+        true
     }
 }
 
@@ -57,27 +63,50 @@ fn append_log(buf: &mut String, bytes: &[u8]) {
 #[derive(Default)]
 struct LogStream {
     pending: Vec<u8>,
+    truncated: bool,
 }
 
 impl LogStream {
+    #[cfg(any(all(target_os = "linux", feature = "kata"), test))]
+    fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
     fn push(&mut self, buf: &mut String, bytes: &[u8]) {
+        if self.truncated {
+            return;
+        }
         if self.pending.is_empty() {
             let keep = incomplete_utf8_tail(bytes);
-            append_log(buf, &bytes[..bytes.len() - keep]);
+            if append_log(buf, &bytes[..bytes.len() - keep]) {
+                self.truncated = true;
+                self.pending.clear();
+                return;
+            }
             self.pending.extend_from_slice(&bytes[bytes.len() - keep..]);
         } else {
             let mut joined = std::mem::take(&mut self.pending);
             joined.extend_from_slice(bytes);
             let keep = incomplete_utf8_tail(&joined);
-            append_log(buf, &joined[..joined.len() - keep]);
+            if append_log(buf, &joined[..joined.len() - keep]) {
+                self.truncated = true;
+                self.pending.clear();
+                return;
+            }
             self.pending = joined.split_off(joined.len() - keep);
         }
     }
 
     /// The stream ended: a tail still incomplete is invalid, and says so.
     fn finish(&mut self, buf: &mut String) {
+        if self.truncated {
+            self.pending.clear();
+            return;
+        }
         let pending = std::mem::take(&mut self.pending);
-        append_log(buf, &pending);
+        if append_log(buf, &pending) {
+            self.truncated = true;
+        }
     }
 }
 
@@ -104,19 +133,38 @@ fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 pub struct LogAccumulator {
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for LogAccumulator {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl LogAccumulator {
     /// Create from a Docker container's log stream (`follow: true`).
     pub fn from_docker(docker: &Docker, container_id: &str) -> Self {
+        Self::from_docker_with_follow(docker, container_id, true)
+    }
+
+    /// Create from a Docker container's existing logs (`follow: false`), so
+    /// collecting logs from a container that is stopped or about to be killed
+    /// returns promptly instead of stalling for `FINALIZE_TIMEOUT_SECS`.
+    pub fn from_docker_snapshot(docker: &Docker, container_id: &str) -> Self {
+        Self::from_docker_with_follow(docker, container_id, false)
+    }
+
+    fn from_docker_with_follow(docker: &Docker, container_id: &str, follow: bool) -> Self {
         let stdout = Arc::new(Mutex::new(String::new()));
         let stderr = Arc::new(Mutex::new(String::new()));
 
         let log_options = LogsOptionsBuilder::default()
             .stdout(true)
             .stderr(true)
-            .follow(true)
+            .follow(follow)
             .build();
 
         let mut log_stream = docker.logs(container_id, Some(log_options));
@@ -147,11 +195,13 @@ impl LogAccumulator {
         Self {
             stdout,
             stderr,
-            handle,
+            handle: Some(handle),
         }
     }
 
-    /// Create from host-side FIFOs (Firecracker/containerd).
+    /// Create from host-side FIFOs (Firecracker/containerd) using non-blocking
+    /// async pipes so aborting on timeout or drop cancels cleanly without
+    /// leaking `spawn_blocking` threads.
     #[cfg(all(target_os = "linux", feature = "kata"))]
     pub fn from_fifos(stdout_path: String, stderr_path: String) -> Self {
         let stdout = Arc::new(Mutex::new(String::new()));
@@ -161,20 +211,16 @@ impl LogAccumulator {
         let stderr_clone = stderr.clone();
 
         let handle = tokio::spawn(async move {
-            let stdout_task = tokio::task::spawn_blocking(move || {
-                read_fifo_stream(&stdout_path, stdout_clone, "stdout");
-            });
-            let stderr_task = tokio::task::spawn_blocking(move || {
-                read_fifo_stream(&stderr_path, stderr_clone, "stderr");
-            });
-
-            let _ = tokio::join!(stdout_task, stderr_task);
+            tokio::join!(
+                read_fifo_stream_async(&stdout_path, stdout_clone, "stdout"),
+                read_fifo_stream_async(&stderr_path, stderr_clone, "stderr"),
+            );
         });
 
         Self {
             stdout,
             stderr,
-            handle,
+            handle: Some(handle),
         }
     }
 
@@ -185,13 +231,19 @@ impl LogAccumulator {
         (stdout, stderr)
     }
 
-    /// Wait for the log stream to complete and return final output.
-    pub async fn finalize(self) -> (String, String) {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(FINALIZE_TIMEOUT_SECS),
-            self.handle,
-        )
-        .await;
+    /// Wait for the log stream to complete and return final output, aborting
+    /// the background reader if it does not finish within `FINALIZE_TIMEOUT_SECS`.
+    pub async fn finalize(mut self) -> (String, String) {
+        if let Some(mut handle) = self.handle.take()
+            && tokio::time::timeout(
+                std::time::Duration::from_secs(FINALIZE_TIMEOUT_SECS),
+                &mut handle,
+            )
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
 
         let stdout = self.stdout.lock().await.clone();
         let stderr = self.stderr.lock().await.clone();
@@ -200,21 +252,54 @@ impl LogAccumulator {
 }
 
 #[cfg(all(target_os = "linux", feature = "kata"))]
-fn read_fifo_stream(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
+async fn read_fifo_stream_async(path: &str, buf: Arc<Mutex<String>>, stream_name: &str) {
+    use tokio::io::AsyncReadExt;
+
+    let mut receiver = match tokio::net::unix::pipe::OpenOptions::new().open_receiver(path) {
+        Ok(rx) => rx,
         Err(e) => {
-            buf.blocking_lock().push_str(&format!(
+            buf.lock().await.push_str(&format!(
                 "[hot-task-worker] failed to open {} fifo '{}': {}\n",
                 stream_name, path, e
             ));
             return;
         }
     };
-    read_stream_to_eof(&mut file, &buf, stream_name, path);
+    let mut chunk = [0u8; 4096];
+    let mut stream = LogStream::default();
+    loop {
+        match receiver.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if stream.is_truncated() {
+                    // Keep draining and discarding bytes until EOF so the
+                    // container/shim writer never blocks on a full pipe or
+                    // dies from SIGPIPE/EPIPE.
+                    continue;
+                }
+                let mut locked = buf.lock().await;
+                stream.push(&mut locked, &chunk[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                if !stream.is_truncated() {
+                    let mut locked = buf.lock().await;
+                    stream.finish(&mut locked);
+                    locked.push_str(&format!(
+                        "[hot-task-worker] failed reading {} fifo '{}': {}\n",
+                        stream_name, path, e
+                    ));
+                }
+                return;
+            }
+        }
+    }
+    if !stream.is_truncated() {
+        stream.finish(&mut *buf.lock().await);
+    }
 }
 
-#[cfg(any(all(target_os = "linux", feature = "kata"), test))]
+#[cfg(test)]
 fn read_stream_to_eof<R: std::io::Read>(
     reader: &mut R,
     buf: &Mutex<String>,
@@ -223,12 +308,11 @@ fn read_stream_to_eof<R: std::io::Read>(
 ) {
     let mut chunk = [0u8; 4096];
     let mut stream = LogStream::default();
-    let mut truncated = false;
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                if truncated {
+                if stream.is_truncated() {
                     // Keep draining and discarding bytes until EOF so the
                     // container/shim writer never blocks on a full pipe or
                     // dies from SIGPIPE/EPIPE.
@@ -236,15 +320,10 @@ fn read_stream_to_eof<R: std::io::Read>(
                 }
                 let mut locked = buf.blocking_lock();
                 stream.push(&mut locked, &chunk[..n]);
-                // Output that only fills the budget may be all there is:
-                // read on, and once truncated, keep draining until EOF without
-                // appending further bytes or re-locking the buffer.
-                if locked.ends_with(TRUNCATION_NOTICE) {
-                    truncated = true;
-                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => {
-                if !truncated {
+                if !stream.is_truncated() {
                     let mut locked = buf.blocking_lock();
                     stream.finish(&mut locked);
                     locked.push_str(&format!(
@@ -256,7 +335,7 @@ fn read_stream_to_eof<R: std::io::Read>(
             }
         }
     }
-    if !truncated {
+    if !stream.is_truncated() {
         stream.finish(&mut buf.blocking_lock());
     }
 }

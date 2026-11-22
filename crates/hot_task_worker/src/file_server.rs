@@ -27,7 +27,14 @@ use tokio::sync::{Semaphore, oneshot};
 use uuid::Uuid;
 
 const GLOBAL_CONNECTION_LIMIT: usize = 256;
+/// Marks a per-task socket directory renamed aside for removal (see
+/// `FileServerHandle`'s `Drop`). A worker that stops before removing one
+/// leaves it for the next worker's startup cleanup.
+const REMOVING_DIR_MARKER: &str = ".removing-";
 const PER_TASK_CONNECTION_LIMIT: usize = 32;
+#[cfg(all(target_os = "linux", feature = "kata"))]
+const VSOCK_PRE_AUTH_PER_CID_LIMIT: usize = 8;
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADER_COUNT: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -49,6 +56,24 @@ static GLOBAL_CONNECTIONS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_CONNECTION_LIMIT)));
 static GLOBAL_TRANSFERS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_TRANSFER_LIMIT)));
+#[cfg(all(target_os = "linux", feature = "kata"))]
+static VSOCK_PRE_AUTH_PER_CID: LazyLock<parking_lot::Mutex<HashMap<u32, Arc<Semaphore>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+#[cfg(all(target_os = "linux", feature = "kata"))]
+fn try_acquire_vsock_pre_auth_permit(cid: u32) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let sem = {
+        let mut map = VSOCK_PRE_AUTH_PER_CID.lock();
+        if map.len() > 256 {
+            map.retain(|_, s| Arc::strong_count(s) > 1);
+        }
+        Arc::clone(
+            map.entry(cid)
+                .or_insert_with(|| Arc::new(Semaphore::new(VSOCK_PRE_AUTH_PER_CID_LIMIT))),
+        )
+    };
+    sem.try_acquire_owned().ok()
+}
 static MAX_READ_SIZE: LazyLock<usize> = LazyLock::new(|| {
     configured_limit(
         "HOT_TASK_FILE_MAX_TRANSFER_BYTES",
@@ -74,6 +99,7 @@ pub struct FileServerContext {
     pub auth_token: String,
     pub db: Arc<DatabasePool>,
     pub storage: Arc<dyn FileStorage>,
+    pub file_max_bytes_conf: Option<i64>,
 }
 
 /// Transport type for the file server.
@@ -111,14 +137,61 @@ impl Drop for FileServerHandle {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(dir) = self.cleanup_dir.take() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
+        let cleanup_dir = self.cleanup_dir.take();
         #[cfg(all(target_os = "linux", feature = "kata"))]
-        if self.join_handle.is_some()
+        let uds_cleanup = if self.join_handle.is_some()
             && let FileServerTransport::VsockUds { uds_path, .. } = &self.transport
         {
-            let _ = std::fs::remove_file(uds_path);
+            Some(uds_path.clone())
+        } else {
+            None
+        };
+        #[cfg(not(all(target_os = "linux", feature = "kata")))]
+        let uds_cleanup: Option<PathBuf> = None;
+
+        // A redelivered task starts a new server at these same paths, so they
+        // must be free when `drop` returns: a removal left to the blocking
+        // pool could run after that server bound its socket, and delete it.
+        // Unlinking the socket and renaming the directory are one syscall
+        // each; only removing the directory, which walks it, is deferred.
+        if let Some(uds_path) = uds_cleanup {
+            let _ = std::fs::remove_file(&uds_path);
+        }
+        if let Some(dir) = cleanup_dir {
+            let mut doomed = dir.clone().into_os_string();
+            doomed.push(format!("{REMOVING_DIR_MARKER}{}", Uuid::new_v4().simple()));
+            let doomed = PathBuf::from(doomed);
+            if std::fs::rename(&dir, &doomed).is_err() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn_blocking(move || {
+                        let _ = std::fs::remove_dir_all(&doomed);
+                    });
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(&doomed);
+                }
+            }
+        }
+    }
+}
+
+/// Remove the socket directories under `socket_dir` that a previous worker
+/// renamed aside but stopped before removing.
+pub(crate) async fn remove_abandoned_socket_dirs(socket_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(socket_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let abandoned = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.contains(REMOVING_DIR_MARKER));
+        if abandoned && entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
 }
@@ -372,7 +445,10 @@ async fn serve_vsock_af(
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _addr)) => {
+                    Ok((stream, addr)) => {
+                        let Some(pre_auth_permit) = try_acquire_vsock_pre_auth_permit(addr.cid()) else {
+                            continue;
+                        };
                         let Ok(global_permit) = Arc::clone(&GLOBAL_CONNECTIONS).try_acquire_owned() else {
                             continue;
                         };
@@ -384,7 +460,7 @@ async fn serve_vsock_af(
                         connections.spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) =
-                                handle_vsock_af_connection(stream, ctx, task_transfers).await
+                                handle_vsock_af_connection(stream, ctx, task_transfers, Some(pre_auth_permit)).await
                             {
                                 tracing::debug!("File server AF_VSOCK connection error: {}", e);
                             }
@@ -392,6 +468,7 @@ async fn serve_vsock_af(
                     }
                     Err(e) => {
                         tracing::warn!("File server AF_VSOCK accept error: {}", e);
+                        tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                     }
                 }
             }
@@ -406,10 +483,11 @@ async fn handle_vsock_af_connection(
     stream: tokio_vsock::VsockStream,
     ctx: FileServerContext,
     task_transfers: Arc<Semaphore>,
+    pre_auth_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (read_half, write_half) = tokio::io::split(stream);
     let reader = BufReader::new(read_half);
-    handle_request(reader, write_half, ctx, task_transfers).await
+    handle_request_with_pre_auth(reader, write_half, ctx, task_transfers, pre_auth_permit).await
 }
 
 /// Start a per-task file server on a Firecracker hybrid vsock UDS path.
@@ -493,6 +571,7 @@ async fn serve_unix(
                     }
                     Err(e) => {
                         tracing::warn!("File server accept error: {}", e);
+                        tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                     }
                 }
             }
@@ -561,6 +640,7 @@ async fn serve_tcp(
                     }
                     Err(e) => {
                         tracing::warn!("File server TCP accept error: {}", e);
+                        tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                     }
                 }
             }
@@ -601,11 +681,26 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    handle_request_with_deadlines(
+    handle_request_with_pre_auth(reader, write_half, ctx, task_transfers, None).await
+}
+
+async fn handle_request_with_pre_auth<R, W>(
+    reader: BufReader<R>,
+    write_half: W,
+    ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
+    pre_auth_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    handle_request_with_deadlines_and_pre_auth(
         reader,
         write_half,
         ctx,
         task_transfers,
+        pre_auth_permit,
         PRE_AUTH_HEADER_DEADLINE,
         REQUEST_DEADLINE,
         READ_IDLE_TIMEOUT,
@@ -614,12 +709,43 @@ where
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn handle_request_with_deadlines<R, W>(
+    reader: BufReader<R>,
+    write_half: W,
+    ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
+    pre_auth_header_deadline: Duration,
+    request_deadline: Duration,
+    idle_timeout: Duration,
+    max_transfer_duration: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    handle_request_with_deadlines_and_pre_auth(
+        reader,
+        write_half,
+        ctx,
+        task_transfers,
+        None,
+        pre_auth_header_deadline,
+        request_deadline,
+        idle_timeout,
+        max_transfer_duration,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_request_with_deadlines_and_pre_auth<R, W>(
     mut reader: BufReader<R>,
     mut write_half: W,
     ctx: FileServerContext,
     task_transfers: Arc<Semaphore>,
+    pre_auth_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pre_auth_header_deadline: Duration,
     request_deadline: Duration,
     idle_timeout: Duration,
@@ -720,6 +846,9 @@ where
         write_http_response(&mut write_half, 401, "text/plain", b"Unauthorized").await?;
         return Ok(());
     }
+    // Authentication succeeded — release the per-CID pre-auth slot so
+    // legitimate guest traffic isn't throttled by the unauthenticated cap.
+    drop(pre_auth_permit);
     if !matches!(method, "GET" | "PUT" | "HEAD" | "DELETE") {
         write_http_response(&mut write_half, 405, "text/plain", b"Method not allowed").await?;
         return Ok(());
@@ -794,15 +923,23 @@ where
         user_id: ctx.user_id,
         run_id: ctx.run_id,
         run_provenance: None,
-        file_max_bytes_conf: None,
+        file_max_bytes_conf: ctx.file_max_bytes_conf,
     };
 
     if uri == "/health" {
         write_http_response(&mut write_half, 200, "text/plain", b"ok").await?;
     } else if uri.starts_with("/files?prefix=") {
+        if method != "GET" {
+            write_http_response(&mut write_half, 405, "text/plain", b"Method not allowed").await?;
+            return Ok(());
+        }
         // GET /files?prefix=<prefix> — list files
         let prefix = uri.strip_prefix("/files?prefix=").unwrap_or("");
-        let prefix = urlencoding_decode(prefix);
+        let Ok(prefix) = urlencoding_decode(prefix) else {
+            write_http_response(&mut write_half, 400, "text/plain", b"Invalid URL encoding")
+                .await?;
+            return Ok(());
+        };
         match tokio::time::timeout(
             request_deadline,
             handle_list(&mut write_half, &ctx.storage, &file_ctx, &prefix),
@@ -821,7 +958,11 @@ where
             }
         }
     } else if let Some(path) = uri.strip_prefix("/files/") {
-        let path = urlencoding_decode(path);
+        let Ok(path) = urlencoding_decode(path) else {
+            write_http_response(&mut write_half, 400, "text/plain", b"Invalid URL encoding")
+                .await?;
+            return Ok(());
+        };
         match method {
             "GET" => {
                 handle_read_with_timeouts(
@@ -1304,31 +1445,38 @@ fn parse_configured_limit(value: Option<&str>, default: usize, hard_max: usize) 
         .min(hard_max)
 }
 
-/// Minimal percent-decoding for URL paths.
-fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
+/// Strict RFC 3986 percent-decoding into UTF-8.
+///
+/// Decodes raw bytes rather than pushing `byte as char` (which corrupts
+/// multibyte UTF-8 into Latin-1), preserves literal `+` in paths, rejects
+/// truncated/invalid `%XX` sequences and NUL bytes, and validates UTF-8.
+fn urlencoding_decode(s: &str) -> Result<String, ()> {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut iter = s.bytes();
+    while let Some(b) = iter.next() {
         if b == b'%' {
-            let hi = chars.next().unwrap_or(b'0');
-            let lo = chars.next().unwrap_or(b'0');
-            let byte = hex_digit(hi) * 16 + hex_digit(lo);
-            result.push(byte as char);
-        } else if b == b'+' {
-            result.push(' ');
+            let hi = iter.next().and_then(hex_digit).ok_or(())?;
+            let lo = iter.next().and_then(hex_digit).ok_or(())?;
+            let decoded = (hi << 4) | lo;
+            if decoded == 0 {
+                return Err(());
+            }
+            bytes.push(decoded);
+        } else if b == 0 {
+            return Err(());
         } else {
-            result.push(b as char);
+            bytes.push(b);
         }
     }
-    result
+    String::from_utf8(bytes).map_err(|_| ())
 }
 
-fn hex_digit(b: u8) -> u8 {
+fn hex_digit(b: u8) -> Option<u8> {
     match b {
-        b'0'..=b'9' => b - b'0',
-        b'a'..=b'f' => b - b'a' + 10,
-        b'A'..=b'F' => b - b'A' + 10,
-        _ => 0,
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1342,20 +1490,33 @@ mod tests {
 
     #[test]
     fn test_urlencoding_decode() {
-        assert_eq!(urlencoding_decode("hello%20world"), "hello world");
-        assert_eq!(urlencoding_decode("path/to/file.txt"), "path/to/file.txt");
-        assert_eq!(urlencoding_decode("a%2Fb"), "a/b");
-        assert_eq!(urlencoding_decode("100%25"), "100%");
+        assert_eq!(urlencoding_decode("hello%20world").unwrap(), "hello world");
+        assert_eq!(
+            urlencoding_decode("path/to/file.txt").unwrap(),
+            "path/to/file.txt"
+        );
+        assert_eq!(urlencoding_decode("a%2Fb").unwrap(), "a/b");
+        assert_eq!(urlencoding_decode("100%25").unwrap(), "100%");
+        assert_eq!(
+            urlencoding_decode("c++/file+1.txt").unwrap(),
+            "c++/file+1.txt"
+        );
+        assert_eq!(urlencoding_decode("caf%C3%A9.txt").unwrap(), "café.txt");
+        assert!(urlencoding_decode("bad%2").is_err());
+        assert!(urlencoding_decode("bad%ZZ").is_err());
+        assert!(urlencoding_decode("nul%00byte").is_err());
+        assert!(urlencoding_decode("%FF%FE").is_err());
     }
 
     #[test]
     fn test_hex_digit() {
-        assert_eq!(hex_digit(b'0'), 0);
-        assert_eq!(hex_digit(b'9'), 9);
-        assert_eq!(hex_digit(b'a'), 10);
-        assert_eq!(hex_digit(b'f'), 15);
-        assert_eq!(hex_digit(b'A'), 10);
-        assert_eq!(hex_digit(b'F'), 15);
+        assert_eq!(hex_digit(b'0'), Some(0));
+        assert_eq!(hex_digit(b'9'), Some(9));
+        assert_eq!(hex_digit(b'a'), Some(10));
+        assert_eq!(hex_digit(b'f'), Some(15));
+        assert_eq!(hex_digit(b'A'), Some(10));
+        assert_eq!(hex_digit(b'F'), Some(15));
+        assert_eq!(hex_digit(b'g'), None);
     }
 
     #[test]
@@ -1483,6 +1644,7 @@ mod tests {
             auth_token: "secret".to_string(),
             db: Arc::new(hot::db::DatabasePool::Sqlite(pool)),
             storage,
+            file_max_bytes_conf: None,
         };
         let (mut client_w, server_r) = tokio::io::duplex(64);
         let (server_w, mut client_r) = tokio::io::duplex(256);
@@ -1707,6 +1869,7 @@ mod tests {
             auth_token: "test-token".to_string(),
             db: Arc::new(db),
             storage,
+            file_max_bytes_conf: None,
         };
 
         let handle = start(&task_id, &socket_dir, ctx)
@@ -2007,6 +2170,7 @@ mod tests {
             auth_token: "tok".to_string(),
             db: Arc::new(hot::db::DatabasePool::Sqlite(pool)),
             storage: Arc::new(MockFileStorage::new()),
+            file_max_bytes_conf: None,
         };
 
         let handle = start(&task_id, &base_dir, ctx.clone()).await.unwrap();
@@ -2042,6 +2206,10 @@ mod tests {
         let expected_dir_2 = base_dir.join(task_id_2.to_string());
         assert!(expected_dir_2.exists());
         drop(handle_2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while expected_dir_2.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
             !expected_dir_2.exists(),
             "per-task socket directory must be removed on Drop"

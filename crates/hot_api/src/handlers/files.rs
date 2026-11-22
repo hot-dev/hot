@@ -2,10 +2,10 @@
 
 use axum::{
     Extension, Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderValue, StatusCode, header},
+    response::Response,
 };
 use chrono::{Duration, Utc};
 use hot::db::Features;
@@ -30,6 +30,122 @@ fn effective_file_max_bytes(conf: &hot::val::Val, plan_max: i64) -> i64 {
         file_storage::FileStorageContext::conf_file_max_bytes(conf),
         plan_max,
     )
+}
+
+/// Map a DB lookup string error: return clean 404 only when no row matched;
+/// log and return 500 on transient DB errors instead of masquerading as 404
+/// or leaking raw SQL errors.
+fn lookup_error_response(resource: &str, err: String) -> (StatusCode, Json<ApiErrorResponse>) {
+    if err.contains("no rows returned") {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found(resource)),
+        )
+    } else {
+        tracing::error!(resource, error = %err, "Database lookup failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error("Internal server error")),
+        )
+    }
+}
+
+/// Validate a caller-supplied MIME Content-Type (must be `type/subtype[; params]`,
+/// visible ASCII only, no control characters, valid HTTP HeaderValue).
+fn validate_content_type(ct: &str) -> Result<String, String> {
+    let trimmed = ct.trim();
+    if trimmed.is_empty() || trimmed.len() > 255 {
+        return Err("content_type must be between 1 and 255 characters".to_string());
+    }
+    if trimmed
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7f || !b.is_ascii())
+    {
+        return Err("content_type must contain only printable ASCII characters".to_string());
+    }
+    let essence = trimmed.split(';').next().unwrap_or("").trim();
+    let Some((ty, sub)) = essence.split_once('/') else {
+        return Err("content_type must be a valid MIME type (type/subtype)".to_string());
+    };
+    let is_token = |s: &str| {
+        !s.is_empty()
+            && s.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+    };
+    if !is_token(ty) || !is_token(sub) || HeaderValue::from_str(trimmed).is_err() {
+        return Err("content_type is not a valid MIME type".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn safe_content_type_header(content_type: Option<&str>) -> HeaderValue {
+    content_type
+        .and_then(|ct| validate_content_type(ct).ok())
+        .and_then(|ct| HeaderValue::from_str(&ct).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"))
+}
+
+/// Build an injection-safe `Content-Disposition: attachment` header with both a
+/// sanitized ASCII fallback `filename="..."` and an RFC 5987 `filename*=UTF-8''...`.
+fn safe_content_disposition_header(filename: &str) -> HeaderValue {
+    let ascii_fallback: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii()
+                && !c.is_ascii_control()
+                && !matches!(c, '"' | '\\' | ';' | '/' | '\r' | '\n')
+            {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ascii_fallback = if ascii_fallback.is_empty() {
+        "download".to_string()
+    } else {
+        ascii_fallback
+    };
+
+    let mut rfc5987 = String::with_capacity(filename.len());
+    for &b in filename.as_bytes() {
+        let is_attr_char = b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            );
+        if is_attr_char {
+            rfc5987.push(b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut rfc5987, "%{:02X}", b);
+        }
+    }
+
+    let value = format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback, rfc5987
+    );
+    HeaderValue::from_str(&value)
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"download\""))
 }
 
 /// Refuse to route a persisted upload through a backend other than the one
@@ -229,12 +345,7 @@ pub async fn get_file(
 
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("File: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("File", e))?;
 
     Ok(Json(ApiResponse::new(file_response_from_record(&record))))
 }
@@ -245,25 +356,21 @@ pub async fn download_file(
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
     Path(file_id): Path<Uuid>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiErrorResponse>)> {
+) -> Result<Response, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can download files.")?;
 
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("File: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("File", e))?;
 
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
         .map(|env| env.org_id)
         .map_err(|e| {
+            tracing::error!(error = %e, "Failed to resolve environment for file download");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&e.to_string())),
+                Json(ApiErrorResponse::internal_error("Internal server error")),
             )
         })?;
 
@@ -274,41 +381,66 @@ pub async fn download_file(
         api_key.created_by_user_id,
     );
 
-    let content = file_storage
-        .read_file(&record.path, &ctx)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to read file: {}",
-                    e
-                ))),
-            )
-        })?;
-
-    let content_type = record
-        .content_type
-        .as_deref()
-        .unwrap_or("application/octet-stream");
-
+    let content_type = safe_content_type_header(record.content_type.as_deref());
     let filename = record.path.rsplit('/').next().unwrap_or(&record.path);
+    let content_disposition = safe_content_disposition_header(filename);
 
-    Ok((
-        StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", filename),
-            ),
-            (
-                axum::http::header::CONTENT_LENGTH,
-                content.len().to_string(),
-            ),
-        ],
-        content,
-    ))
+    let (body, content_length) = match file_storage.open_file_stream(&record.path, &ctx).await {
+        Ok(Some(file_stream)) => {
+            let size = file_stream.metadata.size.max(0) as u64;
+            let mut reader = file_stream.reader;
+            let stream = async_stream::stream! {
+                use tokio::io::AsyncReadExt;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..n])),
+                        Err(e) => {
+                            yield Err(e);
+                            break;
+                        }
+                    }
+                }
+            };
+            (Body::from_stream(stream), size)
+        }
+        Ok(None) => {
+            let content = file_storage
+                .read_file(&record.path, &ctx)
+                .await
+                .map_err(|e| {
+                    tracing::error!(%file_id, error = %e, "Failed to read file");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiErrorResponse::internal_error("Failed to read file")),
+                    )
+                })?;
+            let size = content.len() as u64;
+            (Body::from(content), size)
+        }
+        Err(e) => {
+            tracing::error!(%file_id, error = %e, "Failed to open file stream");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error("Failed to read file")),
+            ));
+        }
+    };
+
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(header::CONTENT_DISPOSITION, content_disposition);
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    if let Ok(len_val) = HeaderValue::from_str(&content_length.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, len_val);
+    }
+    Ok(response)
 }
 
 /// The size of the active file at `path` that a write would replace, or 0.
@@ -362,7 +494,7 @@ pub async fn upload_file(
             )
         })?;
 
-    let features = Features::resolve_for_org(&db, &org_id).await;
+    let features = Features::resolve_for_org_with_conf(&db, &conf, &org_id).await;
 
     let max_file_bytes = effective_file_max_bytes(&conf, features.file_upload_max_bytes());
     let content_size = body.len() as i64;
@@ -406,7 +538,8 @@ pub async fn upload_file(
         org_id,
         Some(api_key.env_id),
         api_key.created_by_user_id,
-    );
+    )
+    .with_file_max_bytes(&conf);
 
     let metadata = file_storage
         .write_file(&path, &body, content_type.as_deref(), &ctx)
@@ -445,12 +578,7 @@ pub async fn delete_file(
 
     let record = file::get_file_by_id_with_env_check(&db, file_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("File: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("File", e))?;
 
     let org_id = Env::get_env(&db, &api_key.env_id)
         .await
@@ -534,7 +662,17 @@ pub async fn initiate_upload(
         )
     })?;
 
-    let features = Features::resolve_for_org(&db, &org_id).await;
+    let validated_content_type = match req.content_type.as_deref() {
+        Some(ct) => Some(validate_content_type(ct).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::bad_request(&e)),
+            )
+        })?),
+        None => None,
+    };
+
+    let features = Features::resolve_for_org_with_conf(&db, &conf, &org_id).await;
 
     let max_file_bytes = effective_file_max_bytes(&conf, features.file_upload_max_bytes());
     if req.expected_size.is_some_and(|size| size <= 0) {
@@ -596,10 +734,11 @@ pub async fn initiate_upload(
         org_id,
         Some(api_key.env_id),
         api_key.created_by_user_id,
-    );
+    )
+    .with_file_max_bytes(&conf);
 
     let backend_upload_id = file_storage
-        .initiate_multipart_upload(&normalized_path, req.content_type.as_deref(), &ctx)
+        .initiate_multipart_upload(&normalized_path, validated_content_type.as_deref(), &ctx)
         .await
         .map_err(|e| {
             (
@@ -632,7 +771,7 @@ pub async fn initiate_upload(
         Some(api_key.env_id),
         api_key.created_by_user_id,
         Some(effective_expected_size),
-        req.content_type.as_deref(),
+        validated_content_type.as_deref(),
         part_size as i64,
         parts_expected,
         Some(&backend_upload_id),
@@ -726,12 +865,7 @@ pub async fn upload_part_handler(
 
     let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("Upload", e))?;
     ensure_upload_backend(&record, &file_storage)?;
 
     // Non-final parts must meet S3 minimum size (5 MB)
@@ -803,8 +937,23 @@ pub async fn upload_part_handler(
         api_key.created_by_user_id,
     );
 
-    let content_hash = file_storage::compute_part_hash(&body);
-    let content_md5 = file_storage::compute_md5(&body);
+    let body_for_hash = body.clone();
+    let (content_hash, content_md5) = tokio::task::spawn_blocking(move || {
+        (
+            file_storage::compute_part_hash(&body_for_hash),
+            file_storage::compute_md5(&body_for_hash),
+        )
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(%upload_id, part_number, error = %e, "Part hashing task failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(
+                "Failed to hash upload part",
+            )),
+        )
+    })?;
     if let Some(part) =
         recorded_part_retry(&db, &record, part_number, &content_hash, &content_md5).await?
     {
@@ -865,19 +1014,28 @@ pub async fn upload_part_handler(
         }
     };
     // A previous owner may have recorded the part between our first lookup
-    // and the reservation. Never send a recorded part to S3 again.
-    let current = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
-        .await
-        .map_err(|e| {
-            (
+    // and the reservation. Never send a recorded part to S3 again, and always
+    // release our reservation before returning early.
+    let current = match file_upload::get_upload(&db, upload_id, org_id, api_key.env_id).await {
+        Ok(current) => current,
+        Err(e) => {
+            let _ = file_upload::release_part(&db, upload_id, part_number, claim_token).await;
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiErrorResponse::internal_error(&e)),
-            )
-        })?;
-    if let Some(part) =
-        recorded_part_retry(&db, &current, part_number, &content_hash, &content_md5).await?
-    {
-        return Ok(part_response(part));
+            ));
+        }
+    };
+    match recorded_part_retry(&db, &current, part_number, &content_hash, &content_md5).await {
+        Ok(Some(part)) => {
+            let _ = file_upload::release_part(&db, upload_id, part_number, claim_token).await;
+            return Ok(part_response(part));
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let _ = file_upload::release_part(&db, upload_id, part_number, claim_token).await;
+            return Err(err);
+        }
     }
     let uploaded = tokio::time::timeout(
         std::time::Duration::from_secs(300),
@@ -961,7 +1119,7 @@ pub async fn upload_part_handler(
 }
 
 pub async fn complete_upload(
-    State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
+    State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     Extension(file_storage): Extension<SharedFileStorage>,
@@ -981,12 +1139,7 @@ pub async fn complete_upload(
 
     let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("Upload", e))?;
     ensure_upload_backend(&record, &file_storage)?;
 
     if record.status == "completed" {
@@ -1039,7 +1192,7 @@ pub async fn complete_upload(
     }
 
     // Re-check quota with actual bytes_received
-    let features = Features::resolve_for_org(&db, &org_id).await;
+    let features = Features::resolve_for_org_with_conf(&db, &conf, &org_id).await;
     let storage_limit = features.storage_bytes();
     if storage_limit >= 0 {
         let current_usage = file::get_storage_usage_by_account(&db, org_id)
@@ -1187,12 +1340,7 @@ pub async fn abort_upload(
 
     let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
-            )
-        })?;
+        .map_err(|e| lookup_error_response("Upload", e))?;
     ensure_upload_backend(&record, &file_storage)?;
 
     if record.status == "aborted" {
@@ -1253,4 +1401,32 @@ pub async fn abort_upload(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_type_validation_rejects_invalid_and_falls_back() {
+        assert_eq!(
+            validate_content_type("application/json; charset=utf-8").unwrap(),
+            "application/json; charset=utf-8"
+        );
+        assert!(validate_content_type("bad\r\nX-Injected: 1").is_err());
+        assert!(validate_content_type("notamimetype").is_err());
+        assert_eq!(
+            safe_content_type_header(Some("bad\r\nheader")),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn content_disposition_sanitizes_quotes_semicolons_and_unicode() {
+        let header = safe_content_disposition_header("evil\"; name=\"x\r\n日本語.txt");
+        let s = header.to_str().unwrap();
+        assert!(s.starts_with("attachment; filename=\"evil__ name=_x__"));
+        assert!(s.contains("filename*=UTF-8''"));
+        assert!(!s.contains('\r') && !s.contains('\n'));
+    }
 }

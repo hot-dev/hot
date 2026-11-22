@@ -1,0 +1,7 @@
+name: "Hot CodeQL Config"
+
+# Keep security-extended parity with previous Default Setup and scan all Rust
+# files (including tests, benches, and fuzz targets). Custom model packs under
+# `.github/codeql/extensions/` are auto-discovered by the CodeQL CLI.
+queries:
+  - uses: security-extended

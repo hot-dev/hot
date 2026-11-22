@@ -571,6 +571,22 @@ impl Features {
         Self::resolve(plan_features.as_ref(), org_features.as_ref())
     }
 
+    /// Resolve features for an organization according to the deployment's
+    /// billing mode (`billing.enabled`): hosted deployments fail closed to
+    /// conservative defaults when an org has no plan row, while self-hosted /
+    /// local dev falls back to unlimited defaults.
+    pub async fn resolve_for_org_with_conf(
+        db: &DatabasePool,
+        conf: &crate::val::Val,
+        org_id: &Uuid,
+    ) -> Self {
+        if crate::product::billing_enabled(conf) {
+            Self::resolve_for_hosted_org(db, org_id).await
+        } else {
+            Self::resolve_for_org(db, org_id).await
+        }
+    }
+
     /// Read the owning account's entitlement overrides without exposing its
     /// consumption or directory. Lookup failures remain errors for API callers.
     pub async fn account_overrides(

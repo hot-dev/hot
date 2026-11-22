@@ -24,17 +24,24 @@ pub const REDACTED_SEGMENT: &str = "[redacted]";
 /// with `[redacted]`, preserving scheme, host, the rest of the path, and the
 /// query string. URLs without a path are returned unchanged. Idempotent.
 pub fn redact_url_token(url: &str) -> String {
-    let (base, query) = match url.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
+    // Only treat `?` as a query delimiter once we are past `scheme://authority`
+    // (or past the first path `/` when an untrusted authority contained `?`,
+    // such as `https://evil.com?/webhook/svc/secret`).
+    let after_scheme = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let first_slash = url[after_scheme..].find('/').map(|rel| after_scheme + rel);
+    let query_search_start = first_slash.unwrap_or(after_scheme);
+    let (base, query) = match url[query_search_start..].find('?') {
+        Some(rel) => {
+            let q = query_search_start + rel;
+            (&url[..q], Some(&url[q + 1..]))
+        }
         None => (url, None),
     };
 
     // The first path slash sits after "scheme://host"; a slash at or before
     // that boundary means there is no path to redact.
-    let path_start = base.find("://").map(|i| i + 3).unwrap_or(0);
-    let redacted = match base[path_start..].find('/') {
-        Some(rel) => {
-            let first_slash = path_start + rel;
+    let redacted = match first_slash {
+        Some(first_slash) if first_slash < base.len() => {
             let trimmed = base.trim_end_matches('/');
             let trailing = &base[trimmed.len()..];
             if trimmed.len() <= first_slash {
@@ -48,7 +55,7 @@ pub fn redact_url_token(url: &str) -> String {
                 }
             }
         }
-        None => base.to_string(),
+        _ => base.to_string(),
     };
 
     match query {
@@ -475,5 +482,17 @@ mod tests {
         assert_eq!(json["caller"]["headers"]["cookie"], "[redacted]");
         assert_eq!(json["caller"]["headers"]["x-stripe-sig"], "[redacted]");
         assert!(json["caller"]["auth"]["service-key"].get("meta").is_none());
+    }
+
+    #[test]
+    fn redacts_token_even_if_authority_contains_question_mark() {
+        assert_eq!(
+            redact_url_token("https://evil.com?/webhook/svc/abcdef123456"),
+            "https://evil.com?/webhook/svc/[redacted]"
+        );
+        assert_eq!(
+            redact_url_token("https://evil.com?/webhook/svc/abcdef123456?foo=bar"),
+            "https://evil.com?/webhook/svc/[redacted]?foo=bar"
+        );
     }
 }

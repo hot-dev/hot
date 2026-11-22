@@ -90,7 +90,20 @@ impl DomainCache {
             if entries.len() >= MAX_CACHE_ENTRIES {
                 entries.retain(|_, v| !v.is_expired());
                 if entries.len() >= MAX_CACHE_ENTRIES {
-                    entries.clear();
+                    // Evict the oldest 25% of entries rather than flushing the entire cache.
+                    let mut timestamps: Vec<Instant> =
+                        entries.values().map(|v| v.inserted_at).collect();
+                    let evict_idx = (timestamps.len() / 4).max(1).min(timestamps.len() - 1);
+                    let (_, cutoff, _) = timestamps.select_nth_unstable(evict_idx);
+                    let cutoff = *cutoff;
+                    entries.retain(|_, v| v.inserted_at > cutoff);
+                    if entries.len() >= MAX_CACHE_ENTRIES {
+                        let drop_count = (entries.len() / 4).max(1);
+                        let keys: Vec<String> = entries.keys().take(drop_count).cloned().collect();
+                        for key in keys {
+                            entries.remove(&key);
+                        }
+                    }
                 }
             }
             entries.insert(
@@ -167,6 +180,22 @@ fn strip_port(host: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+/// Validate basic DNS hostname syntax before querying the database or caching.
+fn is_valid_domain_syntax(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
 /// Check if a host is a known API host (should skip domain resolution).
 fn is_known_host(host: &str) -> bool {
     // Strip port if present
@@ -209,11 +238,12 @@ pub async fn domain_resolution_middleware(
     let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Bootstrap(
         hot::db::BootstrapOperation::Routing,
     )));
-    // Extract host header
+    // Extract host from Host header, falling back to HTTP/2 :authority URI host
     let host = request
         .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
+        .or_else(|| request.uri().host())
         .map(|h| strip_port(h).to_lowercase());
 
     let host = match host {
@@ -231,6 +261,12 @@ pub async fn domain_resolution_middleware(
     // Skip known hosts
     if is_known_host(&host) {
         return Ok(next.run(request).await);
+    }
+
+    // Reject syntactically invalid hostnames without touching the DB or polluting the cache.
+    if !is_valid_domain_syntax(&host) {
+        debug!("Invalid domain syntax rejected before DB lookup: {}", host);
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // A positive entry is not routing authority: deletion/verification changes

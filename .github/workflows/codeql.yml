@@ -1,0 +1,151 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    # Include ready_for_review so draft PRs that skipped scanning run a full
+    # scan as soon as they are marked ready.
+    types: [ opened, synchronize, reopened, ready_for_review ]
+  merge_group:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs immediately, but let pushes to main and scheduled
+  # scans complete so base analyses stay fresh.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect Changed Languages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      standard_languages: ${{ steps.filter.outputs.standard_languages }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: github.event_name == 'pull_request'
+
+      - name: Classify changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo 'standard_languages=["actions","javascript-typescript","python"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+
+          # Always run the lightweight `actions` scan on non-draft PRs so the
+          # native `Require CodeQL` code_scanning ruleset always receives a
+          # CodeQL SARIF upload even on docs/CSS-only PRs.
+          standard_langs=('"actions"')
+
+          if grep -qE '(\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^\.github/(codeql/|workflows/codeql\.yml$))' <<<"$changed"; then
+            rust=true
+          else
+            rust=false
+          fi
+
+          if grep -qE '(\.(js|mjs|cjs|jsx|ts|mts|cts|tsx|html|htm)$|(^|/)(package(-lock)?\.json|tsconfig.*\.json)$|^\.github/(codeql/|workflows/codeql\.yml$))' <<<"$changed"; then
+            standard_langs+=('"javascript-typescript"')
+          fi
+
+          if grep -qE '(\.py$|(^|/)(pyproject\.toml|requirements.*\.txt|setup\.py|setup\.cfg)$|^\.github/(codeql/|workflows/codeql\.yml$))' <<<"$changed"; then
+            standard_langs+=('"python"')
+          fi
+
+          standard_json="[$(IFS=,; echo "${standard_langs[*]}")]"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "standard_languages=$standard_json" >> "$GITHUB_OUTPUT"
+          echo "Detected CodeQL languages -> rust=$rust, standard=$standard_json"
+
+  analyze-rust:
+    name: Analyze (rust)
+    needs: [changes]
+    runs-on:
+      group: hot-ci
+      labels: ubuntu-24.04-8core
+    timeout-minutes: 45
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.changes.outputs.rust == 'true'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Cache CodeQL Rust extractor cargo target dir
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/codeql-cargo-target
+          key: codeql-rust-target-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            codeql-rust-target-${{ runner.os }}-
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        env:
+          CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
+        with:
+          languages: rust
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        env:
+          CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
+        with:
+          category: /language:rust
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: [changes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.changes.outputs.standard_languages || '["actions"]') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          category: /language:${{ matrix.language }}

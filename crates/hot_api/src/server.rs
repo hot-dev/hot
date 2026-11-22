@@ -63,12 +63,12 @@ use crate::handlers::{
     list_runs,
     list_service_keys,
     list_sessions,
-    mcp_handler,
-    mcp_handler_domain,
-    mcp_http_sse_messages_handler,
-    mcp_http_sse_messages_handler_domain,
-    mcp_sse_handler,
-    mcp_sse_handler_domain,
+    mcp_handler_domain_route,
+    mcp_handler_route,
+    mcp_http_sse_messages_handler_domain_route,
+    mcp_http_sse_messages_handler_route,
+    mcp_sse_handler_domain_route,
+    mcp_sse_handler_route,
     publish_event,
     purge_env_calls,
     purge_run_calls,
@@ -426,10 +426,14 @@ pub(crate) fn build_router(
     public_concurrency_limit: usize,
 ) -> Router {
     let db = state.0.clone();
+    // Health endpoints stay outside GlobalConcurrencyLimitLayer so slow public
+    // webhooks/MCP traffic cannot backpressure load-balancer health probes.
+    let health_routes = Router::new()
+        .route("/", get(root_handler))
+        .route("/status", get(status_handler));
+
     // Create routes that don't require authentication
     let public_routes = Router::new()
-        .route("/", get(root_handler))
-        .route("/status", get(status_handler))
         // Webhook endpoints — single catch-all handles both standard and custom domain routes:
         //   Standard:      /webhook/{org}/{env}/{service}/{path...}/{token}
         //   Custom domain: /webhook/{service}/{path...}/{token}
@@ -443,21 +447,21 @@ pub(crate) fn build_router(
         // Streamable HTTP (POST) + deprecated HTTP+SSE compatibility (GET)
         .route(
             "/mcp/{org_slug}/{env_name}/{service}",
-            axum::routing::post(mcp_handler).get(mcp_sse_handler),
+            axum::routing::post(mcp_handler_route).get(mcp_sse_handler_route),
         )
         // MCP HTTP+SSE transport — message POST endpoint
         .route(
             "/mcp/{org_slug}/{env_name}/{service}/messages",
-            axum::routing::post(mcp_http_sse_messages_handler),
+            axum::routing::post(mcp_http_sse_messages_handler_route),
         )
         // Custom domain routes (org/env resolved from domain)
         .route(
             "/mcp/{service}",
-            axum::routing::post(mcp_handler_domain).get(mcp_sse_handler_domain),
+            axum::routing::post(mcp_handler_domain_route).get(mcp_sse_handler_domain_route),
         )
         .route(
             "/mcp/{service}/messages",
-            axum::routing::post(mcp_http_sse_messages_handler_domain),
+            axum::routing::post(mcp_http_sse_messages_handler_domain_route),
         )
         // Hot 3.0.0's sub-org management API, replaced by /v1/orgs in 3.0.1.
         .route(
@@ -612,6 +616,7 @@ pub(crate) fn build_router(
     // Route denials run inside rate limiting and the access log, so a
     // credential probing actions it lacks is throttled and audited.
     Router::new()
+        .merge(health_routes)
         .merge(public_routes)
         .merge(api_v1_routes)
         .merge(org_routes)

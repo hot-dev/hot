@@ -58,6 +58,7 @@ pub fn netns_path(container_id: &str) -> String {
 /// Build a Command that runs via nsenter in the host's mount+network namespace.
 pub(crate) fn host_command(program: &str, args: &[&str]) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(NSENTER[0]);
+    cmd.kill_on_drop(true);
     cmd.args(&NSENTER[1..]);
     cmd.arg(program);
     cmd.args(args);
@@ -174,6 +175,16 @@ pub async fn ensure_iptables() -> Result<(), String> {
     for (check, add) in check_rules.iter().zip(forward_rules.iter()) {
         if !iptables_rule_exists(check).await {
             run_iptables(add).await?;
+        }
+    }
+    // Fail-closed IPv4 FORWARD rules for `kata-br0`. Per-task allow chains are
+    // inserted at position 1 (above these `-A` rules), and `RELATED,ESTABLISHED`
+    // replies are inserted above them too. Appending explicit DROP rules ensures
+    // guests cannot bypass per-task policy even on hosts whose default FORWARD
+    // policy is ACCEPT (standard Linux without Docker).
+    for direction in ["-i", "-o"] {
+        if !iptables_rule_exists(&["-C", "FORWARD", direction, BRIDGE_NAME, "-j", "DROP"]).await {
+            run_iptables(&["-A", "FORWARD", direction, BRIDGE_NAME, "-j", "DROP"]).await?;
         }
     }
     tracing::debug!("cni.iptables: FORWARD rules ensured for {BRIDGE_NAME}");
@@ -405,14 +416,20 @@ async fn remove_policy_chain(chain: &str) {
 }
 
 async fn iptables_rule_exists(args: &[&str]) -> bool {
-    match host_command(IPTABLES_BIN, args).output().await {
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.extend_from_slice(&["-w", "5"]);
+    full.extend_from_slice(args);
+    match host_command(IPTABLES_BIN, &full).output().await {
         Ok(o) => o.status.success(),
         Err(_) => false,
     }
 }
 
 async fn run_iptables(args: &[&str]) -> Result<(), String> {
-    let output = host_command(IPTABLES_BIN, args)
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.extend_from_slice(&["-w", "5"]);
+    full.extend_from_slice(args);
+    let output = host_command(IPTABLES_BIN, &full)
         .output()
         .await
         .map_err(|e| format!("iptables spawn failed: {e}"))?;
@@ -425,14 +442,20 @@ async fn run_iptables(args: &[&str]) -> Result<(), String> {
 }
 
 async fn ip6tables_rule_exists(args: &[&str]) -> bool {
-    match host_command(IP6TABLES_BIN, args).output().await {
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.extend_from_slice(&["-w", "5"]);
+    full.extend_from_slice(args);
+    match host_command(IP6TABLES_BIN, &full).output().await {
         Ok(o) => o.status.success(),
         Err(_) => false,
     }
 }
 
 async fn run_ip6tables(args: &[&str]) -> Result<(), String> {
-    let output = host_command(IP6TABLES_BIN, args)
+    let mut full = Vec::with_capacity(args.len() + 2);
+    full.extend_from_slice(&["-w", "5"]);
+    full.extend_from_slice(args);
+    let output = host_command(IP6TABLES_BIN, &full)
         .output()
         .await
         .map_err(|e| format!("ip6tables spawn failed: {e}"))?;
@@ -537,6 +560,7 @@ pub async fn setup(container_id: &str) -> Result<String, String> {
     // Invoke the CNI bridge plugin with ADD in the host namespace.
     let bridge_bin = format!("{CNI_BIN_DIR}/bridge");
     let output = tokio::process::Command::new(NSENTER[0])
+        .kill_on_drop(true)
         .args(&NSENTER[1..])
         .arg(&bridge_bin)
         .env("CNI_COMMAND", "ADD")
@@ -585,52 +609,65 @@ pub async fn setup(container_id: &str) -> Result<String, String> {
     Ok(ns_path)
 }
 
-/// Run CNI DEL and remove the network namespace. Best-effort; errors are logged
-/// but not propagated since this runs during cleanup.
+/// Run CNI DEL, remove the network namespace, and then remove firewall/L2
+/// rules. Destroying the netns/veth before dropping firewall rules ensures a
+/// still-exiting VM never has an unprotected window. Best-effort; errors are
+/// logged since this runs during cleanup.
 pub async fn teardown(container_id: &str) {
     let ns_path = netns_path(container_id);
 
-    // Rules are independent of netns existence and must also be removed after
-    // partial setup or a previous crash.
-    remove_task_policy(container_id).await;
-
     // Check if the netns file exists (via host namespace).
-    let check = host_command("test", &["-e", &ns_path]).status().await;
-    match check {
-        Ok(s) if s.success() => {}
-        _ => return,
-    }
+    let netns_exists = matches!(
+        host_command("test", &["-e", &ns_path]).status().await,
+        Ok(s) if s.success()
+    );
 
-    // CNI DEL — idempotent by spec.
-    let bridge_bin = format!("{CNI_BIN_DIR}/bridge");
-    let del_result = tokio::process::Command::new(NSENTER[0])
-        .args(&NSENTER[1..])
-        .arg(&bridge_bin)
-        .env("CNI_COMMAND", "DEL")
-        .env("CNI_CONTAINERID", container_id)
-        .env("CNI_NETNS", &ns_path)
-        .env("CNI_IFNAME", "eth0")
-        .env("CNI_PATH", CNI_BIN_DIR)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+    if netns_exists {
+        // CNI DEL — idempotent by spec.
+        let bridge_bin = format!("{CNI_BIN_DIR}/bridge");
+        let del_result = tokio::process::Command::new(NSENTER[0])
+            .kill_on_drop(true)
+            .args(&NSENTER[1..])
+            .arg(&bridge_bin)
+            .env("CNI_COMMAND", "DEL")
+            .env("CNI_CONTAINERID", container_id)
+            .env("CNI_NETNS", &ns_path)
+            .env("CNI_IFNAME", "eth0")
+            .env("CNI_PATH", CNI_BIN_DIR)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
 
-    match del_result {
-        Ok(child) => {
-            if let Err(e) = write_stdin_and_wait(child, bridge_config()).await {
-                tracing::warn!(container_id = container_id, error = %e, "cni.del.failed");
+        match del_result {
+            Ok(child) => match write_stdin_and_wait(child, bridge_config()).await {
+                Ok(output) if !output.status.success() => {
+                    tracing::warn!(
+                        container_id = container_id,
+                        status = %output.status,
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                        "cni.del.nonzero"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(container_id = container_id, error = %e, "cni.del.failed");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(container_id = container_id, error = %e, "cni.del.spawn_failed");
             }
         }
-        Err(e) => {
-            tracing::warn!(container_id = container_id, error = %e, "cni.del.spawn_failed");
-        }
+
+        // Remove the netns before dropping firewall/L2 anti-spoofing rules.
+        let _ = host_command(IP_BIN, &["netns", "del", container_id])
+            .status()
+            .await;
     }
 
-    // Remove the netns.
-    let _ = host_command(IP_BIN, &["netns", "del", container_id])
-        .status()
-        .await;
+    // Rules are independent of netns existence and must always be removed
+    // (including after partial setup or a previous crash).
+    remove_task_policy(container_id).await;
 
     tracing::debug!(container_id = container_id, "cni.teardown.complete");
 }

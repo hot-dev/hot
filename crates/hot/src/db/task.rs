@@ -658,7 +658,7 @@ impl Task {
                     r#"UPDATE task SET
                            task_status_id = $1,
                            stop_time = $2,
-                           duration_ms = COALESCE((EXTRACT(EPOCH FROM ($2 - start_time)) * 1000)::bigint, 0),
+                           duration_ms = 0,
                            result = $3
                        WHERE task_id = $4 AND task_status_id IN ($5, $6)
                        RETURNING duration_ms"#,
@@ -764,12 +764,11 @@ impl Task {
                 sqlx::query(
                     r#"UPDATE task SET
                            task_status_id = ?, stop_time = ?,
-                           duration_ms = COALESCE(CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER), 0),
+                           duration_ms = 0,
                            result = ?
                        WHERE task_id = ? AND task_status_id IN (?, ?)"#,
                 )
                 .bind(failed_id)
-                .bind(now)
                 .bind(now)
                 .bind(retry_error)
                 .bind(task_id)

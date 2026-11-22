@@ -1313,43 +1313,52 @@ fn spawn_worker_queue_claimer(
                 // so a shutdown that wins the race still holds the lease and can
                 // hand it back instead of leaving it pending for this consumer.
                 let handoff_started = std::time::Instant::now();
-                tokio::select! {
-                    biased;
+                let mut lease = Some(lease);
+                let mut stop_claimer = false;
+                while let Some(pending_lease) = lease.take() {
+                    tokio::select! {
+                        biased;
 
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            hand_back_lease_on_shutdown(&claimer_name, lease).await;
-                            break;
-                        }
-                        continue;
-                    }
-                    permit = claimed_tx.reserve() => {
-                        let send_result = match permit {
-                            Ok(permit) => {
-                                permit.send(wrap(lease));
-                                Ok(())
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                hand_back_lease_on_shutdown(&claimer_name, pending_lease).await;
+                                stop_claimer = true;
+                                break;
                             }
-                            Err(_) => Err(lease),
-                        };
-                        let handoff_wait_ms = duration_ms(handoff_started.elapsed());
-                        if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
-                            tracing::info!(
-                                target: "hot::queue::handoff",
-                                queue = queue_name,
-                                handoff_wait_ms = handoff_wait_ms,
-                                threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
-                                "worker queue claimer handoff waited"
-                            );
+                            // Non-shutdown watch update: keep the lease and continue waiting.
+                            lease = Some(pending_lease);
                         }
-                        if let Err(lease) = send_result {
-                            debug!(
-                                "hot.dev: WORKER {} claimer stopping because executors are gone",
-                                queue_name
-                            );
-                            hand_back_lease_on_shutdown(&claimer_name, lease).await;
-                            break;
+                        permit = claimed_tx.reserve() => {
+                            let send_result = match permit {
+                                Ok(permit) => {
+                                    permit.send(wrap(pending_lease));
+                                    Ok(())
+                                }
+                                Err(_) => Err(pending_lease),
+                            };
+                            let handoff_wait_ms = duration_ms(handoff_started.elapsed());
+                            if queue_metrics_enabled && handoff_wait_ms >= WORKER_HANDOFF_WAIT_LOG_MS {
+                                tracing::info!(
+                                    target: "hot::queue::handoff",
+                                    queue = queue_name,
+                                    handoff_wait_ms = handoff_wait_ms,
+                                    threshold_ms = WORKER_HANDOFF_WAIT_LOG_MS,
+                                    "worker queue claimer handoff waited"
+                                );
+                            }
+                            if let Err(pending_lease) = send_result {
+                                debug!(
+                                    "hot.dev: WORKER {} claimer stopping because executors are gone",
+                                    queue_name
+                                );
+                                hand_back_lease_on_shutdown(&claimer_name, pending_lease).await;
+                                stop_claimer = true;
+                            }
                         }
                     }
+                }
+                if stop_claimer {
+                    break;
                 }
             }
 
@@ -1478,8 +1487,16 @@ mod graceful_shutdown {
         /// Initiate graceful shutdown
         /// Phase 1: Stop dequeueing (handled by caller checking is_shutting_down)
         /// Phase 2: Wait for in-flight work to complete or timeout
-        /// Phase 3: Cancel remaining runs on timeout
-        pub async fn initiate_shutdown(&self, db: Option<&DatabasePool>) -> Result<(), String> {
+        /// Phase 3: Cancel remaining runs on timeout. Only mark remaining runs
+        /// `Failed` directly when the queue backend does not redeliver
+        /// interrupted deliveries (e.g. `Memory`); on persistent queues
+        /// (`Redis`/`Sqlite`), redeliveries reopen `Running` runs via
+        /// `earlier_deliveries` and would skip runs already marked `Failed`.
+        pub async fn initiate_shutdown(
+            &self,
+            db: Option<&DatabasePool>,
+            fail_active_on_timeout: bool,
+        ) -> Result<(), String> {
             // Mark shutdown as initiated
             if let Ok(mut shutdown) = self.shutdown_initiated.write() {
                 if *shutdown {
@@ -1540,15 +1557,21 @@ mod graceful_shutdown {
                     );
                     self.cancel_active_tokens("worker shutdown timeout");
 
-                    // Fail remaining active runs (marks as Failed so retry can kick in)
-                    if let Some(db) = db {
-                        let failed_count = self.fail_active_runs(db).await?;
-                        warn!(
-                            "Failed {} remaining runs due to shutdown timeout (will retry if configured)",
-                            failed_count
-                        );
+                    if fail_active_on_timeout {
+                        if let Some(db) = db {
+                            let failed_count = self.fail_active_runs(db).await?;
+                            warn!(
+                                "Failed {} remaining runs due to shutdown timeout (will retry if configured)",
+                                failed_count
+                            );
+                        } else {
+                            warn!("Database not available, cannot fail remaining runs");
+                        }
                     } else {
-                        warn!("Database not available, cannot fail remaining runs");
+                        warn!(
+                            "Cancelled {} remaining active run(s); leaving unfinished runs open for redelivery",
+                            self.active_run_count()
+                        );
                     }
 
                     Ok(())
@@ -1784,6 +1807,23 @@ impl BuildPathCache {
         }
     }
 
+    /// Path of the cross-process extraction lock file for `build_id`.
+    fn lock_file_path(&self, build_id: &Uuid) -> PathBuf {
+        self.extractions
+            .extract_dir(build_id)
+            .with_extension("lock")
+    }
+
+    /// Acquire an exclusive cross-process write lock for `build_id` asynchronously,
+    /// verifying inode identity so an `unlink` during eviction cannot split locks.
+    async fn acquire_file_write_lock_async(
+        &self,
+        build_id: &Uuid,
+        timeout: std::time::Duration,
+    ) -> Option<CrossProcessFileLock> {
+        acquire_file_write_lock_at_path_async(self.lock_file_path(build_id), timeout).await
+    }
+
     /// Acquire a cross-process file lock for extraction.
     /// Returns the lock file handle (which releases the lock when dropped).
     fn acquire_file_lock(
@@ -1819,6 +1859,81 @@ impl Drop for CrossProcessFileLock {
 const FILE_LOCK_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const FILE_LOCK_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
 const FILE_LOCK_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Verify that `file` still refers to the inode currently linked at `path`
+/// (prevents a `flock`-after-`unlink` split-lock race when another process
+/// unlinks the lock file during bundle eviction).
+fn is_same_inode_at_path(file: &std::fs::File, path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(fd_meta), Ok(path_meta)) = (file.metadata(), std::fs::metadata(path)) else {
+            return false;
+        };
+        fd_meta.dev() == path_meta.dev() && fd_meta.ino() == path_meta.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        true
+    }
+}
+
+/// Open and lock `lock_path` asynchronously with bounded backoff, re-opening
+/// if the path was unlinked while waiting for the lock.
+async fn acquire_file_write_lock_at_path_async(
+    lock_path: PathBuf,
+    timeout: std::time::Duration,
+) -> Option<CrossProcessFileLock> {
+    if let Some(parent) = lock_path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut backoff = FILE_LOCK_INITIAL_BACKOFF;
+    loop {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::debug!(error = %err, path = %lock_path.display(), "Failed to open cross-process file lock");
+                return None;
+            }
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                if is_same_inode_at_path(&file, &lock_path) {
+                    return Some(CrossProcessFileLock(file));
+                }
+                // The lock file was unlinked while we raced to lock it; release and reopen.
+                let _ = file.unlock();
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        timeout_ms = timeout.as_millis(),
+                        path = %lock_path.display(),
+                        "Timed out waiting for cross-process file lock"
+                    );
+                    return None;
+                }
+                tokio::time::sleep(backoff.min(remaining)).await;
+                backoff = backoff.saturating_mul(2).min(FILE_LOCK_MAX_BACKOFF);
+            }
+            Err(std::fs::TryLockError::Error(err)) => {
+                tracing::debug!(error = %err, path = %lock_path.display(), "Failed to acquire cross-process file lock");
+                return None;
+            }
+        }
+    }
+}
 
 /// Acquire an exclusive cross-process write lock asynchronously with bounded
 /// exponential backoff on `WouldBlock`, instead of immediately proceeding
@@ -2083,20 +2198,13 @@ impl TryFrom<Message> for RequestMessage {
     type Error = String;
 
     fn try_from(msg: Message) -> Result<Self, Self::Error> {
-        // Debug: log the actual message structure
-        tracing::debug!(
-            "Attempting to parse RequestMessage from: head={}, body={}",
-            msg.head.pretty_print(),
-            msg.body.pretty_print()
-        );
-
-        // Check type discriminator
         let msg_type = msg.head.get_str("__type");
+        tracing::debug!(id = %msg.id, msg_type = %msg_type, "Attempting to parse RequestMessage");
+
         if msg_type != "RequestMessage" {
             return Err(format!(
-                "Expected RequestMessage type, got: '{}'. Message head: {}",
-                msg_type,
-                msg.head.pretty_print()
+                "Expected RequestMessage type for message {}, got: '{}'",
+                msg.id, msg_type
             ));
         }
 
@@ -2105,12 +2213,7 @@ impl TryFrom<Message> for RequestMessage {
             .head
             .get("head")
             .or_else(|| msg.head.get("headers")) // Fallback for old messages
-            .ok_or_else(|| {
-                format!(
-                    "Missing head/headers in RequestMessage. Message head: {}",
-                    msg.head.pretty_print()
-                )
-            })?;
+            .ok_or_else(|| format!("Missing head/headers in RequestMessage {}", msg.id))?;
 
         let mut head = AHashMap::new();
         if let Val::Map(header_map) = head_val {
@@ -2184,20 +2287,13 @@ impl TryFrom<Message> for ResponseMessage {
     type Error = String;
 
     fn try_from(msg: Message) -> Result<Self, Self::Error> {
-        // Debug: log the actual message structure
-        tracing::debug!(
-            "Attempting to parse ResponseMessage from: head={}, body={}",
-            msg.head.pretty_print(),
-            msg.body.pretty_print()
-        );
-
-        // Check type discriminator
         let msg_type = msg.head.get_str("__type");
+        tracing::debug!(id = %msg.id, msg_type = %msg_type, "Attempting to parse ResponseMessage");
+
         if msg_type != "ResponseMessage" {
             return Err(format!(
-                "Expected ResponseMessage type, got: '{}'. Message head: {}",
-                msg_type,
-                msg.head.pretty_print()
+                "Expected ResponseMessage type for message {}, got: '{}'",
+                msg.id, msg_type
             ));
         }
 
@@ -2206,12 +2302,7 @@ impl TryFrom<Message> for ResponseMessage {
             .head
             .get("head")
             .or_else(|| msg.head.get("headers")) // Fallback for old messages
-            .ok_or_else(|| {
-                format!(
-                    "Missing head/headers in ResponseMessage. Message head: {}",
-                    msg.head.pretty_print()
-                )
-            })?;
+            .ok_or_else(|| format!("Missing head/headers in ResponseMessage {}", msg.id))?;
 
         let mut head = AHashMap::new();
         if let Val::Map(header_map) = head_val {
@@ -2353,6 +2444,9 @@ fn wait_log_due(key: Uuid) -> bool {
     let now = std::time::Instant::now();
     if last.len() > 10_000 {
         last.retain(|_, at| now.duration_since(*at) < INTERVAL);
+        if last.len() >= 10_000 {
+            last.clear();
+        }
     }
     match last.get(&key) {
         Some(at) if now.duration_since(*at) < INTERVAL => false,
@@ -2717,32 +2811,44 @@ impl ClaimFence {
     }
 
     /// Record one touch: its outcome, or `None` when it failed to reach
-    /// Redis. Returns the loss when this touch trips the fence.
+    /// Redis. `confirmed_at` is the pre-RPC instant (when Redis could have
+    /// reset the idle clock); `now` is the observation instant.
+    /// Returns the loss when this touch trips the fence.
+    #[cfg(test)]
     fn observe(
         &mut self,
         touched: Option<hot::queue::streams::PendingTouch>,
         now: tokio::time::Instant,
     ) -> Option<ClaimLoss> {
+        self.observe_at(touched, now, now)
+    }
+
+    fn observe_at(
+        &mut self,
+        touched: Option<hot::queue::streams::PendingTouch>,
+        confirmed_at: tokio::time::Instant,
+        now: tokio::time::Instant,
+    ) -> Option<ClaimLoss> {
         use hot::queue::streams::PendingTouch;
-        let pickup = !std::mem::replace(&mut self.touched_before, true);
+        let _pickup = !std::mem::replace(&mut self.touched_before, true);
         let current = self.verdict();
         if current == Some(ClaimLoss::Lost) {
             return None;
         }
         let verdict = match touched {
             Some(PendingTouch::Touched) => {
-                self.last_confirmed = now;
+                self.last_confirmed = confirmed_at;
                 None
             }
-            // Acknowledged before this worker started it: while the delivery
-            // waited in the prefetch buffer or the handoff, with no
-            // keepalive, another worker reclaimed it, ran it and settled it.
-            // This copy is stale (see `pickup_verdict`).
-            Some(PendingTouch::Acked) if pickup => Some(ClaimLoss::Lost),
-            // Trimmed from the stream or acknowledged: no other worker can
-            // be handed the delivery any more, so the claim holds for good.
-            Some(PendingTouch::Trimmed | PendingTouch::Acked) => None,
-            Some(PendingTouch::Reclaimed) => Some(ClaimLoss::Lost),
+            // Acknowledged while this worker's handlers are still running:
+            // the touch loop stops observing once they are done and this
+            // worker settles the delivery (see `settling_delivery`), so an
+            // Acked observation means another worker (or startup purge)
+            // already took over and settled it.
+            Some(PendingTouch::Acked | PendingTouch::Reclaimed) => Some(ClaimLoss::Lost),
+            // Trimmed from the stream: no other worker can be handed the
+            // delivery any more, so this copy's runs continue.
+            Some(PendingTouch::Trimmed) => None,
             None => {
                 let unconfirmed = now.saturating_duration_since(self.last_confirmed);
                 let reclaimable_at = self.last_confirmed + self.reclaim_after;
@@ -2780,6 +2886,33 @@ struct EventKeepaliveGuard {
     pickup: Option<tokio::sync::oneshot::Receiver<Option<hot::queue::streams::PendingTouch>>>,
     /// The delivery's stream entry id.
     delivery_id: String,
+    /// Set once the delivery's handlers are done and this worker settles it
+    /// (see `settling_delivery`): the touch loop then stops without a verdict.
+    settling: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Run a delivery's `worker`, then mark the delivery as settling before the
+/// queue acknowledges it. The keepalive guard outlives that acknowledgement,
+/// so without the mark a touch landing just after it would find the entry
+/// acknowledged and report this worker's own ACK as a lost claim.
+fn settling_delivery<'a, F, Fut, R>(
+    settling: Option<Arc<std::sync::atomic::AtomicBool>>,
+    worker: F,
+) -> impl FnOnce(Message) -> futures::future::BoxFuture<'a, Result<R, WorkerError>> + Send
+where
+    F: FnOnce(Message) -> Fut + Send + 'a,
+    Fut: std::future::Future<Output = Result<R, WorkerError>> + Send + 'a,
+    R: Send + Sync,
+{
+    move |message| {
+        Box::pin(async move {
+            let result = worker(message).await;
+            if let Some(settling) = settling {
+                settling.store(true, std::sync::atomic::Ordering::Release);
+            }
+            result
+        })
+    }
 }
 
 /// How long an executor waits for the pickup touch before it starts the
@@ -2790,6 +2923,11 @@ impl EventKeepaliveGuard {
     /// The claim fence's verdict for this delivery, for its runs to watch.
     fn claim(&self) -> tokio::sync::watch::Receiver<Option<ClaimLoss>> {
         self.claim.clone()
+    }
+
+    /// The mark `settling_delivery` sets when the handlers are done.
+    fn settling(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.settling)
     }
 
     /// What the first touch found, once it has answered. `None` when it
@@ -2903,6 +3041,8 @@ fn spawn_event_lease_keepalive(
     let delivery_id = keepalive.msg_id().to_string();
     let (pickup_tx, pickup) = tokio::sync::oneshot::channel();
     let mut pickup_tx = Some(pickup_tx);
+    let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handlers_done = Arc::clone(&settling);
     let touch_loop = tokio::spawn(async move {
         use hot::queue::streams::PendingTouch;
         // First touch immediately: the delivery may have accrued idle in the
@@ -2913,11 +3053,25 @@ fn spawn_event_lease_keepalive(
         let mut delay = std::time::Duration::ZERO;
         loop {
             tokio::time::sleep(delay).await;
+            // The handlers are done and this worker is settling the delivery:
+            // there is nothing left to keep alive.
+            if handlers_done.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            let touch_started = tokio::time::Instant::now();
             let touched = keepalive.touch().await;
+            // They finished while the touch was in flight: an entry found
+            // acknowledged now is this worker's own ACK, and no run is left
+            // for a verdict to stop.
+            if handlers_done.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
             let unconfirmed = fence.verdict().is_some();
-            if let Some(loss) =
-                fence.observe(touched.as_ref().ok().copied(), tokio::time::Instant::now())
-            {
+            if let Some(loss) = fence.observe_at(
+                touched.as_ref().ok().copied(),
+                touch_started,
+                tokio::time::Instant::now(),
+            ) {
                 warn!(
                     "hot.dev: WORKER {} stopping the runs of event delivery {}: {:?}",
                     worker_id,
@@ -2997,6 +3151,7 @@ fn spawn_event_lease_keepalive(
         claim,
         pickup: Some(pickup),
         delivery_id,
+        settling,
     })
 }
 
@@ -3351,25 +3506,14 @@ async fn create_event_publisher(
 
 // Helper functions for event handler execution
 
-/// Find ALL deployed builds for an environment (for multi-project support)
+/// Find ALL deployed builds for active projects in an environment (for multi-project support)
 async fn find_all_deployed_builds_for_env(
     db: &DatabasePool,
     env_id: &Uuid,
 ) -> Result<Vec<Build>, String> {
-    let projects = Project::get_projects_by_env(db, env_id, None, None)
+    Build::get_deployed_builds_by_env(db, env_id)
         .await
-        .map_err(|e| format!("Failed to get projects for environment: {}", e))?;
-
-    let mut deployed_builds = Vec::new();
-    for project in projects {
-        if let Ok(Some(deployed_build)) =
-            Build::get_deployed_build_by_project(db, &project.project_id).await
-        {
-            deployed_builds.push(deployed_build);
-        }
-    }
-
-    Ok(deployed_builds)
+        .map_err(|e| format!("Failed to get deployed builds for environment: {}", e))
 }
 
 /// Whether the environment has a deployment this runtime can't run, made
@@ -3410,26 +3554,71 @@ async fn park_event_with_epoch(
     message: &EventMessage,
     epoch: Option<&str>,
 ) -> Result<(), WorkerError> {
-    let payload = serde_json::to_string(message)?;
-    let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload,quota_epoch) VALUES($1,$2,$3,$4,$5) ON CONFLICT(message_id) DO NOTHING";
+    park_event_until(db, message, epoch, chrono::Utc::now()).await
+}
+
+/// Park an event whose project is inactive. Replay tells an inactive project
+/// by the parked row's build, and an event that names only its project has
+/// none: replay would hand it straight back, to be parked again. Such an
+/// event waits out the project back-off before its next try instead.
+async fn park_event_for_inactive_project(
+    db: &DatabasePool,
+    message: &EventMessage,
+) -> Result<(), WorkerError> {
+    let retry_at = chrono::Utc::now() + chrono::Duration::seconds(PARKED_PROJECT_BACKOFF_SECS);
+    park_event_until(db, message, None, retry_at).await
+}
+
+/// Park `message` until `leased_until`, when replay looks at it next.
+async fn park_event_until(
+    db: &DatabasePool,
+    message: &EventMessage,
+    epoch: Option<&str>,
+    leased_until: chrono::DateTime<chrono::Utc>,
+) -> Result<(), WorkerError> {
+    let mut parked = message.clone();
+    // Replayed parked events arrive as fresh queue deliveries (`redelivered == false`),
+    // so mark them repeatable to ensure multi-handler runs check `earlier_deliveries`.
+    parked.head.insert(
+        hot::lang::event::MAY_REPEAT_HEAD.to_string(),
+        "true".to_string(),
+    );
+    // Never persist raw webhook capability tokens in `parked_event.payload`.
+    parked.body.event.event_data =
+        hot::webhook_url::redact_event_data_original_urls(&parked.body.event.event_data);
+    let payload = serde_json::to_string(&parked)?;
+    // Always bind a fresh `leased_until` and update it on conflict so a re-park
+    // that races with `replay_parked_events`'s trailing guarded DELETE
+    // (`WHERE message_id=$1 AND leased_until=$2`) never matches the replay lease
+    // and gets silently deleted.
+    let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload,quota_epoch,leased_until) \
+        VALUES($1,$2,$3,$4,$5,$6) \
+        ON CONFLICT(message_id) DO UPDATE SET \
+            env_id=EXCLUDED.env_id, \
+            build_id=EXCLUDED.build_id, \
+            payload=EXCLUDED.payload, \
+            quota_epoch=EXCLUDED.quota_epoch, \
+            leased_until=EXCLUDED.leased_until";
     match db {
         DatabasePool::Postgres(pool) => {
             sqlx::query(sql)
-                .bind(message.id)
-                .bind(message.body.event.env_id)
-                .bind(message.body.execution_context.build_id)
+                .bind(parked.id)
+                .bind(parked.body.event.env_id)
+                .bind(parked.body.execution_context.build_id)
                 .bind(payload)
                 .bind(epoch)
+                .bind(leased_until)
                 .execute(pool)
                 .await?;
         }
         DatabasePool::Sqlite(pool) => {
             sqlx::query(sql)
-                .bind(message.id)
-                .bind(message.body.event.env_id)
-                .bind(message.body.execution_context.build_id)
+                .bind(parked.id)
+                .bind(parked.body.event.env_id)
+                .bind(parked.body.execution_context.build_id)
                 .bind(payload)
                 .bind(epoch)
+                .bind(leased_until)
                 .execute(pool)
                 .await?;
         }
@@ -3487,41 +3676,103 @@ async fn replay_parked_events(
             ORDER BY leased_until LIMIT 100
         ) AND leased_until <= $1 RETURNING message_id,payload,leased_until=$2";
     for env_id in envs {
-        let env = hot::db::Env::get_env_uncached(db, &env_id).await?;
-        let epoch = hot::db::Run::admission_epoch(db, env.org_id).await?;
-        let rows: Vec<(Uuid, String, bool)> = match db {
-            DatabasePool::Postgres(pool) => {
-                sqlx::query_as(sql)
-                    .bind(now)
-                    .bind(lease)
-                    .bind(backoff)
-                    .bind(env_id)
-                    .bind(&epoch)
-                    .fetch_all(pool)
-                    .await?
-            }
-            DatabasePool::Sqlite(pool) => {
-                sqlx::query_as(sql)
-                    .bind(now)
-                    .bind(lease)
-                    .bind(backoff)
-                    .bind(env_id)
-                    .bind(&epoch)
-                    .fetch_all(pool)
-                    .await?
+        let env = match hot::db::Env::get_env_uncached(db, &env_id).await {
+            Ok(env) => env,
+            Err(error) => {
+                warn!(%env_id, %error, "Skipping parked event replay for environment");
+                continue;
             }
         };
+        let epoch = match hot::db::Run::admission_epoch(db, env.org_id).await {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                warn!(%env_id, %error, "Skipping parked event replay: could not read admission epoch");
+                continue;
+            }
+        };
+        let rows: Vec<(Uuid, String, bool)> = match db {
+            DatabasePool::Postgres(pool) => {
+                match sqlx::query_as(sql)
+                    .bind(now)
+                    .bind(lease)
+                    .bind(backoff)
+                    .bind(env_id)
+                    .bind(&epoch)
+                    .fetch_all(pool)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(%env_id, %error, "Failed to lease parked events for replay");
+                        continue;
+                    }
+                }
+            }
+            DatabasePool::Sqlite(pool) => {
+                match sqlx::query_as(sql)
+                    .bind(now)
+                    .bind(lease)
+                    .bind(backoff)
+                    .bind(env_id)
+                    .bind(&epoch)
+                    .fetch_all(pool)
+                    .await
+                {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        warn!(%env_id, %error, "Failed to lease parked events for replay");
+                        continue;
+                    }
+                }
+            }
+        };
+        let delete_sql = "DELETE FROM parked_event WHERE message_id=$1 AND leased_until=$2";
         for (id, payload, _) in rows.into_iter().filter(|(_, _, replay)| *replay) {
-            let message: EventMessage = serde_json::from_str(&payload)?;
-            queue.enqueue(message.into()).await?;
-            let sql = "DELETE FROM parked_event WHERE message_id=$1 AND leased_until=$2";
-            match db {
-                DatabasePool::Postgres(pool) => {
-                    sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+            let mut message: EventMessage = match serde_json::from_str(&payload) {
+                Ok(message) => message,
+                Err(error) => {
+                    warn!(message_id = %id, %env_id, %error, "Deleting corrupt parked_event row");
+                    let _ = match db {
+                        DatabasePool::Postgres(pool) => sqlx::query(delete_sql)
+                            .bind(id)
+                            .bind(lease)
+                            .execute(pool)
+                            .await
+                            .map(|_| ()),
+                        DatabasePool::Sqlite(pool) => sqlx::query(delete_sql)
+                            .bind(id)
+                            .bind(lease)
+                            .execute(pool)
+                            .await
+                            .map(|_| ()),
+                    };
+                    continue;
                 }
-                DatabasePool::Sqlite(pool) => {
-                    sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
-                }
+            };
+            message.head.insert(
+                hot::lang::event::MAY_REPEAT_HEAD.to_string(),
+                "true".to_string(),
+            );
+            if let Err(error) = queue.enqueue(message.into()).await {
+                warn!(message_id = %id, %env_id, %error, "Failed to enqueue replayed parked event");
+                continue;
+            }
+            let deleted = match db {
+                DatabasePool::Postgres(pool) => sqlx::query(delete_sql)
+                    .bind(id)
+                    .bind(lease)
+                    .execute(pool)
+                    .await
+                    .map(|_| ()),
+                DatabasePool::Sqlite(pool) => sqlx::query(delete_sql)
+                    .bind(id)
+                    .bind(lease)
+                    .execute(pool)
+                    .await
+                    .map(|_| ()),
+            };
+            if let Err(error) = deleted {
+                warn!(message_id = %id, %env_id, %error, "Failed to delete replayed parked_event row");
             }
         }
     }
@@ -3627,17 +3878,42 @@ async fn hydrate_event_message_from_db(
 
     let (target_project_id, target_project_name) =
         if let Some(project_id) = event_message.body.event.target_project_id {
-            let project = Project::get_project(db, &project_id).await.map_err(|e| {
-                worker_error(format!(
-                    "Target project {} for event {} is invalid: {}",
-                    project_id, event_id, e
-                ))
-            })?;
+            // `get_project` returns active projects only: an inactive one
+            // must be found to be parked for, not taken for a missing one.
+            let project = match Project::get_project_including_inactive(db, &project_id).await {
+                Ok(project) => project,
+                Err(hot::db::project::ProjectError::Database(e)) => {
+                    return Err(worker_infrastructure_retry_error(
+                        format!(
+                            "Failed to load target project {} for event {}: {}",
+                            project_id, event_id, e
+                        ),
+                        infra_retry_backoff_ms,
+                    ));
+                }
+                Err(e) => {
+                    return Err(worker_error(format!(
+                        "Target project {} for event {} is invalid: {}",
+                        project_id, event_id, e
+                    )));
+                }
+            };
             if project.env_id != stored_event.env_id {
                 return Err(worker_error(format!(
                     "Target project {} does not belong to event environment {}",
                     project_id, stored_event.env_id
                 )));
+            }
+            if !project.active {
+                park_event_for_inactive_project(db, &event_message)
+                    .await
+                    .map_err(|e| {
+                        worker_infrastructure_retry_error(
+                            format!("Failed to park event for inactive project: {e}"),
+                            infra_retry_backoff_ms,
+                        )
+                    })?;
+                return Err(Box::new(ParkedEvent));
             }
             (Some(project.project_id), Some(project.name))
         } else {
@@ -3668,20 +3944,44 @@ async fn hydrate_event_message_from_db(
     }
     let target_build_id = persisted_target_build_id.or(claimed_context.build_id);
     let authoritative_build = if let Some(build_id) = target_build_id {
-        let build = Build::get_build(db, &build_id).await.map_err(|e| {
-            worker_error(format!(
-                "Target build {} for event {} is invalid: {}",
-                build_id, event_id, e
-            ))
-        })?;
-        let project = Project::get_project(db, &build.project_id)
-            .await
-            .map_err(|e| {
-                worker_error(format!(
+        // As for the target project above: a database that cannot answer
+        // says nothing about the build, so the delivery is retried.
+        let build = match Build::get_build(db, &build_id).await {
+            Ok(build) => build,
+            Err(hot::db::build::BuildError::Database(e)) => {
+                return Err(worker_infrastructure_retry_error(
+                    format!(
+                        "Failed to load target build {} for event {}: {}",
+                        build_id, event_id, e
+                    ),
+                    infra_retry_backoff_ms,
+                ));
+            }
+            Err(e) => {
+                return Err(worker_error(format!(
+                    "Target build {} for event {} is invalid: {}",
+                    build_id, event_id, e
+                )));
+            }
+        };
+        let project = match Project::get_project_including_inactive(db, &build.project_id).await {
+            Ok(project) => project,
+            Err(hot::db::project::ProjectError::Database(e)) => {
+                return Err(worker_infrastructure_retry_error(
+                    format!(
+                        "Failed to load project {} for target build {}: {}",
+                        build.project_id, build_id, e
+                    ),
+                    infra_retry_backoff_ms,
+                ));
+            }
+            Err(e) => {
+                return Err(worker_error(format!(
                     "Project {} for target build {} is invalid: {}",
                     build.project_id, build_id, e
-                ))
-            })?;
+                )));
+            }
+        };
         if project.env_id != stored_event.env_id {
             return Err(worker_error(format!(
                 "Target build {} does not belong to event environment {}",
@@ -3702,7 +4002,14 @@ async fn hydrate_event_message_from_db(
         .as_ref()
         .is_some_and(|(_, project)| !project.active)
     {
-        park_event(db, &event_message).await?;
+        park_event_for_inactive_project(db, &event_message)
+            .await
+            .map_err(|e| {
+                worker_infrastructure_retry_error(
+                    format!("Failed to park event for inactive project: {e}"),
+                    infra_retry_backoff_ms,
+                )
+            })?;
         return Err(Box::new(ParkedEvent));
     }
     if !(0..=100).contains(&claimed_context.retry_attempt) {
@@ -4583,15 +4890,16 @@ async fn settle_orphaned_event_runs(
     reason: &str,
     orphaned: OrphanedEvents,
 ) {
-    let orphans: ahash::AHashMap<uuid::Uuid, Option<uuid::Uuid>> = orphans
-        .into_iter()
-        .map(|ids| (ids.event_id, ids.stream_id))
-        .collect();
+    let mut event_ids = ahash::AHashSet::new();
+    let mut stream_ids = ahash::AHashSet::new();
+    for ids in orphans {
+        event_ids.insert(ids.event_id);
+        if let Some(stream_id) = ids.stream_id {
+            stream_ids.insert(stream_id);
+        }
+    }
 
-    // Each event's own runs first: a requeued event's redelivered handlers
-    // reuse their rows, so those are held for them rather than failed.
-    let mut unsettled_streams = ahash::AHashSet::new();
-    for (event_id, stream_id) in &orphans {
+    for event_id in &event_ids {
         let own_runs = match orphaned {
             OrphanedEvents::Requeued => {
                 hot::db::run::Run::hold_orphaned_runs_for_redelivery(db, event_id).await
@@ -4617,29 +4925,28 @@ async fn settle_orphaned_event_runs(
                     "hot.dev: WORKER failed to reconcile orphaned runs for event {}: {}",
                     event_id, error
                 );
-                // Failing its stream would fail the event's own runs too.
-                unsettled_streams.extend(*stream_id);
             }
         }
     }
 
-    // Then whatever else in the events' streams is still running.
-    let streams: ahash::AHashSet<uuid::Uuid> = orphans
-        .into_values()
-        .flatten()
-        .filter(|stream_id| !unsettled_streams.contains(stream_id))
-        .collect();
-    for stream_id in streams {
-        match hot::db::run::Run::fail_orphaned_runs_by_stream_id(db, &stream_id, reason).await {
-            Ok(failed) if failed > 0 => info!(
-                "hot.dev: WORKER marked {} orphaned run(s) as failed for stream {}",
-                failed, stream_id
+    // Also fail any remaining non-event runs (`event_id IS NULL`) in affected
+    // streams that have no queue message to redeliver them, without touching
+    // concurrent healthy sibling event runs that have their own `event_id`.
+    for stream_id in &stream_ids {
+        match hot::db::run::Run::fail_orphaned_non_event_runs_by_stream_id(db, stream_id, reason)
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => info!(
+                "hot.dev: WORKER marked {} orphaned non-event run(s) as failed for stream {}",
+                count, stream_id
             ),
-            Ok(_) => {}
-            Err(error) => warn!(
-                "hot.dev: WORKER failed to mark orphaned runs as failed for stream {}: {}",
-                stream_id, error
-            ),
+            Err(error) => {
+                warn!(
+                    "hot.dev: WORKER failed to reconcile orphaned runs for stream {}: {}",
+                    stream_id, error
+                );
+            }
         }
     }
 }
@@ -4759,17 +5066,18 @@ fn bytecode_has_function(
                 );
                 return CacheCheckResult::Found;
             }
-            // Also try with various arities
-            for arity in 0..=5 {
-                let arity_key = format!("{}/{}", function_name, arity);
-                if cached.function_mapping.contains_key(&arity_key) {
-                    tracing::debug!(
-                        "ROUTING: Found arity match for function '{}' at '{}'",
-                        function_name,
-                        arity_key
-                    );
-                    return CacheCheckResult::Found;
-                }
+            // Also match any arity-suffixed overload (e.g., "::ns/fn/6")
+            let arity_prefix = format!("{}/", function_name);
+            if let Some(arity_key) = cached.function_mapping.keys().find(|k| {
+                k.starts_with(&arity_prefix)
+                    && k[arity_prefix.len()..].chars().all(|c| c.is_ascii_digit())
+            }) {
+                tracing::debug!(
+                    "ROUTING: Found arity match for function '{}' at '{}'",
+                    function_name,
+                    arity_key
+                );
+                return CacheCheckResult::Found;
             }
             // Log some functions from the mapping to help debug
             let sample_functions: Vec<_> = cached
@@ -5045,7 +5353,9 @@ async fn prepare_bundle_runtime(
         return Err(reason);
     }
 
+    let _bundle_lease = build_path_cache.lease(build.build_id);
     let mut build_data = None;
+    let mut versions_persisted = false;
     let mut existing_path = get_bundle_extracted_path(build, build_path_cache).await;
 
     if existing_path.is_none() {
@@ -5054,39 +5364,83 @@ async fn prepare_bundle_runtime(
 
         existing_path = get_completed_bundle_extracted_path(build, build_path_cache);
         if existing_path.is_none() {
-            let extract_dir = bundle_extract_dir(&build.build_id);
-            let _file_lock_guard = match BuildPathCache::acquire_file_lock(&build.build_id) {
-                Ok(lock) => acquire_file_write_lock_async(lock, FILE_LOCK_WAIT_TIMEOUT).await,
-                Err(_) => None,
+            let extract_dir = build_path_cache.extractions.extract_dir(&build.build_id);
+            // Download before acquiring the cross-process lock so slow network I/O
+            // doesn't hold the 10s file lock against sibling worker processes.
+            let pre_fetched = if !BuildPathCache::is_extraction_complete(&extract_dir) {
+                Some(retrieve_build_data(build, project, env, worker_conf).await?)
+            } else {
+                None
             };
+
+            let _file_lock_guard = build_path_cache
+                .acquire_file_write_lock_async(&build.build_id, FILE_LOCK_WAIT_TIMEOUT)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "Timed out waiting for cross-process extraction lock for build {}",
+                        build.build_id
+                    )
+                })?;
 
             if BuildPathCache::is_extraction_complete(&extract_dir) {
                 let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
                 compile_bundle_cache(extract_dir.clone(), manifest).await?;
                 build_path_cache.insert(build.build_id, extract_dir.clone());
                 existing_path = Some(extract_dir);
+                build_data = pre_fetched;
             } else {
-                let data = retrieve_build_data(build, project, env, worker_conf).await?;
-                clear_partial_bundle_extraction(&extract_dir, _file_lock_guard.is_some())?;
-                let prepared = async {
-                    hot::bundle::extract_bundle_from_bytes(&data, &extract_dir).map_err(|e| {
-                        format!(
-                            "Failed to extract build {} to {}: {}",
-                            build.build_id,
-                            extract_dir.display(),
-                            e
-                        )
-                    })?;
-                    // Recorded before the version check, so a build this
-                    // runtime can't run is known without fetching it again.
-                    persist_bundle_manifest_versions(db, build, project, env, &extract_dir).await;
-                    let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
-                    compile_bundle_cache(extract_dir.clone(), manifest).await
-                }
-                .await;
+                let data = match pre_fetched {
+                    Some(data) => data,
+                    None => retrieve_build_data(build, project, env, worker_conf).await?,
+                };
+                let data_for_extract = data.clone();
+                let dir_for_extract = extract_dir.clone();
+                let build_id = build.build_id;
+                let extracted = tokio::task::spawn_blocking(move || {
+                    clear_partial_bundle_extraction(&dir_for_extract, true)?;
+                    hot::bundle::extract_bundle_from_bytes(&data_for_extract, &dir_for_extract)
+                        .map_err(|e| {
+                            format!(
+                                "Failed to extract build {} to {}: {}",
+                                build_id,
+                                dir_for_extract.display(),
+                                e
+                            )
+                        })
+                })
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Bundle extraction task failed for {}: {}",
+                        build.build_id, e
+                    )
+                })
+                .and_then(|res| res);
+
+                let prepared = match extracted {
+                    Ok(()) => {
+                        // Recorded before the version check, so a build this
+                        // runtime can't run is known without fetching it again.
+                        persist_bundle_manifest_versions(db, build, project, env, &extract_dir)
+                            .await;
+                        versions_persisted = true;
+                        match hot::bundle::read_bundle_manifest(&extract_dir) {
+                            Ok(manifest) => {
+                                compile_bundle_cache(extract_dir.clone(), manifest).await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                };
                 if let Err(error) = prepared {
-                    // A partial extraction would make every later one fail.
-                    let _ = std::fs::remove_dir_all(&extract_dir);
+                    // Safe because we exclusively hold `_file_lock_guard`.
+                    let dir_to_clean = extract_dir.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = std::fs::remove_dir_all(&dir_to_clean);
+                    })
+                    .await;
                     return Err(error);
                 }
                 BuildPathCache::mark_extraction_complete(&extract_dir);
@@ -5108,7 +5462,9 @@ async fn prepare_bundle_runtime(
         )
     })?;
 
-    persist_bundle_manifest_versions(db, build, project, env, &extract_dir).await;
+    if !versions_persisted {
+        persist_bundle_manifest_versions(db, build, project, env, &extract_dir).await;
+    }
 
     Ok(PreparedBundleRuntime {
         extract_dir,
@@ -5770,6 +6126,7 @@ async fn extract_agent_type_from_scheduled_event(
 ) -> Option<String> {
     if let Some(schedule_id) = extract_schedule_id_from_event_data(event_data)
         && let Ok(schedule) = Schedule::get_schedule(db, &schedule_id).await
+        && schedule.build_id == *build_id
         && let Some(ref meta) = schedule.meta
         && let Some(agent_type) = agent_type_from_meta(meta, &schedule.ns)
     {
@@ -6663,11 +7020,14 @@ async fn execute_single_event_handler_inner(
         hot::db::run::RunType::Event.as_id()
     };
 
-    // Check for manual retry context in event data (for UI-triggered retries)
+    // Check for manual retry context in event data (for UI-triggered retries).
+    // Ignore non-valid `"retry"` maps (missing `origin-run-id`) so arbitrary
+    // user event data containing a `"retry"` field never corrupts run lineage.
     let retry_context = hot::env::retry::RetryContext::from_event_data(
         &event_message.body.event.event_data,
         worker_conf,
-    );
+    )
+    .filter(|ctx| ctx.is_valid());
 
     // For origin_run_id: determine based on event type and context
     let origin_run_id = if let Some(ref ctx) = retry_context {
@@ -6829,12 +7189,14 @@ async fn execute_single_event_handler_inner(
     // Set once the worker decides to stop this run (see `run_must_stop`), so
     // the failure the VM records as it unwinds names the reason.
     let stopped = Arc::new(OnceLock::new());
+    let hard_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let emitter_for_events = emitter.clone().map(|inner| {
         let inner = RunStartWatch::wrap(inner, run_id, Arc::clone(&run_has_started));
         Arc::new(StoppedRunEmitter {
             inner,
             run_id,
             stopped: Arc::clone(&stopped),
+            hard_stopped: Arc::clone(&hard_stopped),
         }) as Arc<dyn EngineEventEmitter>
     });
 
@@ -6859,8 +7221,11 @@ async fn execute_single_event_handler_inner(
     .unwrap_or_else(|| function_name.clone());
 
     debug!(
-        "Executing event handler function: {} with event: {}",
-        function_name, event_object
+        event_type = %event_message.body.event.event_type,
+        event_id = %event_message.body.event.event_id,
+        run_id = %run_id,
+        "Executing event handler function: {}",
+        function_name
     );
 
     // Note: run:start event will be emitted by the VM when execution begins
@@ -7146,7 +7511,7 @@ async fn execute_single_event_handler_inner(
                     debug!(
                         "✓ Bytecode cache hit for bundle '{}' (key: {}) - trusting manifest hashes",
                         project.name,
-                        &cache_key[..12]
+                        &cache_key[..cache_key.len().min(12)]
                     );
                     Some(cached)
                 } else {
@@ -7166,7 +7531,7 @@ async fn execute_single_event_handler_inner(
                             debug!(
                                 "✓ Bytecode cache hit for project '{}' (key: {})",
                                 project.name,
-                                &cache_key[..12]
+                                &cache_key[..cache_key.len().min(12)]
                             );
                             Some(cached)
                         }
@@ -7292,7 +7657,8 @@ async fn execute_single_event_handler_inner(
     // known, so that they mask inside strings too.
     let context_storage = {
         let mut storage = context_storage.unwrap_or_default();
-        if let hot::val::Val::Map(ref data_map) = event_message.body.event.event_data
+        if event_message.body.event.event_type == "hot:call"
+            && let hot::val::Val::Map(ref data_map) = event_message.body.event.event_data
             && let Some(caller) = data_map.get(&hot::val::Val::from("caller"))
         {
             _execution_context
@@ -7541,12 +7907,16 @@ async fn execute_single_event_handler_inner(
                     } else {
                         // Cross-process file lock (prevents process races)
                         let file_lock_wait_started = std::time::Instant::now();
-                        let _file_lock_guard = cache_for_locking
-                            .acquire_file_lock(&cache_key)
-                            .ok()
-                            .and_then(|lock| {
-                                acquire_file_write_lock_blocking(lock, FILE_LOCK_WAIT_TIMEOUT)
-                            });
+                        let _file_lock_guard = if cache_key.is_empty() {
+                            None
+                        } else {
+                            cache_for_locking
+                                .acquire_file_lock(&cache_key)
+                                .ok()
+                                .and_then(|lock| {
+                                    acquire_file_write_lock_blocking(lock, FILE_LOCK_WAIT_TIMEOUT)
+                                })
+                        };
                         debug!(
                             "TIMING [{}]: bytecode_file_lock_wait: {:?}",
                             run_id_for_timing.as_simple(),
@@ -7754,24 +8124,84 @@ async fn execute_single_event_handler_inner(
         default_budget,
         budget_rx,
         claim,
-        stopped,
+        Arc::clone(&stopped),
         external_cancel.clone(),
     );
     let vm_wait_started = std::time::Instant::now();
+    let mask_worker_failure = |text: &str| {
+        let failure_mask = hot::lang::masking::RecordMask::new(
+            &_execution_context.secret_values,
+            &_execution_context.secret_value_hashes,
+        );
+        let masked = failure_mask.mask_text(text);
+        let mut end = masked.len().min(4096);
+        while !masked.is_char_boundary(end) {
+            end -= 1;
+        }
+        masked[..end].to_string()
+    };
+    let publish_worker_failure_events = |masked_error: String| {
+        if let Some(ref publisher) = stream_publisher {
+            let run_type = if event_message.body.event.event_type == "hot:call" {
+                "call"
+            } else if event_message.body.event.event_type == "hot:schedule" {
+                "schedule"
+            } else {
+                "event"
+            }
+            .to_string();
+            let stream_event = StreamEvent::RunFail {
+                run_id,
+                env_id: event_message.body.event.env_id,
+                stream_id,
+                event_id: Some(event_message.body.event.event_id),
+                error: Some(masked_error.clone()),
+            };
+            let env_event = EnvEvent::RunFail {
+                run_id,
+                env_id: event_message.body.event.env_id,
+                stream_id,
+                event_id: Some(event_message.body.event.event_id),
+                project_id: Some(build.project_id),
+                fn_name: Some(function_name.clone()),
+                run_type,
+                duration_ms: None,
+                error: Some(masked_error),
+            };
+            let publisher_clone = Arc::clone(publisher);
+            tokio::spawn(async move {
+                if let Err(e) = publisher_clone.publish(stream_event).await {
+                    tracing::warn!("Failed to publish stream failure event: {}", e);
+                }
+                if let Err(e) = publisher_clone.publish_env(env_event).await {
+                    tracing::warn!("Failed to publish env failure event: {}", e);
+                }
+            });
+        }
+    };
+    let mut panicked_or_aborted = false;
     let result = tokio::select! {
         joined = handle => {
-            let joined_result = joined
-                .map_err(|e| format!("Blocking task failed: {}", e))?
-                .unwrap_or_else(|panic| {
+            let joined_result = match joined {
+                Ok(Ok(val)) => val,
+                Ok(Err(panic)) => {
+                    panicked_or_aborted = true;
+                    let masked_msg = mask_worker_failure(&panic.message);
+                    let masked_summary = mask_worker_failure(&panic.summary());
                     tracing::error!(
                         target: "hot::panic",
                         location = panic.location.as_deref().unwrap_or("<unknown>"),
                         thread = %panic.thread,
                         "user code panicked in worker event handler: {}",
-                        panic.message,
+                        masked_msg,
                     );
-                    Err(format!("Event handler panicked: {}", panic.summary()))
-                });
+                    Err(format!("Event handler panicked: {}", masked_summary))
+                }
+                Err(e) => {
+                    panicked_or_aborted = true;
+                    Err(format!("Blocking task failed: {}", e))
+                }
+            };
             debug!(
                 "TIMING [{}]: vm_spawn_blocking_wait: {:?}",
                 run_id.as_simple(),
@@ -7780,8 +8210,11 @@ async fn execute_single_event_handler_inner(
             joined_result
         }
         stop = must_stop => {
-            // The detached VM may still start the run: never run it again.
-            run_has_started.store(true, std::sync::atomic::Ordering::Release);
+            // Fence off late lifecycle events from the detached VM thread, and
+            // note whether `run:start` had already been emitted before we took
+            // over finalization.
+            let had_started = run_has_started.swap(true, std::sync::atomic::Ordering::AcqRel);
+            hard_stopped.store(true, std::sync::atomic::Ordering::Release);
             if let Some(token) = &external_cancel {
                 token.store(true, std::sync::atomic::Ordering::Release);
             }
@@ -7794,10 +8227,23 @@ async fn execute_single_event_handler_inner(
             // run failure: the database writer applies the handler/schedule retry
             // policy (a timed-out run may be retried) and publishes the standard
             // `run:failed` alert. This is intentional — a timeout is a failure.
-            // The direct `fail_run` fallback (no emitter, e.g. in tests) is
-            // best-effort and applies neither retry nor alerting.
+            // If `run:start` never ran (e.g. timed out during compilation), insert
+            // the failed run row directly via `record_unstarted_run` instead of
+            // emitting `run:fail` against a nonexistent row.
             if !stop.records_failure() {
                 // Another worker took the event over and records how the run ends.
+            } else if !had_started {
+                record_unstarted_run(
+                    db,
+                    event_message,
+                    build,
+                    event_handler,
+                    run_id,
+                    &stop_error,
+                    false,
+                )
+                .await;
+                publish_worker_failure_events(mask_worker_failure(&stop_error));
             } else if let Some(ref em) = emitter {
                 let failure = val!({
                     "$type": "::hot::run/Failure",
@@ -7829,6 +8275,7 @@ async fn execute_single_event_handler_inner(
                     run_id.as_simple(),
                     flush_started.elapsed()
                 );
+                publish_worker_failure_events(mask_worker_failure(&stop_error));
             } else {
                 match bounded_run_result_write(
                     RUN_RESULT_FLUSH_TIMEOUT,
@@ -7848,6 +8295,7 @@ async fn execute_single_event_handler_inner(
                         );
                     }
                 }
+                publish_worker_failure_events(mask_worker_failure(&stop_error));
             }
             // The RunRegistration guard unregisters the run as this return
             // unwinds — the run stops counting as active now, even though the
@@ -7860,11 +8308,77 @@ async fn execute_single_event_handler_inner(
     let mut result = match result {
         Ok(val) => val,
         Err(e) => {
+            let masked_error = mask_worker_failure(&e);
             error!(
                 "Event handler '{}' failed for event '{}': {}",
-                function_name, event_message.body.event.event_type, e
+                function_name, event_message.body.event.event_type, masked_error
             );
-            return Err(e);
+            // A panic/abort inside the blocking task unwinds before the VM can
+            // emit `run:fail` or notify stream listeners. When `run:start` had
+            // already been emitted (and another worker has not taken over the
+            // claim), settle the run row and wake stream subscribers here so
+            // neither stays stuck until the 25h zombie reaper / caller timeout.
+            if panicked_or_aborted
+                && run_has_started.load(std::sync::atomic::Ordering::Acquire)
+                && !stopped.get().is_some_and(|s| !s.records_failure())
+            {
+                hard_stopped.store(true, std::sync::atomic::Ordering::Release);
+                if let Some(ref em) = emitter {
+                    let failure = val!({
+                        "$type": "::hot::run/Failure",
+                        "$val": {
+                            "msg": masked_error.clone(),
+                            "err": Val::Null,
+                        },
+                    });
+                    em.emit(hot::lang::emitter::EngineEvent::run_fail(
+                        &execution_context_for_events,
+                        failure,
+                    ));
+                    match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(flush_err)) => {
+                            error!(
+                                "Failed to flush panic failure for run {}: {}",
+                                run_id, flush_err
+                            );
+                        }
+                        Err(_) => {
+                            error!(
+                                run_id = %run_id,
+                                timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                                "Flushing panic failure timed out"
+                            );
+                        }
+                    }
+                } else {
+                    match bounded_run_result_write(
+                        RUN_RESULT_FLUSH_TIMEOUT,
+                        hot::db::Run::fail_run(db, &run_id, &masked_error),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(fail_err)) => {
+                            error!(
+                                "Failed to mark panicked run {} failed: {}",
+                                run_id, fail_err
+                            );
+                        }
+                        Err(_) => {
+                            error!(
+                                run_id = %run_id,
+                                timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                                "Marking panicked run failed timed out"
+                            );
+                        }
+                    }
+                }
+                publish_worker_failure_events(masked_error.clone());
+            }
+            return Err(masked_error);
         }
     };
 
@@ -8323,29 +8837,41 @@ struct StoppedRunEmitter {
     inner: Arc<dyn EngineEventEmitter>,
     run_id: Uuid,
     stopped: Arc<OnceLock<RunStop>>,
+    /// Set once the worker's hard timeout / claim-loss backstop has finalized
+    /// the run and detached the VM thread, so late VM lifecycle events cannot
+    /// overwrite or duplicate the terminal state.
+    hard_stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EngineEventEmitter for StoppedRunEmitter {
     fn emit(&self, event: hot::lang::emitter::EngineEvent) {
-        if event.execution_context.run_id == self.run_id
-            && let Some(stop) = self.stopped.get()
-        {
-            match event.event_type.as_str() {
-                "run:fail" | "run:stop" | "run:cancel" if !stop.records_failure() => return,
-                "run:fail" => {
-                    self.inner.emit(hot::lang::emitter::EngineEvent::run_fail(
-                        &event.execution_context,
-                        val!({
-                            "$type": "::hot::run/Failure",
-                            "$val": {
-                                "msg": stop.error(),
-                                "err": Val::Null,
-                            },
-                        }),
-                    ));
-                    return;
+        if event.execution_context.run_id == self.run_id {
+            if self.hard_stopped.load(std::sync::atomic::Ordering::Acquire)
+                && matches!(
+                    event.event_type.as_str(),
+                    "run:start" | "run:stop" | "run:cancel" | "run:fail"
+                )
+            {
+                return;
+            }
+            if let Some(stop) = self.stopped.get() {
+                match event.event_type.as_str() {
+                    "run:fail" | "run:stop" | "run:cancel" if !stop.records_failure() => return,
+                    "run:fail" => {
+                        self.inner.emit(hot::lang::emitter::EngineEvent::run_fail(
+                            &event.execution_context,
+                            val!({
+                                "$type": "::hot::run/Failure",
+                                "$val": {
+                                    "msg": stop.error(),
+                                    "err": Val::Null,
+                                },
+                            }),
+                        ));
+                        return;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         self.inner.emit(event);
@@ -9726,6 +10252,7 @@ pub async fn run_with_components_shared_context_and_db(
     // possibly have crossed the idle threshold in less than ORPHAN_IDLE_MS).
     // Worst-case orphan recovery latency = ORPHAN_IDLE_MS + interval = 120s,
     // which is well under any user-visible threshold.
+    let mut janitor_handle: Option<tokio::task::JoinHandle<()>> = None;
     if matches!(queue_type, QueueType::Redis) {
         use hot::queue::StreamCleanup;
         // Janitor uses w0's stable consumer name as the XAUTOCLAIM destination
@@ -9751,7 +10278,7 @@ pub async fn run_with_components_shared_context_and_db(
             .clone()
             .with_consumer_name(admin_email_name.clone());
         let mut janitor_shutdown_rx = shutdown_rx.clone();
-        tokio::spawn(async move {
+        janitor_handle = Some(tokio::spawn(async move {
             const TICK: std::time::Duration = std::time::Duration::from_secs(60);
             // Run cleanup_streams every 5 ticks (= every 5 minutes). Slower
             // than reclaim_orphans because it does XINFO CONSUMERS + per-
@@ -9771,6 +10298,10 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                     }
                     _ = tokio::time::sleep(TICK) => {
+                        if *janitor_shutdown_rx.borrow() {
+                            debug!("hot.dev: WORKER janitor shutting down");
+                            break;
+                        }
                         tick = tick.wrapping_add(1);
                         let queues: [(&str, &dyn StreamCleanup); 5] = [
                             ("hot:event", &event_q),
@@ -9783,6 +10314,9 @@ pub async fn run_with_components_shared_context_and_db(
                         // Phase 1: reclaim orphaned PEL entries from dead
                         // consumers (every tick).
                         for (name, q) in &queues {
+                            if *janitor_shutdown_rx.borrow() {
+                                break;
+                            }
                             match q.reclaim_orphans().await {
                                 Ok(0) => {}
                                 Ok(n) => {
@@ -9802,8 +10336,13 @@ pub async fn run_with_components_shared_context_and_db(
 
                         // Phase 2: reap stale consumers + trim streams
                         // (every CLEANUP_EVERY_N_TICKS).
-                        if tick.is_multiple_of(CLEANUP_EVERY_N_TICKS) {
+                        if !*janitor_shutdown_rx.borrow()
+                            && tick.is_multiple_of(CLEANUP_EVERY_N_TICKS)
+                        {
                             for (name, q) in &queues {
+                                if *janitor_shutdown_rx.borrow() {
+                                    break;
+                                }
                                 match q.cleanup_streams().await {
                                     Ok((0, 0)) => {}
                                     Ok((consumers, trimmed)) => {
@@ -9824,7 +10363,7 @@ pub async fn run_with_components_shared_context_and_db(
                     }
                 }
             }
-        });
+        }));
     } else if matches!(queue_type, QueueType::Sqlite) {
         let event_q = event_queue.clone();
         let other_queues = [
@@ -10326,6 +10865,8 @@ pub async fn run_with_components_shared_context_and_db(
                                 let redis_delivery_id = _keepalive_guard
                                     .as_ref()
                                     .map(|guard| guard.delivery_id.clone());
+                                let delivery_settling =
+                                    _keepalive_guard.as_ref().map(EventKeepaliveGuard::settling);
                                 // The delivery waited for this executor with no
                                 // keepalive: start it only once the first touch
                                 // says it is still this worker's to run.
@@ -10365,7 +10906,7 @@ pub async fn run_with_components_shared_context_and_db(
                                     .as_deref()
                                     .map(|id| running_event_deliveries_clone.enter(id));
                                 // Process ONE event message (atomic operation)
-                                match lease.process(|message| {
+                                match lease.process(settling_delivery(delivery_settling, |message| {
                                 let db_ref = db_clone.clone();
                                 let blob_store_ref = blob_store_clone.clone();
                                 let worker_conf_ref = worker_conf_clone.clone();
@@ -10507,9 +11048,35 @@ pub async fn run_with_components_shared_context_and_db(
                                                     Ok(mut all_handlers) => {
                                                         // A retry belongs to the handler whose run failed, not to
                                                         // the whole event. If a redeploy removed that handler,
-                                                        // nothing is left to retry.
+                                                        // nothing is left to retry. When `target_project_id` is
+                                                        // set (e.g. two projects expose the same `ns/var` name),
+                                                        // also restrict to handlers from that project before
+                                                        // `once_handlers[0]` picks a single handler.
                                                         if let Some(retried) = event_message.retried_handler() {
                                                             all_handlers.retain(|handler| handler.function_name() == retried);
+                                                            if let Some(target_project_id) = event_message.body.event.target_project_id {
+                                                                let mut scoped_handlers = Vec::with_capacity(all_handlers.len());
+                                                                for handler in all_handlers {
+                                                                    match Build::get_build(db, &handler.build_id).await {
+                                                                        Ok(build) if build.project_id == target_project_id => {
+                                                                            scoped_handlers.push(handler);
+                                                                        }
+                                                                        Ok(_) => {}
+                                                                        Err(e) => {
+                                                                            let err_msg = format!(
+                                                                                "Failed to load build {} while scoping retried handler: {}",
+                                                                                handler.build_id, e
+                                                                            );
+                                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                            return Err(worker_infrastructure_retry_error(
+                                                                                err_msg,
+                                                                                infra_retry_backoff_ms,
+                                                                            ));
+                                                                        }
+                                                                    }
+                                                                }
+                                                                all_handlers = scoped_handlers;
+                                                            }
                                                         }
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
@@ -11059,9 +11626,10 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                     };
 
                                                                                     // The ACK is group-wide: once another worker has the
-                                                                                    // event, it would settle that worker's delivery.
-                                                                                    if matches!(claim_ref.as_ref().map(|claim| *claim.borrow()), Some(Some(ClaimLoss::Lost))) {
-                                                                                        return Err(worker_error(RunStop::ClaimLost(ClaimLoss::Lost).error()));
+                                                                                    // event, or an unconfirmed claim has passed its stop
+                                                                                    // deadline, ACKing would settle another worker's delivery.
+                                                                                    if let Some(loss) = claim_stops_new_runs(claim_ref.as_ref(), tokio::time::Instant::now()) {
+                                                                                        return Err(worker_error(RunStop::ClaimLost(loss).error()));
                                                                                     }
 
                                                                                     // Handlers after the first whose setup failed are held
@@ -11234,6 +11802,10 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             return Err(worker_error(err_msg));
                                                                                         }
 
+                                                                                        // Hold a bundle lease across extraction and activation so
+                                                                                        // background eviction cannot sweep this directory mid-deploy.
+                                                                                        let _bundle_lease = build_path_cache_ref.lease(build.build_id);
+
                                                                                         // Extract the build with locking to prevent race conditions
                                                                                         // In-process lock (thread safety)
                                                                                         let extraction_lock = build_path_cache_ref.get_extraction_lock(&build.build_id);
@@ -11245,12 +11817,26 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                 worker_id,
                                                                                                 build.build_id);
                                                                                         } else {
-                                                                                            let extract_dir = std::path::PathBuf::from(format!(".hot/run/build-{}", build.build_id.as_simple()));
+                                                                                            let extract_dir = build_path_cache_ref.extractions.extract_dir(&build.build_id);
 
-                                                                                            // Cross-process file lock
-                                                                                            let _file_lock_guard = match BuildPathCache::acquire_file_lock(&build.build_id) {
-                                                                                                Ok(lock) => acquire_file_write_lock_async(lock, FILE_LOCK_WAIT_TIMEOUT).await,
-                                                                                                Err(_) => None,
+                                                                                            // Cross-process file lock is required before mutating
+                                                                                            // the shared extraction directory.
+                                                                                            let Some(_file_lock_guard) = build_path_cache_ref
+                                                                                                .acquire_file_write_lock_async(
+                                                                                                    &build.build_id,
+                                                                                                    FILE_LOCK_WAIT_TIMEOUT,
+                                                                                                )
+                                                                                                .await
+                                                                                            else {
+                                                                                                let err_msg = format!(
+                                                                                                    "Timed out waiting for cross-process extraction lock for build {}",
+                                                                                                    build.build_id
+                                                                                                );
+                                                                                                warn!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                                                return Err(worker_infrastructure_retry_error(
+                                                                                                    err_msg,
+                                                                                                    5_000,
+                                                                                                ));
                                                                                             };
 
                                                                                             // Check if another process already extracted
@@ -11260,96 +11846,118 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                     build.build_id);
                                                                                                 build_path_cache_ref.insert(build.build_id, extract_dir);
                                                                                             } else {
-                                                                                                let holds_file_lock = _file_lock_guard.is_some();
-                                                                                                let extracted = clear_partial_bundle_extraction(&extract_dir, holds_file_lock)
-                                                                                                    .and_then(|()| hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir));
-                                                                                                if extracted.is_err() && holds_file_lock {
-                                                                                                    // Left behind, it would make every later extraction fail.
-                                                                                                    let _ = std::fs::remove_dir_all(&extract_dir);
-                                                                                                }
-                                                                                                match extracted {
-                                                                                                    Ok(()) => {
-                                                                                                        debug!("hot.dev: WORKER {} extracted build {} to {}",
-                                                                                                            worker_id,
-                                                                                                            build.build_id,
-                                                                                                            extract_dir.display());
+                                                                                                // Run synchronous extraction and pre-compilation on the
+                                                                                                // blocking pool inside `run_user_code` so a compiler
+                                                                                                // panic marks the build failed instead of leaving it
+                                                                                                // stuck in `loading` and blocking tokio worker threads.
+                                                                                                let extract_dir_for_blocking = extract_dir.clone();
+                                                                                                let build_data_for_blocking = build_data.clone();
+                                                                                                let project_name_for_blocking = project.name.clone();
+                                                                                                let build_id_for_blocking = build.build_id;
+                                                                                                let panic_label = format!("deploy:{build_id_for_blocking}");
+                                                                                                let compile_outcome = tokio::task::spawn_blocking(move || {
+                                                                                                    hot::lang::user_code::run_user_code(&panic_label, move || {
+                                                                                                        let extracted = clear_partial_bundle_extraction(
+                                                                                                            &extract_dir_for_blocking,
+                                                                                                            true,
+                                                                                                        )
+                                                                                                        .and_then(|()| {
+                                                                                                            hot::bundle::extract_bundle_from_bytes(
+                                                                                                                &build_data_for_blocking,
+                                                                                                                &extract_dir_for_blocking,
+                                                                                                            )
+                                                                                                        });
+                                                                                                        if let Err(e) = extracted {
+                                                                                                            let _ = std::fs::remove_dir_all(&extract_dir_for_blocking);
+                                                                                                            return Err(format!(
+                                                                                                                "Failed to extract build {}: {}",
+                                                                                                                build_id_for_blocking, e
+                                                                                                            ));
+                                                                                                        }
 
-                                                                                                        // Read the manifest to get the correct cache key
-                                                                                                        let manifest = hot::bundle::read_bundle_manifest(&extract_dir);
+                                                                                                        let manifest = hot::bundle::read_bundle_manifest(&extract_dir_for_blocking);
                                                                                                         let (proj_name, cache_key, file_hashes) = match &manifest {
-                                                                                                            Ok(m) => {
-                                                                                                                (m.bundle_name.clone(), m.cache_key.clone(), Some(m.file_hashes.clone()))
-                                                                                                            }
-                                                                                                            Err(_) => (project.name.clone(), None, None)
+                                                                                                            Ok(m) => (
+                                                                                                                m.bundle_name.clone(),
+                                                                                                                m.cache_key.clone(),
+                                                                                                                Some(m.file_hashes.clone()),
+                                                                                                            ),
+                                                                                                            Err(_) => (project_name_for_blocking, None, None),
                                                                                                         };
 
-                                                                                                        // Pre-compile the bundle to generate bytecode cache
-                                                                                                        let build_src_path = extract_dir.join("hot/src");
-                                                                                                        let build_pkg_path = extract_dir.join("hot/pkg");
+                                                                                                        let build_src_path = extract_dir_for_blocking.join("hot/src");
+                                                                                                        let build_pkg_path = extract_dir_for_blocking.join("hot/pkg");
                                                                                                         let mut paths = vec![build_src_path.to_string_lossy().to_string()];
                                                                                                         if build_pkg_path.exists() {
                                                                                                             paths.push(build_pkg_path.to_string_lossy().to_string());
                                                                                                         }
 
-                                                                                                        let bundle_cache_dir = extract_dir.join(".hot").join("cache");
-
-                                                                                                        // Clear any stale embedded cache files from the bundle
+                                                                                                        let bundle_cache_dir = extract_dir_for_blocking.join(".hot").join("cache");
                                                                                                         if bundle_cache_dir.exists()
-                                                                                                            && let Ok(entries) = std::fs::read_dir(&bundle_cache_dir) {
-                                                                                                                for entry in entries.flatten() {
-                                                                                                                    let path = entry.path();
-                                                                                                                    if path.to_string_lossy().ends_with(".bc.zst") {
-                                                                                                                        if let Err(e) = std::fs::remove_file(&path) {
-                                                                                                                            tracing::warn!("Failed to remove stale cache file {:?}: {}", path, e);
-                                                                                                                        } else {
-                                                                                                                            tracing::debug!("Removed stale embedded cache file {:?}", path);
-                                                                                                                        }
+                                                                                                            && let Ok(entries) = std::fs::read_dir(&bundle_cache_dir)
+                                                                                                        {
+                                                                                                            for entry in entries.flatten() {
+                                                                                                                let path = entry.path();
+                                                                                                                if path.to_string_lossy().ends_with(".bc.zst") {
+                                                                                                                    if let Err(e) = std::fs::remove_file(&path) {
+                                                                                                                        tracing::warn!("Failed to remove stale cache file {:?}: {}", path, e);
+                                                                                                                    } else {
+                                                                                                                        tracing::debug!("Removed stale embedded cache file {:?}", path);
                                                                                                                     }
                                                                                                                 }
                                                                                                             }
+                                                                                                        }
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-                                                                                                        debug!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
-                                                                                                        match compile_event_bundle_to_cache(
-                                                                                                            &extract_dir,
+                                                                                                        if let Err(e) = compile_event_bundle_to_cache(
+                                                                                                            &extract_dir_for_blocking,
                                                                                                             &paths,
                                                                                                             &bundle_cache,
                                                                                                             &proj_name,
                                                                                                             cache_key.as_deref(),
                                                                                                             file_hashes,
                                                                                                         ) {
-                                                                                                            Ok(()) => {
-                                                                                                                debug!("Bundle {} pre-compiled successfully", build.build_id);
-
-                                                                                                                // Mark extraction complete AFTER bytecode is ready
-                                                                                                                BuildPathCache::mark_extraction_complete(&extract_dir);
-
-                                                                                                                // Store the extracted path in the cache
-                                                                                                                build_path_cache_ref.insert(build.build_id, extract_dir);
-                                                                                                            }
-                                                                                                            Err(e) => {
-                                                                                                                let err_msg = format!("Failed to pre-compile bundle {}: {}", build.build_id, e);
-                                                                                                                error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-                                                                                                                if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
-                                                                                                                    warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
-                                                                                                                        worker_id,
-                                                                                                                        build.build_id,
-                                                                                                                        status_err);
-                                                                                                                }
-                                                                                                                hot::db::alert::publish_deploy_failed_alert(
-                                                                                                                    db,
-                                                                                                                    &env.org_id,
-                                                                                                                    &project.env_id,
-                                                                                                                    &build.build_id,
-                                                                                                                    &project.name,
-                                                                                                                    &err_msg,
-                                                                                                                ).await;
-                                                                                                                return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
-                                                                                                            }
+                                                                                                            let _ = std::fs::remove_dir_all(&extract_dir_for_blocking);
+                                                                                                            return Err(format!(
+                                                                                                                "Failed to pre-compile bundle {}: {}",
+                                                                                                                build_id_for_blocking, e
+                                                                                                            ));
                                                                                                         }
+
+                                                                                                        BuildPathCache::mark_extraction_complete(&extract_dir_for_blocking);
+                                                                                                        Ok(())
+                                                                                                    })
+                                                                                                })
+                                                                                                .await;
+
+                                                                                                let prepare_result = match compile_outcome {
+                                                                                                    Ok(Ok(res)) => res,
+                                                                                                    Ok(Err(panic)) => {
+                                                                                                        let _ = std::fs::remove_dir_all(&extract_dir);
+                                                                                                        Err(format!(
+                                                                                                            "Bundle {} preparation panicked: {}",
+                                                                                                            build.build_id,
+                                                                                                            panic.summary()
+                                                                                                        ))
                                                                                                     }
                                                                                                     Err(e) => {
-                                                                                                        let err_msg = format!("Failed to extract build {}: {}", build.build_id, e);
+                                                                                                        let _ = std::fs::remove_dir_all(&extract_dir);
+                                                                                                        Err(format!(
+                                                                                                            "Bundle {} preparation task failed: {}",
+                                                                                                            build.build_id, e
+                                                                                                        ))
+                                                                                                    }
+                                                                                                };
+
+                                                                                                match prepare_result {
+                                                                                                    Ok(()) => {
+                                                                                                        debug!("hot.dev: WORKER {} extracted and pre-compiled build {} to {}",
+                                                                                                            worker_id,
+                                                                                                            build.build_id,
+                                                                                                            extract_dir.display());
+                                                                                                        build_path_cache_ref.insert(build.build_id, extract_dir);
+                                                                                                    }
+                                                                                                    Err(err_msg) => {
                                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                                                                         if let Err(status_err) = Build::mark_runtime_failed(db, &build.build_id, &err_msg).await {
                                                                                                             warn!("hot.dev: WORKER {} failed to mark build {} failed: {}",
@@ -11900,10 +12508,27 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     error!("hot.dev: WORKER {} maintenance: {}", worker_id, problem);
                                                                     -1
                                                                 });
-                                                                let mut org_ids = hot::db::subscription::OrgPlan::get_all_root_org_ids(db).await.unwrap_or_default();
+                                                                let mut org_ids = match hot::db::subscription::OrgPlan::get_all_root_org_ids(db).await {
+                                                                    Ok(ids) => ids,
+                                                                    Err(e) => {
+                                                                        error!(
+                                                                            "hot.dev: WORKER {} maintenance: call_retention_cleanup failed to list root orgs: {}",
+                                                                            worker_id, e
+                                                                        );
+                                                                        Vec::new()
+                                                                    }
+                                                                };
                                                                 for root_id in org_ids.clone() {
-                                                                    if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
-                                                                        org_ids.extend(children.into_iter().map(|child| child.org_id));
+                                                                    match hot::db::Org::list_children(db, &root_id).await {
+                                                                        Ok(children) => {
+                                                                            org_ids.extend(children.into_iter().map(|child| child.org_id));
+                                                                        }
+                                                                        Err(e) => {
+                                                                            error!(
+                                                                                "hot.dev: WORKER {} maintenance: call_retention_cleanup failed to list children for org {}: {}",
+                                                                                worker_id, root_id, e
+                                                                            );
+                                                                        }
                                                                     }
                                                                 }
                                                                 org_ids.sort_unstable();
@@ -11987,7 +12612,7 @@ pub async fn run_with_components_shared_context_and_db(
                                     // Return some value as the processing result
                                     Ok(()) as Result<(), Box<dyn std::error::Error + Send + Sync>>
                                 }
-                            }).await {
+                            })).await {
                                 Ok(Some(_)) => {
                                 },
                                 Ok(None) => {
@@ -12083,11 +12708,21 @@ pub async fn run_with_components_shared_context_and_db(
         // A supervised task (see `spawn_supervised_worker_task`) stayed down.
         _ = worker_task_gave_up().notified() => Some("A worker task kept panicking"),
     };
+    let worker_shutdown_timeout = worker_shutdown_drain_timeout(hot::env::is_local_dev());
     let restarting = restart_reason.is_some();
     if let Some(reason) = restart_reason {
-        error!("{reason}; draining before supervisor restart");
-        tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        let restart_watchdog_timeout = std::time::Duration::from_secs(shutdown_timeout)
+            .saturating_add(worker_shutdown_timeout)
+            .saturating_add(UNSTARTED_HAND_BACK_TIMEOUT.saturating_mul(2))
+            .saturating_add(CONSUMER_UNREGISTER_TOTAL_TIMEOUT)
+            .saturating_add(SHUTDOWN_FLUSH_TIMEOUT.saturating_mul(2))
+            .saturating_add(std::time::Duration::from_secs(30));
+        error!(
+            "{reason}; draining before supervisor restart (watchdog: {}s)",
+            restart_watchdog_timeout.as_secs()
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(restart_watchdog_timeout).await;
             std::process::exit(75);
         });
     }
@@ -12099,7 +12734,10 @@ pub async fn run_with_components_shared_context_and_db(
 
     // Phase 2: Initiate graceful shutdown and wait for active runs to complete
     if let Err(e) = shutdown_coordinator
-        .initiate_shutdown(db.as_ref().map(|d| d.as_ref()))
+        .initiate_shutdown(
+            db.as_ref().map(|d| d.as_ref()),
+            matches!(queue_type, QueueType::Memory),
+        )
         .await
     {
         error!("hot.dev: WORKER graceful shutdown error: {}", e);
@@ -12109,7 +12747,6 @@ pub async fn run_with_components_shared_context_and_db(
         shutdown_coordinator.is_shutting_down()
     );
 
-    let worker_shutdown_timeout = worker_shutdown_drain_timeout(hot::env::is_local_dev());
     info!(
         "hot.dev: WORKER waiting for workers to complete (timeout: {}s)",
         worker_shutdown_timeout.as_secs()
@@ -12145,6 +12782,18 @@ pub async fn run_with_components_shared_context_and_db(
         workers_drained || worker_tasks_stopped(&worker_handles, WORKER_ABORT_SETTLE).await;
     drop(worker_handles);
 
+    // Ensure the Redis janitor is stopped before handing back pending
+    // deliveries or unregistering consumers so it cannot XAUTOCLAIM entries
+    // onto our consumer while shutdown is draining it.
+    if let Some(mut handle) = janitor_handle.take()
+        && tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+    }
+
     if !workers_drained {
         warn!("hot.dev: WORKER workers were aborted; only idle consumers will be unregistered");
     }
@@ -12154,8 +12803,10 @@ pub async fn run_with_components_shared_context_and_db(
             "hot.dev: WORKER tasks still running after the abort; claimed deliveries stay pending until reclaimed"
         );
     }
+    const PER_QUEUE_HAND_BACK_CAP: std::time::Duration = std::time::Duration::from_secs(3);
     // One budget for the whole pass: a queue that is down must not hold the
-    // exit for each delivery in turn.
+    // exit for each delivery in turn, and queues run concurrently so one
+    // stalled stream cannot starve the others.
     let final_hand_back = async {
         if hand_back.unstarted {
             // No claimer or executor is left, so nothing this consumer
@@ -12163,11 +12814,13 @@ pub async fn run_with_components_shared_context_and_db(
             // includes the leases the executors never received. A delivery
             // whose handlers started is not among them: its queue refuses
             // it (see `ShutdownHandBack` for why it stays pending).
-            for (channel, claimed_rx) in [
+            let handoff_futures = [
                 ("hot:request handoff", &request_claimed_rx),
                 ("hot:event handoff", &event_claimed_rx),
                 ("notification handoff", &notification_claimed_rx),
-            ] {
+            ]
+            .into_iter()
+            .map(|(channel, claimed_rx)| async move {
                 let leftovers = hand_back_channel_leftovers(channel, claimed_rx).await;
                 if leftovers > 0 {
                     info!(
@@ -12175,7 +12828,9 @@ pub async fn run_with_components_shared_context_and_db(
                         leftovers, channel
                     );
                 }
-            }
+            });
+            join_all(handoff_futures).await;
+
             // Then what the consumers hold without a lease: a prefetch
             // buffer its claimer did not get to release, and first
             // deliveries a dropped lease left pending.
@@ -12187,44 +12842,74 @@ pub async fn run_with_components_shared_context_and_db(
                 drained_queues.push(("hot:alert", &alert_queue, &admin_alert_name));
                 drained_queues.push(("hot:email", &email_queue, &admin_email_name));
             }
-            for (queue_name, queue, consumer_name) in drained_queues {
-                release_unstarted_deliveries(
-                    queue_name,
-                    &queue.clone().with_consumer_name(consumer_name.clone()),
-                )
-                .await;
-            }
+            let release_futures = drained_queues
+                .into_iter()
+                .map(|(queue_name, queue, consumer_name)| async move {
+                    let q = queue.clone().with_consumer_name(consumer_name.clone());
+                    if tokio::time::timeout(
+                        PER_QUEUE_HAND_BACK_CAP,
+                        release_unstarted_deliveries(queue_name, &q),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        warn!(
+                            "hot.dev: WORKER timed out releasing unstarted deliveries on {} after {}s",
+                            queue_name,
+                            PER_QUEUE_HAND_BACK_CAP.as_secs()
+                        );
+                    }
+                });
+            join_all(release_futures).await;
         }
         if hand_back.own_retries {
-            hand_back_own_retries(
-                "hot:event",
-                &event_queue
-                    .clone()
-                    .with_consumer_name(admin_event_name.clone()),
-                &crash_quarantine.own_retries_pending(),
-            )
-            .await;
-            // The other queues' retries wait out an orphan idle too. Not
-            // hot:email: its retries are delayed requeues (see the
-            // executors), which any worker promotes.
-            hand_back_own_retries(
-                "hot:request",
-                &request_queue
-                    .clone()
-                    .with_consumer_name(admin_request_name.clone()),
-                &request_watch.own_retries.pending(),
-            )
-            .await;
+            let mut retry_queues: Vec<(&str, _, Vec<String>)> = vec![
+                (
+                    "hot:event",
+                    event_queue
+                        .clone()
+                        .with_consumer_name(admin_event_name.clone()),
+                    crash_quarantine.own_retries_pending(),
+                ),
+                // The other queues' retries wait out an orphan idle too. Not
+                // hot:email: its retries are delayed requeues (see the
+                // executors), which any worker promotes.
+                (
+                    "hot:request",
+                    request_queue
+                        .clone()
+                        .with_consumer_name(admin_request_name.clone()),
+                    request_watch.own_retries.pending(),
+                ),
+            ];
             if db.is_some() {
-                hand_back_own_retries(
+                retry_queues.push((
                     "hot:alert",
-                    &alert_queue
+                    alert_queue
                         .clone()
                         .with_consumer_name(admin_alert_name.clone()),
-                    &alert_watch.own_retries.pending(),
-                )
-                .await;
+                    alert_watch.own_retries.pending(),
+                ));
             }
+            let retry_futures =
+                retry_queues
+                    .into_iter()
+                    .map(|(queue_name, queue, pending)| async move {
+                        if tokio::time::timeout(
+                            PER_QUEUE_HAND_BACK_CAP,
+                            hand_back_own_retries(queue_name, &queue, &pending),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            warn!(
+                                "hot.dev: WORKER timed out handing back retries on {} after {}s",
+                                queue_name,
+                                PER_QUEUE_HAND_BACK_CAP.as_secs()
+                            );
+                        }
+                    });
+            join_all(retry_futures).await;
         }
     };
     if tokio::time::timeout(UNSTARTED_HAND_BACK_TIMEOUT, final_hand_back)
@@ -12236,43 +12921,48 @@ pub async fn run_with_components_shared_context_and_db(
         );
     }
     let unregister_all = async {
-        unregister_idle_consumer(
-            "hot:event",
-            &event_queue
-                .clone()
-                .with_consumer_name(admin_event_name.clone()),
-        )
-        .await;
-        unregister_idle_consumer(
-            "hot:request",
-            &request_queue
-                .clone()
-                .with_consumer_name(admin_request_name.clone()),
-        )
-        .await;
-        unregister_idle_consumer(
-            "hot:response",
-            &response_queue
-                .clone()
-                .with_consumer_name(admin_response_name.clone()),
-        )
-        .await;
+        let mut queues = vec![
+            (
+                "hot:event",
+                event_queue
+                    .clone()
+                    .with_consumer_name(admin_event_name.clone()),
+            ),
+            (
+                "hot:request",
+                request_queue
+                    .clone()
+                    .with_consumer_name(admin_request_name.clone()),
+            ),
+            (
+                "hot:response",
+                response_queue
+                    .clone()
+                    .with_consumer_name(admin_response_name.clone()),
+            ),
+        ];
         if db.is_some() {
-            unregister_idle_consumer(
+            queues.push((
                 "hot:alert",
-                &alert_queue
+                alert_queue
                     .clone()
                     .with_consumer_name(admin_alert_name.clone()),
-            )
-            .await;
-            unregister_idle_consumer(
+            ));
+            queues.push((
                 "hot:email",
-                &email_queue
+                email_queue
                     .clone()
                     .with_consumer_name(admin_email_name.clone()),
+            ));
+        }
+        join_all(queues.into_iter().map(|(queue_name, queue)| async move {
+            let _ = tokio::time::timeout(
+                PER_QUEUE_HAND_BACK_CAP,
+                unregister_idle_consumer(queue_name, &queue),
             )
             .await;
-        }
+        }))
+        .await;
     };
     if tokio::time::timeout(CONSUMER_UNREGISTER_TOTAL_TIMEOUT, unregister_all)
         .await
@@ -12478,6 +13168,187 @@ mod tests {
         replay_parked_events(&db, &queue).await.unwrap();
         assert_eq!(queue.dequeue().await.unwrap().unwrap().id, message.id);
         assert!(queue.is_empty().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reparking_during_replay_lease_survives_trailing_delete() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let ctx = hot::lang::event::ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.org_id),
+            Some(data.user_id),
+            Some(data.build_id),
+        );
+        let event = hot::lang::event::Event::new(
+            data.env_id,
+            data.stream_id,
+            "quota-race-test".into(),
+            Val::Null,
+        );
+        let message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::EventMessageBody {
+                event,
+                execution_context: ctx,
+            },
+        };
+        park_event_with_epoch(&db, &message, Some("epoch-1"))
+            .await
+            .unwrap();
+
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+
+        // Simulate `replay_parked_events` leasing the row (now + 90s) before
+        // enqueueing and running its trailing guarded DELETE.
+        let replay_lease = chrono::Utc::now() + chrono::Duration::seconds(90);
+        sqlx::query("UPDATE parked_event SET leased_until = ? WHERE message_id = ?")
+            .bind(replay_lease)
+            .bind(message.id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // Worker claims the replayed message and re-parks it under a new epoch
+        // before the replay's trailing DELETE executes.
+        park_event_with_epoch(&db, &message, Some("epoch-2"))
+            .await
+            .unwrap();
+
+        // Replay's trailing guarded DELETE must not delete the re-parked row.
+        let deleted =
+            sqlx::query("DELETE FROM parked_event WHERE message_id = $1 AND leased_until = $2")
+                .bind(message.id)
+                .bind(replay_lease)
+                .execute(pool)
+                .await
+                .unwrap()
+                .rows_affected();
+        assert_eq!(
+            deleted, 0,
+            "trailing replay delete must not drop re-parked row"
+        );
+
+        let (count, stored_epoch): (i64, Option<String>) = sqlx::query_as(
+            "SELECT COUNT(*), MAX(quota_epoch) FROM parked_event WHERE message_id = ?",
+        )
+        .bind(message.id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(stored_epoch.as_deref(), Some("epoch-2"));
+    }
+
+    #[tokio::test]
+    async fn find_all_deployed_builds_for_env_returns_over_ten_active_and_propagates_errors() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        // Seed 12 active projects with ready deployed builds, plus 1 inactive
+        // project whose build was left deployed=1.
+        let mut expected_build_ids = std::collections::HashSet::new();
+        // `insert_test_data` may have created a project/build; inspect what's deployed first.
+        for existing in find_all_deployed_builds_for_env(&db, &data.env_id)
+            .await
+            .unwrap()
+        {
+            expected_build_ids.insert(existing.build_id);
+        }
+
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+
+        for i in 0..12 {
+            let project_id = Uuid::now_v7();
+            let build_id = Uuid::now_v7();
+            Project::insert_project(
+                &db,
+                &project_id,
+                &data.env_id,
+                &format!("proj-{i}"),
+                &data.user_id,
+            )
+            .await
+            .unwrap();
+            Build::insert_build(
+                &db,
+                &build_id,
+                &project_id,
+                &format!("hash-{i}"),
+                100,
+                1,
+                &data.user_id,
+            )
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE build SET deployed = 1, runtime_status = 'ready' WHERE build_id = ?",
+            )
+            .bind(build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+            expected_build_ids.insert(build_id);
+        }
+
+        // Inactive project with deployed build must be excluded.
+        let inactive_project_id = Uuid::now_v7();
+        let inactive_build_id = Uuid::now_v7();
+        Project::insert_project(
+            &db,
+            &inactive_project_id,
+            &data.env_id,
+            "proj-inactive",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        Build::insert_build(
+            &db,
+            &inactive_build_id,
+            &inactive_project_id,
+            "hash-inactive",
+            100,
+            1,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE build SET deployed = 1, runtime_status = 'ready' WHERE build_id = ?")
+            .bind(inactive_build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE project SET active = 0 WHERE project_id = ?")
+            .bind(inactive_project_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let builds = find_all_deployed_builds_for_env(&db, &data.env_id)
+            .await
+            .unwrap();
+        let actual_build_ids: std::collections::HashSet<Uuid> =
+            builds.iter().map(|b| b.build_id).collect();
+        assert!(actual_build_ids.len() >= 12);
+        assert_eq!(actual_build_ids, expected_build_ids);
+        assert!(!actual_build_ids.contains(&inactive_build_id));
+
+        // Closing the pool must surface an Err instead of silently returning empty.
+        pool.close().await;
+        assert!(
+            find_all_deployed_builds_for_env(&db, &data.env_id)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -13468,21 +14339,57 @@ mod tests {
         );
         assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
 
-        // One that finds it trimmed or acknowledged does not: nobody else
-        // can be handed the event, so its runs go on. That also settles an
-        // unconfirmed claim.
-        for settled in [PendingTouch::Trimmed, PendingTouch::Acked] {
-            let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
-            assert!(fence.observe(None, start + fence_after).is_some());
-            assert_eq!(fence.observe(Some(settled), start + fence_after), None);
-            assert_eq!(*claim.borrow(), None, "{settled:?}");
+        // One that finds it trimmed does not: nobody else can be handed the
+        // event, so its runs go on. That also settles an unconfirmed claim.
+        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
+        assert!(fence.observe(None, start + fence_after).is_some());
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Trimmed), start + fence_after),
+            None
+        );
+        assert_eq!(*claim.borrow(), None);
+
+        // One that finds it acknowledged while our keepalive is still active
+        // means another worker already reclaimed and settled the delivery:
+        // claim is lost for good.
+        let (mut fence, claim) = ClaimFence::new(fence_after, reclaim_after, start);
+        assert!(fence.observe(None, start + fence_after).is_some());
+        assert_eq!(
+            fence.observe(Some(PendingTouch::Acked), start + fence_after),
+            Some(ClaimLoss::Lost)
+        );
+        assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost));
+    }
+
+    /// The delivery is marked as settling only once its handlers are done,
+    /// whatever they returned, so the touch loop tells this worker's own ACK
+    /// from another worker's.
+    #[tokio::test]
+    async fn settling_delivery_marks_the_delivery_after_its_handlers() {
+        for fails in [false, true] {
+            let settling = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = Arc::clone(&settling);
+            let worker =
+                settling_delivery(Some(Arc::clone(&settling)), move |_message: Message| {
+                    let seen = Arc::clone(&seen);
+                    async move {
+                        assert!(!seen.load(std::sync::atomic::Ordering::Acquire));
+                        if fails {
+                            Err(worker_error("handler failed".to_string()))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                });
+            let message: Message = hot::lang::event::MaintenanceMessage::single_task("test").into();
+            assert_eq!(worker(message).await.is_err(), fails);
+            assert!(settling.load(std::sync::atomic::Ordering::Acquire));
         }
     }
 
-    /// A delivery that sat buffered with no keepalive can be reclaimed, run
-    /// and acknowledged by another worker before this one picks it up. The
-    /// first touch then finds it acknowledged, before any handler started
-    /// here: the copy is stale, not a claim that holds for good.
+    /// A delivery acknowledged while this worker's keepalive is still active
+    /// (whether on the first touch or a later one) means another worker has
+    /// already reclaimed and settled it: the claim is lost.
     #[test]
     fn claim_fence_loses_a_delivery_acknowledged_before_its_first_touch() {
         use hot::queue::streams::PendingTouch;
@@ -13500,17 +14407,36 @@ mod tests {
             Some(ClaimLoss::Lost)
         );
 
-        // Acknowledged after an earlier touch, confirmed or failed, keeps its
-        // meaning: nobody else can be handed the delivery.
+        // Acknowledged after an earlier touch also marks the claim lost,
+        // because this worker never ACKs while its keepalive is still alive.
         for earlier in [Some(PendingTouch::Touched), None] {
             let (mut fence, claim) = ClaimFence::new(secs(300), secs(450), start);
             assert_eq!(fence.observe(earlier, start), None);
             assert_eq!(
                 fence.observe(Some(PendingTouch::Acked), start + secs(5)),
-                None
+                Some(ClaimLoss::Lost)
             );
-            assert_eq!(*claim.borrow(), None, "{earlier:?}");
+            assert_eq!(*claim.borrow(), Some(ClaimLoss::Lost), "{earlier:?}");
         }
+
+        // Pre-RPC confirmation time (`observe_at`) prevents a slow Redis touch
+        // response from overstating when Redis actually reset the idle timer.
+        let (mut fence, _claim) = ClaimFence::new(secs(10), secs(20), start);
+        assert_eq!(
+            fence.observe_at(
+                Some(PendingTouch::Touched),
+                start + secs(1),
+                start + secs(9)
+            ),
+            None
+        );
+        assert_eq!(
+            fence.observe(None, start + secs(11)),
+            Some(ClaimLoss::Unconfirmed {
+                unconfirmed: secs(10),
+                reclaimable_at: start + secs(21),
+            })
+        );
 
         // A first touch that finds the entry trimmed loses nothing: nobody
         // else can run it, and this may be the last copy.
@@ -13553,6 +14479,7 @@ mod tests {
             claim: tokio::sync::watch::channel(None).1,
             pickup,
             delivery_id: "1-0".to_string(),
+            settling: Default::default(),
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -14467,10 +15394,12 @@ mod tests {
         let collected = Arc::new(Collect::default());
         let run_id = Uuid::now_v7();
         let stopped = Arc::new(OnceLock::new());
+        let hard_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let emitter = StoppedRunEmitter {
             inner: collected.clone(),
             run_id,
             stopped: Arc::clone(&stopped),
+            hard_stopped: Arc::clone(&hard_stopped),
         };
         let context = |run_id| {
             ExecutionContext::new(
@@ -14534,12 +15463,26 @@ mod tests {
             ]
         );
 
+        // Once `hard_stopped` is set (after the worker backstop finalized the
+        // run and detached the VM thread), all lifecycle events for `run_id`
+        // are suppressed while other runs still pass through.
+        hard_stopped.store(true, std::sync::atomic::Ordering::Release);
+        let before_hard_stop_count = collected.0.lock().unwrap().len();
+        emitter.emit(hot::lang::emitter::EngineEvent::run_start(&context(run_id)));
+        emitter.emit(hot::lang::emitter::EngineEvent::run_stop(
+            &context(run_id),
+            Val::Null,
+        ));
+        emitter.emit(cancelled.clone());
+        assert_eq!(collected.0.lock().unwrap().len(), before_hard_stop_count);
+
         // A run whose event another worker took over records no end here.
         let collected = Arc::new(Collect::default());
         let lost = StoppedRunEmitter {
             inner: collected.clone(),
             run_id,
             stopped: Arc::new(OnceLock::from(RunStop::ClaimLost(ClaimLoss::Lost))),
+            hard_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         lost.emit(cancelled.clone());
         lost.emit(hot::lang::emitter::EngineEvent::run_stop(
@@ -14604,6 +15547,7 @@ mod tests {
             claim: tokio::sync::watch::channel(None).1,
             pickup: None,
             delivery_id: String::new(),
+            settling: Default::default(),
         };
         drop(guard);
 
@@ -16461,6 +17405,88 @@ handler fn () { initialized }
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;
         }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// An event that names an inactive project waits for it instead of
+    /// failing as if the project were missing, and waits out the project
+    /// back-off: replay cannot tell its project is inactive without a build.
+    #[tokio::test]
+    async fn event_for_an_inactive_target_project_is_parked_with_a_backoff() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_time = chrono::Utc::now();
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &test_data.env_id,
+            &stream_id,
+            "order:created",
+            &serde_json::json!({"order": 1}),
+            event_time,
+            &test_data.user_id,
+            None,
+        )
+        .await
+        .expect("event should insert");
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE project SET active = 0 WHERE project_id = ?")
+            .bind(test_data.project_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: test_data.env_id,
+                    stream_id,
+                    event_type: "order:created".to_string(),
+                    event_data: val!({"event_id": event_id.to_string()}),
+                    event_time,
+                    target_project_id: Some(test_data.project_id),
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Event.as_id(),
+                    Some(test_data.env_id),
+                    Some(Uuid::now_v7()),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let before = chrono::Utc::now();
+        let held = hydrate_event_message_from_db(0, &db, None, message.clone(), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            held.downcast_ref::<ParkedEvent>().is_some(),
+            "an inactive project parks its events: {held}"
+        );
+        let leased_until: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT leased_until FROM parked_event WHERE message_id = ?")
+                .bind(message.id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(
+            leased_until >= before + chrono::Duration::seconds(PARKED_PROJECT_BACKOFF_SECS),
+            "{leased_until}"
+        );
+
+        pool.close().await;
         let _ = std::fs::remove_file(db_path);
     }
 
