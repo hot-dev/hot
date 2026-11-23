@@ -111,6 +111,10 @@ pub async fn orgs_new_handler(
         hot::db::Plan::get_all_active(&pool)
             .await
             .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.plan_id.is_some())
+            .filter(|p| !p.plan_name.contains("Self-Host"))
+            .collect()
     } else {
         vec![]
     };
@@ -250,8 +254,14 @@ pub async fn orgs_create_handler(
     let billing_enabled = hot::product::billing_enabled(&conf);
 
     // Get plans for error rendering
-    let plans = if billing_enabled {
-        Plan::get_all_active(&db).await.unwrap_or_default()
+    let plans: Vec<Plan> = if billing_enabled {
+        Plan::get_all_active(&db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.plan_id.is_some())
+            .filter(|p| !p.plan_name.contains("Self-Host"))
+            .collect()
     } else {
         Vec::new()
     };
@@ -305,18 +315,47 @@ pub async fn orgs_create_handler(
         ));
     }
 
-    // Require plan selection in Hot Cloud
-    if billing_enabled && (form.plan_id.is_none() || form.plan_id.as_deref() == Some("")) {
-        return Err(render_orgs_new_with_error(
-            &session,
-            "Please select a plan",
-            name,
-            &form.slug,
-            account_type,
-            plans,
-            selected_plan,
-            selected_billing,
-        ));
+    // Require valid plan and billing period selection in Hot Cloud before creating the org
+    if billing_enabled {
+        if selected_plan.is_empty() {
+            return Err(render_orgs_new_with_error(
+                &session,
+                "Please select a plan",
+                name,
+                &form.slug,
+                account_type,
+                plans,
+                selected_plan,
+                selected_billing,
+            ));
+        }
+        if !plans
+            .iter()
+            .any(|p| p.plan_id.as_deref() == Some(selected_plan))
+        {
+            return Err(render_orgs_new_with_error(
+                &session,
+                "Please select a valid plan",
+                name,
+                &form.slug,
+                account_type,
+                plans,
+                selected_plan,
+                selected_billing,
+            ));
+        }
+        if !matches!(selected_billing, "monthly" | "annual") {
+            return Err(render_orgs_new_with_error(
+                &session,
+                "Invalid billing period",
+                name,
+                &form.slug,
+                account_type,
+                plans,
+                selected_plan,
+                "monthly",
+            ));
+        }
     }
 
     // Limit one individual org per user
@@ -352,10 +391,11 @@ pub async fn orgs_create_handler(
         ));
     }
 
-    // Back-button recovery: if the user already owns this slug, forward to checkout
+    // Back-button recovery: if the user already owns this root slug, forward to checkout
     // instead of showing a "taken" error.
     if let Ok(existing_org) = hot::db::org::Org::get_org_by_slug(&db, &form.slug).await
         && existing_org.created_by_user_id == session.current_user_id()
+        && existing_org.parent_org_id.is_none()
     {
         if !billing_enabled {
             return Ok((jar, Redirect::to(&format!("/@{}", form.slug))));
@@ -370,7 +410,9 @@ pub async fn orgs_create_handler(
             jar,
             Redirect::to(&format!(
                 "/@{}/billing/checkout?plan={}&billing={}",
-                form.slug, plan_id, billing
+                form.slug,
+                urlencoding::encode(&plan_id),
+                urlencoding::encode(&billing)
             )),
         ));
     }
@@ -477,12 +519,20 @@ pub async fn orgs_create_handler(
                     "Checkout throttled after org creation; retry_after_secs={}",
                     retry_after
                 );
-                return Ok((jar, Redirect::to(&format!("/@{}/billing", form.slug))));
+                return Ok((
+                    jar,
+                    Redirect::to(&format!("/@{}/billing?checkout_error=1", form.slug)),
+                ));
             }
+
+            let billing_db = db.with_scope(hot::db::DatabaseScope::Maintenance {
+                operation: hot::db::MaintenanceOperation::Billing,
+                org_id: Some(org_id),
+            });
 
             let checkout_url = match billing_provider()
                 .create_checkout(BillingCheckoutRequest {
-                    db: &db,
+                    db: &billing_db,
                     conf: &conf,
                     org_id,
                     org_slug: &form.slug,
@@ -502,7 +552,10 @@ pub async fn orgs_create_handler(
                         org_id,
                         err.message
                     );
-                    return Ok((jar, Redirect::to(&format!("/@{}/billing", form.slug))));
+                    return Ok((
+                        jar,
+                        Redirect::to(&format!("/@{}/billing?checkout_error=1", form.slug)),
+                    ));
                 }
             };
 

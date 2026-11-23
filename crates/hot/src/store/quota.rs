@@ -167,7 +167,7 @@ macro_rules! begin {
             let mut tx=$begin(pool,kind).await.map_err(|e| e.to_string())?;
             let overrides:Option<String>=sqlx::query_scalar("SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1")
                 .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
-            let plan:Option<String>=sqlx::query_scalar("SELECT CAST(COALESCE(p.features,'{}') AS TEXT) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
+            let plan:Option<String>=sqlx::query_scalar("SELECT CASE WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
                 .bind(root).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
             let limit=limit(plan,overrides,kind)?;
             // Unlimited accounts need neither the sibling-serializing account

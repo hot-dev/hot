@@ -17,6 +17,12 @@
     </div>
     {% endif %}
 
+    {% if error_message != "" %}
+    <div class="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200 px-4 py-3 rounded-lg mb-6" role="alert">
+        {{ error_message }}
+    </div>
+    {% endif %}
+
     {% if page_context.show_cloud_upsells %}
         <!-- Local Development Plan -->
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
@@ -123,11 +129,21 @@
                             <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
                             <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">{{ plan.plan_name }}</p>
                             <p class="text-gray-600 dark:text-gray-400">
-                                ${{ plan.monthly_price_dollars() }}{% if sub.billing_period == "monthly" %}/month{% else %}/year{% endif %}
+                                {% if plan.is_free_plan() %}
+                                    Free
+                                {% elif sub.billing_period == "annual" %}
+                                    ${{ plan.annual_price_dollars() }}/year
+                                {% else %}
+                                    ${{ plan.monthly_price_dollars() }}/month
+                                {% endif %}
                             </p>
                         </div>
 
-                        {% if sub.is_active() %}
+                        {% if sub.is_active() && cancel_at_period_end %}
+                            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200">
+                                Cancelling
+                            </span>
+                        {% elif sub.is_active() %}
                             <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
                                 Active
                             </span>
@@ -151,33 +167,61 @@
                     <!-- Billing Period Info -->
                     {% if let Some(period_end) = sub.current_period_end %}
                     <div class="border-t border-gray-200 dark:border-gray-700 pt-4 mb-4">
+                        {% if sub.is_active() && cancel_at_period_end %}
+                        <p class="text-sm text-yellow-700 dark:text-yellow-300">
+                            Scheduled to end on <span class="font-medium">{{ period_end.format("%B %d, %Y") }}</span>. Your subscription will not renew.
+                        </p>
+                        {% else %}
                         <p class="text-sm text-gray-600 dark:text-gray-400">
                             Current period ends: <span class="font-medium text-gray-900 dark:text-white">{{ period_end.format("%B %d, %Y") }}</span>
                         </p>
+                        {% endif %}
                     </div>
                     {% endif %}
 
                     <!-- Actions -->
                     <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
-                            {% if plan.is_free_plan() %}
+                            {% if !sub.is_active() %}
+                            <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
+                                Choose a Plan
+                            </a>
+                            {% elif plan.is_free_plan() %}
                             <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
                                 Upgrade Plan
                             </a>
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
                                 Add more compute, team members, and custom domains with a paid plan.
                             </p>
+                            {% elif cancel_at_period_end && has_provider_subscription %}
+                            <div class="flex items-center gap-3">
+                                <form method="post" action="/@{{ org.slug }}/billing/reactivate">
+                                    <button type="submit" class="btn btn-primary">
+                                        Reactivate Subscription
+                                    </button>
+                                </form>
+                                <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-secondary">
+                                    Change Plan
+                                </a>
+                            </div>
+                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                                Reactivate before the end of your billing period to keep your subscription uninterrupted.
+                            </p>
                             {% else %}
                             <div class="flex items-center gap-3">
                                 <a href="/@{{ org.slug }}/billing/checkout" class="btn btn-primary">
                                     Change Plan
                                 </a>
+                                {% if has_provider_subscription %}
                                 <button type="button" onclick="showCancelModal()" class="btn btn-danger">
                                     Cancel Subscription
                                 </button>
+                                {% endif %}
                             </div>
+                            {% if has_provider_subscription %}
                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
                                 Your subscription will remain active until the end of the current billing period.
                             </p>
+                            {% endif %}
                             {% endif %}
                     </div>
                 </div>

@@ -887,8 +887,8 @@ pub async fn confirm_email_handler(
         match verification.plan.as_deref() {
             Some(plan) => format!(
                 "/claim-handle?plan={}&billing={}",
-                plan,
-                verification.billing.as_deref().unwrap_or("monthly")
+                urlencoding::encode(plan),
+                urlencoding::encode(verification.billing.as_deref().unwrap_or("monthly"))
             ),
             None => "/claim-handle".to_string(),
         }
@@ -1123,11 +1123,18 @@ pub async fn claim_handle_handler(
         if !plan.is_empty() {
             return Redirect::to(&format!(
                 "/@{}/billing/checkout?plan={}&billing={}",
-                slug, plan, billing
+                slug,
+                urlencoding::encode(&plan),
+                urlencoding::encode(&billing)
             ))
             .into_response();
         }
-        if session.billing_enabled && session.current_org_subscription_status.is_none() {
+        if session.billing_enabled
+            && matches!(
+                session.current_org_subscription_status,
+                None | Some(hot::db::OrgPlanStatus::Pending)
+            )
+        {
             return Redirect::to(&format!("/@{}/billing/checkout", slug)).into_response();
         }
         return Redirect::to("/").into_response();
@@ -1213,9 +1220,16 @@ pub async fn claim_handle_post_handler(
         let target = if !plan.is_empty() {
             format!(
                 "/@{}/billing/checkout?plan={}&billing={}",
-                slug, plan, billing
+                slug,
+                urlencoding::encode(&plan),
+                urlencoding::encode(&billing)
             )
-        } else if session.billing_enabled && session.current_org_subscription_status.is_none() {
+        } else if session.billing_enabled
+            && matches!(
+                session.current_org_subscription_status,
+                None | Some(hot::db::OrgPlanStatus::Pending)
+            )
+        {
             format!("/@{}/billing/checkout", slug)
         } else {
             "/".to_string()
@@ -1304,7 +1318,9 @@ pub async fn claim_handle_post_handler(
         let target = if !plan.is_empty() {
             format!(
                 "/@{}/billing/checkout?plan={}&billing={}",
-                existing.slug, plan, billing
+                existing.slug,
+                urlencoding::encode(&plan),
+                urlencoding::encode(&billing)
             )
         } else if session.billing_enabled {
             format!("/@{}/billing/checkout", existing.slug)
@@ -1399,7 +1415,9 @@ pub async fn claim_handle_post_handler(
             updated_cookies,
             Redirect::to(&format!(
                 "/@{}/billing/checkout?plan={}&billing={}",
-                org_slug, plan, billing
+                org_slug,
+                urlencoding::encode(&plan),
+                urlencoding::encode(&billing)
             )),
         ))
     } else if session.billing_enabled {

@@ -75,7 +75,7 @@ async fn begin_storage_write(
             // Decide on the plan before locking: an unlimited account needs
             // neither the root lock nor a total over every active file.
             let plan: Option<serde_json::Value> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
             ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
             let overrides: Option<serde_json::Value> =
                 sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
@@ -138,7 +138,7 @@ async fn begin_storage_write(
                     .await
                     .map_err(fwe)?;
             let plan: Option<String> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+                "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}') ELSE '{}' END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
             ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
             let parse = |raw: Option<String>| {
                 raw.map(|s| serde_json::from_str::<serde_json::Value>(&s))
@@ -2677,7 +2677,7 @@ pub(crate) async fn seed_storage_quota_test_org(db: &DatabasePool, org_id: Uuid)
         active integer NOT NULL DEFAULT 1, created_at datetime NOT NULL DEFAULT current_timestamp, created_by_user_id blob NOT NULL,
         updated_at datetime NOT NULL DEFAULT current_timestamp, updated_by_user_id blob, active_toggle_at datetime, active_toggle_by_user_id blob);
         CREATE TABLE IF NOT EXISTS plan (plan_uuid blob PRIMARY KEY, features text);
-        CREATE TABLE IF NOT EXISTS org_plan (org_id blob PRIMARY KEY, plan_uuid blob);")
+        CREATE TABLE IF NOT EXISTS org_plan (org_id blob PRIMARY KEY, plan_uuid blob, status_id integer NOT NULL DEFAULT 1);")
         .execute(pool).await.unwrap();
     // The quota reads the counters migration 016 keeps; install them on the
     // fixture's `file` table once, from the migration itself.

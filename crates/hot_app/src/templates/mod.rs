@@ -1678,7 +1678,8 @@ fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
         && let Some(ref org) = session.current_org
         && let Some(status) = session.current_org_subscription_status
     {
-        let billing_url = format!("/@{}/billing", org.slug);
+        // Billing belongs to the account's root org.
+        let billing_url = format!("/@{}/billing", session.billing_org().unwrap_or(org).slug);
         match status {
             hot::db::OrgPlanStatus::Active => {
                 // No notice needed
@@ -1693,8 +1694,10 @@ fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
             }
             hot::db::OrgPlanStatus::Inactive => {
                 notices.push(
-                    GlobalNotice::warning("Your plan is inactive.")
-                        .with_action("Manage Billing →", billing_url),
+                    GlobalNotice::warning(
+                        "Your plan is inactive. Runs, uploads and plan features are paused until you choose a plan.",
+                    )
+                    .with_action("Choose a Plan →", billing_url),
                 );
             }
         }
@@ -2191,7 +2194,10 @@ pub struct OrgBilling<'a> {
     pub subscription: Option<hot::db::OrgPlan>,
     pub plan: Option<hot::db::Plan>,
     pub success_message: &'a str,
+    pub error_message: &'a str,
     pub billing_provider_configured: bool,
+    pub cancel_at_period_end: bool,
+    pub has_provider_subscription: bool,
 }
 
 #[derive(Template)]
@@ -2230,6 +2236,8 @@ pub struct OrgPlanSelect<'a> {
     pub plans: Vec<hot::db::Plan>,
     pub current_plan_name: Option<String>,
     pub current_plan_sort_order: Option<i32>,
+    pub current_billing_period: Option<String>,
+    pub current_subscription_active: bool,
 }
 
 #[derive(Template)]
@@ -2271,6 +2279,7 @@ pub struct OrgCheckoutForm<'a> {
     pub plan: hot::db::Plan,
     pub billing_period: &'a str,
     pub all_plans: Vec<hot::db::Plan>,
+    pub has_active_paid_subscription: bool,
 }
 
 #[derive(Template)]

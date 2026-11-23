@@ -63,7 +63,7 @@ impl Admission {
                     .bind(root)
                     .execute(&mut *tx)
                     .await?;
-                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
                     .bind(root).fetch_one(&mut *tx).await?;
                 let mut limit = resolve_limit(plan, overrides, configured_limit)?;
                 // An account over its cap after a downgrade may redeploy the
@@ -89,7 +89,7 @@ impl Admission {
                     .bind(root)
                     .execute(&mut *tx)
                     .await?;
-                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
                     .bind(root).fetch_one(&mut *tx).await?;
                 let mut limit = resolve_limit(plan, overrides, configured_limit)?;
                 if limit >= 0 {

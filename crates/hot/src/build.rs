@@ -3571,12 +3571,21 @@ hot.pkg.demo {
             crate::db::DatabasePool::Postgres(_) => unreachable!(),
         }
 
-        crate::db::OrgPlan::create(
+        // A plan grants its features only once it is active.
+        let org_plan = crate::db::OrgPlan::create(
             db,
             org_id,
             &plan_uuid,
             crate::db::BillingPeriod::Monthly,
             user_id,
+        )
+        .await
+        .unwrap();
+        crate::db::OrgPlan::update_status(
+            db,
+            &org_plan.org_plan_id,
+            crate::db::OrgPlanStatus::Active,
+            Some(user_id),
         )
         .await
         .unwrap();

@@ -440,7 +440,7 @@ impl Org {
                     (child, env, false)
                 } else {
                     let plan: Option<Value> = sqlx::query_scalar(
-                        "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = $1"
+                        "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = $1"
                     ).bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let limit = child_limit(plan.as_ref(), root.3.as_ref(), request.hosted);
                     let count: i64 =
@@ -493,7 +493,7 @@ impl Org {
                     (child, env, false)
                 } else {
                     let plan: Option<String> = sqlx::query_scalar(
-                        "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = ?"
+                        "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}') ELSE '{}' END FROM org_plan op JOIN plan p ON p.plan_uuid = op.plan_uuid WHERE op.org_id = ?"
                     ).bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let plan = parse_features(plan)?;
                     let overrides = parse_features(root.3)?;
@@ -600,7 +600,7 @@ impl Org {
                     }
                     (id, false)
                 } else {
-                    let plan: Option<Value> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
+                    let plan: Option<Value> = sqlx::query_scalar("SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let limit = environment_limit(plan.as_ref(), root.1.as_ref());
                     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM env e JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1")
@@ -651,7 +651,7 @@ impl Org {
                     }
                     (id, false)
                 } else {
-                    let plan: Option<String> = sqlx::query_scalar("SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?")
+                    let plan: Option<String> = sqlx::query_scalar("SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}') ELSE '{}' END FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?")
                         .bind(root_id).fetch_optional(&mut *tx).await?.flatten();
                     let plan = parse_features(plan)?;
                     let overrides = parse_features(root.1)?;
