@@ -4496,7 +4496,8 @@ class Agent:
         filesystems. Box images are a cache of their registries, and each box's
         /data is outside the store (box-data), so both come back as boxes run.
         Boxes running here end. A box left behind would keep the pool's devices
-        open, so the store is left as it is while one is."""
+        open, so the store is left as it is while one is: an open device or a
+        running shim."""
         if render.scalable(self.config):
             raise AgentError("A scalable task host's disk is deleted with it, so a replaced host starts with an empty "
                              "box store: replace the task-worker group's instances")
@@ -4517,19 +4518,27 @@ class Agent:
             # The task worker ends its boxes as it stops.
             self.compose(bundle, "stop", "--timeout", "120", "task-worker")
         self.run_command(["systemctl", "stop", "kata-containerd.service"])
+        # The pool's snapshot devices, and how many hold each open. A box
+        # never started leaves its device active and closed, which the pool
+        # can lose; one a box still uses is open.
         try:
-            names = self.run_command(["dmsetup", "ls"]).stdout
+            listed = self.run_command(["dmsetup", "info", "-c", "--noheadings", "-o", "name,open",
+                                       "--separator", ":"]).stdout
         except subprocess.CalledProcessError:
-            names = ""  # "No devices found"
-        devices = [line.split()[0] for line in names.splitlines()
-                   if line.split() and line.split()[0].startswith(BOX_POOL + "-")]
+            listed = ""  # "No devices found"
+        devices = {}
+        for line in listed.splitlines():
+            name, _, opened = line.strip().rpartition(":")
+            if name.startswith(BOX_POOL + "-") and opened.isdigit():
+                devices[name] = int(opened)
+        held = [name for name, opened in devices.items() if opened]
         try:
             self.run_command(["pgrep", "-f", "containerd-shim-kata-v2"])
             shims = True
         except subprocess.CalledProcessError:
             shims = False
-        if devices or shims:
-            left = (([f"{len(devices)} box devices"] if devices else [])
+        if held or shims:
+            left = (([f"{len(held)} box devices"] if held else [])
                     + (["Kata shims"] if shims else []))
             self.run_command(["systemctl", "start", "kata-containerd.service"])
             if running:
@@ -4538,6 +4547,8 @@ class Agent:
                              "stopped. Replace the instance, which keeps the data disk and starts with no box running, "
                              "then run reset-box-store again")
         try:
+            for name in devices:
+                self.run_command(["dmsetup", "remove", name])
             if self.box_pool_active():
                 self.run_command(["dmsetup", "remove", BOX_POOL])
             pool = self.data_root / "kata/devmapper"

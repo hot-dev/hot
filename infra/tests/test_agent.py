@@ -126,9 +126,10 @@ class Recorder:
         # device-mapper yet says so, and the room it finds on the disk.
         self.pool_active = True
         self.pool_table = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown\n"
-        # What else device-mapper has (a box's snapshot device), whether a Kata
-        # shim still runs, and the loop devices on the pool's files.
-        self.box_devices = []
+        # What else device-mapper has (a box's snapshot devices, with how many
+        # hold each open), whether a Kata shim still runs, and the loop devices
+        # on the pool's files.
+        self.box_devices = {}
         self.kata_shims = False
         self.loops = {"data": "/dev/loop1", "meta": "/dev/loop0"}
 
@@ -172,13 +173,21 @@ class Recorder:
             return subprocess.CompletedProcess(command, 0, stdout=(
                 "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
                 f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
-        if command[:2] == ["dmsetup", "ls"]:
-            names = [f"{name}\t(252:9)" for name in ([agent_module.BOX_POOL] if self.pool_active else [])
-                     + self.box_devices]
-            return subprocess.CompletedProcess(command, 0, stdout="\n".join(names) + "\n" if names else
+        if command[:3] == ["dmsetup", "info", "-c"]:
+            rows = [f"{name}:{opened}" for name, opened in
+                    (({agent_module.BOX_POOL: len(self.box_devices)} if self.pool_active else {})
+                     | self.box_devices).items()]
+            return subprocess.CompletedProcess(command, 0, stdout="\n".join(rows) + "\n" if rows else
                                                "No devices found\n", stderr="")
         if command[:2] == ["dmsetup", "remove"]:
-            self.pool_active = False
+            if command[2] in self.box_devices:
+                if self.box_devices[command[2]]:
+                    raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
+                del self.box_devices[command[2]]
+            elif self.box_devices:
+                raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
+            else:
+                self.pool_active = False
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         if command[0] == "pgrep":
             if not self.kata_shims:
@@ -10481,8 +10490,8 @@ class ResetBoxStore(AgentHarness):
     def test_a_box_left_running_keeps_the_store(self):
         for left, setting in (("1 box devices", "box_devices"), ("Kata shims", "kata_shims")):
             with self.subTest(left):
-                self.run.box_devices, self.run.kata_shims = [], False
-                setattr(self.run, setting, ["hot-devpool-snap-3"] if setting == "box_devices" else True)
+                self.run.box_devices, self.run.kata_shims = {}, False
+                setattr(self.run, setting, {"hot-devpool-snap-3": 1} if setting == "box_devices" else True)
                 self.run.commands.clear()
                 with self.assertRaisesRegex(agent_module.AgentError, f"left as it was: {left}.*Replace the instance"):
                     self.agent.command("reset-box-store", request_id="r1")
@@ -10492,6 +10501,16 @@ class ResetBoxStore(AgentHarness):
                 # Put back as it was: containerd and the task worker run again.
                 self.assertEqual(self.run.commands[-1][-2:], ["--force-recreate", "task-worker"])
                 self.assertIn(["systemctl", "start", "kata-containerd.service"], self.run.commands)
+
+    def test_a_closed_box_device_goes_with_the_pool(self):
+        # A box created and never started leaves its device active, and no
+        # one holds it open.
+        self.run.box_devices = {"hot-devpool-snap-10": 0}
+        self.agent.command("reset-box-store", request_id="r1")
+        commands = self.run.commands
+        self.assertLess(commands.index(["dmsetup", "remove", "hot-devpool-snap-10"]),
+                        commands.index(["dmsetup", "remove", "hot-devpool"]))
+        self.assertFalse(self.pool.exists())
 
     def test_a_stopped_installation_stays_stopped(self):
         self.agent.command("drain-and-stop", request_id="s1")
@@ -10510,6 +10529,8 @@ class ResetBoxStore(AgentHarness):
                 raise subprocess.CalledProcessError(1, command, stderr="Job failed")
             return recorder(command, **kwargs)
         self.agent.run_command = no_start
+        # A pool that fits, whatever this machine's disk has free.
+        self.agent.box_pool_shortfall = lambda: None
         with self.assertRaises(agent_module.CommandFailed) as raised:
             self.agent.command("reset-box-store", request_id="r1")
         self.assertIn("did not start", str(raised.exception))
