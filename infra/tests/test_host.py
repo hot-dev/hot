@@ -25,6 +25,9 @@ AWS = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/aws/singl
 GCP = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/gcp/single-machine").glob("*.tf")))
 
 
+KATA_CONFIG = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml"
+
+
 def heredoc(target):
     """The body of the here-document that setup-host.sh writes to target."""
     match = re.search(rf"cat > {re.escape(target)} <<'?(\w+)'?\n(.*?)\n\1\n", SETUP, re.S)
@@ -400,7 +403,7 @@ class HostImage(unittest.TestCase):
         self.assertNotRegex(SETUP, r"mkdir -p /run/")
 
     def test_largest_box_fits_the_kata_memory_ceiling(self):
-        kata = tomllib.loads(heredoc("/opt/kata/share/defaults/kata-containers/configuration.toml")
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
                              .replace("${rootfs}", "/rootfs.img"))
         qemu = kata["hypervisor"]["qemu"]
         self.assertTrue(kata["runtime"]["static_sandbox_resource_mgmt"])
@@ -420,15 +423,51 @@ class HostImage(unittest.TestCase):
     def test_kata_containerd_runs_without_cri(self):
         config = tomllib.loads(heredoc("/etc/kata-containerd/config.toml")
                                .replace("${KATA_CONTAINERD_GID}", "2000"))
-        self.assertIn("io.containerd.grpc.v1.cri", config["disabled_plugins"])
+        self.assertEqual(config["version"], 4)
+        # containerd 2 splits CRI into several plugins; disabling one leaves the rest.
+        self.assertLessEqual({"io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images",
+                              "io.containerd.cri.v1.runtime",
+                              "io.containerd.podsandbox.controller.v1.podsandbox",
+                              "io.containerd.nri.v1.nri"}, set(config["disabled_plugins"]))
+        # Without these, a missing pool leaves containerd up with no images or tasks.
+        self.assertLessEqual({"io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"},
+                             set(config["required_plugins"]))
+        # Version 4 ignores a top-level [grpc], and the socket would be Docker's.
+        self.assertNotIn("grpc", config)
+        self.assertNotIn("ttrpc", config)
         self.assertEqual(list(config["plugins"]),
-                         ["io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"])
-        self.assertEqual(config["grpc"]["gid"], 2000)
+                         ["io.containerd.server.v1.grpc", "io.containerd.server.v1.ttrpc",
+                          "io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"])
+        for plugin, address in (("grpc", "/run/kata-containerd/containerd.sock"),
+                                ("ttrpc", "/run/kata-containerd/containerd.sock.ttrpc")):
+            server = config["plugins"][f"io.containerd.server.v1.{plugin}"]
+            self.assertEqual((server["address"], server["gid"]), (address, 2000))
+
+    def test_boxes_run_on_katas_rust_runtime(self):
+        # Task workers name io.containerd.kata.v2 on every host; the link decides
+        # which runtime that is.
+        self.assertIn("ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 "
+                      "/usr/local/bin/containerd-shim-kata-v2", SETUP)
+        self.assertIn('kata-static-${KATA_VERSION}-amd64.tar.zst', SETUP)
+        self.assertIn(f"rm -f {KATA_CONFIG}\n", SETUP)
+        kata = tomllib.loads(heredoc(KATA_CONFIG).replace("${rootfs}", "/rootfs.img"))
+        self.assertEqual({key: kata["runtime"][key] for key in ("name", "hypervisor_name", "agent_name")},
+                         {"name": "virt_container", "hypervisor_name": "qemu", "agent_name": "kata"})
+        self.assertEqual(kata["agent"]["kata"]["dial_timeout_ms"], 30000)
+        # Keys only the Go runtime reads would be silently ignored.
+        for section, key in (("hypervisor.qemu", "use_vsock"), ("hypervisor.qemu", "firmware_volume"),
+                             ("agent.kata", "dial_timeout"), ("runtime", "disable_guest_empty_dir")):
+            table = kata
+            for part in section.split("."):
+                table = table[part]
+            self.assertNotIn(key, table, f"{section}.{key}")
+        self.assertIn("kata-containers.img)", SETUP)
+        self.assertNotIn("kata-ubuntu-", SETUP)
 
     def test_boxes_start_on_a_host_without_selinux(self):
         # Kata creates no container when guest SELinux is on and the host has
         # none, and an absent setting leaves it on. Ubuntu ships AppArmor.
-        kata = tomllib.loads(heredoc("/opt/kata/share/defaults/kata-containers/configuration.toml")
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
                              .replace("${rootfs}", "/rootfs.img"))
         self.assertIs(kata["hypervisor"]["qemu"]["disable_guest_selinux"], True)
         self.assertIn('[[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]', SETUP)

@@ -15,12 +15,12 @@
 # instead of producing an image.
 set -euo pipefail
 
-KATA_VERSION="3.28.0"
-KATA_SHA256="99cefb46d70bc27b7bcffd7595be9010c6bed43e1cdfcf8078554c19e7c9b19d"
-CONTAINERD_VERSION="1.7.30"
-CONTAINERD_SHA256="ca0f27e34411504acd1cd24fcbaa71b9c47d31ce9408c47c54a2dc1810ceb1df"
-CNI_VERSION="1.9.1"
-CNI_SHA256="b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303"
+KATA_VERSION="4.4.0"
+KATA_SHA256="ccbc0cbc591089d0c57012b78da64b23ef43e0bac0f869dc7bfebe8588c33986"
+CONTAINERD_VERSION="2.4.2"
+CONTAINERD_SHA256="35880c1dd4627e8ce56526bfabb39c144e83458ffdb197ce6f05d17d94d7d91e"
+CNI_VERSION="1.10.0"
+CNI_SHA256="ce8603d6a1bd448efba5bd6dc44f38dce349f821aa57e1bb354b52628ebf1853"
 COSIGN_VERSION="v3.1.4"
 COSIGN_SHA256="424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"
 KATA_CONTAINERD_GID="2000"
@@ -116,7 +116,9 @@ log "Installing Kata Containers ${KATA_VERSION}"
 fetch "https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.zst" \
     "$KATA_SHA256" "$work/kata.tar.zst"
 tar --zstd -xf "$work/kata.tar.zst" -C /
-ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
+# Kata's Rust runtime. The task worker names io.containerd.kata.v2 for every
+# box, and containerd runs whichever shim the host links here.
+ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 # QEMU looks for its ROMs in share/qemu.
 ln -sfn /opt/kata/share/kata-qemu/qemu /opt/kata/share/qemu
 
@@ -158,7 +160,8 @@ install -m 0755 "$work/hotbox" /usr/local/bin/hotbox
 
 install -d -m 0755 "$HOST_DIR/kata"
 rootfs="$HOST_DIR/kata/hot-rootfs.img"
-cp "$(readlink -f /opt/kata/share/kata-containers/kata-ubuntu-noble.image)" "$rootfs"
+# kata-containers.img names the release's base guest image, whatever its distribution.
+cp "$(readlink -f /opt/kata/share/kata-containers/kata-containers.img)" "$rootfs"
 loop=$(losetup --find --show --partscan "$rootfs")
 mnt="$work/rootfs"
 mkdir -p "$mnt"
@@ -183,8 +186,11 @@ AGENT
 chmod 0755 /usr/local/bin/hot-agent
 
 log "Writing Kata and containerd configuration"
-install -d -m 0755 /opt/kata/share/defaults/kata-containers
-cat > /opt/kata/share/defaults/kata-containers/configuration.toml <<KATA
+# Kata's Rust runtime reads this path. The release ships it as a link to its
+# own QEMU configuration, so replace the link rather than write through it.
+install -d -m 0755 /opt/kata/share/defaults/kata-containers/runtime-rs
+rm -f /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml
+cat > /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml <<KATA
 [hypervisor.qemu]
 path = "/opt/kata/bin/qemu-system-x86_64"
 kernel = "/opt/kata/share/kata-containers/vmlinux.container"
@@ -203,7 +209,6 @@ default_memory = 512
 # worker's budget keeps boxes within that.
 default_maxmemory = 9216
 memory_slots = 10
-use_vsock = true
 disable_seccomp = false
 enable_mem_prealloc = false
 enable_hugepages = false
@@ -222,16 +227,18 @@ disable_selinux = false
 # container on a host without SELinux, which Ubuntu is: no box would start.
 disable_guest_selinux = true
 firmware = ""
-firmware_volume = ""
 
 [agent.kata]
 enable_debug = false
 enable_tracing = false
 kernel_modules = []
 debug_console_enabled = false
-dial_timeout = 30
+dial_timeout_ms = 30000
 
 [runtime]
+name = "virt_container"
+hypervisor_name = "qemu"
+agent_name = "kata"
 create_container_timeout = 60
 enable_debug = false
 internetworking_model = "macvtap"
@@ -240,7 +247,7 @@ enable_tracing = false
 disable_new_netns = false
 sandbox_cgroup_only = true
 static_sandbox_resource_mgmt = true
-disable_guest_empty_dir = false
+emptydir_mode = "shared-fs"
 enable_pprof = false
 KATA
 
@@ -252,19 +259,33 @@ fi
 
 install -d -m 0755 /etc/kata-containerd
 cat > /etc/kata-containerd/config.toml <<CONTAINERD
-version = 2
+version = 4
 root = "/var/lib/kata/containerd"
 state = "/run/kata-containerd"
 # The task worker uses containerd's own API and names the Kata runtime for
-# each box. The Kubernetes CRI plugin would only add a streaming server and
-# CNI polling behind the task worker's socket.
-disabled_plugins = ["io.containerd.grpc.v1.cri"]
-
-[grpc]
-  address = "/run/kata-containerd/containerd.sock"
-  gid = ${KATA_CONTAINERD_GID}
+# each box. Kubernetes' CRI, its sandbox controller, and NRI would only add
+# services behind the task worker's socket.
+disabled_plugins = [
+  "io.containerd.grpc.v1.cri",
+  "io.containerd.cri.v1.images",
+  "io.containerd.cri.v1.runtime",
+  "io.containerd.podsandbox.controller.v1.podsandbox",
+  "io.containerd.nri.v1.nri",
+]
+# containerd 2 keeps serving, without images, containers, or tasks, when a
+# snapshotter fails to load. Exit instead, so systemd tries again and the
+# agent reports containerd down.
+required_plugins = ["io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"]
 
 [plugins]
+  # Version 4 reads its sockets only here. It ignores a top-level [grpc], and
+  # containerd would then take Docker's /run/containerd/containerd.sock.
+  [plugins."io.containerd.server.v1.grpc"]
+    address = "/run/kata-containerd/containerd.sock"
+    gid = ${KATA_CONTAINERD_GID}
+  [plugins."io.containerd.server.v1.ttrpc"]
+    address = "/run/kata-containerd/containerd.sock.ttrpc"
+    gid = ${KATA_CONTAINERD_GID}
   [plugins."io.containerd.snapshotter.v1.devmapper"]
     root_path = "/var/lib/kata/devmapper"
     pool_name = "hot-devpool"

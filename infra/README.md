@@ -48,7 +48,7 @@ Implemented:
 - The host image recipe ([`images/host/setup-host.sh`](images/host/setup-host.sh),
   [`images/packer`](images/packer), built by
   [`images/build-host.sh`](images/build-host.sh)): Ubuntu 24.04 with Docker,
-  Kata on QEMU, a dedicated containerd, CNI, `cosign`, a guest image, and a fallback
+  Kata on QEMU through Kata's Rust runtime, a dedicated containerd, CNI, `cosign`, a guest image, and a fallback
   copy of `hotbox`. Each start of a task worker installs its release's own `hotbox`,
   and boxes use that ([Security updates](#security-updates)); they never run the
   copy in the guest image. SSH is masked, and Packer builds without SSH. Kata
@@ -839,9 +839,9 @@ test keeps this table in step with those pins.
 | Managed PostgreSQL | 18 (RDS, Cloud SQL) | `opentofu/modules/single-machine-contract` |
 | Managed Valkey | 8.1 (ElastiCache), 8.0 (Memorystore) | `opentofu/stacks/*/single-machine/valkey.tf` |
 | Host OS | Ubuntu 24.04 LTS | `images/packer/hot-host.pkr.hcl` |
-| Kata Containers | 3.28.0 | `images/host/setup-host.sh` |
-| containerd (box tasks) | 1.7.30 | `images/host/setup-host.sh` |
-| CNI plugins | 1.9.1 | `images/host/setup-host.sh` |
+| Kata Containers | 4.4.0 | `images/host/setup-host.sh` |
+| containerd (box tasks) | 2.4.2 | `images/host/setup-host.sh` |
+| CNI plugins | 1.10.0 | `images/host/setup-host.sh` |
 | OpenTofu | 1.13.1 | `selfhost-plan.yml` |
 | AWS provider | 6.69.1 | Stack lockfiles |
 | Google provider | 8.7.0 | Stack lockfiles |
@@ -1681,6 +1681,14 @@ protection and apply again. To undo the change instead (restore `host_image`, or
 `tofu import 'google_compute_instance_group_membership.public[0]' ZONE/hot-NAME-public/hot-NAME`,
 because adding the VM again fails. A membership created before this setting still
 removes the VM on its first replacement.
+
+**Box storage after a host image change.** Box images live on the data disk, in
+Kata's containerd store and its devmapper pool, so a new host image opens the store
+an older one wrote. If Kata's containerd does not start on the new image,
+`diagnostics` reports it down and box tasks wait. Code tasks still run. Set
+`host_image` back to the previous image and apply: it opens the store as before.
+Box images are only a cache of their registries, and each box's `/data` is outside
+the store, in `box-data` on the data disk.
 
 **Restore the data disk from a snapshot.** Snapshots are named or tagged with
 the installation (`HotDataVolume` on AWS, label `hot-installation` on GCP).

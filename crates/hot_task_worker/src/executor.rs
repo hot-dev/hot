@@ -2619,6 +2619,8 @@ finally:
                                 },
                             )
                             .await;
+                            // Kata's Go runtime, on older host images, keeps a
+                            // sandbox in /run/vc, which the worker has bound.
                             for dir in &[
                                 format!("/run/vc/sbs/{cid}"),
                                 format!("/run/vc/vm/{cid}"),
@@ -2626,6 +2628,13 @@ finally:
                             ] {
                                 let _ = tokio::fs::remove_dir_all(dir).await;
                             }
+                            // Its Rust runtime keeps one in /run/kata on the host,
+                            // reached through PID 1's mounts, as hotbox is.
+                            let _ = tokio::process::Command::new(IN_HOST_MOUNTS[0])
+                                .args(&IN_HOST_MOUNTS[1..])
+                                .args(["rm", "-rf", "--", &format!("/run/kata/{cid}")])
+                                .output()
+                                .await;
                             if needs_network {
                                 netns_path = None;
                             }
