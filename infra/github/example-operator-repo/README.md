@@ -123,10 +123,10 @@ is `ADMIN_PASSWORD` in the installation's generated secret.
 ## Host commands
 
 Run the `command` workflow from `main` for `status`, `diagnostics`, `logs`,
-`backup`, `restart-service`, `drain-and-stop`, `roll-back`, `test-alert`, or
-`deploy-now`, which retries a failed deploy or migration by deploying the current
-release pointer again. `backup`, `drain-and-stop`, and `roll-back` are for
-single-machine installations. The workflow uses the release role, so it waits for the
+`backup`, `restart-service`, `drain-and-stop`, `roll-back`, `test-alert`,
+`reset-box-store`, or `deploy-now`, which retries a failed deploy or migration by
+deploying the current release pointer again. `backup`, `drain-and-stop`, `roll-back`,
+and `reset-box-store` are for single-machine installations. The workflow uses the release role, so it waits for the
 `production` environment's approval like a release, and writes the agent's redacted report
 to the job summary. Anyone who can read this repository's Actions runs can read those
 summaries, and logs can contain user data. The same commands run locally with
@@ -147,8 +147,8 @@ which commands are refused. Set it to `scalable` on a scalable installation. Lef
 `single-machine`, the helper refuses the command before sending it when it can read the
 scheduler's pointer. When it cannot, it fails the run after the command is out, and
 hosts may still be acting on it, so check `status` before sending it again. A scalable
-installation refuses `backup`, `drain-and-stop`, and `roll-back`, on either cloud: it
-stops by [resizing its groups](../../README.md#stopping-a-scalable-installation). On a
+installation refuses `backup`, `drain-and-stop`, `roll-back`, and `reset-box-store`, on
+either cloud: it stops by [resizing its groups](../../README.md#stopping-a-scalable-installation). On a
 scalable Google Cloud installation a command reaches only one host, so the helper
 sends only `status`, `diagnostics`, and `test-alert`, and refuses the others with what
 to do instead.

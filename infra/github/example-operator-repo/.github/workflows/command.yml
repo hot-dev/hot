@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: backup, drain-and-stop, and roll-back are for single-machine installations
+        description: backup, drain-and-stop, roll-back, and reset-box-store are for single-machine installations
         type: choice
-        options: [status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, test-alert, deploy-now]
+        options: [status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, test-alert, reset-box-store, deploy-now]
       service:
         description: For logs and restart-service; a scalable installation's hosts do not run postgres or valkey
         type: choice

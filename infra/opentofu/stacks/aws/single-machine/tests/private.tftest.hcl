@@ -225,7 +225,7 @@ run "agent_channel" {
     error_message = "The host keeps the data channels of its managed policy: port forwarding to the ingress needs them, and ssm:StartSession on operator principals decides who may use it."
   }
   assert {
-    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 9
+    condition     = aws_ssm_document.command.document_type == "Command" && length(jsondecode(aws_ssm_document.command.content).parameters.operation.allowedValues) == 10
     error_message = "Host commands must be a fixed allowlist in a Hot command document."
   }
   assert {

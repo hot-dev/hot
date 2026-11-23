@@ -70,7 +70,9 @@ FAILED_STATES = {"rejected", "failed", "migration-failed", "resume-failed", "exp
 ERROR_LINES = 3
 ERROR_CHARS = 400
 COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back",
-            "test-alert"}
+            "test-alert", "reset-box-store"}
+# Kata's containerd names each active snapshot's thin device after the pool.
+BOX_POOL = "hot-devpool"
 # After a test alert, how long the agent reports AlertTest = 0, which
 # resolves the alert on clouds that keep an incident open without data.
 ALERT_TEST_RESOLVE_SECONDS = (120, 900)
@@ -4128,6 +4130,8 @@ class Agent:
             return self.report(state="stopped", request_id=request_id)
         if operation == "roll-back":
             return self.report(state="rolled-back", request_id=request_id, **self.roll_back(bundle))
+        if operation == "reset-box-store":
+            return self.report(state="box-store-reset", request_id=request_id, **self.reset_box_store(bundle, request_id))
         if operation == "backup":
             # An extra logical dump beside the scheduled data-disk snapshots.
             # A managed database is backed up by its cloud service, an existing
@@ -4484,6 +4488,89 @@ class Agent:
         finally:
             done.set()
             thread.join(timeout=5)
+
+    def reset_box_store(self, bundle, request_id):
+        """Empty Kata's box image store, for a containerd that refuses the one
+        on the data disk, as after a host image change: its image metadata and
+        the devmapper pool that holds the images' layers and boxes' root
+        filesystems. Box images are a cache of their registries, and each box's
+        /data is outside the store (box-data), so both come back as boxes run.
+        Boxes running here end. A box left behind would keep the pool's devices
+        open, so the store is left as it is while one is."""
+        if render.scalable(self.config):
+            raise AgentError("A scalable task host's disk is deleted with it, so a replaced host starts with an empty "
+                             "box store: replace the task-worker group's instances")
+        if "task-worker" not in self.roles():
+            raise AgentError("This host runs no task worker, so it has no box store")
+        if not self.data_disk_mounted():
+            raise AgentError("The data disk is not mounted")
+        state = self.state()
+        if state.get("stopping"):
+            raise AgentError("drain-and-stop has yet to finish: the next cycle stops the rest of Hot. Run "
+                             "reset-box-store once it has")
+        # A stopped installation keeps its task worker stopped.
+        running = not state.get("stopped")
+        if running:
+            # Said first, as a restart says it: if the agent dies from here on,
+            # the next cycle brings the task worker back (finish_restarts).
+            self.note_restarts(started={"task-worker": request_id})
+            # The task worker ends its boxes as it stops.
+            self.compose(bundle, "stop", "--timeout", "120", "task-worker")
+        self.run_command(["systemctl", "stop", "kata-containerd.service"])
+        try:
+            names = self.run_command(["dmsetup", "ls"]).stdout
+        except subprocess.CalledProcessError:
+            names = ""  # "No devices found"
+        devices = [line.split()[0] for line in names.splitlines()
+                   if line.split() and line.split()[0].startswith(BOX_POOL + "-")]
+        try:
+            self.run_command(["pgrep", "-f", "containerd-shim-kata-v2"])
+            shims = True
+        except subprocess.CalledProcessError:
+            shims = False
+        if devices or shims:
+            left = (([f"{len(devices)} box devices"] if devices else [])
+                    + (["Kata shims"] if shims else []))
+            self.run_command(["systemctl", "start", "kata-containerd.service"])
+            if running:
+                self.restart(bundle, "task-worker", request_id)
+            raise AgentError(f"The box store was left as it was: {' and '.join(left)} still run after the task worker "
+                             "stopped. Replace the instance, which keeps the data disk and starts with no box running, "
+                             "then run reset-box-store again")
+        try:
+            if self.box_pool_active():
+                self.run_command(["dmsetup", "remove", BOX_POOL])
+            pool = self.data_root / "kata/devmapper"
+            for name in ("data", "meta"):
+                backing = pool / name
+                if not backing.exists():
+                    continue
+                for line in self.run_command(["losetup", "-j", str(backing)]).stdout.splitlines():
+                    device = line.split(":", 1)[0].strip()
+                    if device.startswith("/dev/loop"):
+                        self.run_command(["losetup", "-d", device])
+            # The pool's files and its "held" marker go with it, so a new pool
+            # is sized and held as a first one is (kata-devpool-activate).
+            for directory in (self.data_root / "kata/containerd", pool):
+                if directory.exists():
+                    shutil.rmtree(directory)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CommandFailed(f"The box store was only partly removed: {self.explain(error)}",
+                                recovery="Run reset-box-store again. Until it finishes, box tasks wait; code tasks "
+                                         "run") from error
+        notes = {}
+        try:
+            # Starts Kata's containerd, whose start creates a new pool.
+            self.configure_host()
+        except BoxPoolShort as error:
+            notes["warning"] = str(error)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise CommandFailed(f"The box store is empty, and Kata's containerd did not start: {self.explain(error)}",
+                                recovery="Run diagnostics for why, then reset-box-store again. Until it starts, box "
+                                         "tasks wait; code tasks run") from error
+        if running:
+            self.restart(bundle, "task-worker", request_id)
+        return notes
 
     def stop_services(self, bundle):
         """Stop Hot in order: the scheduler, then workers with time to

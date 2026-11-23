@@ -22,7 +22,8 @@ diagnostics, and test-alert there, and says what to do instead of the rest. No
 command stops a scalable installation, so on either cloud the helper refuses
 drain-and-stop there and names the group resize instead, and what to do before
 hosts come back after a database restore. Its database and Valkey are not on its
-hosts, so it refuses backup, roll-back, and any service its hosts do not run, which
+hosts, so it refuses backup, roll-back, and any service its hosts do not run, and
+reset-box-store, since a replaced host starts with an empty box store, all of which
 the AWS command document leaves out. A release waits 30
 minutes unless --timeout says otherwise, or 60 on a scalable installation, where
 --timeout covers the whole release. All of this follows the installation's
@@ -53,7 +54,7 @@ import sys
 import time
 
 OPERATIONS = ("deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop",
-              "roll-back", "test-alert")
+              "roll-back", "test-alert", "reset-box-store")
 # Final states per operation; anything else is progress or another request.
 FAILED = {"failed", "rejected", "migration-failed", "resume-failed", "expired"}
 # The reports that settle a host's deploy of a release. Every report carries
@@ -86,8 +87,8 @@ BACK_FROM_A_RESTORE = ("A host that comes back deploys and migrates from its poi
 # command reaches whichever host takes it first. Any host answers status,
 # diagnostics, and test-alert, and its report names it. These would act on, or
 # ask about, that host alone, so they are refused with what to do instead. On AWS
-# the command document leaves out backup and roll-back, so they are refused there
-# too, with the same words.
+# the command document leaves out backup, roll-back, and reset-box-store, so they
+# are refused there too, with the same words.
 ONE_HOST_INSTEAD = {
     "deploy-now": "To retry a failed role, replace its group's instances; to retry a failed migration, recreate the "
                   f"scheduler's instance; do either {GROUP_IDENTITY}; then run release again. See Upgrading in "
@@ -106,6 +107,8 @@ ONE_HOST_INSTEAD = {
     "roll-back": "Scalable hosts have no roll-back: fix forward, or restore the database to a point in time. See "
                  "Upgrading in infra/README.md",
     "backup": "A scalable installation's database is not on its hosts: back it up with its provider",
+    "reset-box-store": "A scalable task host's disk is deleted with it, so a replaced host starts with an empty box "
+                       f"store: replace the task-worker group's instances {GROUP_IDENTITY}",
 }
 # On AWS a scalable installation's app and API groups replace a host that fails
 # the load balancer's health check, as a stopped one does. Its replacement has
@@ -472,7 +475,7 @@ class Installation:
         if self.scalable and operation == "drain-and-stop":
             raise CliError(f"Not sent: on a scalable AWS installation {operation} would not hold. "
                            f"{RESIZE_TO_STOP.format(name=self.name)}")
-        if self.scalable and operation in ("backup", "roll-back"):
+        if self.scalable and operation in ("backup", "roll-back", "reset-box-store"):
             raise CliError(f"Not sent: {operation} is for single-machine installations. {ONE_HOST_INSTEAD[operation]}")
         self.check_preset()
         request_id = request_id or f"cli-{secrets.token_hex(6)}"
