@@ -36,6 +36,21 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.14 to 3.0.15 {#upgrading-from-3-0-14-to-3-0-15}
+
+**No database migrations.** 3.0.15 runs on a 3.0.14 database as is.
+
+**What to check in a self-hosted installation:**
+
+- A task worker on the Docker box backend now refuses to start, outside local development, when `network.egress-proxy`, `network.deny-cidrs`, `network.allow-cidrs` or `engine.isolation` is set. Docker guests apply none of them. Set `HOT_BOX_BACKEND=kata`, turn Hot Box off with `HOT_BOX_ENABLED=false`, or clear the setting. `hot dev` only warns.
+- With `network.client-ip.trusted-proxy` on, `X-Forwarded-Host` and `X-Forwarded-Proto` are honoured only from a peer listed in `network.client-ip.trusted-proxies`. Check that the list covers every proxy in front of the API.
+
+**Behavior change: events sent from outside can't set `caller` or `_hot_target_build_id`.** `POST /v1/events`, `POST /v1/streams/subscribe-with-event` and `::hot::event/send` drop both top-level keys.
+
+**Behavior change: webhook response statuses.** A webhook handler's untyped result is an HTTP response only when its `status` is 200 to 599. A typed `HttpResponse` with any other status answers 500.
+
+**Behavior change: with hosted billing on, only an active plan grants its features.** A pending or inactive plan resolves to the hosted defaults, an organization with a pending plan is sent to checkout, and the usage and limits endpoints name such a plan `<plan> (pending)` or `<plan> (inactive)`. Installations without billing are unaffected.
+
 ## Upgrading from Hot 3.0.13 to 3.0.14 {#upgrading-from-3-0-13-to-3-0-14}
 
 **No database migrations.** 3.0.14 runs on a 3.0.13 database as is.
