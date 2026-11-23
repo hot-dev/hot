@@ -3007,6 +3007,9 @@ finally:
                     return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
                         .await;
                 }
+                // `--local` keeps the pull in `ctr` itself, as 1.7's `ctr` did.
+                // The 2.x default pulls through the daemon's Transfer service,
+                // which unpacks only into the platforms its config lists.
                 let output = tokio::process::Command::new("ctr")
                     .args([
                         "--address",
@@ -3015,6 +3018,7 @@ finally:
                         NAMESPACE,
                         "images",
                         "pull",
+                        "--local",
                         "--snapshotter",
                         SNAPSHOTTER,
                         "--",
