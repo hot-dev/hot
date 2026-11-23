@@ -71,7 +71,7 @@ apt_get() {
 }
 apt_get update
 apt_get install -y --no-install-recommends \
-    ca-certificates curl jq python3 zstd e2fsprogs dmsetup thin-provisioning-tools \
+    ca-certificates curl jq python3 zstd e2fsprogs erofs-utils fdisk dmsetup thin-provisioning-tools \
     iproute2 iptables nftables docker.io docker-compose-v2
 apt_get upgrade -y
 
@@ -160,18 +160,27 @@ install -m 0755 "$work/hotbox" /usr/local/bin/hotbox
 
 install -d -m 0755 "$HOST_DIR/kata"
 rootfs="$HOST_DIR/kata/hot-rootfs.img"
-# kata-containers.img names the release's base guest image, whatever its distribution.
-cp "$(readlink -f /opt/kata/share/kata-containers/kata-containers.img)" "$rootfs"
-loop=$(losetup --find --show --partscan "$rootfs")
-mnt="$work/rootfs"
-mkdir -p "$mnt"
-udevadm settle
-if [[ -b "${loop}p1" ]]; then mount "${loop}p1" "$mnt"; else mount "$loop" "$mnt"; fi
+# kata-containers.img names the release's base guest image, whatever its
+# distribution. Its first partition is a read-only EROFS root (the second holds
+# its dm-verity hashes, which nothing here checks), so the root is unpacked,
+# given the hotbox, and packed again as the one partition of a new image. Kata
+# attaches it as a virtio-blk disk and boots root=/dev/vda1 from it.
+base=$(readlink -f /opt/kata/share/kata-containers/kata-containers.img)
+read -r start sectors < <(partx -g -o START,SECTORS -n 1 "$base")
+dd if="$base" of="$work/base.erofs" bs=512 skip="$start" count="$sectors" status=none
+[[ "$(blkid -o value -s TYPE "$work/base.erofs")" == erofs ]] \
+    || fail "Kata's guest image has no EROFS root"
+fsck.erofs --preserve --extract="$work/guest-root" "$work/base.erofs"
 # Boxes never run this copy: a box's container has its own root, and the
 # bind-mounted hotbox.
-install -D -m 0755 "$work/hotbox" "$mnt/usr/local/bin/hotbox"
-umount "$mnt"
-losetup -d "$loop"
+install -D -m 0755 "$work/hotbox" "$work/guest-root/usr/local/bin/hotbox"
+mkfs.erofs --quiet -zlz4hc "$work/root.erofs" "$work/guest-root"
+mib=$(( ($(stat -c %s "$work/root.erofs") + 1048575) >> 20 ))
+rm -f "$rootfs"
+truncate -s $(( (mib + 1) << 20 )) "$rootfs"
+echo "start=2048, size=$(( mib * 2048 )), type=83, bootable" | sfdisk --quiet "$rootfs"
+dd if="$work/root.erofs" of="$rootfs" bs=512 seek=2048 conv=notrunc status=none
+rm -rf "$work/guest-root" "$work/base.erofs" "$work/root.erofs"
 sha256sum "$rootfs" | cut -d' ' -f1 > "$rootfs.sha256"
 
 log "Installing the deploy agent"
@@ -195,7 +204,10 @@ cat > /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml <<K
 path = "/opt/kata/bin/qemu-system-x86_64"
 kernel = "/opt/kata/share/kata-containers/vmlinux.container"
 image = "${rootfs}"
-rootfs_type = "ext4"
+rootfs_type = "erofs"
+# virtio-blk, as the release configures it: an nvdimm image needs a DAX header
+# this image does not have.
+disable_image_nvdimm = true
 machine_type = "q35"
 valid_hypervisor_paths = ["/opt/kata/bin/qemu-system-x86_64"]
 kernel_params = "agent.log_vport=1025"
