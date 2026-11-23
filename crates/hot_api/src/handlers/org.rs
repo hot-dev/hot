@@ -251,10 +251,18 @@ pub(super) async fn account_plan_details(
         Some(subscription) => Some(subscription.get_plan(&billing).await?),
         None => None,
     };
+    // Only an active plan grants its features. A pending or inactive plan
+    // still marks a hosted account, which enforcement resolves against the
+    // cloud defaults: report the same limits rather than the plan's.
+    let plan_active = subscription.as_ref().is_some_and(OrgPlan::is_active);
     let plan_features = plan.as_ref().map(|plan| {
-        plan.features
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}))
+        if plan_active {
+            plan.features
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        }
     });
     for features in [plan_features.as_ref(), overrides.as_ref()]
         .into_iter()
@@ -295,9 +303,16 @@ pub(super) async fn account_plan_details(
         subscription.as_ref().and_then(|s| s.current_period_start),
         subscription.as_ref().and_then(|s| s.current_period_end),
     );
-    let name = plan
-        .map(|p| p.plan_name)
-        .unwrap_or_else(|| if hosted { "No Plan" } else { "Self-Hosted" }.into());
+    let name = match (plan, subscription.as_ref().and_then(OrgPlan::status)) {
+        (Some(plan), Some(hot::db::OrgPlanStatus::Pending)) => {
+            format!("{} (pending)", plan.plan_name)
+        }
+        (Some(plan), status) if status != Some(hot::db::OrgPlanStatus::Active) => {
+            format!("{} (inactive)", plan.plan_name)
+        }
+        (Some(plan), _) => plan.plan_name,
+        (None, _) => if hosted { "No Plan" } else { "Self-Hosted" }.into(),
+    };
     Ok((name, features, period_start, period_end))
 }
 
@@ -397,5 +412,46 @@ mod tests {
         assert!(period_start > start && period_start <= now);
         assert!(period_end > now);
         assert!((28..=31).contains(&(period_end - period_start).num_days()));
+    }
+
+    #[tokio::test]
+    async fn account_plan_details_report_cloud_defaults_until_the_plan_is_active() {
+        let db = hot::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let root = uuid::Uuid::now_v7();
+        let plan = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO org(org_id,name,slug,org_type,created_by_user_id) VALUES (?,'Root',?,'organization',?)")
+            .bind(root).bind(root.to_string()).bind(root).execute(pool).await.unwrap();
+        sqlx::query(r#"INSERT INTO plan(plan_uuid,plan_name,base_price_monthly_cents,base_price_annual_cents,sort_order,features) VALUES (?,'Status Test',2500,25000,1,'{"runs_per_month":5000}')"#)
+            .bind(plan).execute(pool).await.unwrap();
+        let org_plan = OrgPlan::create(&db, &root, &plan, hot::db::BillingPeriod::Monthly, &root)
+            .await
+            .unwrap();
+
+        // Pending: the limits enforcement applies, not the selected plan's.
+        let (name, features, _, _) = account_plan_details(&db, &root, true).await.unwrap();
+        assert_eq!(name, "Status Test (pending)");
+        assert_eq!(features.runs_per_month(), 0);
+
+        OrgPlan::update_status(
+            &db,
+            &org_plan.org_plan_id,
+            hot::db::OrgPlanStatus::Active,
+            Some(&root),
+        )
+        .await
+        .unwrap();
+        let (name, features, _, _) = account_plan_details(&db, &root, true).await.unwrap();
+        assert_eq!(name, "Status Test");
+        assert_eq!(features.runs_per_month(), 5000);
+
+        OrgPlan::cancel_immediately(&db, &org_plan.org_plan_id, &root)
+            .await
+            .unwrap();
+        let (name, features, _, _) = account_plan_details(&db, &root, true).await.unwrap();
+        assert_eq!(name, "Status Test (inactive)");
+        assert_eq!(features.runs_per_month(), 0);
     }
 }

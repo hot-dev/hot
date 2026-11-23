@@ -175,7 +175,7 @@ function updateSelection(radio) {
   updateSummary();
 }
 
-const HAS_ACTIVE_PAID = {{ has_active_paid_subscription }};
+const HAS_ACTIVE_PAID = {{ has_active_paid_subscription|js|safe }};
 const ORG_NAME = {{ org.name|js|safe }};
 
 function updateSummary() {

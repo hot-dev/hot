@@ -1390,7 +1390,7 @@ mod tests {
         .await
         .unwrap();
 
-        // OrgPlan::create starts in Pending (status_id = 0): must resolve to cloud defaults,
+        // OrgPlan::create starts in Pending: must resolve to cloud defaults,
         // NOT the paid plan features and NOT self-hosted unlimited.
         let org_plan = crate::db::OrgPlan::create(
             &db,

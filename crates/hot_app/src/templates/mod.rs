@@ -1678,7 +1678,8 @@ fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
         && let Some(ref org) = session.current_org
         && let Some(status) = session.current_org_subscription_status
     {
-        let billing_url = format!("/@{}/billing", org.slug);
+        // Billing belongs to the account's root org.
+        let billing_url = format!("/@{}/billing", session.billing_org().unwrap_or(org).slug);
         match status {
             hot::db::OrgPlanStatus::Active => {
                 // No notice needed
@@ -1693,8 +1694,10 @@ fn build_global_notices(session: &crate::auth::Session) -> Vec<GlobalNotice> {
             }
             hot::db::OrgPlanStatus::Inactive => {
                 notices.push(
-                    GlobalNotice::warning("Your plan is inactive.")
-                        .with_action("Manage Billing →", billing_url),
+                    GlobalNotice::warning(
+                        "Your plan is inactive. Runs, uploads and plan features are paused until you choose a plan.",
+                    )
+                    .with_action("Choose a Plan →", billing_url),
                 );
             }
         }
