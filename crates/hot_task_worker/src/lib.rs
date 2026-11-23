@@ -10195,15 +10195,37 @@ fn resolve_bundle_resource_bind(
         ));
     }
     let canonical_str = canonical.to_string_lossy();
-    if canonical_str.contains(':') || canonical_str.contains('\0') {
+    let Some(bind_source) = bind_mount_source(&canonical_str, cfg!(windows)) else {
         return Err(format!(
             "resource path {:?} cannot be bind-mounted safely",
             resource_path
         ));
-    }
+    };
 
-    let bind = format!("{}:{}:ro", canonical_str, container_path);
+    let bind = format!("{}:{}:ro", bind_source, container_path);
     Ok((bind, container_path.to_string(), resource_path.to_string()))
+}
+
+/// The host side of a Docker `source:target:ro` bind, or None when the path
+/// would be misparsed. A `:` would split the spec and a NUL would truncate it.
+/// On Windows, `canonicalize` returns `\\?\C:\...`: the verbatim prefix is
+/// dropped and the drive letter's colon is allowed, as Docker parses it.
+fn bind_mount_source(canonical: &str, windows: bool) -> Option<&str> {
+    let mut source = canonical;
+    let mut rest = canonical;
+    if windows {
+        let disk = source.strip_prefix(r"\\?\").unwrap_or(source);
+        let bytes = disk.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            source = disk;
+            rest = &disk[2..];
+        }
+    }
+    (!rest.contains(':') && !rest.contains('\0')).then_some(source)
 }
 
 #[cfg(target_os = "linux")]
@@ -15351,6 +15373,31 @@ flaky fn (args: Any): Map {
                 "expected {invalid:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn bind_mount_source_allows_only_a_windows_drive_colon() {
+        assert_eq!(
+            bind_mount_source("/srv/b/resources/cfg", false),
+            Some("/srv/b/resources/cfg")
+        );
+        assert_eq!(bind_mount_source("/srv/a:b/cfg", false), None);
+        assert_eq!(bind_mount_source("/srv/a\0b", false), None);
+        // A drive path on Unix is just a path with a colon.
+        assert_eq!(bind_mount_source(r"C:\b\cfg", false), None);
+
+        assert_eq!(
+            bind_mount_source(r"\\?\C:\b\resources\cfg", true),
+            Some(r"C:\b\resources\cfg")
+        );
+        assert_eq!(bind_mount_source(r"D:\b\cfg", true), Some(r"D:\b\cfg"));
+        assert_eq!(bind_mount_source(r"\\?\C:\b\a:b", true), None);
+        assert_eq!(bind_mount_source(r"\\?\C:", true), None);
+        assert_eq!(
+            bind_mount_source(r"\\?\UNC\host\share\cfg", true),
+            Some(r"\\?\UNC\host\share\cfg")
+        );
+        assert_eq!(bind_mount_source("C:\\b\\a\0", true), None);
     }
 
     #[test]
