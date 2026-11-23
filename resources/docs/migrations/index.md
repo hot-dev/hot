@@ -45,7 +45,7 @@ Pinned installs are useful when you need to finish database migrations with an o
 - A task worker on the Docker box backend now refuses to start, outside local development, when `network.egress-proxy`, `network.deny-cidrs`, `network.allow-cidrs` or `engine.isolation` is set. Docker guests apply none of them. Set `HOT_BOX_BACKEND=kata`, turn Hot Box off with `HOT_BOX_ENABLED=false`, or clear the setting. `hot dev` only warns.
 - With `network.client-ip.trusted-proxy` on, `X-Forwarded-Host` and `X-Forwarded-Proto` are honoured only from a peer listed in `network.client-ip.trusted-proxies`. Check that the list covers every proxy in front of the API.
 
-**Behavior change: events sent from outside can't set `caller` or `_hot_target_build_id`.** `POST /v1/events`, `POST /v1/streams/subscribe-with-event` and `::hot::event/send` drop both top-level keys.
+**Behavior change: two event data keys are reserved.** `POST /v1/events` and `POST /v1/streams/subscribe-with-event` answer 400 when the event data has `_hot_target_build_id`, or has `caller` on a `hot:call` event. `::hot::event/send` drops those keys instead. `caller` on any other event type is left alone.
 
 **Behavior change: webhook response statuses.** A webhook handler's untyped result is an HTTP response only when its `status` is 200 to 599. A typed `HttpResponse` with any other status answers 500.
 
