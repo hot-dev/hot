@@ -1,0 +1,199 @@
+::gemini::test::live-smoke ns
+meta {
+    doc: """
+    Live network smoke tests for the Gemini chat-tools adapter.
+
+    Gated by the `HOT_LIVE_TESTS` env var so the normal suite stays
+    hermetic and offline. They also need a real `GEMINI_API_KEY`, which goes
+    in as a per-call key through `ChatOptions.provider-opts`.
+    `GEMINI_SMOKE_MODEL` picks the model (default `gemini-3.8-flash`).
+    Gemini 3 and later require thought signatures back on every
+    function-call turn, which these tests check.
+
+    ```bash
+    HOT_LIVE_TESTS=1 GEMINI_API_KEY=... GEMINI_SMOKE_MODEL=gemini-3.8-flash hot test --project pkg-test-gemini ::gemini::test::live-smoke
+    ```
+
+    With `HOT_LIVE_TESTS` unset every test here passes without a call.
+    """
+}
+
+::env     ::hot::env
+::ct      ::gemini::chat-tools
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+is-live fn (): Bool {
+    and(not(is-empty(::env/get("HOT_LIVE_TESTS", ""))), not(is-empty(::env/get("GEMINI_API_KEY", ""))))
+}
+
+smoke-model fn (): Str { ::env/get("GEMINI_SMOKE_MODEL", "gemini-3.8-flash") }
+
+key-opts fn (): Map { {api-key: ::env/get("GEMINI_API_KEY", "")} }
+
+// Gemini 2.5 thinks by budget and doesn't require signatures; 3 and later do both by level.
+is-gemini-3 fn (): Bool { not(starts-with(smoke-model(), "gemini-2")) }
+
+// Thinking on, in the form the model takes.
+THINKING_OPTIONS_3 ::ct/ChatRequestOptions({max-tokens: 4096, thinking-level: "low", include-thoughts: true})
+THINKING_OPTIONS_25 ::ct/ChatRequestOptions({max-tokens: 4096, thinking-budget: 512, include-thoughts: true})
+
+thinking-options fn (): ::ct/ChatRequestOptions {
+    if(is-gemini-3(), THINKING_OPTIONS_3, THINKING_OPTIONS_25)
+}
+
+get-weather
+meta { doc: """Test fixture: the weather in a city.""" }
+fn (city: Str): Str { `${city}: 18C and clear` }
+
+current-year
+meta { doc: """Test fixture: a tool that takes no arguments.""" }
+fn (): Int { 2031 }
+
+WEATHER_TOOL ::ai-tool/from-fn(get-weather, {name: "get_weather", description: "The current weather in one city."})
+YEAR_TOOL ::ai-tool/from-fn(current-year, {name: "current_year", description: "The current year. Takes no arguments."})
+
+chat-opts fn (tools: Vec<::ai-tool/Tool>): ::ai-chat/ChatOptions {
+    ::ai-chat/ChatOptions({
+        chat-opts-fn: ::ct/chat-with-tools,
+        chat-stream-opts-fn: ::ct/chat-with-tools-stream,
+        model: smoke-model(),
+        provider-opts: key-opts(),
+        tools: tools,
+        max-iterations: 6,
+    })
+}
+
+test-live-text
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-opts-fn: ::ct/chat-with-tools,
+                model: smoke-model(),
+                provider-opts: key-opts(),
+                system: "Reply with exactly the word pong, in lowercase, and nothing else.",
+                max-iterations: 1,
+            })
+            answer ::ai-chat/run-loop(opts, "ping")
+            assert(contains(lowercase(answer), "pong"), `text reply, got ${answer}`)
+        }
+    }
+}
+
+test-live-parallel-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop(chat-opts([WEATHER_TOOL]), "Call get_weather for Paris and for Rome, then tell me both results.")
+            assert(contains(answer, "Paris"), `names Paris, got ${answer}`)
+            assert(contains(answer, "Rome"), `names Rome, got ${answer}`)
+            assert(contains(answer, "18"), `uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-stream-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop-stream(chat-opts([WEATHER_TOOL]), "Call get_weather for Oslo, then tell me the result.", ::ai-chat/noop-on-delta)
+            assert(contains(answer, "18"), `stream uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-thinking-keeps-signatures-across-turns
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            options thinking-options()
+            thinking-chat (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, opts: Map): ::ai-chat/ChatReply {
+                ::ct/chat-with-tools-options(model, messages, system, tools, options, opts)
+            }
+
+            first-reply ::ct/chat-with-tools-options(
+                smoke-model(),
+                [::ai-chat/user-message("Call get_weather for Lima.")],
+                null,
+                [WEATHER_TOOL],
+                options,
+                key-opts()
+            )
+            assert-eq("tool_use", first-reply.stop-reason, "the model calls the tool")
+            call first-reply.tool-calls[0]
+            cond {
+                is-gemini-3() => { assert(is-some(get(or(call.meta, {}), "thought-signature")), "Gemini 3 signs the call") }
+                => { assert(true) }
+            }
+
+            loop-opts ::ai-chat/ChatOptions({
+                chat-opts-fn: thinking-chat,
+                model: smoke-model(),
+                provider-opts: key-opts(),
+                tools: [WEATHER_TOOL],
+                max-iterations: 6,
+            })
+            answer ::ai-chat/run-loop(loop-opts, "Call get_weather for Lima, then for Quito, one after the other, then report both.")
+            assert(contains(answer, "Lima"), `names Lima, got ${answer}`)
+            assert(contains(answer, "Quito"), `names Quito, got ${answer}`)
+        }
+    }
+}
+
+test-live-zero-arg-tool
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop(chat-opts([YEAR_TOOL]), "Use the current_year tool and tell me the year it returns.")
+            assert(contains(answer, "2031"), `uses the zero-arg tool, got ${answer}`)
+        }
+    }
+}
+
+test-live-response-schema
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            options ::ct/ChatRequestOptions({
+                max-tokens: 2048,
+                response-schema: {type: "object", properties: {answer: {type: "integer"}}, required: ["answer"]},
+            })
+            reply ::ct/chat-with-tools-options(smoke-model(), [::ai-chat/user-message("What is 2 + 2?")], null, null, options, key-opts())
+            assert-eq(4, from-json(reply.text).answer, "a JSON reply in the schema")
+            assert(gt(reply.usage.input-tokens, 0), "usage is filled in")
+        }
+    }
+}
+
+test-live-a-bad-key-is-an-err
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            bad {api-key: "not-a-real-key-0000000000"}
+            messages [::ai-chat/user-message("Hi")]
+            reply ::ct/chat-with-tools(smoke-model(), messages, null, null, bad)
+            assert(is-err(reply), "a refused call is an Err")
+            assert(gte(err-value(reply).status, 400), "with its status")
+            assert(is-some(err-value(reply).body.error), "and Gemini's error body")
+
+            streamed ::ct/chat-with-tools-stream(smoke-model(), messages, null, null, ::ai-chat/noop-on-delta, bad)
+            assert(is-err(streamed), "a refused stream is an Err")
+            assert(is-some(err-value(streamed).body.error), "with the decoded error body")
+        }
+    }
+}

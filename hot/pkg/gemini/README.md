@@ -7,7 +7,7 @@ Google Gemini API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/gemini": "1.2.5"
+"hot.dev/gemini": "1.3.0"
 ```
 
 ## Configuration
@@ -62,6 +62,27 @@ for-each(stream.body, (chunk) {
     println(chunk)
 })
 ```
+
+### Tool calling with hot-ai
+
+`::gemini::chat-tools` satisfies the `::ai::chat` chat contract, so a Gemini model can run under `::ai::chat/run-loop` and `run-loop-stream` with tools. `hot-ai`'s built-in registry leaves every provider's `chat-fn` null, so wire the adapter on `ChatOptions`:
+
+```hot
+get-weather fn (city: Str): Str { `${city}: 18C` }
+
+opts ::ai::chat/ChatOptions({
+    chat-fn: ::gemini::chat-tools/chat-with-tools,
+    chat-stream-fn: ::gemini::chat-tools/chat-with-tools-stream,
+    model: "gemini-2.5-flash",
+    tools: [::ai::tool/from-fn(get-weather)]
+})
+
+answer ::ai::chat/run-loop(opts, "What's the weather in Paris?")
+```
+
+For a per-call key, use `chat-opts-fn` and `chat-stream-opts-fn` with `provider-opts: {api-key: tenant-key}`. For thinking, output ceiling, context caching, safety settings or a response schema, bind `chat-with-tools-options` with a `ChatRequestOptions` in a closure.
+
+Thought signatures, which Gemini 3 requires back on the next turn, ride on each `ToolCall.meta` and go back on their own. Thought text stays out of the reply. A refused call, an error inside a stream, a stream cut short and a reply with no text and no call each come back as an Err you can check with `is-err`.
 
 ### Image Generation (Imagen)
 
