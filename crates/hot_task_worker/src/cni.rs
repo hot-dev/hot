@@ -5,8 +5,8 @@ use crate::guest_network::{SUBNET, guest_policy};
 /// Manages network namespace lifecycle and invokes the CNI bridge plugin to
 /// provide outbound internet access from Kata microVMs. The flow is:
 ///   1. `setup(container_id)` — create a netns + call CNI ADD (bridge + IPAM)
-///   2. Pass the netns path in the OCI spec so Kata's macvtap model wires it
-///      into the VM via a macvtap device
+///   2. Pass the netns path in the OCI spec so Kata's tcfilter model wires it
+///      into the VM (tc redirects between the veth and the VM's tap)
 ///   3. `teardown(container_id)` — call CNI DEL + remove the netns
 ///
 /// All operations run via `nsenter -t 1 -m -n` so they execute in the HOST's

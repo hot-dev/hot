@@ -25,6 +25,9 @@ AWS = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/aws/singl
 GCP = "\n".join(p.read_text() for p in sorted((ROOT / "opentofu/stacks/gcp/single-machine").glob("*.tf")))
 
 
+KATA_CONFIG = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml"
+
+
 def heredoc(target):
     """The body of the here-document that setup-host.sh writes to target."""
     match = re.search(rf"cat > {re.escape(target)} <<'?(\w+)'?\n(.*?)\n\1\n", SETUP, re.S)
@@ -400,14 +403,24 @@ class HostImage(unittest.TestCase):
         self.assertNotRegex(SETUP, r"mkdir -p /run/")
 
     def test_largest_box_fits_the_kata_memory_ceiling(self):
-        kata = tomllib.loads(heredoc("/opt/kata/share/defaults/kata-containers/configuration.toml")
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
                              .replace("${rootfs}", "/rootfs.img"))
         qemu = kata["hypervisor"]["qemu"]
         self.assertTrue(kata["runtime"]["static_sandbox_resource_mgmt"])
         limits = (ROOT.parent / "crates/hot_task_worker/src/box_limits.rs").read_text()
         largest = int(re.search(r"SYSTEM_MAX_MEMORY_MB: u64 = ([0-9_]+);", limits).group(1).replace("_", ""))
-        # Static sizing starts each VM with default_memory plus the box's limit.
-        self.assertGreaterEqual(qemu["default_maxmemory"], qemu["default_memory"] + largest)
+        # runtime-rs starts each VM with overhead_memory plus the box's limit,
+        # and the Go runtime added default_memory: keep them the same.
+        self.assertEqual(qemu["overhead_memory"], qemu["default_memory"])
+        self.assertEqual(qemu["overhead_vcpus"], qemu["default_vcpus"])
+        self.assertGreaterEqual(qemu["default_maxmemory"], qemu["overhead_memory"] + largest)
+
+    def test_box_networks_use_a_model_runtime_rs_has(self):
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
+                             .replace("${rootfs}", "/rootfs.img"))
+        # runtime-rs knows tcfilter, l3forwarding and none, and treats any other
+        # name as none: an internet box would get an interface and no route.
+        self.assertEqual(kata["runtime"]["internetworking_model"], "tcfilter")
 
     def test_docker_takes_no_address_range_of_its_own(self):
         daemon = json.loads(heredoc("/etc/docker/daemon.json"))
@@ -420,15 +433,96 @@ class HostImage(unittest.TestCase):
     def test_kata_containerd_runs_without_cri(self):
         config = tomllib.loads(heredoc("/etc/kata-containerd/config.toml")
                                .replace("${KATA_CONTAINERD_GID}", "2000"))
-        self.assertIn("io.containerd.grpc.v1.cri", config["disabled_plugins"])
+        self.assertEqual(config["version"], 4)
+        # containerd 2 splits CRI into several plugins; disabling one leaves the rest.
+        self.assertLessEqual({"io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images",
+                              "io.containerd.cri.v1.runtime",
+                              "io.containerd.podsandbox.controller.v1.podsandbox",
+                              "io.containerd.nri.v1.nri"}, set(config["disabled_plugins"]))
+        # Without these, a missing pool leaves containerd up with no images or tasks.
+        self.assertLessEqual({"io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"},
+                             set(config["required_plugins"]))
+        # Version 4 ignores a top-level [grpc], and the socket would be Docker's.
+        self.assertNotIn("grpc", config)
+        self.assertNotIn("ttrpc", config)
         self.assertEqual(list(config["plugins"]),
-                         ["io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"])
-        self.assertEqual(config["grpc"]["gid"], 2000)
+                         ["io.containerd.server.v1.grpc", "io.containerd.server.v1.ttrpc",
+                          "io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"])
+        for plugin, address in (("grpc", "/run/kata-containerd/containerd.sock"),
+                                ("ttrpc", "/run/kata-containerd/containerd.sock.ttrpc")):
+            server = config["plugins"][f"io.containerd.server.v1.{plugin}"]
+            self.assertEqual((server["address"], server["gid"]), (address, 2000))
+
+    def test_boxes_run_on_katas_rust_runtime(self):
+        # Task workers name io.containerd.kata.v2 on every host; the link decides
+        # which runtime that is.
+        self.assertIn("ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 "
+                      "/usr/local/bin/containerd-shim-kata-v2", SETUP)
+        self.assertIn('kata-static-${KATA_VERSION}-amd64.tar.zst', SETUP)
+        self.assertIn(f"rm -f {KATA_CONFIG}\n", SETUP)
+        kata = tomllib.loads(heredoc(KATA_CONFIG).replace("${rootfs}", "/rootfs.img"))
+        self.assertEqual({key: kata["runtime"][key] for key in ("name", "hypervisor_name", "agent_name")},
+                         {"name": "virt_container", "hypervisor_name": "qemu", "agent_name": "kata"})
+        # runtime-rs refuses a config whose overall budget is below the sleep
+        # between attempts: every box would fail to start.
+        agent = kata["agent"]["kata"]
+        self.assertEqual((agent["dial_timeout_ms"], agent["reconnect_timeout_ms"]), (10, 30000))
+        self.assertGreaterEqual(agent["reconnect_timeout_ms"], agent["dial_timeout_ms"])
+        # Keys only the Go runtime reads would be silently ignored.
+        for section, key in (("hypervisor.qemu", "use_vsock"), ("hypervisor.qemu", "firmware_volume"),
+                             ("agent.kata", "dial_timeout"), ("runtime", "disable_guest_empty_dir")):
+            table = kata
+            for part in section.split("."):
+                table = table[part]
+            self.assertNotIn(key, table, f"{section}.{key}")
+        self.assertIn("kata-containers.img)", SETUP)
+        self.assertNotIn("kata-ubuntu-", SETUP)
+
+    def test_the_guest_boots_hot_init_from_its_own_root(self):
+        init_path = '"$work/guest-root/usr/local/sbin/hot-init"'
+        init = heredoc(init_path)
+        kata = tomllib.loads(heredoc(KATA_CONFIG).replace("${rootfs}", "/rootfs.img"))
+        self.assertIn(" init=/usr/local/sbin/hot-init", kata["hypervisor"]["qemu"]["kernel_params"])
+        # Written into the root before it is packed, and executable.
+        self.assertLess(SETUP.index(f"cat > {init_path}"), SETUP.index("mkfs.erofs"))
+        self.assertLess(SETUP.index(f"chmod 0755 {init_path}"), SETUP.index("mkfs.erofs"))
+        self.assertTrue(init.startswith("#!/bin/bash\n"))
+        subprocess.run(["bash", "-n"], input=init, text=True, check=True)
+        # The agent runs as a child, with kata-agent.service's limits, and the
+        # VM powers off once it is gone.
+        self.assertIn("\nulimit -n 1073741824\n", init)
+        self.assertIn("\necho -997 > /proc/self/oom_score_adj\n", init)
+        self.assertIn("\n/usr/bin/kata-agent &\n", init)
+        # Boxes share the guest's network namespace, so its localhost.
+        self.assertLess(init.index("\nip link set lo up\n"), init.index("\n/usr/bin/kata-agent &\n"))
+        self.assertTrue(init.endswith("\necho o > /proc/sysrq-trigger"))
+        for mount in ("proc /proc", "sysfs /sys", "cgroup2 /sys/fs/cgroup", "tmpfs /run", "tmpfs /tmp",
+                      "devpts /dev/pts", "tmpfs /dev/shm"):
+            self.assertRegex(init, rf"\nmount -t {mount.split()[0]} .*{re.escape(mount)}\n")
+
+    def test_hot_init_applies_sysctl_d_as_systemd_does(self):
+        init = heredoc('"$work/guest-root/usr/local/sbin/hot-init"')
+        loop = re.search(r"\nfor conf in /usr/lib/sysctl\.d/\*\.conf; do\n.*?\n *done < \"\$conf\"\ndone\n", init, re.S).group(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            confs, proc = Path(tmp, "sysctl.d"), Path(tmp, "sys")
+            confs.mkdir()
+            for key in ("kernel/printk", "net/ipv4/conf/all/rp_filter", "vm/max_map_count"):
+                (proc / key).parent.mkdir(parents=True, exist_ok=True)
+                (proc / key).write_text("old\n")
+            (confs / "55-a.conf").write_text("# comment\n; also\n\nkernel.printk = 4 4 1 7\n"
+                                             "net.ipv4.conf.all.rp_filter=2\n-net.core.missing = 1\n")
+            (confs / "55-b.conf").write_text("vm.max_map_count=1048576")
+            script = loop.replace("/usr/lib/sysctl.d", str(confs)).replace('"/proc/sys/', f'"{proc}/')
+            subprocess.run(["bash", "-c", script], check=True)
+            self.assertEqual((proc / "kernel/printk").read_text(), "4 4 1 7\n")
+            self.assertEqual((proc / "net/ipv4/conf/all/rp_filter").read_text(), "2\n")
+            self.assertEqual((proc / "vm/max_map_count").read_text(), "1048576\n")
+            self.assertFalse((proc / "net/core").exists())
 
     def test_boxes_start_on_a_host_without_selinux(self):
         # Kata creates no container when guest SELinux is on and the host has
         # none, and an absent setting leaves it on. Ubuntu ships AppArmor.
-        kata = tomllib.loads(heredoc("/opt/kata/share/defaults/kata-containers/configuration.toml")
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
                              .replace("${rootfs}", "/rootfs.img"))
         self.assertIs(kata["hypervisor"]["qemu"]["disable_guest_selinux"], True)
         self.assertIn('[[ "$ID" == "ubuntu" && "$VERSION_ID" == "24.04" ]]', SETUP)

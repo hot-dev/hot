@@ -542,7 +542,8 @@ class RuntimeContract(unittest.TestCase):
         executor = (ROOT.parent / "crates/hot_task_worker/src/executor.rs").read_text()
         self.assertEqual(int(re.search(r"^default_memory = (\d+)$", host, re.M)[1]), renderer.KATA_GUEST_BASE_MB)
         self.assertEqual(int(re.search(r"DEFAULT_MEMORY_MB: u64 = (\d+);", limits)[1]), renderer.BOX_MEMORY_MB)
-        # A guest's RAM is default_memory plus the box's limit, and /tmp is a
+        self.assertEqual(int(re.search(r"^overhead_memory = (\d+)$", host, re.M)[1]), renderer.KATA_GUEST_BASE_MB)
+        # A guest's RAM is overhead_memory plus the box's limit, and /tmp is a
         # tmpfs in that RAM, so the allowance has no separate room for it.
         self.assertIn("static_sandbox_resource_mgmt = true", host)
         self.assertRegex(executor, r'"destination": "/tmp",\s*"type": "tmpfs",\s*"source": "tmpfs"')
