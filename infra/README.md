@@ -17,9 +17,10 @@ Implemented:
   digits, and `-`. Plan refuses anything else.
 - AWS and GCP OpenTofu roots with pinned providers and committed lockfiles.
   New private networks have NAT egress; existing networks are reused without
-  changing their routes. VMs have no public addresses or SSH ingress. A subnet
-  the GCP stacks create keeps VPC flow logs (half the flows, in ten-minute
-  records); on an existing network, flow logs are the subnet owner's setting.
+  changing their routes. VMs have no public addresses or SSH ingress. A network
+  the stacks create keeps flow logs in ten-minute records: every flow of the
+  VPC on AWS, in the log group `/hot/NAME/vpc-flow`, and half the flows of the
+  subnet on GCP. On an existing network, flow logs are its owner's setting.
 - Retained, encrypted cloud data disks, encrypted boot disks, nested
   virtualization, scoped secret access, and separate host identities.
 - Required client-side encryption of OpenTofu state and saved plans. The
@@ -2599,6 +2600,7 @@ there stays.
 | --- | --- | --- |
 | Data-disk snapshots | 7 days | `backup.retention_days` |
 | Container logs in CloudWatch | 30 days | `logging.retention_days` |
+| Flow logs of a new VPC in CloudWatch | 30 days | `logging.retention_days` |
 | Container logs in Cloud Logging | The log bucket's retention (30 days by default) | Cloud Logging |
 | Local container logs | 3 files of 10 MB per container | Fixed |
 | Pre-upgrade and data-move database dumps | The last 3 of each | Fixed |
@@ -2621,8 +2623,8 @@ Builds and files stay until users delete them.
 - NAT for outbound traffic (AWS NAT gateway, GCP Cloud NAT) and, when
   enabled, the load balancers for public endpoints;
 - managed PostgreSQL and Valkey instances (high availability doubles them);
-- log ingestion and storage (on GCP this includes the new subnet's VPC flow
-  logs), metrics, and alarms;
+- log ingestion and storage (this includes a new network's flow logs),
+  metrics, and alarms;
 - Secrets Manager secrets on AWS.
 
 **Budgets.** Set `monitoring.monthly_budget` to create a monthly cost
@@ -2767,6 +2769,8 @@ says:
     pointer as it expects.
   - That an ECR mirror in another account answers `AccessDeniedException` to a look by
     name, which preflight turns into a warning.
+  - That a new VPC's flow logs reach `/hot/NAME/vpc-flow`, on both presets: the role
+    the flow-log service takes holds four `logs` actions on that group alone.
   - A HEAD and a GET of a missing key under a role's prefix with the host role,
     recording 403 or 404. The result decides the prefix-limited `s3:ListBucket`
     grant in both stacks.

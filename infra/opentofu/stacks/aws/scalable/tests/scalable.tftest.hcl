@@ -20,6 +20,9 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::123456789012:role/hot-example" }
   }
+  mock_resource "aws_cloudwatch_log_group" {
+    defaults = { arn = "arn:aws:logs:us-east-1:123456789012:log-group:/hot/hot-example" }
+  }
   mock_resource "aws_sns_topic" {
     defaults = { arn = "arn:aws:sns:us-east-1:123456789012:hot-example-alerts" }
   }
@@ -92,6 +95,14 @@ run "each_role_runs_in_its_own_group" {
   assert {
     condition     = aws_launch_template.role["app"].metadata_options[0].http_tokens == "required" && length(aws_nat_gateway.egress) == 2 && length(aws_subnet.private) == 2
     error_message = "IMDSv2 only, and private hosts in two zones with a NAT gateway each."
+  }
+  assert {
+    condition     = length(aws_flow_log.vpc) == 1 && aws_flow_log.vpc[0].traffic_type == "ALL" && aws_flow_log.vpc[0].max_aggregation_interval == 600 && aws_cloudwatch_log_group.flow[0].name == "/hot/hot-example/vpc-flow" && aws_cloudwatch_log_group.flow[0].retention_in_days == aws_cloudwatch_log_group.host.retention_in_days
+    error_message = "A VPC the stack creates keeps flow logs of every flow, as long as the hosts' logs."
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.flow[0].assume_role_policy).Statement[0].Principal.Service == "vpc-flow-logs.amazonaws.com" && contains(keys(jsondecode(aws_iam_role.flow[0].assume_role_policy).Statement[0].Condition.StringEquals), "aws:SourceAccount")
+    error_message = "Only the flow-log service takes the role that writes them, and only for this account."
   }
   assert {
     condition     = data.aws_availability_zones.available[0].state == null && one(data.aws_availability_zones.available[0].filter).name == "zone-type" && contains(tolist(one(data.aws_availability_zones.available[0].filter).values), "availability-zone")
@@ -609,6 +620,10 @@ run "existing_network_in_a_secondary_range" {
   assert {
     condition     = alltrue([for config in values(local.host_config) : config.data.postgres.endpoint.deny_cidrs == tolist(["100.64.32.0/20", "100.64.48.0/20"]) && config.data.valkey.endpoint.deny_cidrs == tolist(["100.64.32.0/20", "100.64.48.0/20"])])
     error_message = "On an existing network, where the VPC's range is not denied, every host learns each data subnet's range."
+  }
+  assert {
+    condition     = length(aws_flow_log.vpc) == 0 && length(aws_iam_role.flow) == 0 && length(aws_cloudwatch_log_group.flow) == 0
+    error_message = "An existing network's flow logs are its owner's setting."
   }
 }
 
