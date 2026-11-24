@@ -84,19 +84,19 @@ jobs:
         shell: pwsh
         run: Set-MpPreference -DisableRealtimeMonitoring $true
 
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
       # Since the 20261116 windows-2025 image, a cold test build runs out of
       # commit charge (os error 1455) while rust-lld maps the test binaries'
-      # rlibs, even at -j 2. A fixed 16 GB pagefile raises the limit; the
-      # action creates it at once, with no reboot.
+      # rlibs, even at -j 2. A fixed 16 GB pagefile raises the limit, created
+      # at once with no reboot. Some runners refuse it on D:, which the
+      # al-cheb action reported only as an error that left the step green, so
+      # the build failed hours later: the script says why, tries C:, and fails
+      # here when no drive takes it.
       - name: Enlarge the pagefile (Windows)
         if: runner.os == 'Windows'
-        uses: al-cheb/configure-pagefile-action@a3b6ebd6b634da88790d9c58d4b37a7f4a7b8708 # v1.4
-        with:
-          minimum-size: 16GB
-          maximum-size: 16GB
-          disk-root: "D:"
-
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        shell: pwsh
+        run: ./scripts/windows-pagefile.ps1 -SizeGB 16 -Drives D:,C:
 
       - name: Windows installer scope and directory tests
         if: runner.os == 'Windows'
