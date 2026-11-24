@@ -2476,6 +2476,18 @@ finally:
 
             let pull_start = Instant::now();
             timings.image_pull_started_at = Some(pull_start);
+            // Counted in the pull phase, which is platform time, not the box's.
+            if let Err(error) = wait_for_containerd(
+                &self.channel,
+                CONTAINERD_RESTART_WAIT,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            {
+                timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+                timings.image_pull_ended_at = Some(Instant::now());
+                return Err(error);
+            }
             tracing::debug!(trace_id = trace_id, image = %image, "kata.image.pulling");
             let requested_disk_mb = limits
                 .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
@@ -3834,6 +3846,52 @@ finally:
         Some((used_sectors, total_sectors))
     }
 
+    /// How long a box waits for Kata's containerd to answer before it starts.
+    /// systemd restarts containerd 5 s after it exits, so this rides out a
+    /// crash or a restart instead of failing every box task that arrives
+    /// meanwhile; a containerd that stays down still fails the task.
+    const CONTAINERD_RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait up to `budget` for containerd to answer its version call. Any
+    /// answer will do, even an error: only an unreachable daemon (the socket
+    /// gone or refusing while systemd restarts it) waits.
+    async fn wait_for_containerd(
+        channel: &Channel,
+        budget: std::time::Duration,
+        retry: std::time::Duration,
+    ) -> ExecutorResult<()> {
+        let started = Instant::now();
+        let mut warned = false;
+        loop {
+            let mut client = containerd_client::services::v1::version_client::VersionClient::new(
+                channel.clone(),
+            );
+            let call = client.version(Request::new(()));
+            let error = match tokio::time::timeout(
+                retry.max(std::time::Duration::from_secs(1)),
+                call,
+            )
+            .await
+            {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(status)) if status.code() != Code::Unavailable => return Ok(()),
+                Ok(Err(status)) => status.message().to_string(),
+                Err(_) => "no answer".to_string(),
+            };
+            if started.elapsed() + retry > budget {
+                return Err(ExecutorError::Connection(format!(
+                    "Kata's containerd did not answer for {}s: {error}",
+                    budget.as_secs()
+                )));
+            }
+            if !warned {
+                tracing::warn!(%error, "kata.containerd.unavailable, waiting before the box starts");
+                warned = true;
+            }
+            tokio::time::sleep(retry).await;
+        }
+    }
+
     async fn content_available_mb() -> ExecutorResult<u64> {
         let output = crate::cni::host_command("df", &["-Pm", "/var/lib/kata/containerd"])
             .output()
@@ -3894,6 +3952,40 @@ finally:
             )));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod containerd_wait_tests {
+        use super::*;
+
+        /// A containerd that doesn't answer fails the box with a connection
+        /// error once the wait runs out, not at once and not forever.
+        #[tokio::test]
+        async fn unreachable_containerd_fails_after_the_wait() {
+            // Port 1 on loopback refuses, as a missing socket does.
+            let channel =
+                containerd_client::tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                    .connect_lazy();
+            let started = Instant::now();
+            let result = wait_for_containerd(
+                &channel,
+                std::time::Duration::from_millis(600),
+                std::time::Duration::from_millis(200),
+            )
+            .await;
+            let waited = started.elapsed();
+            match result {
+                Err(ExecutorError::Connection(message)) => {
+                    assert!(message.contains("did not answer"), "{message}");
+                }
+                other => panic!("expected a connection error, got {other:?}"),
+            }
+            assert!(
+                waited >= std::time::Duration::from_millis(400),
+                "{waited:?}"
+            );
+            assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+        }
     }
 
     #[cfg(test)]
