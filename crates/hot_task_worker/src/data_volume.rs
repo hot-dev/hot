@@ -60,6 +60,60 @@ impl Drop for DetachedCleanupSlot {
     }
 }
 
+/// Whether box `/data` mounts are made in PID 1's mount namespace: true when
+/// this worker shares the host's PID namespace but not its mounts, as a task
+/// worker in a container on a box host does. Kata's shim resolves a box's
+/// `/data` path in the host's mounts, and a container's bind of the volume
+/// directory keeps the mounts made in it private unless the bind has shared
+/// propagation, which ECS can't set: the shim then shares the bare directory,
+/// and the box's writes bypass its size. Mounting in the host's namespace works
+/// with shared propagation or without. A worker on the host itself, or in a
+/// container with a PID namespace of its own, shares PID 1's mounts, and runs
+/// the commands directly.
+fn mounts_in_host_namespace() -> bool {
+    std::cfg_select! {
+        target_os = "linux" => {
+            static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *HOST.get_or_init(|| {
+                match (
+                    std::fs::read_link("/proc/1/ns/mnt"),
+                    std::fs::read_link("/proc/self/ns/mnt"),
+                ) {
+                    (Ok(init), Ok(own)) => init != own,
+                    _ => false,
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
+/// The command line that runs `program` where box `/data` mounts are made.
+fn mount_argv(program: &str, host_namespace: bool) -> Vec<&str> {
+    if host_namespace {
+        vec!["nsenter", "-t", "1", "-m", "--", program]
+    } else {
+        vec![program]
+    }
+}
+
+/// `program` (mount, umount, chown, chmod) in the mount namespace where box
+/// `/data` mounts are made: see `mounts_in_host_namespace`.
+pub(crate) fn mount_command(program: &str) -> tokio::process::Command {
+    let argv = mount_argv(program, mounts_in_host_namespace());
+    let mut command = tokio::process::Command::new(argv[0]);
+    command.args(&argv[1..]).kill_on_drop(true);
+    command
+}
+
+/// The blocking form of `mount_command`, for the detached cleanup thread.
+fn mount_command_sync(program: &str) -> std::process::Command {
+    let argv = mount_argv(program, mounts_in_host_namespace());
+    let mut command = std::process::Command::new(argv[0]);
+    command.args(&argv[1..]);
+    command
+}
+
 /// Whether a failed `fallocate` leaves `truncate` to make the backing file: only
 /// where fallocate can't work at all, because the tool is missing or the
 /// filesystem doesn't support it. Any other failure, no space above all, is
@@ -351,7 +405,7 @@ impl DataVolume {
         }
 
         // Mount via loop device
-        let output = match Self::killable_command("mount")
+        let output = match mount_command("mount")
             .args([
                 "-o",
                 "loop,nosuid,nodev,noexec",
@@ -375,7 +429,7 @@ impl DataVolume {
         // Make writable by container users: default `nobody` (65534) as well as
         // arbitrary non-root image `USER`s (e.g. node=1000, postgres=999) inside
         // this per-task isolated volume.
-        let output = match Self::killable_command("chown")
+        let output = match mount_command("chown")
             .args(["65534:65534", volume.mount_point.to_string_lossy().as_ref()])
             .output()
             .await
@@ -391,14 +445,20 @@ impl DataVolume {
             )));
         }
 
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(
-                &volume.mount_point,
-                std::fs::Permissions::from_mode(0o1777),
-            )
+        // The volume's root, where it is mounted: not the directory under it.
+        let output = match mount_command("chmod")
+            .args(["1777", volume.mount_point.to_string_lossy().as_ref()])
+            .output()
             .await
-            .map_err(|e| DataVolumeError::Io(format!("chmod data volume: {e}")))?;
+        {
+            Ok(output) => output,
+            Err(e) => return Err(DataVolumeError::Io(format!("chmod data volume: {e}"))),
+        };
+        if !output.status.success() {
+            return Err(DataVolumeError::Io(format!(
+                "chmod data volume failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         Ok(volume)
@@ -431,6 +491,7 @@ impl DataVolume {
         Ok(false)
     }
 
+    #[cfg(target_os = "linux")]
     fn killable_command(program: &str) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(program);
         command.kill_on_drop(true);
@@ -446,13 +507,13 @@ impl DataVolume {
     pub async fn cleanup(&self) {
         if self.is_loop_mount {
             if self.mounted {
-                let unmounted = Self::killable_command("umount")
+                let unmounted = mount_command("umount")
                     .arg(self.mount_point.to_string_lossy().to_string())
                     .output()
                     .await
                     .is_ok_and(|output| output.status.success());
                 if !unmounted {
-                    let _ = Self::killable_command("umount")
+                    let _ = mount_command("umount")
                         .args(["-l", self.mount_point.to_string_lossy().as_ref()])
                         .output()
                         .await;
@@ -557,12 +618,12 @@ impl DataVolume {
         if is_loop_mount {
             if mounted {
                 let mount_str = mount_point.to_string_lossy().to_string();
-                let unmounted = std::process::Command::new("umount")
+                let unmounted = mount_command_sync("umount")
                     .arg(&mount_str)
                     .output()
                     .is_ok_and(|output| output.status.success());
                 if !unmounted {
-                    let _ = std::process::Command::new("umount")
+                    let _ = mount_command_sync("umount")
                         .args(["-l", &mount_str])
                         .output();
                 }
@@ -664,6 +725,30 @@ mod tests {
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         })
+    }
+
+    /// A worker in a container on a box host mounts in the host's mount
+    /// namespace, where Kata's shim looks; one that shares PID 1's mounts
+    /// runs the command itself.
+    #[test]
+    fn mounts_go_where_pid_one_sees_them() {
+        assert_eq!(
+            mount_argv("mount", true),
+            ["nsenter", "-t", "1", "-m", "--", "mount"]
+        );
+        assert_eq!(mount_argv("umount", false), ["umount"]);
+    }
+
+    /// This test process shares PID 1's mounts unless it runs in a container
+    /// beside the host's PID 1, which test runs don't.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_worker_sharing_pid_one_mounts_mounts_directly() {
+        let shared = std::fs::read_link("/proc/1/ns/mnt").ok()
+            == std::fs::read_link("/proc/self/ns/mnt").ok();
+        if shared {
+            assert!(!mounts_in_host_namespace());
+        }
     }
 
     #[test]

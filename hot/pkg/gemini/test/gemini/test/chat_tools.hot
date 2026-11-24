@@ -1,0 +1,506 @@
+::gemini::test::chat-tools ns
+meta ["test"]
+
+::ct      ::gemini::chat-tools
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+::ctx     ::hot::ctx
+
+ReplyDelta ::ai::chat/ReplyDelta
+
+// ============================================================================
+// Recorded responses
+// ============================================================================
+
+TEXT_REPLY {
+    candidates: [{content: {role: "model", parts: [{text: "Paris is the capital."}]}, finishReason: "STOP", index: 0}],
+    usageMetadata: {promptTokenCount: 12, candidatesTokenCount: 6, totalTokenCount: 18},
+    modelVersion: "gemini-2.5-flash",
+}
+
+// Gemini 3 parallel calls: no ids, the signature on the first call only.
+TWO_CALLS {
+    candidates: [{
+        content: {role: "model", parts: [
+            {functionCall: {name: "get_weather", args: {city: "Paris"}}, thoughtSignature: "c2lnLTE="},
+            {functionCall: {name: "get_weather", args: {city: "Rome"}}},
+        ]},
+        finishReason: "STOP",
+        index: 0,
+    }],
+    usageMetadata: {promptTokenCount: 40, candidatesTokenCount: 20, thoughtsTokenCount: 64, totalTokenCount: 124},
+}
+
+THINKING_TEXT {
+    candidates: [{content: {role: "model", parts: [{text: "Weighing it up.", thought: true}, {text: "42"}]}, finishReason: "STOP"}],
+    usageMetadata: {promptTokenCount: 10, candidatesTokenCount: 1, thoughtsTokenCount: 9, cachedContentTokenCount: 8, totalTokenCount: 20},
+}
+
+get-weather fn (city: Str): Str { `${city}: 18C` }
+
+WEATHER_TOOL ::ai-tool/from-fn(get-weather, {name: "get_weather"})
+
+// The labels of the deltas a stream sends, kept under ctx `key`.
+recorder fn (key: Str): Fn {
+    ::ctx/set(key, [])
+    (delta) {
+        label match delta {
+            ReplyDelta.TextDelta => { `text:${delta.text}` }
+            ReplyDelta.ToolUseStart => { `start:${delta.name}` }
+            ReplyDelta.ToolUseInputDelta => { `input:${delta.partial-input-json}` }
+            ReplyDelta.ToolUseEnd => { "end" }
+            ReplyDelta.Stop => { `stop:${delta.reason}` }
+            => { "other" }
+        }
+
+        ::ctx/set(key, concat(or(::ctx/get(key), []), [label]))
+        null
+    }
+}
+
+// ============================================================================
+// Replies
+// ============================================================================
+
+test-a-text-reply
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TEXT_REPLY)
+    assert-eq("Paris is the capital.", reply.text)
+    assert(is-null(reply.tool-calls), "no calls")
+    assert-eq("end_turn", reply.stop-reason)
+    assert-eq(12, reply.usage.input-tokens)
+    assert-eq(6, reply.usage.output-tokens)
+    assert-eq(18, reply.usage.total-tokens)
+}
+
+test-a-reply-with-two-calls
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TWO_CALLS)
+    assert-eq("tool_use", reply.stop-reason, "calls win over STOP")
+    assert(is-null(reply.text), "no text")
+    calls reply.tool-calls
+    assert-eq(2, length(calls))
+    assert-eq(["get_weather", "get_weather"], map(calls, %.name))
+    assert-eq({city: "Paris"}, calls[0].input)
+    assert-eq({city: "Rome"}, calls[1].input)
+    assert-eq({thought-signature: "c2lnLTE="}, calls[0].meta, "the signature rides on its call")
+    assert(is-null(calls[1].meta), "a call with no id and no signature has no meta")
+    assert(starts-with(calls[0].id, "gemini_"), "a call with no Gemini id gets one")
+    assert(ne(calls[0].id, calls[1].id), "and the two differ")
+    assert-eq(84, reply.usage.output-tokens, "thought tokens count as output")
+    assert-eq(64, reply.usage.thought-tokens)
+}
+
+test-a-call-keeps-its-gemini-id
+meta ["test"]
+fn () {
+    call ::ct/part-tool-call({functionCall: {id: "fc-7", name: "get_weather", args: {city: "Oslo"}}})
+    assert-eq("fc-7", call.id)
+    assert-eq({gemini-id: "fc-7"}, call.meta)
+}
+
+test-a-zero-arg-call-has-an-empty-input
+meta ["test"]
+fn () {
+    call ::ct/part-tool-call({functionCall: {name: "now"}})
+    assert-eq({}, call.input)
+}
+
+test-thought-parts-stay-out-of-the-text
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(THINKING_TEXT)
+    assert-eq("42", reply.text)
+    assert-eq(8, reply.usage.cache-read-tokens)
+    assert-eq(10, reply.usage.output-tokens)
+    assert-eq(20, reply.usage.total-tokens)
+}
+
+test-max-tokens-with-text-is-a-reply
+meta ["test"]
+fn () {
+    reply ::ct/parse-response({candidates: [{content: {role: "model", parts: [{text: "Once upon"}]}, finishReason: "MAX_TOKENS"}]})
+    assert-eq("max_tokens", reply.stop-reason)
+    assert-eq("Once upon", reply.text)
+}
+
+test-an-empty-reply-is-an-err
+meta ["test"]
+fn () {
+    safety ::ct/parse-response({candidates: [{finishReason: "SAFETY", finishMessage: "blocked"}]})
+    assert(is-err(safety), "no text and no call")
+    assert-eq("empty-reply", err-value(safety).kind)
+    assert-eq("SAFETY", err-value(safety).finish-reason)
+    assert-eq("blocked", err-value(safety).message)
+
+    thinking ::ct/parse-response({candidates: [{content: {role: "model", parts: [{text: "Hmm.", thought: true}]}, finishReason: "MAX_TOKENS"}]})
+    assert(is-err(thinking), "thinking that used the whole budget")
+    assert-eq("MAX_TOKENS", err-value(thinking).finish-reason)
+
+    malformed ::ct/parse-response({candidates: [{finishReason: "MALFORMED_FUNCTION_CALL"}]})
+    assert-eq("MALFORMED_FUNCTION_CALL", err-value(malformed).finish-reason)
+}
+
+test-a-blocked-prompt-is-an-err
+meta ["test"]
+fn () {
+    reply ::ct/parse-response({promptFeedback: {blockReason: "PROHIBITED_CONTENT"}})
+    assert(is-err(reply), "no candidates at all")
+    assert-eq("PROHIBITED_CONTENT", err-value(reply).block-reason)
+}
+
+test-an-http-error-is-an-err
+meta ["test"]
+fn () {
+    refused ::hot::http/HttpResponse({
+        status: 400,
+        headers: {},
+        body: {error: {code: 400, message: "Invalid JSON payload", status: "INVALID_ARGUMENT"}},
+    })
+    reply ::ct/reply-from-response(refused)
+    assert(is-err(reply), "a 400 is an Err")
+    assert-eq(400, err-value(reply).status)
+    assert-eq("INVALID_ARGUMENT", err-value(reply).body.error.status)
+
+    ok ::ct/reply-from-response(::hot::http/HttpResponse({status: 200, headers: {}, body: TEXT_REPLY}))
+    assert-eq("Paris is the capital.", ok.text)
+}
+
+test-a-refused-stream-keeps-its-reason
+meta ["test"]
+fn () {
+    response ::hot::http/StreamingHttpResponse({
+        status: 403,
+        headers: {},
+        body: Iter(["{\"error\": {\"code\": 403, ", "\"status\": \"PERMISSION_DENIED\"}}"]),
+    })
+    refused ::gemini::api/refused-stream(response)
+    assert-eq(403, refused.status)
+    assert-eq("PERMISSION_DENIED", refused.body.error.status)
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+test-a-tool-result-turn
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TWO_CALLS)
+    calls reply.tool-calls
+    paris ::ai-tool/ToolResult({id: calls[0].id, output: "Paris: 18C", is-error: false})
+    rome ::ai-tool/ToolResult({id: calls[1].id, output: "no data", is-error: true})
+    out ::ct/to-contents([
+        ::ai-chat/user-message("Weather in Paris and Rome?"),
+        ::ai-chat/assistant-message(reply.text, calls),
+        ::ai-chat/tool-result-message(paris),
+        ::ai-chat/tool-result-message(rome),
+    ])
+
+    assert-eq(["user", "model", "user"], map(out.contents, %.role), "both results share one turn")
+    results out.contents[2].parts
+    assert-eq(2, length(results))
+    assert-eq({name: "get_weather", response: {result: "Paris: 18C"}}, results[0].functionResponse, "a Str is wrapped as an object")
+    assert-eq({name: "get_weather", response: {error: "no data"}}, results[1].functionResponse, "a failure is marked")
+}
+
+test-a-map-result-goes-as-it-is
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "fc-1", name: "get_weather", input: {city: "Oslo"}, meta: {gemini-id: "fc-1"}})
+    result ::ai-chat/tool-result-message(::ai-tool/ToolResult({id: "fc-1", output: {temp: 4}, is-error: false}))
+    part ::ct/to-function-response-part(result, {fc-1: call})
+    assert-eq({id: "fc-1", name: "get_weather", response: {temp: 4}}, part.functionResponse, "a Gemini id is echoed")
+}
+
+test-a-result-with-no-call-in-history-is-named-by-id
+meta ["test"]
+fn () {
+    result ::ai-chat/tool-result-message(::ai-tool/ToolResult({id: "lost", output: 1, is-error: false}))
+    part ::ct/to-function-response-part(result, {})
+    assert-eq("lost", part.functionResponse.name)
+    assert-eq({result: 1}, part.functionResponse.response)
+}
+
+test-the-signature-goes-back-on-the-next-turn
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TWO_CALLS)
+    request ::ct/build-request(
+        [
+            ::ai-chat/user-message("Weather?"),
+            ::ai-chat/assistant-message(reply.text, reply.tool-calls),
+        ],
+        null,
+        [WEATHER_TOOL],
+        ::ct/DEFAULT_REQUEST_OPTIONS
+    )
+    model-turn request.contents[1]
+    assert-eq("model", model-turn.role)
+    assert-eq("c2lnLTE=", model-turn.parts[0].thoughtSignature)
+    assert-eq({name: "get_weather", args: {city: "Paris"}}, model-turn.parts[0].functionCall, "no invented id is sent")
+    assert(not(in("thoughtSignature", keys(model-turn.parts[1]))), "the second call had none")
+}
+
+test-assistant-text-comes-before-its-calls
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "c1", name: "get_weather", input: {city: "Paris"}})
+    out ::ct/to-contents([::ai-chat/assistant-message("Checking.", [call])])
+    parts out.contents[0].parts
+    assert-eq({text: "Checking."}, parts[0])
+    assert-eq("get_weather", parts[1].functionCall.name)
+}
+
+test-system-messages-join-the-system-instruction
+meta ["test"]
+fn () {
+    request ::ct/build-request(
+        [
+            ::ai-chat/Message({role: "system", content: "Answer in French."}),
+            ::ai-chat/user-message("Hi"),
+        ],
+        "Be brief.",
+        null,
+        ::ct/DEFAULT_REQUEST_OPTIONS
+    )
+    assert-eq({parts: [{text: "Be brief.\n\nAnswer in French."}]}, request.systemInstruction)
+    assert-eq(["user"], map(request.contents, %.role), "no system role in contents")
+    assert(not(in("tools", keys(request))), "no tools given, none sent")
+    assert(not(in("generationConfig", keys(request))), "nothing set, nothing sent")
+}
+
+test-an-empty-user-message-is-dropped
+meta ["test"]
+fn () {
+    out ::ct/to-contents([::ai-chat/user-message(""), ::ai-chat/user-message("Hi")])
+    assert-eq(1, length(out.contents), "Gemini refuses a turn with no parts")
+}
+
+test-image-parts-are-inline-data
+meta ["test"]
+fn () {
+    m ::ai-chat/Message({
+        role: "user",
+        content: "What is this?",
+        parts: [::ai-chat/text-part("What is this?"), ::ai-chat/image-part("iVBORw0KGgo=", "image/png")],
+    })
+    parts ::ct/to-contents([m]).contents[0].parts
+    assert-eq({text: "What is this?"}, parts[0])
+    assert-eq({inlineData: {mimeType: "image/png", data: "iVBORw0KGgo="}}, parts[1])
+}
+
+test-tool-declarations
+meta ["test"]
+fn () {
+    now ::ai-tool/Tool({name: "now", description: "The time.", input-schema: {type: "object", properties: {}}, fn: () { "noon" }})
+    request ::ct/build-request([::ai-chat/user-message("Hi")], null, [WEATHER_TOOL, now], ::ct/DEFAULT_REQUEST_OPTIONS)
+    declarations request.tools[0].functionDeclarations
+    assert-eq(["get_weather", "now"], map(declarations, %.name))
+    assert-eq("object", declarations[0].parametersJsonSchema.type)
+    assert-eq(["city"], keys(declarations[0].parametersJsonSchema.properties))
+    assert(not(in("parametersJsonSchema", keys(declarations[1]))), "a tool with no arguments sends no schema")
+
+    empty ::ct/build-request([::ai-chat/user-message("Hi")], null, [], ::ct/DEFAULT_REQUEST_OPTIONS)
+    assert(not(in("tools", keys(empty))), "an empty tool list sends none")
+}
+
+test-qualified-tool-names-are-provider-safe
+meta ["test"]
+fn () {
+    tool ::ai-tool/from-fn(get-weather)
+    decl ::ct/to-function-declaration(tool)
+    assert(::hot::regex/is-match(decl.name, "^[a-zA-Z0-9_-]+$"), `got ${decl.name}`)
+}
+
+test-cached-content-leaves-out-what-the-cache-holds
+meta ["test"]
+fn () {
+    request ::ct/build-request(
+        [::ai-chat/user-message("Hi")],
+        "Be brief.",
+        [WEATHER_TOOL],
+        ::ct/ChatRequestOptions({cached-content: "cachedContents/abc", tool-mode: "ANY"})
+    )
+    assert-eq("cachedContents/abc", request.cachedContent)
+    assert(not(in("systemInstruction", keys(request))), "the system prompt is in the cache")
+    assert(not(in("tools", keys(request))), "so are the tools")
+    assert(not(in("toolConfig", keys(request))), "and the tool config")
+}
+
+test-request-options
+meta ["test"]
+fn () {
+    options ::ct/ChatRequestOptions({
+        max-tokens: 2048,
+        thinking-level: "low",
+        include-thoughts: true,
+        response-schema: {type: "object"},
+        tool-mode: "AUTO",
+        safety-settings: [{category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE"}],
+    })
+    request ::ct/build-request([::ai-chat/user-message("Hi")], null, [WEATHER_TOOL], options)
+    assert-eq(2048, request.generationConfig.maxOutputTokens)
+    assert-eq({thinkingLevel: "low", includeThoughts: true}, request.generationConfig.thinkingConfig)
+    assert-eq("application/json", request.generationConfig.responseMimeType, "a schema implies JSON")
+    assert-eq({type: "object"}, request.generationConfig.responseJsonSchema)
+    assert-eq({functionCallingConfig: {mode: "AUTO"}}, request.toolConfig)
+    assert-eq("BLOCK_NONE", request.safetySettings[0].threshold)
+
+    budget ::ct/generation-config(::ct/ChatRequestOptions({thinking-budget: 0}))
+    assert-eq({thinkingConfig: {thinkingBudget: 0}}, budget, "a zero budget is sent, it turns thinking off")
+}
+
+test-a-request-reaches-the-wire-whole
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TWO_CALLS)
+    request ::ct/build-request(
+        [::ai-chat/user-message("Weather?"), ::ai-chat/assistant-message(reply.text, reply.tool-calls)],
+        "s",
+        [WEATHER_TOOL],
+        ::ct/DEFAULT_REQUEST_OPTIONS
+    )
+    sent from-json(::gemini::api/build-request("POST", "https://example.com", {}, request, {api-key: "k"}).body)
+    assert-eq("c2lnLTE=", sent.contents[1].parts[0].thoughtSignature)
+    assert-eq("get_weather", sent.tools[0].functionDeclarations[0].name)
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+STREAM_EVENTS [
+    {event: "message", data: {candidates: [{content: {role: "model", parts: [{text: "Thinking it over.", thought: true}]}}]}},
+    {event: "message", data: {candidates: [{content: {role: "model", parts: [{text: "Let me "}]}}], usageMetadata: {promptTokenCount: 30, candidatesTokenCount: 2, totalTokenCount: 32}}},
+    {event: "message", data: "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"check.\"}]}}]}"},
+    {event: "message", data: {
+        candidates: [{content: {role: "model", parts: [{functionCall: {name: "get_weather", args: {city: "Paris"}}, thoughtSignature: "c2ln"}]}, finishReason: "STOP"}],
+        usageMetadata: {promptTokenCount: 30, candidatesTokenCount: 9, thoughtsTokenCount: 5, totalTokenCount: 44},
+    }},
+]
+
+test-a-stream
+meta ["test"]
+fn () {
+    on-delta recorder("test.gemini.stream")
+    state ::ct/drain-stream(Iter(STREAM_EVENTS), on-delta, ::ct/EMPTY_STATE)
+    reply ::ct/finalize-state(state)
+    assert-eq("Let me check.", reply.text, "thought text is not the answer")
+    assert-eq("tool_use", reply.stop-reason)
+    assert-eq("get_weather", reply.tool-calls[0].name)
+    assert-eq({thought-signature: "c2ln"}, reply.tool-calls[0].meta)
+    assert-eq(44, reply.usage.total-tokens, "usage is cumulative: the last chunk's, not a sum")
+    assert-eq(14, reply.usage.output-tokens)
+    assert-eq(
+        ["text:Let me ", "text:check.", "start:get_weather", "input:{\"city\":\"Paris\"}", "end"],
+        ::ctx/get("test.gemini.stream"),
+        "a whole call is one start, one input and one end"
+    )
+}
+
+test-a-stream-error-event-ends-it
+meta ["test"]
+fn () {
+    frames Iter([
+        {event: "message", data: {candidates: [{content: {role: "model", parts: [{text: "Hi"}]}}]}},
+        {event: "error", data: {error: {code: 503, status: "UNAVAILABLE"}}},
+        {event: "message", data: {candidates: []}},
+    ])
+    result ::ct/drain-stream(frames, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    assert(is-err(result), "an error event is an Err")
+    assert-eq(200, err-value(result).status)
+    assert-eq("UNAVAILABLE", err-value(result).body.error.status)
+    assert-eq("message", next(frames).value.event, "nothing after the error is read")
+}
+
+test-an-error-payload-inside-the-stream-ends-it
+meta ["test"]
+fn () {
+    frames Iter([
+        {event: "message", data: "{\"error\": {\"code\": 500, \"status\": \"INTERNAL\"}}"},
+    ])
+    result ::ct/drain-stream(frames, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    assert(is-err(result), "a data.error chunk is an Err")
+    assert-eq("INTERNAL", err-value(result).body.error.status)
+}
+
+test-a-stream-cut-short-is-an-err
+meta ["test"]
+fn () {
+    frames Iter([{event: "message", data: {candidates: [{content: {role: "model", parts: [{text: "Hel"}]}}]}}])
+    state ::ct/drain-stream(frames, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    reply ::ct/finalize-state(state)
+    assert(is-err(reply), "no finish reason means the stream ended early")
+    assert-eq("incomplete-stream", err-value(reply).kind)
+}
+
+// ============================================================================
+// Credentials
+// ============================================================================
+
+test-a-missing-key-is-an-err-not-a-halt
+meta ["test"]
+fn () {
+    before ::ctx/get("gemini.api.key")
+    ::ctx/set("gemini.api.key", null)
+    messages [::ai-chat/user-message("Hi")]
+    reply ::ct/chat-with-tools("gemini-2.5-flash", messages, null, null, {})
+    assert(is-err(reply), "chat-with-tools returns the Err")
+    assert(contains(Str(err-value(reply)), "gemini.api.key"), "naming the ctx key")
+    streamed ::ct/chat-with-tools-stream("gemini-2.5-flash", messages, null, null, ::ai-chat/noop-on-delta, {})
+    assert(is-err(streamed), "so does the stream")
+    plain ::gemini::chat/generate-stream("gemini-2.5-flash", ::gemini::chat/GenerateContentRequest({contents: []}), {})
+    assert(is-err(plain), "and generate-stream")
+    ::ctx/set("gemini.api.key", before)
+}
+
+// ============================================================================
+// run-loop
+// ============================================================================
+
+test-run-loop-carries-the-signature-across-turns
+meta ["test"]
+fn () {
+    fake (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+        request ::ct/build-request(messages, system, tools, ::ct/DEFAULT_REQUEST_OPTIONS)
+        cond {
+            eq(length(request.contents), 1) => { ::ct/parse-response(TWO_CALLS) }
+            => {
+                signature request.contents[1].parts[0].thoughtSignature
+                results request.contents[2].parts
+                outputs map(results, (p) { p.functionResponse.response.result })
+                answer `${signature} ${join(outputs, ", ")}`
+                ::ct/parse-response({candidates: [{content: {role: "model", parts: [{text: answer}]}, finishReason: "STOP"}]})
+            }
+        }
+    }
+
+    opts ::ai-chat/ChatOptions({chat-fn: fake, model: "gemini-2.5-flash", tools: [WEATHER_TOOL]})
+    answer ::ai-chat/run-loop(opts, "Weather in Paris and Rome?")
+    assert-eq("c2lnLTE= Paris: 18C, Rome: 18C", answer)
+}
+
+test-run-loop-stream-with-a-tool
+meta ["test"]
+fn () {
+    fake-stream (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+        request ::ct/build-request(messages, system, tools, ::ct/DEFAULT_REQUEST_OPTIONS)
+        events cond {
+            eq(length(request.contents), 1) => { STREAM_EVENTS }
+            => {
+                result request.contents[2].parts[0].functionResponse.response.result
+                [{event: "message", data: {candidates: [{content: {role: "model", parts: [{text: result}]}, finishReason: "STOP"}]}}]
+            }
+        }
+
+        ::ct/drain-stream(Iter(events), on-delta, ::ct/EMPTY_STATE)
+            |> if-ok((state) { ::ct/finalize-state(state) })
+    }
+
+    opts ::ai-chat/ChatOptions({chat-stream-fn: fake-stream, model: "gemini-2.5-flash", tools: [WEATHER_TOOL]})
+    answer ::ai-chat/run-loop-stream(opts, "Weather in Paris?")
+    assert-eq("Paris: 18C", answer)
+}

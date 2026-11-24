@@ -1741,6 +1741,24 @@ fn kata_root_readonly(writable_rootfs: bool) -> bool {
     !writable_rootfs
 }
 
+/// The OCI annotations for a box's Kata sandbox.
+///
+/// A box without a network runs in a new network namespace with only `lo`.
+/// Kata's Rust runtime polls such a namespace for 5 seconds, waiting for
+/// interfaces a hook might add, before it starts the box. Its "none"
+/// networking model skips that wait, and attaches no network, which such a
+/// box has none of anyway. Kata applies runtime annotations without
+/// `enable_annotations`, which lists only hypervisor ones.
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kata_annotations(netns_path: Option<&str>) -> serde_json::Value {
+    if netns_path.is_some() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ "io.katacontainers.config.runtime.internetworking_model": "none" })
+    }
+}
+
 /// Give every Kata sandbox its own cgroup.
 ///
 /// When `linux.cgroupsPath` is omitted, the Kata runtime falls back to the
@@ -2458,6 +2476,18 @@ finally:
 
             let pull_start = Instant::now();
             timings.image_pull_started_at = Some(pull_start);
+            // Counted in the pull phase, which is platform time, not the box's.
+            if let Err(error) = wait_for_containerd(
+                &self.channel,
+                CONTAINERD_RESTART_WAIT,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            {
+                timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+                timings.image_pull_ended_at = Some(Instant::now());
+                return Err(error);
+            }
             tracing::debug!(trace_id = trace_id, image = %image, "kata.image.pulling");
             let requested_disk_mb = limits
                 .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
@@ -2468,7 +2498,8 @@ finally:
                     &mut images,
                     image,
                     extras.and_then(|e| e.registry_auth.clone()),
-                    crate::resource_budget::disk_admission_mb(requested_disk_mb),
+                    // /data is not in the pool: see `pool_admission_mb`.
+                    crate::resource_budget::pool_admission_mb(requested_disk_mb),
                 )
                 .await;
             // Stamp the phase end on success and mid-pull failure alike
@@ -2503,7 +2534,7 @@ finally:
 
             // Set up CNI networking if the task requires internet access.
             // This creates a netns with a veth pair + bridge so Kata's
-            // macvtap model can wire it into the VM.
+            // tcfilter model can wire it into the VM.
             let needs_network = limits.is_some_and(|l| l.network);
             let mut netns_path = if needs_network {
                 match crate::cni::setup(&container_id).await {
@@ -2619,6 +2650,8 @@ finally:
                                 },
                             )
                             .await;
+                            // Kata's Go runtime, on older host images, keeps a
+                            // sandbox in /run/vc, which the worker has bound.
                             for dir in &[
                                 format!("/run/vc/sbs/{cid}"),
                                 format!("/run/vc/vm/{cid}"),
@@ -2626,6 +2659,25 @@ finally:
                             ] {
                                 let _ = tokio::fs::remove_dir_all(dir).await;
                             }
+                            // Its Rust runtime keeps one in /run/kata on the host,
+                            // reached through PID 1's mounts, as hotbox is.
+                            // Bounded, as a cleanup step is, and never into a
+                            // mount left below it, such as a box's /data.
+                            let _ = tokio::time::timeout(
+                                KATA_CLEANUP_STEP_TIMEOUT,
+                                tokio::process::Command::new(IN_HOST_MOUNTS[0])
+                                    .args(&IN_HOST_MOUNTS[1..])
+                                    .args([
+                                        "rm",
+                                        "-rf",
+                                        "--one-file-system",
+                                        "--",
+                                        &format!("/run/kata/{cid}"),
+                                    ])
+                                    .kill_on_drop(true)
+                                    .output(),
+                            )
+                            .await;
                             if needs_network {
                                 netns_path = None;
                             }
@@ -3007,6 +3059,9 @@ finally:
                     return pull_with_registry_auth(self.channel.clone(), image, auth, SNAPSHOTTER)
                         .await;
                 }
+                // `--local` keeps the pull in `ctr` itself, as 1.7's `ctr` did.
+                // The 2.x default pulls through the daemon's Transfer service,
+                // which unpacks only into the platforms its config lists.
                 let output = tokio::process::Command::new("ctr")
                     .args([
                         "--address",
@@ -3015,6 +3070,7 @@ finally:
                         NAMESPACE,
                         "images",
                         "pull",
+                        "--local",
                         "--snapshotter",
                         SNAPSHOTTER,
                         "--",
@@ -3562,7 +3618,8 @@ finally:
                     "cgroupsPath": kata_cgroups_path(container_id),
                     "namespaces": namespaces
                 },
-                "mounts": mounts
+                "mounts": mounts,
+                "annotations": kata_annotations(netns_path)
             })
         }
 
@@ -3794,6 +3851,52 @@ finally:
         Some((used_sectors, total_sectors))
     }
 
+    /// How long a box waits for Kata's containerd to answer before it starts.
+    /// systemd restarts containerd 5 s after it exits, so this rides out a
+    /// crash or a restart instead of failing every box task that arrives
+    /// meanwhile; a containerd that stays down still fails the task.
+    const CONTAINERD_RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait up to `budget` for containerd to answer its version call. Any
+    /// answer will do, even an error: only an unreachable daemon (the socket
+    /// gone or refusing while systemd restarts it) waits.
+    async fn wait_for_containerd(
+        channel: &Channel,
+        budget: std::time::Duration,
+        retry: std::time::Duration,
+    ) -> ExecutorResult<()> {
+        let started = Instant::now();
+        let mut warned = false;
+        loop {
+            let mut client = containerd_client::services::v1::version_client::VersionClient::new(
+                channel.clone(),
+            );
+            let call = client.version(Request::new(()));
+            let error = match tokio::time::timeout(
+                retry.max(std::time::Duration::from_secs(1)),
+                call,
+            )
+            .await
+            {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(status)) if status.code() != Code::Unavailable => return Ok(()),
+                Ok(Err(status)) => status.message().to_string(),
+                Err(_) => "no answer".to_string(),
+            };
+            if started.elapsed() + retry > budget {
+                return Err(ExecutorError::Connection(format!(
+                    "Kata's containerd did not answer for {}s: {error}",
+                    budget.as_secs()
+                )));
+            }
+            if !warned {
+                tracing::warn!(%error, "kata.containerd.unavailable, waiting before the box starts");
+                warned = true;
+            }
+            tokio::time::sleep(retry).await;
+        }
+    }
+
     async fn content_available_mb() -> ExecutorResult<u64> {
         let output = crate::cni::host_command("df", &["-Pm", "/var/lib/kata/containerd"])
             .output()
@@ -3854,6 +3957,40 @@ finally:
             )));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod containerd_wait_tests {
+        use super::*;
+
+        /// A containerd that doesn't answer fails the box with a connection
+        /// error once the wait runs out, not at once and not forever.
+        #[tokio::test]
+        async fn unreachable_containerd_fails_after_the_wait() {
+            // Port 1 on loopback refuses, as a missing socket does.
+            let channel =
+                containerd_client::tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                    .connect_lazy();
+            let started = Instant::now();
+            let result = wait_for_containerd(
+                &channel,
+                std::time::Duration::from_millis(600),
+                std::time::Duration::from_millis(200),
+            )
+            .await;
+            let waited = started.elapsed();
+            match result {
+                Err(ExecutorError::Connection(message)) => {
+                    assert!(message.contains("did not answer"), "{message}");
+                }
+                other => panic!("expected a connection error, got {other:?}"),
+            }
+            assert!(
+                waited >= std::time::Duration::from_millis(400),
+                "{waited:?}"
+            );
+            assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+        }
     }
 
     #[cfg(test)]
@@ -4544,6 +4681,19 @@ mod kata_tests {
         assert_ne!(
             super::retry_container_id(base, 2),
             super::retry_container_id(base, 3)
+        );
+    }
+
+    #[test]
+    fn test_a_box_without_a_network_skips_katas_interface_wait() {
+        assert_eq!(
+            super::kata_annotations(None),
+            serde_json::json!({ "io.katacontainers.config.runtime.internetworking_model": "none" })
+        );
+        // A box with a network keeps the configured model, which attaches it.
+        assert_eq!(
+            super::kata_annotations(Some("/var/run/netns/box")),
+            serde_json::json!({})
         );
     }
 

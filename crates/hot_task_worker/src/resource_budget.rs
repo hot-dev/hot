@@ -13,10 +13,17 @@ use tokio::sync::Notify;
 /// addition to the user-visible `/data` allocation. The proportional term
 /// avoids admitting very large writable roots against a data-only budget.
 pub fn disk_admission_mb(data_mb: u64) -> u64 {
+    data_mb.saturating_add(pool_admission_mb(data_mb))
+}
+
+/// What a box takes from Kata's box storage pool: its image and writable
+/// rootfs, which `disk_admission_mb` counts on top of `/data`. `/data` is a
+/// file of its own outside the pool (see `data_volume`), which the disk it is
+/// on is checked for.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+pub fn pool_admission_mb(data_mb: u64) -> u64 {
     const BASE_IMAGE_AND_SNAPSHOT_OVERHEAD_MB: u64 = 2_048;
-    data_mb
-        .saturating_add(BASE_IMAGE_AND_SNAPSHOT_OVERHEAD_MB)
-        .saturating_add(data_mb / 4)
+    BASE_IMAGE_AND_SNAPSHOT_OVERHEAD_MB.saturating_add(data_mb / 4)
 }
 
 #[derive(Debug, Default)]
@@ -281,6 +288,16 @@ mod tests {
         assert_eq!(disk_admission_mb(0), 2_048);
         assert_eq!(disk_admission_mb(4_096), 7_168);
         assert!(disk_admission_mb(u64::MAX).eq(&u64::MAX));
+    }
+
+    #[test]
+    fn the_box_pool_holds_the_rootfs_not_data() {
+        assert_eq!(pool_admission_mb(0), 2_048);
+        assert_eq!(pool_admission_mb(10_240), 4_608);
+        assert_eq!(
+            disk_admission_mb(10_240),
+            10_240 + pool_admission_mb(10_240)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
