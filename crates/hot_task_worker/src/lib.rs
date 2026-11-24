@@ -5371,6 +5371,7 @@ async fn process_container_task(
         && extras.entrypoint.is_none()
         && extras.data_volume_path.is_none()
         && extras.registry_auth.is_none()
+        && extras.host_file_server.is_none()
     {
         None
     } else {

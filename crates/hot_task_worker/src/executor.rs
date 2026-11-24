@@ -972,8 +972,8 @@ mod docker {
         NetworkCreateRequest,
     };
     use bollard::query_parameters::{
-        CreateImageOptionsBuilder, ListContainersOptionsBuilder, PruneNetworksOptionsBuilder,
-        RemoveContainerOptionsBuilder, WaitContainerOptionsBuilder,
+        CreateImageOptionsBuilder, ListContainersOptionsBuilder, ListNetworksOptionsBuilder,
+        PruneNetworksOptionsBuilder, RemoveContainerOptionsBuilder, WaitContainerOptionsBuilder,
     };
     use futures::stream::StreamExt;
     use std::collections::HashMap;
@@ -1265,6 +1265,11 @@ mod docker {
                 // Remove the Created container so failed starts never leak
                 // containers or stall cancellation-quota settlement.
                 self.remove_container(&container_id).await;
+                // Its relay too, which removal finds by inspecting the
+                // container: here it is at hand, should that inspect fail.
+                if let Some(relay) = &relay {
+                    self.teardown_relay(relay).await;
+                }
                 return Err(ExecutorError::Start(e.to_string()));
             }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
@@ -1511,7 +1516,12 @@ mod docker {
         /// Remove a relay and its box's network. Best-effort: the box
         /// container goes first, since Docker keeps a network something uses.
         async fn teardown_relay(&self, relay: &Relay) {
-            let force = RemoveContainerOptionsBuilder::default().force(true).build();
+            // With its anonymous volumes: the relay runs from the box's image,
+            // whose VOLUMEs Docker makes one for each.
+            let force = RemoveContainerOptionsBuilder::default()
+                .force(true)
+                .v(true)
+                .build();
             self.docker
                 .remove_container(&relay.container, Some(force))
                 .await
@@ -1552,8 +1562,14 @@ mod docker {
                 .list_containers(Some(options))
                 .await
                 .unwrap_or_default();
+            let now = chrono::Utc::now().timestamp();
             for relay in relays {
                 let Some(id) = relay.id else { continue };
+                // A relay a minute old or less may be another worker's on this
+                // daemon, made before its box: kept, as its network is below.
+                if relay.created.is_some_and(|created| now - created < 60) {
+                    continue;
+                }
                 let task = relay
                     .labels
                     .as_ref()
@@ -1581,7 +1597,10 @@ mod docker {
                     None => false,
                 };
                 if !box_left {
-                    let force = RemoveContainerOptionsBuilder::default().force(true).build();
+                    let force = RemoveContainerOptionsBuilder::default()
+                        .force(true)
+                        .v(true)
+                        .build();
                     self.docker.remove_container(&id, Some(force)).await.ok();
                 }
             }
@@ -1620,6 +1639,34 @@ mod docker {
                     tracing::warn!(
                         task_id,
                         "Failed to list Docker containers during timeout cleanup: {}",
+                        e
+                    );
+                }
+            }
+            // A task cut short after its relay started and before its box
+            // existed leaves the relay's network, which no box names: remove
+            // it, now that the relay container above is gone.
+            let mut filters = HashMap::new();
+            filters.insert(
+                "label".to_string(),
+                vec![
+                    format!("hot.dev/managed-by={RELAY_MANAGED_BY}"),
+                    format!("hot.dev/task-id={task_id}"),
+                ],
+            );
+            let options = ListNetworksOptionsBuilder::default()
+                .filters(&filters)
+                .build();
+            match self.docker.list_networks(Some(options)).await {
+                Ok(networks) => {
+                    for name in networks.into_iter().filter_map(|network| network.name) {
+                        self.docker.remove_network(&name).await.ok();
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        "Failed to list box networks during timeout cleanup: {}",
                         e
                     );
                 }
@@ -1751,6 +1798,11 @@ mod docker {
                 // Remove the Created container so failed starts never leak
                 // containers or stall cancellation-quota settlement.
                 self.remove_container(&container_id).await;
+                // Its relay too, which removal finds by inspecting the
+                // container: here it is at hand, should that inspect fail.
+                if let Some(relay) = &relay {
+                    self.teardown_relay(relay).await;
+                }
                 return Err(ExecutorError::Start(e.to_string()));
             }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
