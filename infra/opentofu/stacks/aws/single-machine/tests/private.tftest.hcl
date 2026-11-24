@@ -17,6 +17,9 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::123456789012:role/hot-example" }
   }
+  mock_resource "aws_cloudwatch_log_group" {
+    defaults = { arn = "arn:aws:logs:us-east-1:123456789012:log-group:/hot/hot-example" }
+  }
   mock_resource "aws_sns_topic" {
     defaults = { arn = "arn:aws:sns:us-east-1:123456789012:hot-example-alerts" }
   }
@@ -96,6 +99,14 @@ run "private_local" {
   assert {
     condition     = aws_instance.host.cpu_options[0].nested_virtualization == "enabled"
     error_message = "The task host must enable nested virtualization."
+  }
+  assert {
+    condition     = length(aws_flow_log.vpc) == 1 && aws_flow_log.vpc[0].traffic_type == "ALL" && aws_flow_log.vpc[0].max_aggregation_interval == 600 && aws_cloudwatch_log_group.flow[0].name == "/hot/hot-example/vpc-flow" && aws_cloudwatch_log_group.flow[0].retention_in_days == aws_cloudwatch_log_group.host.retention_in_days
+    error_message = "A VPC the stack creates keeps flow logs of every flow, as long as the hosts' logs."
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.flow[0].assume_role_policy).Statement[0].Principal.Service == "vpc-flow-logs.amazonaws.com" && contains(keys(jsondecode(aws_iam_role.flow[0].assume_role_policy).Statement[0].Condition.StringEquals), "aws:SourceAccount")
+    error_message = "Only the flow-log service takes the role that writes them, and only for this account."
   }
 }
 
@@ -202,6 +213,10 @@ run "existing_network_ownership" {
   assert {
     condition     = length(aws_vpc.hot) == 0 && length(aws_nat_gateway.egress) == 0 && length(aws_subnet.private) == 0
     error_message = "Existing networking must not be recreated or re-routed."
+  }
+  assert {
+    condition     = length(aws_flow_log.vpc) == 0 && length(aws_iam_role.flow) == 0 && length(aws_cloudwatch_log_group.flow) == 0
+    error_message = "An existing network's flow logs are its owner's setting."
   }
 }
 

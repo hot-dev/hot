@@ -92,6 +92,45 @@ resource "aws_vpc" "hot" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 }
+# A record of who talked to whom in the network the stack creates, for looking
+# into an incident afterwards: every flow, in ten-minute records, kept as long
+# as the hosts' logs. Only the flow-log service takes the role that writes
+# them, and only for this account's flow logs in this region.
+data "aws_caller_identity" "current" {
+  count = local.new_network ? 1 : 0
+}
+resource "aws_cloudwatch_log_group" "flow" {
+  count             = local.new_network ? 1 : 0
+  name              = "/hot/${local.config.name}/vpc-flow"
+  retention_in_days = local.config.logging.retention_days
+}
+resource "aws_iam_role" "flow" {
+  count = local.new_network ? 1 : 0
+  name  = "hot-${local.config.name}-vpc-flow"
+  assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{
+    Effect = "Allow", Principal = { Service = "vpc-flow-logs.amazonaws.com" }, Action = "sts:AssumeRole"
+    Condition = {
+      StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current[0].account_id }
+      ArnLike      = { "aws:SourceArn" = "arn:aws:ec2:${local.config.region}:${data.aws_caller_identity.current[0].account_id}:vpc-flow-log/*" }
+    }
+  }] })
+}
+resource "aws_iam_role_policy" "flow" {
+  count = local.new_network ? 1 : 0
+  role  = aws_iam_role.flow[0].id
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{
+    Effect   = "Allow", Action = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogGroups", "logs:DescribeLogStreams"]
+    Resource = "${aws_cloudwatch_log_group.flow[0].arn}:*"
+  }] })
+}
+resource "aws_flow_log" "vpc" {
+  count                    = local.new_network ? 1 : 0
+  vpc_id                   = aws_vpc.hot[0].id
+  traffic_type             = "ALL"
+  log_destination          = aws_cloudwatch_log_group.flow[0].arn
+  iam_role_arn             = aws_iam_role.flow[0].arn
+  max_aggregation_interval = 600
+}
 resource "aws_subnet" "public" {
   count                   = local.new_network ? 2 : 0
   vpc_id                  = local.vpc_id
