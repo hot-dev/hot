@@ -1422,10 +1422,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Each box's /data is a loop mount under this directory, whose path Kata's
     // shim resolves in the host's mounts. A task worker in a container needs
-    // the directory at this same path on the host, with shared propagation so
-    // the host sees the mounts: on a plain bind the host sees an empty directory
-    // and the box's writes bypass its size limit. The default suits a worker
-    // running on the host itself.
+    // the directory at this same path on the host. One that shares the host's
+    // PID namespace mounts in the host's mount namespace, so the host sees the
+    // mounts on a plain bind too (`data_volume::mount_command`); any other
+    // needs shared propagation on the bind, or the host sees an empty
+    // directory and the box's writes bypass its size limit. The directory
+    // belongs on a disk: on tmpfs the volumes' files are memory. The default
+    // suits a worker running on the host itself.
     let data_vol_base = config
         .data_volume_base_dir
         .clone()
@@ -10298,14 +10301,15 @@ async fn cleanup_stale_data_volumes(
         {
             let mnt = path.join("mnt");
             if mnt.exists() {
-                let mut cmd = tokio::process::Command::new("umount");
-                cmd.kill_on_drop(true).arg(&mnt);
+                // Where the volume was mounted: see `data_volume::mount_command`.
+                let mut cmd = data_volume::mount_command("umount");
+                cmd.arg(&mnt);
                 let unmounted = tokio::time::timeout(STALE_UMOUNT_TIMEOUT, cmd.output())
                     .await
                     .is_ok_and(|res| res.is_ok_and(|output| output.status.success()));
                 if !unmounted {
-                    let mut lazy = tokio::process::Command::new("umount");
-                    lazy.kill_on_drop(true).args(["-l"]).arg(&mnt);
+                    let mut lazy = data_volume::mount_command("umount");
+                    lazy.args(["-l"]).arg(&mnt);
                     let lazy_ok = match tokio::time::timeout(STALE_UMOUNT_TIMEOUT, lazy.output())
                         .await
                     {

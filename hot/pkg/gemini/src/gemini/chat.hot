@@ -7,6 +7,7 @@
 api-call ::gemini::api/call
 api-call-stream ::gemini::api/call-stream
 HttpError ::gemini::api/HttpError
+refused-stream ::gemini::api/refused-stream
 is-ok-response ::hot::http/is-ok-response
 
 // ============================================================================
@@ -18,11 +19,34 @@ Role type open "user" | "model"
 
 // Literal union for finish reasons
 FinishReason type open "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "OTHER"
+FinishReason type open | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "MALFORMED_FUNCTION_CALL"
+FinishReason type open | "LANGUAGE" | "IMAGE_SAFETY" | "UNEXPECTED_TOOL_CALL" | "FINISH_REASON_UNSPECIFIED"
 
-// Content part (text, image, etc.)
+// A call the model asks for. `id` is set by newer models and must be
+// echoed on the matching `FunctionResponse`.
+FunctionCall type {
+    id: Str?,
+    name: Str,
+    args: Map?
+}
+
+// A tool's result. `response` must be a JSON object.
+FunctionResponse type {
+    id: Str?,
+    name: Str,
+    response: Map
+}
+
+// Content part (text, image, function call or response). `thought` marks a
+// part as the model's reasoning, not its answer. `thoughtSignature` is
+// opaque: send it back on the same part in the next turn.
 Part type {
     text: Str?,
-    inlineData: InlineData?
+    inlineData: InlineData?,
+    functionCall: FunctionCall?,
+    functionResponse: FunctionResponse?,
+    thought: Bool?,
+    thoughtSignature: Str?
 }
 
 InlineData type {
@@ -42,7 +66,40 @@ GenerationConfig type {
     topP: Dec?,
     topK: Int?,
     maxOutputTokens: Int?,
-    stopSequences: Vec<Str>?
+    stopSequences: Vec<Str>?,
+    thinkingConfig: ThinkingConfig?,
+    responseMimeType: Str?,
+    responseSchema: Map?,
+    responseJsonSchema: Map?
+}
+
+// Thinking controls. `thinkingLevel` is for Gemini 3 ("low", "high");
+// `thinkingBudget` (tokens; 0 turns thinking off, -1 lets the model decide)
+// is for Gemini 2.5.
+ThinkingConfig type {
+    thinkingLevel: Str?,
+    thinkingBudget: Int?,
+    includeThoughts: Bool?
+}
+
+// One entry of `Tool.functionDeclarations`. Use `parametersJsonSchema` for a
+// standard JSON Schema, or `parameters` for Gemini's OpenAPI subset.
+FunctionDeclaration type {
+    name: Str,
+    description: Str?,
+    parameters: Map?,
+    parametersJsonSchema: Map?
+}
+
+// A tool set offered to the model.
+Tool type {
+    functionDeclarations: Vec<FunctionDeclaration>?
+}
+
+// Function-calling controls. `functionCallingConfig.mode` is "AUTO", "ANY",
+// "NONE" or "VALIDATED".
+ToolConfig type {
+    functionCallingConfig: Map?
 }
 
 // Safety setting
@@ -52,11 +109,16 @@ SafetySetting type {
 }
 
 // Generate content request
+// With `cachedContent` set, `systemInstruction`, `tools` and `toolConfig`
+// belong in the cache, and the API refuses them here.
 GenerateContentRequest type {
     contents: Vec<Content>,
     systemInstruction: Content?,
     generationConfig: GenerationConfig?,
-    safetySettings: Vec<SafetySetting>?
+    safetySettings: Vec<SafetySetting>?,
+    tools: Vec<Tool>?,
+    toolConfig: ToolConfig?,
+    cachedContent: Str?
 }
 
 // Generate content response
@@ -78,10 +140,15 @@ PromptFeedback type {
     safetyRatings: Vec<Map>?
 }
 
+// `promptTokenCount` includes `cachedContentTokenCount`.
+// `candidatesTokenCount` leaves out `thoughtsTokenCount`.
 UsageMetadata type {
     promptTokenCount: Int?,
     candidatesTokenCount: Int?,
-    totalTokenCount: Int?
+    totalTokenCount: Int?,
+    cachedContentTokenCount: Int?,
+    thoughtsTokenCount: Int?,
+    toolUsePromptTokenCount: Int?
 }
 
 // Streaming response wrapper
@@ -186,7 +253,8 @@ fn
     // Use v1beta for systemInstruction support, alt=sse for SSE streaming
     response api-call-stream("POST", `/v1beta/models/${model}:streamGenerateContent?alt=sse`, {}, request, "sse", opts)
     cond {
-        gte(response.status, 400) => { err(HttpError(response)) }
+        is-err(response) => { response }
+        gte(response.status, 400) => { err(refused-stream(response)) }
         => { StreamingGenerateResponse(response) }
     }
 }

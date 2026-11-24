@@ -86,12 +86,17 @@ meta {
     - `name` — the `Tool.name` the model wants to invoke.
     - `input` — JSON-decoded input map matching the tool's
       `input-schema`.
+    - `meta` — optional provider data the adapter needs back on the
+      next turn, such as Gemini's `thoughtSignature`. `run-loop`
+      carries it untouched from the reply into the next request, and
+      it is left out of the token estimate. Other adapters ignore it.
     """
 }
 type {
     id: Str,
     name: Str,
-    input: Map
+    input: Map,
+    meta: Map?
 }
 
 ToolResult

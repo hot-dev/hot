@@ -15,12 +15,12 @@
 # instead of producing an image.
 set -euo pipefail
 
-KATA_VERSION="3.28.0"
-KATA_SHA256="99cefb46d70bc27b7bcffd7595be9010c6bed43e1cdfcf8078554c19e7c9b19d"
-CONTAINERD_VERSION="1.7.30"
-CONTAINERD_SHA256="ca0f27e34411504acd1cd24fcbaa71b9c47d31ce9408c47c54a2dc1810ceb1df"
-CNI_VERSION="1.9.1"
-CNI_SHA256="b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303"
+KATA_VERSION="4.4.0"
+KATA_SHA256="ccbc0cbc591089d0c57012b78da64b23ef43e0bac0f869dc7bfebe8588c33986"
+CONTAINERD_VERSION="2.4.2"
+CONTAINERD_SHA256="35880c1dd4627e8ce56526bfabb39c144e83458ffdb197ce6f05d17d94d7d91e"
+CNI_VERSION="1.10.0"
+CNI_SHA256="ce8603d6a1bd448efba5bd6dc44f38dce349f821aa57e1bb354b52628ebf1853"
 COSIGN_VERSION="v3.1.4"
 COSIGN_SHA256="424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa"
 KATA_CONTAINERD_GID="2000"
@@ -71,7 +71,7 @@ apt_get() {
 }
 apt_get update
 apt_get install -y --no-install-recommends \
-    ca-certificates curl jq python3 zstd e2fsprogs dmsetup thin-provisioning-tools \
+    ca-certificates curl jq python3 zstd e2fsprogs erofs-utils fdisk dmsetup thin-provisioning-tools \
     iproute2 iptables nftables docker.io docker-compose-v2
 apt_get upgrade -y
 
@@ -116,7 +116,9 @@ log "Installing Kata Containers ${KATA_VERSION}"
 fetch "https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.zst" \
     "$KATA_SHA256" "$work/kata.tar.zst"
 tar --zstd -xf "$work/kata.tar.zst" -C /
-ln -sf /opt/kata/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
+# Kata's Rust runtime. The task worker names io.containerd.kata.v2 for every
+# box, and containerd runs whichever shim the host links here.
+ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 /usr/local/bin/containerd-shim-kata-v2
 # QEMU looks for its ROMs in share/qemu.
 ln -sfn /opt/kata/share/kata-qemu/qemu /opt/kata/share/qemu
 
@@ -158,17 +160,77 @@ install -m 0755 "$work/hotbox" /usr/local/bin/hotbox
 
 install -d -m 0755 "$HOST_DIR/kata"
 rootfs="$HOST_DIR/kata/hot-rootfs.img"
-cp "$(readlink -f /opt/kata/share/kata-containers/kata-ubuntu-noble.image)" "$rootfs"
-loop=$(losetup --find --show --partscan "$rootfs")
-mnt="$work/rootfs"
-mkdir -p "$mnt"
-udevadm settle
-if [[ -b "${loop}p1" ]]; then mount "${loop}p1" "$mnt"; else mount "$loop" "$mnt"; fi
+# kata-containers.img names the release's base guest image, whatever its
+# distribution. Its first partition is a read-only EROFS root (the second holds
+# its dm-verity hashes, which nothing here checks), so the root is unpacked,
+# given the hotbox, and packed again as the one partition of a new image. Kata
+# attaches it as a virtio-blk disk and boots root=/dev/vda1 from it.
+base=$(readlink -f /opt/kata/share/kata-containers/kata-containers.img)
+read -r start sectors < <(partx -g -o START,SECTORS -n 1 "$base")
+dd if="$base" of="$work/base.erofs" bs=512 skip="$start" count="$sectors" status=none
+[[ "$(blkid -o value -s TYPE "$work/base.erofs")" == erofs ]] \
+    || fail "Kata's guest image has no EROFS root"
+fsck.erofs --preserve --extract="$work/guest-root" "$work/base.erofs"
 # Boxes never run this copy: a box's container has its own root, and the
 # bind-mounted hotbox.
-install -D -m 0755 "$work/hotbox" "$mnt/usr/local/bin/hotbox"
-umount "$mnt"
-losetup -d "$loop"
+install -D -m 0755 "$work/hotbox" "$work/guest-root/usr/local/bin/hotbox"
+# The guest boots this in place of the image's systemd (init= in kernel_params),
+# which takes about 2 s of every box start to reach the agent. It gives the
+# agent what the image's kata-containers.target does: the mounts, the sysctl.d
+# settings, /tmp, and kata-agent.service's limits. It leaves out the rest
+# (udev, journald, timers, chrony): as in Kata's own initrd guests, kvmclock
+# sets the clock at boot. The agent runs as a child, as under systemd; run as
+# PID 1, this agent never answers.
+install -d -m 0755 "$work/guest-root/usr/local/sbin"
+cat > "$work/guest-root/usr/local/sbin/hot-init" <<'INIT'
+#!/bin/bash
+exec </dev/console >/dev/console 2>&1
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t cgroup2 -o nosuid,nodev,noexec,nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
+mount -t tmpfs -o nosuid,nodev,mode=755 tmpfs /run
+mount -t tmpfs -o nosuid,nodev tmpfs /tmp
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o nosuid,noexec,gid=5,mode=620,ptmxmode=000 devpts /dev/pts
+mount -t tmpfs -o nosuid,nodev tmpfs /dev/shm
+# systemd brings up the loopback itself; a box's localhost is the guest's.
+ip link set lo up
+# What systemd-sysctl applies: key = value lines, "-" marking a key that may be
+# missing, the last line with or without its newline.
+for conf in /usr/lib/sysctl.d/*.conf; do
+    [[ -f $conf ]] || continue
+    while IFS='=' read -r key value || [[ -n $key ]]; do
+        key=${key//[[:space:]]/}
+        [[ -n $key && $key != [\#\;]* ]] || continue
+        key=${key#-}
+        value=${value#"${value%%[![:space:]]*}"}
+        echo "$value" > "/proc/sys/${key//.//}" 2>/dev/null
+    done < "$conf"
+done
+# systemd sets these itself: the first two so kata-agent.service's LimitNOFILE
+# fits.
+echo 9223372036854775807 > /proc/sys/fs/file-max
+echo 2147483584 > /proc/sys/fs/nr_open
+echo 512 > /proc/sys/net/unix/max_dgram_qlen
+[[ -s /etc/hostname ]] && echo "$(< /etc/hostname)" > /proc/sys/kernel/hostname
+ulimit -n 1073741824
+echo -997 > /proc/self/oom_score_adj
+/usr/bin/kata-agent &
+agent=$!
+# Reap whatever is left to PID 1 while the agent runs, then power off, as
+# kata-agent.service's FailureAction does.
+while kill -0 "$agent" 2>/dev/null; do wait; done
+sync
+echo o > /proc/sysrq-trigger
+INIT
+chmod 0755 "$work/guest-root/usr/local/sbin/hot-init"
+mkfs.erofs --quiet -zlz4hc "$work/root.erofs" "$work/guest-root"
+mib=$(( ($(stat -c %s "$work/root.erofs") + 1048575) >> 20 ))
+rm -f "$rootfs"
+truncate -s $(( (mib + 1) << 20 )) "$rootfs"
+echo "start=2048, size=$(( mib * 2048 )), type=83, bootable" | sfdisk --quiet "$rootfs"
+dd if="$work/root.erofs" of="$rootfs" bs=512 seek=2048 conv=notrunc status=none
+rm -rf "$work/guest-root" "$work/base.erofs" "$work/root.erofs"
 sha256sum "$rootfs" | cut -d' ' -f1 > "$rootfs.sha256"
 
 log "Installing the deploy agent"
@@ -183,27 +245,36 @@ AGENT
 chmod 0755 /usr/local/bin/hot-agent
 
 log "Writing Kata and containerd configuration"
-install -d -m 0755 /opt/kata/share/defaults/kata-containers
-cat > /opt/kata/share/defaults/kata-containers/configuration.toml <<KATA
+# Kata's Rust runtime reads this path. The release ships it as a link to its
+# own QEMU configuration, so replace the link rather than write through it.
+install -d -m 0755 /opt/kata/share/defaults/kata-containers/runtime-rs
+rm -f /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml
+cat > /opt/kata/share/defaults/kata-containers/runtime-rs/configuration.toml <<KATA
 [hypervisor.qemu]
 path = "/opt/kata/bin/qemu-system-x86_64"
 kernel = "/opt/kata/share/kata-containers/vmlinux.container"
 image = "${rootfs}"
-rootfs_type = "ext4"
+rootfs_type = "erofs"
+# virtio-blk, as the release configures it: an nvdimm image needs a DAX header
+# this image does not have.
+disable_image_nvdimm = true
 machine_type = "q35"
 valid_hypervisor_paths = ["/opt/kata/bin/qemu-system-x86_64"]
-kernel_params = "agent.log_vport=1025"
+kernel_params = "agent.log_vport=1025 init=/usr/local/sbin/hot-init"
 enable_annotations = ["enable_iommu", "kernel_params", "default_vcpus", "default_memory"]
 default_vcpus = 1
+# runtime-rs sizes a box's VM as these overheads plus the box's own limits.
+# They default to 0, which gave a 64 MB nano box a 64 MB VM that could not run
+# it. These match the Go runtime, which added default_vcpus and default_memory.
+overhead_vcpus = 1.0
 default_maxvcpus = 0
 default_memory = 512
-# Static sizing adds each box's memory limit to default_memory, so this must
-# hold the largest box (SYSTEM_MAX_MEMORY_MB, 8192, in the task worker's
-# box_limits.rs) on top of it. Kata lowers it to the host's RAM, and the task
+overhead_memory = 512
+# This must hold the largest box (SYSTEM_MAX_MEMORY_MB, 8192, in the task
+# worker's box_limits.rs) on top of overhead_memory. Kata lowers it to the host's RAM, and the task
 # worker's budget keeps boxes within that.
 default_maxmemory = 9216
 memory_slots = 10
-use_vsock = true
 disable_seccomp = false
 enable_mem_prealloc = false
 enable_hugepages = false
@@ -222,25 +293,32 @@ disable_selinux = false
 # container on a host without SELinux, which Ubuntu is: no box would start.
 disable_guest_selinux = true
 firmware = ""
-firmware_volume = ""
 
 [agent.kata]
 enable_debug = false
 enable_tracing = false
 kernel_modules = []
 debug_console_enabled = false
-dial_timeout = 30
+# The sleep between attempts to reach the agent, as the release sets it, and
+# the overall time for them. runtime-rs refuses a config whose budget is below
+# the sleep, and fails every box.
+dial_timeout_ms = 10
+reconnect_timeout_ms = 30000
 
 [runtime]
+name = "virt_container"
+hypervisor_name = "qemu"
+agent_name = "kata"
 create_container_timeout = 60
 enable_debug = false
-internetworking_model = "macvtap"
+# runtime-rs has no macvtap model: any other name gives the VM no route out.
+internetworking_model = "tcfilter"
 disable_guest_seccomp = true
 enable_tracing = false
 disable_new_netns = false
 sandbox_cgroup_only = true
 static_sandbox_resource_mgmt = true
-disable_guest_empty_dir = false
+emptydir_mode = "shared-fs"
 enable_pprof = false
 KATA
 
@@ -252,19 +330,33 @@ fi
 
 install -d -m 0755 /etc/kata-containerd
 cat > /etc/kata-containerd/config.toml <<CONTAINERD
-version = 2
+version = 4
 root = "/var/lib/kata/containerd"
 state = "/run/kata-containerd"
 # The task worker uses containerd's own API and names the Kata runtime for
-# each box. The Kubernetes CRI plugin would only add a streaming server and
-# CNI polling behind the task worker's socket.
-disabled_plugins = ["io.containerd.grpc.v1.cri"]
-
-[grpc]
-  address = "/run/kata-containerd/containerd.sock"
-  gid = ${KATA_CONTAINERD_GID}
+# each box. Kubernetes' CRI, its sandbox controller, and NRI would only add
+# services behind the task worker's socket.
+disabled_plugins = [
+  "io.containerd.grpc.v1.cri",
+  "io.containerd.cri.v1.images",
+  "io.containerd.cri.v1.runtime",
+  "io.containerd.podsandbox.controller.v1.podsandbox",
+  "io.containerd.nri.v1.nri",
+]
+# containerd 2 keeps serving, without images, containers, or tasks, when a
+# snapshotter fails to load. Exit instead, so systemd tries again and the
+# agent reports containerd down.
+required_plugins = ["io.containerd.snapshotter.v1.devmapper", "io.containerd.transfer.v1.local"]
 
 [plugins]
+  # Version 4 reads its sockets only here. It ignores a top-level [grpc], and
+  # containerd would then take Docker's /run/containerd/containerd.sock.
+  [plugins."io.containerd.server.v1.grpc"]
+    address = "/run/kata-containerd/containerd.sock"
+    gid = ${KATA_CONTAINERD_GID}
+  [plugins."io.containerd.server.v1.ttrpc"]
+    address = "/run/kata-containerd/containerd.sock.ttrpc"
+    gid = ${KATA_CONTAINERD_GID}
   [plugins."io.containerd.snapshotter.v1.devmapper"]
     root_path = "/var/lib/kata/devmapper"
     pool_name = "hot-devpool"
