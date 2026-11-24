@@ -126,6 +126,12 @@ class Recorder:
         # device-mapper yet says so, and the room it finds on the disk.
         self.pool_active = True
         self.pool_table = "0 83886080 thin-pool 7:1 7:0 128 32768 1 no_discard_passdown\n"
+        # What else device-mapper has (a box's snapshot devices, with how many
+        # hold each open), whether a Kata shim still runs, and the loop devices
+        # on the pool's files.
+        self.box_devices = {}
+        self.kata_shims = False
+        self.loops = {"data": "/dev/loop1", "meta": "/dev/loop0"}
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
@@ -167,6 +173,31 @@ class Recorder:
             return subprocess.CompletedProcess(command, 0, stdout=(
                 "Queue Status:\n  Backend: Redis (redis://hot:***@valkey:6379)\n\nSummary:\n"
                 f"  Total pending:    {pending}\n  Total processing: {processing}\n  Total deadletter: {deadletter}\n"))
+        if command[:3] == ["dmsetup", "info", "-c"]:
+            rows = [f"{name}:{opened}" for name, opened in
+                    (({agent_module.BOX_POOL: len(self.box_devices)} if self.pool_active else {})
+                     | self.box_devices).items()]
+            return subprocess.CompletedProcess(command, 0, stdout="\n".join(rows) + "\n" if rows else
+                                               "No devices found\n", stderr="")
+        if command[:2] == ["dmsetup", "remove"]:
+            name = command[-1]
+            if name in self.box_devices:
+                if self.box_devices[name]:
+                    raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
+                del self.box_devices[name]
+            elif self.box_devices:
+                raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
+            else:
+                self.pool_active = False
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[0] == "pgrep":
+            if not self.kata_shims:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, stdout="4242\n", stderr="")
+        if command[:2] == ["losetup", "-j"]:
+            device = self.loops.get(Path(command[2]).name)
+            return subprocess.CompletedProcess(command, 0, stderr="", stdout=(
+                f"{device}: [64769]:12 ({command[2]})\n" if device else ""))
         if command[0] == "dmsetup" and not self.pool_active:
             raise subprocess.CalledProcessError(1, command, stderr="Device does not exist.")
         if command[:2] == ["dmsetup", "table"]:
@@ -10424,6 +10455,191 @@ class Resume(AgentHarness):
         self.assertEqual((report["state"], report["request_id"]), ("resumed", "d1"))
         self.assertEqual(self.run.compose_calls()[-1], "up -d scheduler")
         self.assertEqual(self.agent.command("deploy-now", request_id="d2")["state"], "current")
+
+
+class ResetBoxStore(AgentHarness):
+    HOLD_STOP = ["systemctl", "stop", "hot-box-pool-hold.timer", "hot-box-pool-hold.service"]
+    HOLD_START = ["systemctl", "start", "hot-box-pool-hold.timer"]
+
+    def setUp(self):
+        super().setUp()
+        self.agent.reconcile()
+        data = Path(self.tmp.name)
+        self.pool = data / "kata/devmapper"
+        self.store = data / "kata/containerd"
+        for path in (self.pool / "data", self.pool / "meta", self.pool / "metadata.db", self.pool / "held",
+                     self.store / "io.containerd.metadata.v1.bolt/meta.db"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        self.box_file = data / "data" / render.BOX_DATA_DIRECTORY / "box-1/notes.txt"
+        self.box_file.parent.mkdir(parents=True, exist_ok=True)
+        self.box_file.write_text("kept")
+        self.run.commands.clear()
+
+    def test_the_store_is_emptied_and_box_data_kept(self):
+        report = self.agent.command("reset-box-store", request_id="r1")
+        self.assertEqual((report["state"], report["request_id"]), ("box-store-reset", "r1"))
+        self.assertFalse(self.pool.exists())
+        self.assertFalse(self.store.exists())
+        self.assertEqual(self.box_file.read_text(), "kept")
+        commands = self.run.commands
+        order = [["systemctl", "stop", "kata-containerd.service"], self.HOLD_STOP,
+                 ["dmsetup", "remove", "--retry", "hot-devpool"],
+                 ["losetup", "-d", "/dev/loop1"], ["losetup", "-d", "/dev/loop0"],
+                 ["systemctl", "start", "kata-containerd.service"], self.HOLD_START]
+        self.assertEqual([c for c in commands if c in order], order)
+        self.assertEqual(self.run.compose_calls()[0], "stop --timeout 120 task-worker")
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_box_left_running_keeps_the_store(self):
+        for left, setting in (("1 box devices", "box_devices"), ("Kata shims", "kata_shims")):
+            with self.subTest(left):
+                self.run.box_devices, self.run.kata_shims = {}, False
+                setattr(self.run, setting, {"hot-devpool-snap-3": 1} if setting == "box_devices" else True)
+                self.run.commands.clear()
+                with self.assertRaisesRegex(agent_module.AgentError, f"left as it was: {left}.*Replace the instance"):
+                    self.agent.command("reset-box-store", request_id="r1")
+                self.assertTrue((self.pool / "data").exists())
+                self.assertTrue(self.store.exists())
+                self.assertNotIn(["dmsetup", "remove", "--retry", "hot-devpool"], self.run.commands)
+                # Put back as it was: containerd, the task worker and the
+                # pool's hold run again.
+                self.assertEqual(self.run.commands[-2][-2:], ["--force-recreate", "task-worker"])
+                self.assertEqual(self.run.commands[-1], self.HOLD_START)
+                self.assertIn(["systemctl", "start", "kata-containerd.service"], self.run.commands)
+
+    def test_a_refused_store_left_in_place_still_says_why(self):
+        # A containerd that refused the store fails to start again; the task
+        # worker comes back all the same, and the reason is the error.
+        recorder = self.run
+        self.run.box_devices = {"hot-devpool-snap-3": 1}
+
+        def no_start(command, **kwargs):
+            if command == ["systemctl", "start", "kata-containerd.service"]:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="Job failed")
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_start
+        with self.assertRaisesRegex(agent_module.AgentError, "left as it was: 1 box devices"):
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertEqual(self.run.commands[-1], self.HOLD_START)
+        self.assertTrue((self.pool / "data").exists())
+
+    def test_a_task_worker_that_does_not_start_after_the_reset_says_what_next(self):
+        recorder = self.run
+
+        def no_worker(command, **kwargs):
+            if "--force-recreate" in command:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="no such image")
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_worker
+        self.agent.box_pool_shortfall = lambda: None
+        with self.assertRaises(agent_module.CommandFailed) as raised:
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertIn("reset, and the task worker did not start", str(raised.exception))
+        self.assertIn("task-worker", raised.exception.details["recovery"])
+        self.assertFalse(self.pool.exists())
+        self.assertEqual(self.run.commands[-1], self.HOLD_START)
+
+    def test_a_closed_box_device_goes_with_the_pool(self):
+        # A box created and never started leaves its device active, and no
+        # one holds it open.
+        self.run.box_devices = {"hot-devpool-snap-10": 0}
+        self.agent.command("reset-box-store", request_id="r1")
+        commands = self.run.commands
+        self.assertLess(commands.index(["dmsetup", "remove", "--retry", "hot-devpool-snap-10"]),
+                        commands.index(["dmsetup", "remove", "--retry", "hot-devpool"]))
+        self.assertFalse(self.pool.exists())
+
+    def test_a_stopped_installation_stays_stopped(self):
+        self.agent.command("drain-and-stop", request_id="s1")
+        self.run.commands.clear()
+        self.agent.command("reset-box-store", request_id="r1")
+        self.assertEqual(self.run.compose_calls(), [])
+        self.assertFalse(self.pool.exists())
+        self.assertTrue(self.agent.state()["stopped"])
+
+    def test_a_containerd_that_does_not_start_says_what_next(self):
+        recorder = self.run
+
+        def no_start(command, **kwargs):
+            if command == ["systemctl", "start", "kata-containerd.service"]:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="Job failed")
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_start
+        # A pool that fits, whatever this machine's disk has free.
+        self.agent.box_pool_shortfall = lambda: None
+        with self.assertRaises(agent_module.CommandFailed) as raised:
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertIn("did not start", str(raised.exception))
+        self.assertIn("reset-box-store again", raised.exception.details["recovery"])
+        # The task worker runs code tasks meanwhile.
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_refusal_after_the_store_is_gone_is_a_failure(self):
+        def refused():
+            raise agent_module.AgentError("The operator secret bundle must be a JSON object of names and values")
+        self.agent.configure_host = refused
+        report = self.agent.answer("reset-box-store", request_id="r1")
+        self.assertEqual(report["state"], "failed")
+        self.assertIn("box store is empty", report["error"])
+        self.assertFalse(self.pool.exists())
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+
+    def test_what_would_fail_the_restart_is_refused_before_anything_stops(self):
+        for name, setup in (
+                ("operator bundle", lambda: self.cloud.secrets.__setitem__(self.agent.references["operator"], "x")),
+                ("restore pending", lambda: setattr(self.agent, "restore_pending", lambda state, release: "pending")),
+                ("data left behind", lambda: setattr(self.agent, "bundle_left_behind", lambda bundle, state: True))):
+            with self.subTest(name), mock.patch.object(self.agent, "restore_pending", self.agent.restore_pending), \
+                    mock.patch.object(self.agent, "bundle_left_behind", self.agent.bundle_left_behind), \
+                    mock.patch.dict(self.cloud.secrets):
+                setup()
+                self.run.commands.clear()
+                report = self.agent.answer("reset-box-store", request_id="r1")
+                self.assertEqual(report["state"], "rejected")
+                # Only looked: the guest network reads the host's addresses.
+                self.assertEqual([c for c in self.run.commands if "stop" in c], [])
+                self.assertEqual(self.run.compose_calls(), [])
+                self.assertTrue(self.pool.exists())
+                self.assertNotIn("restarting", self.agent.state())
+
+    def test_devices_that_cannot_be_listed_keep_the_store(self):
+        recorder = self.run
+
+        def unlisted(command, **kwargs):
+            if command[:3] == ["dmsetup", "info", "-c"]:
+                raise subprocess.CalledProcessError(1, command, stderr="/dev/mapper/control: open failed")
+            return recorder(command, **kwargs)
+        self.agent.run_command = unlisted
+        with self.assertRaisesRegex(agent_module.AgentError, "left as it was: its devices could not be listed"):
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertTrue((self.pool / "data").exists())
+        self.assertNotIn(["dmsetup", "remove", "--retry", "hot-devpool"], self.run.commands)
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+
+    def test_a_cycle_that_brings_the_task_worker_back_says_nothing_for_the_reset(self):
+        # As after an agent that died mid-reset: the task worker is noted
+        # under no request ID.
+        self.agent.note_restarts(started={"task-worker": ""})
+        reports = []
+        with mock.patch.object(self.agent, "report", lambda **status: reports.append(status)):
+            self.agent.finish_restarts()
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertEqual(reports, [])
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_scalable_host_is_refused(self):
+        with mock.patch.object(render, "scalable", lambda config: True):
+            with self.assertRaisesRegex(agent_module.AgentError, "replace the task-worker group's instances"):
+                self.agent.command("reset-box-store", request_id="r1")
+        self.assertEqual(self.run.commands, [])
+        self.assertTrue(self.pool.exists())
 
 
 class AlertTests(AgentHarness):

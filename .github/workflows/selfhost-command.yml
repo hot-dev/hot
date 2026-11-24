@@ -18,7 +18,7 @@ on:
   workflow_call:
     inputs:
       operation:
-        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, test-alert, or deploy-now. backup, drain-and-stop, and roll-back are for single-machine installations, and a scalable one refuses them
+        description: status, diagnostics, logs, backup, restart-service, drain-and-stop, roll-back, test-alert, reset-box-store, or deploy-now. backup, drain-and-stop, roll-back, and reset-box-store are for single-machine installations, and a scalable one refuses them
         type: string
         required: true
       service:
@@ -108,7 +108,7 @@ jobs:
           [[ "$CLOUD" =~ ^(aws|gcp)$ ]] || { echo "::error::cloud must be aws or gcp"; exit 1; }
           # The helper takes anything but scalable for a single machine.
           [[ "$PRESET" =~ ^(single-machine|scalable)$ ]] || { echo "::error::preset must be single-machine or scalable"; exit 1; }
-          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back|test-alert|deploy-now)$ ]] ||
+          [[ "$OPERATION" =~ ^(status|diagnostics|logs|backup|restart-service|drain-and-stop|roll-back|test-alert|reset-box-store|deploy-now)$ ]] ||
             { echo "::error::unsupported operation; new releases use the selfhost-release workflow"; exit 1; }
           [[ "$SERVICE" =~ ^[a-z-]{0,16}$ ]] || { echo "::error::invalid service"; exit 1; }
           [[ "$CLOUD" != aws || ( -n "$REGION" && -n "$ROLE" ) ]] ||

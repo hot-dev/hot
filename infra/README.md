@@ -654,6 +654,7 @@ still queues on GitHub, one run per installation.
 | `deploy-now` | Deploys the release pointer now (the `release` action sets the pointer first), and retries a failed deploy or migration. After `drain-and-stop`, or a start after a boot that failed, it starts the installed release again if neither the pointer nor the configuration changed. It also renders the same release again when the operator secret gained or lost an entry. One sent before a deploy of that release failed answers with that failure and retries nothing: send it again after fixing the cause |
 | `roll-back` | After a failed upgrade: restores a local database from the pre-upgrade dump if the migrations started, then restarts the installed release. See [Recovery](#recovery) |
 | `test-alert` | Fires the `alert-test` alert, which resolves by itself: checks that alerts reach `monitoring.alert_emails` |
+| `reset-box-store` | On a single machine only. Empties Kata's box image store on the data disk (its containerd metadata and devmapper pool), for a Kata containerd that refuses it, as after a host image change. Stops the task worker, which ends running boxes, then starts Kata's containerd on a new pool and the task worker again. Box images pull again as boxes run, and each box's `/data` is kept. Refused, with the store left as it was, while a box device or Kata shim still runs: replace the instance, then run it again. See [Recovery](#recovery) |
 
 On a scalable AWS installation a command reaches every host, and the helper
 waits for each host that was in service when it was sent and still is. It returns
@@ -661,15 +662,15 @@ the first failure, or else the newest answer, with each host's state under
 `answers`. A host without the service rejects it, which does not count while some
 host has it. A host that does not answer fails the command and is named in the
 error; if none answers, the helper prints only the error. The command document
-there has no `backup`, `roll-back`, or `drain-and-stop`, and the helper refuses all
-three before sending: the database is not on those hosts, and a stopped host would
-not stay stopped. On either cloud it also refuses `logs` or `restart-service` naming
+there has no `backup`, `roll-back`, `drain-and-stop`, or `reset-box-store`, and the
+helper refuses all four before sending: the database is not on those hosts, a stopped
+host would not stay stopped, and a replaced task host starts with an empty box store. On either cloud it also refuses `logs` or `restart-service` naming
 `postgres`, `valkey`, or any other service a scalable installation's hosts do not run.
 
 On a scalable GCP installation a command reaches whichever host takes it first, so
 the helper sends only `status`, `diagnostics`, and `test-alert`. It refuses
-`drain-and-stop`, `restart-service`, `logs`, `deploy-now`, `roll-back`, and
-`backup`, and says what to do instead.
+`drain-and-stop`, `restart-service`, `logs`, `deploy-now`, `roll-back`, `backup`, and
+`reset-box-store`, and says what to do instead.
 
 On GCP the agent acknowledges a command before it runs it and remembers the last
 200 request IDs, so a message delivered twice runs once.
@@ -1688,11 +1689,12 @@ removes the VM on its first replacement.
 
 **Box storage after a host image change.** Box images live on the data disk, in
 Kata's containerd store and its devmapper pool, so a new host image opens the store
-an older one wrote. If Kata's containerd does not start on the new image,
-`diagnostics` reports it down and box tasks wait. Code tasks still run. Set
-`host_image` back to the previous image and apply: it opens the store as before.
-Box images are only a cache of their registries, and each box's `/data` is outside
-the store, in `box-data` on the data disk.
+an older one wrote. If Kata's containerd refuses it, `diagnostics` reports it down and
+box tasks wait. Code tasks still run. Run `reset-box-store`: it empties the store and
+starts Kata's containerd on a new pool. Box images are only a cache of their
+registries, and each box's `/data` is outside the store, in `box-data` on the data
+disk, so nothing else is lost. Setting `host_image` back to the previous image and
+applying also opens the store as before.
 
 **Restore the data disk from a snapshot.** Snapshots are named or tagged with
 the installation (`HotDataVolume` on AWS, label `hot-installation` on GCP).

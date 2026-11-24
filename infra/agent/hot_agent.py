@@ -70,7 +70,9 @@ FAILED_STATES = {"rejected", "failed", "migration-failed", "resume-failed", "exp
 ERROR_LINES = 3
 ERROR_CHARS = 400
 COMMANDS = {"deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "roll-back",
-            "test-alert"}
+            "test-alert", "reset-box-store"}
+# Kata's containerd names each active snapshot's thin device after the pool.
+BOX_POOL = "hot-devpool"
 # After a test alert, how long the agent reports AlertTest = 0, which
 # resolves the alert on clouds that keep an incident open without data.
 ALERT_TEST_RESOLVE_SECONDS = (120, 900)
@@ -4051,54 +4053,7 @@ class Agent:
             if self.state().get("stopping"):
                 raise AgentError("drain-and-stop has yet to finish: the next cycle stops the rest of Hot. Run "
                                  "restart-service once it has, or run deploy-now to start all of Hot")
-            pending = self.restore_pending(self.state(), release)
-            if pending:
-                raise AgentError(pending)
-            # The installed bundle cannot read records a move has rewritten, and
-            # would put new uploads on the old storage. A move cut short counts
-            # too, until the next cycle takes it up.
-            failed = self.state().get("failed") or {}
-            if (self.storage_progress(self.state().get("deploying") or {}) == "moving"
-                    or (self.storage_progress(failed) == "moving" and not failed.get("rolled_back"))):
-                raise AgentError("Hot stays stopped: some objects may already be in the new storage, which the "
-                                 "installed bundle cannot read. Fix the cause and run deploy-now, or put the storage "
-                                 "setting back, apply, and run deploy-now")
-            # Nor does it describe a database the data has moved to, in a deploy
-            # that upgraded too. Secrets follow the state, so nothing would write
-            # to the old copy, but the service could not connect.
-            if self.bundle_left_behind(bundle, self.state()):
-                raise AgentError("Hot stays stopped: the data moved to the new database, and the installed bundle "
-                                 "still describes the copy it left. Fix the cause and run deploy-now")
-            # The scheduler stays off a schema that may be partly migrated until
-            # what its note names clears that.
-            held = self.scheduler_held(self.state()) if service == "scheduler" else {}
-            if held:
-                raise AgentError(f"The scheduler is {held['scheduler']}")
-            if service == "app":
-                check_oauth(self.config.get("settings") or {}, self.operator_secrets())
-            # The service is recreated from the installed bundle, which mounts
-            # the operator secret bundle's entries as they were rendered: a new
-            # entry would never reach it, and a removed one would leave it
-            # mounting a file that is gone.
-            changes = self.unmounted_secrets(bundle, roles=[service], rendering=False)
-            if changes:
-                added, removed = changes[service]
-                parts = ([f"has {', '.join(added)}, which the installed bundle does not mount"] if added else []) + (
-                    [f"no longer has {', '.join(removed)}, which the installed bundle mounts"] if removed else [])
-                raise AgentError(f"For {service}, the operator secret bundle {' and '.join(parts)}; run deploy-now, "
-                                 "which renders the bundle again with them")
-            # What it recreates would exit on an empty file or an egress proxy
-            # Hot refuses, where now it runs on the value it read. A reboot
-            # delivers regardless: nothing is running.
-            data_keys = existing_data_keys(self.installed_config(self.state().get("data_modes")))
-            recreated = {service, *(("ingress",) if service in render.web_roles(self.config) else ())}
-            for key, value in self.operator_secrets().items():
-                if not (isinstance(value, str) and recreated.intersection(operator_readers(key, data_keys))):
-                    continue
-                if reads_as_empty(value):
-                    raise empty_entry(key)
-                if key == "HOT_NETWORK_EGRESS_PROXY" and not render.is_egress_proxy(value):
-                    raise bad_egress_proxy(key)
+            self.refuse_restart(bundle, release, service)
             # Secrets are rendered again, which is how rotation takes effect,
             # for the data services the installed bundle uses.
             self.deliver_secrets(data_modes=self.state().get("data_modes"))
@@ -4128,6 +4083,9 @@ class Agent:
             return self.report(state="stopped", request_id=request_id)
         if operation == "roll-back":
             return self.report(state="rolled-back", request_id=request_id, **self.roll_back(bundle))
+        if operation == "reset-box-store":
+            return self.report(state="box-store-reset", request_id=request_id,
+                               **self.reset_box_store(bundle, release, request_id))
         if operation == "backup":
             # An extra logical dump beside the scheduled data-disk snapshots.
             # A managed database is backed up by its cloud service, an existing
@@ -4143,6 +4101,58 @@ class Agent:
             target = self.dump_postgres(bundle, "manual")
             return self.report(state="backed-up", backup=str(target / "postgres.dump"), request_id=request_id)
         raise AgentError(f"Unhandled command {operation!r}")
+
+    def refuse_restart(self, bundle, release, service):
+        """Raise AgentError, with what to do instead, where recreating `service`
+        from the installed bundle would not bring it back as it runs now."""
+        pending = self.restore_pending(self.state(), release)
+        if pending:
+            raise AgentError(pending)
+        # The installed bundle cannot read records a move has rewritten, and
+        # would put new uploads on the old storage. A move cut short counts
+        # too, until the next cycle takes it up.
+        failed = self.state().get("failed") or {}
+        if (self.storage_progress(self.state().get("deploying") or {}) == "moving"
+                or (self.storage_progress(failed) == "moving" and not failed.get("rolled_back"))):
+            raise AgentError("Hot stays stopped: some objects may already be in the new storage, which the "
+                             "installed bundle cannot read. Fix the cause and run deploy-now, or put the storage "
+                             "setting back, apply, and run deploy-now")
+        # Nor does it describe a database the data has moved to, in a deploy
+        # that upgraded too. Secrets follow the state, so nothing would write
+        # to the old copy, but the service could not connect.
+        if self.bundle_left_behind(bundle, self.state()):
+            raise AgentError("Hot stays stopped: the data moved to the new database, and the installed bundle "
+                             "still describes the copy it left. Fix the cause and run deploy-now")
+        # The scheduler stays off a schema that may be partly migrated until
+        # what its note names clears that.
+        held = self.scheduler_held(self.state()) if service == "scheduler" else {}
+        if held:
+            raise AgentError(f"The scheduler is {held['scheduler']}")
+        if service == "app":
+            check_oauth(self.config.get("settings") or {}, self.operator_secrets())
+        # The service is recreated from the installed bundle, which mounts
+        # the operator secret bundle's entries as they were rendered: a new
+        # entry would never reach it, and a removed one would leave it
+        # mounting a file that is gone.
+        changes = self.unmounted_secrets(bundle, roles=[service], rendering=False)
+        if changes:
+            added, removed = changes[service]
+            parts = ([f"has {', '.join(added)}, which the installed bundle does not mount"] if added else []) + (
+                [f"no longer has {', '.join(removed)}, which the installed bundle mounts"] if removed else [])
+            raise AgentError(f"For {service}, the operator secret bundle {' and '.join(parts)}; run deploy-now, "
+                             "which renders the bundle again with them")
+        # What it recreates would exit on an empty file or an egress proxy
+        # Hot refuses, where now it runs on the value it read. A reboot
+        # delivers regardless: nothing is running.
+        data_keys = existing_data_keys(self.installed_config(self.state().get("data_modes")))
+        recreated = {service, *(("ingress",) if service in render.web_roles(self.config) else ())}
+        for key, value in self.operator_secrets().items():
+            if not (isinstance(value, str) and recreated.intersection(operator_readers(key, data_keys))):
+                continue
+            if reads_as_empty(value):
+                raise empty_entry(key)
+            if key == "HOT_NETWORK_EGRESS_PROXY" and not render.is_egress_proxy(value):
+                raise bad_egress_proxy(key)
 
     def restart(self, bundle, service, request_id):
         """Recreate one service from `bundle`. Said first, as a deploy says what it
@@ -4234,7 +4244,8 @@ class Agent:
                 self.note_restarts(done=[service])
                 continue
             self.restart(bundle, service, request_id)
-            self.report(state="restarted", service=service, request_id=request_id)
+            if request_id:
+                self.report(state="restarted", service=service, request_id=request_id)
 
     def stop_recovery(self):
         """What to do after a drain-and-stop failed, going by what the state says
@@ -4484,6 +4495,144 @@ class Agent:
         finally:
             done.set()
             thread.join(timeout=5)
+
+    def reset_box_store(self, bundle, release, request_id):
+        """Empty Kata's box image store, for a containerd that refuses the one
+        on the data disk, as after a host image change: its image metadata and
+        the devmapper pool that holds the images' layers and boxes' root
+        filesystems. Box images are a cache of their registries, and each box's
+        /data is outside the store (box-data), so both come back as boxes run.
+        Boxes running here end. A box left behind would keep the pool's devices
+        open, so the store is left as it is while one is: an open device or a
+        running shim."""
+        if render.scalable(self.config):
+            raise AgentError("A scalable task host's disk is deleted with it, so a replaced host starts with an empty "
+                             "box store: replace the task-worker group's instances")
+        if "task-worker" not in self.roles():
+            raise AgentError("This host runs no task worker, so it has no box store")
+        if not self.data_disk_mounted():
+            raise AgentError("The data disk is not mounted")
+        state = self.state()
+        if state.get("stopping"):
+            raise AgentError("drain-and-stop has yet to finish: the next cycle stops the rest of Hot. Run "
+                             "reset-box-store once it has")
+        # What starting Kata's containerd again reads, checked while nothing is
+        # stopped yet (configure_host).
+        self.guest_network(self.operator_secrets())
+        # A stopped installation keeps its task worker stopped.
+        running = not state.get("stopped")
+        if running:
+            # And the task worker it stops must come back as it runs now.
+            self.refuse_restart(bundle, release, "task-worker")
+            # Said first, as a restart says it: if the agent dies from here on,
+            # the next cycle brings the task worker back (finish_restarts). Under
+            # no request ID, so the cycle that does says nothing in this
+            # command's name: its report is box-store-reset, or none.
+            self.note_restarts(started={"task-worker": ""})
+            # The task worker ends its boxes as it stops.
+            self.compose(bundle, "stop", "--timeout", "120", "task-worker")
+        self.run_command(["systemctl", "stop", "kata-containerd.service"])
+        # hot-box-pool-hold.timer rewrites the pool's files each minute, so it
+        # waits until they are gone and a new pool is made.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self.run_command(["systemctl", "stop", "hot-box-pool-hold.timer", "hot-box-pool-hold.service"])
+        try:
+            return self.reset_stopped_box_store(bundle, running)
+        finally:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                self.run_command(["systemctl", "start", "hot-box-pool-hold.timer"])
+
+    def reset_stopped_box_store(self, bundle, running):
+        """reset-box-store, once the task worker and Kata's containerd have
+        stopped."""
+        # The pool's snapshot devices, and how many hold each open. A box
+        # never started leaves its device active and closed, which the pool
+        # can lose; one a box still uses is open.
+        unlisted = None
+        try:
+            listed = self.run_command(["dmsetup", "info", "-c", "--noheadings", "-o", "name,open",
+                                       "--separator", ":"]).stdout
+        except subprocess.CalledProcessError as error:
+            listed = ""
+            if "No devices found" not in f"{error.stdout or ''}{error.stderr or ''}":
+                unlisted = self.explain(error)
+        devices = {}
+        for line in listed.splitlines():
+            name, _, opened = line.strip().rpartition(":")
+            if name.startswith(BOX_POOL + "-") and opened.isdigit():
+                devices[name] = int(opened)
+        held = [name for name, opened in devices.items() if opened]
+        try:
+            self.run_command(["pgrep", "-f", "containerd-shim-kata-v2"])
+            shims = True
+        except subprocess.CalledProcessError:
+            shims = False
+        if held or shims or unlisted:
+            # Put back as it was, as far as it goes: a containerd that refused
+            # the store fails to start again, and the next cycle brings back a
+            # task worker that does not start here (finish_restarts).
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                self.run_command(["systemctl", "start", "kata-containerd.service"])
+            if running:
+                self.restart_quietly(bundle)
+            if unlisted:
+                raise AgentError(f"The box store was left as it was: its devices could not be listed: {unlisted}")
+            left = (([f"{len(held)} box devices"] if held else [])
+                    + (["Kata shims"] if shims else []))
+            raise AgentError(f"The box store was left as it was: {' and '.join(left)} still run after the task worker "
+                             "stopped. Replace the instance, which keeps the data disk and starts with no box running, "
+                             "then run reset-box-store again")
+        try:
+            for name in devices:
+                self.run_command(["dmsetup", "remove", "--retry", name])
+            if self.box_pool_active():
+                self.run_command(["dmsetup", "remove", "--retry", BOX_POOL])
+            pool = self.data_root / "kata/devmapper"
+            for name in ("data", "meta"):
+                backing = pool / name
+                if not backing.exists():
+                    continue
+                for line in self.run_command(["losetup", "-j", str(backing)]).stdout.splitlines():
+                    device = line.split(":", 1)[0].strip()
+                    if device.startswith("/dev/loop"):
+                        self.run_command(["losetup", "-d", device])
+            # The pool's files and its "held" marker go with it, so a new pool
+            # is sized and held as a first one is (kata-devpool-activate).
+            for directory in (self.data_root / "kata/containerd", pool):
+                if directory.exists():
+                    shutil.rmtree(directory)
+        except (OSError, subprocess.SubprocessError) as error:
+            if running:
+                self.restart_quietly(bundle)
+            raise CommandFailed(f"The box store was only partly removed: {self.explain(error)}",
+                                recovery="Run reset-box-store again. Until it finishes, box tasks wait; code tasks "
+                                         "run") from error
+        notes = {}
+        try:
+            # Starts Kata's containerd, whose start creates a new pool.
+            self.configure_host()
+        except BoxPoolShort as error:
+            notes["warning"] = str(error)
+        except (AgentError, OSError, subprocess.SubprocessError) as error:
+            # Code tasks need no containerd: the task worker runs them meanwhile.
+            if running:
+                self.restart_quietly(bundle)
+            raise CommandFailed(f"The box store is empty, and Kata's containerd did not start: {self.explain(error)}",
+                                recovery="Run diagnostics for why, then reset-box-store again. Until it starts, box "
+                                         "tasks wait; code tasks run") from error
+        if running:
+            try:
+                self.restart(bundle, "task-worker", "")
+            except (AgentError, OSError, subprocess.SubprocessError) as error:
+                raise CommandFailed(f"The box store was reset, and the task worker did not start: "
+                                    f"{self.explain(error)}", recovery=self.restart_recovery("task-worker")) from error
+        return notes
+
+    def restart_quietly(self, bundle):
+        """Start the task worker a reset stopped, where that may fail: the next
+        cycle tries again, as `restarting` says (finish_restarts)."""
+        with contextlib.suppress(AgentError, OSError, subprocess.SubprocessError):
+            self.restart(bundle, "task-worker", "")
 
     def stop_services(self, bundle):
         """Stop Hot in order: the scheduler, then workers with time to

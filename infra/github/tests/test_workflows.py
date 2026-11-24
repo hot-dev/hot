@@ -609,13 +609,13 @@ class CommandWorkflow(unittest.TestCase):
     def test_the_callers_are_told_what_a_scalable_installation_refuses(self):
         # drain-and-stop would report stopped while the app and API groups replace
         # the stopped hosts, and the database is not on a scalable installation's hosts.
-        single_machine = {"backup", "drain-and-stop", "roll-back"}
+        single_machine = {"backup", "drain-and-stop", "roll-back", "reset-box-store"}
         self.assertLessEqual(single_machine, set(selfhost.OPERATIONS))
         operation = re.search(r"(?m)^      operation:\n        description: (.+)\n", COMMAND).group(1)
-        self.assertIn("backup, drain-and-stop, and roll-back are for single-machine installations", operation)
+        self.assertIn("backup, drain-and-stop, roll-back, and reset-box-store are for single-machine installations", operation)
         example = (EXAMPLE / ".github/workflows/command.yml").read_text()
         operation = re.search(r"(?m)^      operation:\n        description: (.+)\n", example).group(1)
-        self.assertEqual(operation, "backup, drain-and-stop, and roll-back are for single-machine installations")
+        self.assertEqual(operation, "backup, drain-and-stop, roll-back, and reset-box-store are for single-machine installations")
 
 
 class InfrastructureChecks(unittest.TestCase):

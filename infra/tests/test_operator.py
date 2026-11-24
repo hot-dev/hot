@@ -1631,7 +1631,8 @@ class ScalableCommands(unittest.TestCase):
 
     def test_backup_and_roll_back_are_refused_with_what_to_do_instead(self):
         for operation, instead in (("backup", "back it up with its provider"),
-                                   ("roll-back", "fix forward, or restore the database to a point in time")):
+                                   ("roll-back", "fix forward, or restore the database to a point in time"),
+                                   ("reset-box-store", "replace the task-worker group's instances")):
             with self.subTest(operation):
                 cli = ScalableCli()
                 with self.assertRaises(selfhost.CliError) as caught:
@@ -1695,7 +1696,7 @@ class ScalableCommands(unittest.TestCase):
     def test_the_helper_and_the_command_document_agree(self):
         self.assertEqual(set(selfhost.HOST_SERVICES) | {"none"}, set(DocumentCli.ALLOWED["service"]))
         self.assertEqual(set(selfhost.OPERATIONS) - set(DocumentCli.ALLOWED["operation"]),
-                         {"backup", "drain-and-stop", "roll-back"})
+                         {"backup", "drain-and-stop", "roll-back", "reset-box-store"})
 
 
 class GcpScalableCommands(unittest.TestCase):
@@ -1704,7 +1705,8 @@ class GcpScalableCommands(unittest.TestCase):
     def test_what_one_host_cannot_answer_is_refused_before_sending(self):
         instead = {"drain-and-stop": "resize each group to 0", "restart-service": "Replace the role's instances",
                    "logs": "Cloud Logging", "deploy-now": "recreate the scheduler's instance",
-                   "roll-back": "no roll-back", "backup": "its provider"}
+                   "roll-back": "no roll-back", "backup": "its provider",
+                   "reset-box-store": "replace the task-worker group's instances"}
         self.assertEqual(set(instead), set(selfhost.ONE_HOST_INSTEAD))
         self.assertLess(set(instead), set(selfhost.OPERATIONS))
         for operation, alternative in instead.items():
@@ -1738,7 +1740,7 @@ class GcpScalableCommands(unittest.TestCase):
             self.assertEqual(installation(GCP, cli).run(operation, "app")["state"], "done")
             cli = FakeCli("aws", [{"state": "done"}])
             self.assertEqual(installation(AWS, cli).run(operation, "app")["state"], "done")
-            if operation in ("drain-and-stop", "backup", "roll-back"):
+            if operation in ("drain-and-stop", "backup", "roll-back", "reset-box-store"):
                 continue  # Refused there too: see test_nothing_goes_out_that_the_command_document_refuses.
             cli = ScalableCli()
             installation(SCALABLE, cli).run(operation, "app", timeout=60)

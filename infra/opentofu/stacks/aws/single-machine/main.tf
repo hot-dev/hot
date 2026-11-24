@@ -225,7 +225,7 @@ resource "aws_ssm_document" "command" {
     schemaVersion = "2.2"
     description   = "Run one Hot agent command on the installation host."
     parameters = {
-      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "test-alert", "roll-back"] }
+      operation = { type = "String", allowedValues = ["deploy-now", "status", "diagnostics", "logs", "backup", "restart-service", "drain-and-stop", "test-alert", "roll-back", "reset-box-store"] }
       service   = { type = "String", default = "none", allowedValues = ["none", "app", "api", "worker", "task-worker", "scheduler", "ingress", "postgres", "valkey"] }
       requestId = { type = "String", allowedPattern = "^[A-Za-z0-9-]{1,64}$" }
       # When the helper stops waiting, in seconds since the epoch: past it the
