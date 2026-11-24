@@ -80,6 +80,10 @@ run "private_local" {
     condition     = google_compute_router_nat.egress[0].enable_dynamic_port_allocation && !google_compute_router_nat.egress[0].enable_endpoint_independent_mapping && google_compute_router_nat.egress[0].min_ports_per_vm == 4096 && google_compute_router_nat.egress[0].max_ports_per_vm == 65536
     error_message = "The one host gets enough NAT ports for busy outbound calls to one destination, not the default 64."
   }
+  assert {
+    condition     = google_compute_subnetwork.hot[0].log_config[0].aggregation_interval == "INTERVAL_10_MIN" && google_compute_subnetwork.hot[0].log_config[0].flow_sampling == 0.5 && google_compute_subnetwork.hot[0].log_config[0].metadata == "INCLUDE_ALL_METADATA"
+    error_message = "A subnet the stack creates keeps VPC flow logs."
+  }
 }
 
 run "private_existing_s3" {

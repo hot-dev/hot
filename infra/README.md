@@ -17,7 +17,9 @@ Implemented:
   digits, and `-`. Plan refuses anything else.
 - AWS and GCP OpenTofu roots with pinned providers and committed lockfiles.
   New private networks have NAT egress; existing networks are reused without
-  changing their routes. VMs have no public addresses or SSH ingress.
+  changing their routes. VMs have no public addresses or SSH ingress. A subnet
+  the GCP stacks create keeps VPC flow logs (half the flows, in ten-minute
+  records); on an existing network, flow logs are the subnet owner's setting.
 - Retained, encrypted cloud data disks, encrypted boot disks, nested
   virtualization, scoped secret access, and separate host identities.
 - Required client-side encryption of OpenTofu state and saved plans. The
@@ -2619,7 +2621,8 @@ Builds and files stay until users delete them.
 - NAT for outbound traffic (AWS NAT gateway, GCP Cloud NAT) and, when
   enabled, the load balancers for public endpoints;
 - managed PostgreSQL and Valkey instances (high availability doubles them);
-- log ingestion and storage, metrics, and alarms;
+- log ingestion and storage (on GCP this includes the new subnet's VPC flow
+  logs), metrics, and alarms;
 - Secrets Manager secrets on AWS.
 
 **Budgets.** Set `monitoring.monthly_budget` to create a monthly cost
