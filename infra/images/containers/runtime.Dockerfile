@@ -10,7 +10,7 @@
 
 # Debian 13: the ONNX Runtime library Hot links needs glibc 2.38 and GCC 13's
 # libstdc++, as on the Ubuntu 24.04 runners that build the Linux packages.
-ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 FROM --platform=linux/amd64 ${DEBIAN_IMAGE} AS builder
 
@@ -43,9 +43,12 @@ RUN curl -fsSL -o /usr/local/bin/tailwindcss \
     && echo "${TAILWIND_SHA256}  /usr/local/bin/tailwindcss" | sha256sum --check - \
     && chmod +x /usr/local/bin/tailwindcss
 
-# `ctr` imports box images into the Kata containerd on the host.
-ARG CONTAINERD_VERSION=1.7.30
-ARG CONTAINERD_SHA256=ca0f27e34411504acd1cd24fcbaa71b9c47d31ce9408c47c54a2dc1810ceb1df
+# `ctr` pulls box images into the Kata containerd on the host. It comes from
+# the current containerd release, matching the host's: an older line's `ctr`
+# is built with an old Go and gRPC that image scans flag. The task worker
+# passes `--local`, which pulls the same way against a 1.7 or 2.x daemon.
+ARG CONTAINERD_VERSION=2.4.2
+ARG CONTAINERD_SHA256=35880c1dd4627e8ce56526bfabb39c144e83458ffdb197ce6f05d17d94d7d91e
 RUN curl -fsSL -o /tmp/containerd.tar.gz \
         "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-amd64.tar.gz" \
     && echo "${CONTAINERD_SHA256}  /tmp/containerd.tar.gz" | sha256sum --check - \
@@ -92,7 +95,9 @@ FROM --platform=linux/amd64 ${DEBIAN_IMAGE}
 
 # iproute2 and iptables: the task worker manages box network namespaces.
 # e2fsprogs: the task worker formats each box's /data volume with mkfs.ext4.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The upgrade picks up Debian security fixes published after the base digest.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         ca-certificates \
         e2fsprogs \
         iproute2 \
