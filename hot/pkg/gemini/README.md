@@ -73,7 +73,7 @@ get-weather fn (city: Str): Str { `${city}: 18C` }
 opts ::ai::chat/ChatOptions({
     chat-fn: ::gemini::chat-tools/chat-with-tools,
     chat-stream-fn: ::gemini::chat-tools/chat-with-tools-stream,
-    model: "gemini-3.8-flash",
+    model: "gemini-4-hydrogen",
     tools: [::ai::tool/from-fn(get-weather)]
 })
 
