@@ -1,0 +1,1066 @@
+::gemini::chat-tools ns
+meta {
+    doc: """
+    Gemini adapter that satisfies the `::ai::chat/run-loop` contract:
+
+    ```
+    chat-with-tools(
+        model: Str,
+        messages: Vec<::ai::chat/Message>,
+        system: Str?,
+        tools: Vec<::ai::tool/Tool>?
+    ): ::ai::chat/ChatReply
+    ```
+
+    It translates `::ai::chat/Message` records into Gemini `contents`,
+    calls `generateContent` (or `streamGenerateContent`), and normalizes the
+    response into a `::ai::chat/ChatReply`, so `run-loop` does not need to
+    know Gemini's wire format.
+
+    **Wiring.** `::ai::chat`'s built-in registry leaves `chat-fn` null for
+    every provider, so set the adapter on `ChatOptions` (or register it with
+    `::ai::chat/with-providers`):
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::gemini::chat-tools/chat-with-tools,
+        chat-stream-fn: ::gemini::chat-tools/chat-with-tools-stream,
+        model: "gemini-2.5-flash",
+    })
+    ```
+
+    **Per-call credentials.** Each entry point also takes a trailing
+    `opts: Map` (`api-key`, `base-url`, see `::gemini::api/resolve`).
+    `chat-with-tools` and `chat-with-tools-stream` with `opts` match the
+    `chat-opts-fn` and `chat-stream-opts-fn` slots of
+    `::ai::chat/ChatOptions`, which hand them `ChatOptions.provider-opts`.
+
+    **Tool calls.** A Gemini function call may come with no id, and a model
+    that thinks returns a `thoughtSignature` on the call that Gemini 3
+    requires back on the next turn. The adapter keeps both in
+    `ToolCall.meta` (`gemini-id`, `thought-signature`), which `run-loop`
+    carries into the next request untouched. A call with no Gemini id gets a
+    generated one.
+
+    **Failures.** A refused call, an error inside the stream, a stream that
+    ends before its finish reason and a reply with no text and no call all
+    come back as an Err: `::gemini::api/HttpError` for the first two,
+    `ReplyError` for the last two.
+    """
+}
+
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+HttpError          ::gemini::api/HttpError
+refused-stream     ::gemini::api/refused-stream
+is-ok-response     ::hot::http/is-ok-response
+ReplyDelta         ::ai-chat/ReplyDelta
+TextDelta          ::ai-chat/TextDelta
+ToolUseStart       ::ai-chat/ToolUseStart
+ToolUseInputDelta  ::ai-chat/ToolUseInputDelta
+ToolUseEnd         ::ai-chat/ToolUseEnd
+StreamStop         ::ai-chat/StreamStop
+
+PROVIDER_NAME "Google Gemini"
+
+// ============================================================================
+// Options and errors
+// ============================================================================
+
+ChatRequestOptions
+meta {
+    doc: """
+    Per-request controls for Gemini `generateContent`. Every field is
+    optional; a null field is left out of the request so the model's default
+    applies.
+
+    - `max-tokens` — `maxOutputTokens`. Thinking counts against it.
+    - `temperature` — sampling temperature.
+    - `thinking-level` — Gemini 3 thinking level (`"low"`, `"high"`).
+    - `thinking-budget` — Gemini 2.5 thinking budget in tokens (`0` turns
+      thinking off, `-1` lets the model decide).
+    - `include-thoughts` — ask for thought summaries. They are kept out of
+      the reply's text either way.
+    - `cached-content` — a `cachedContents/...` name from
+      `::gemini::cachedcontents`. With it set, the system prompt, tools and
+      tool config are left out of the request: Gemini refuses them beside a
+      cache, so they must be in the cache.
+    - `safety-settings` — `[{category, threshold}]`, as Gemini takes them.
+    - `response-mime-type` — e.g. `"application/json"`.
+    - `response-schema` — a JSON Schema for the reply (`responseJsonSchema`).
+      Sets the MIME type to `application/json` when that is not given.
+    - `tool-mode` — `functionCallingConfig.mode`: `"AUTO"`, `"ANY"`,
+      `"NONE"` or `"VALIDATED"`.
+    """
+}
+type {
+    max-tokens: Int?,
+    temperature: Dec?,
+    thinking-level: Str?,
+    thinking-budget: Int?,
+    include-thoughts: Bool?,
+    cached-content: Str?,
+    safety-settings: Vec<Map>?,
+    response-mime-type: Str?,
+    response-schema: Map?,
+    tool-mode: Str?,
+}
+
+DEFAULT_REQUEST_OPTIONS ChatRequestOptions({})
+
+ReplyError
+meta {
+    doc: """
+    Why a call that Gemini answered produced no usable reply.
+
+    - `kind` — `"empty-reply"` (no text and no call) or
+      `"incomplete-stream"` (the stream ended before a finish reason).
+    - `finish-reason` — the candidate's `finishReason`, e.g. `"SAFETY"`,
+      `"MALFORMED_FUNCTION_CALL"`, or `"MAX_TOKENS"` when thinking used the
+      whole output budget.
+    - `block-reason` — `promptFeedback.blockReason` when the prompt itself
+      was blocked.
+    - `message` — the candidate's `finishMessage`, when Gemini gives one.
+
+    **Example**
+
+    ```hot
+    reply ::gemini::chat-tools/parse-response({candidates: [{finishReason: "SAFETY"}]})
+    is-err(reply)  // true
+    err-value(reply).finish-reason  // "SAFETY"
+    ```
+    """
+}
+type {
+    kind: Str,
+    finish-reason: Str?,
+    block-reason: Str?,
+    message: Str?,
+}
+
+// ============================================================================
+// Outbound: ::ai::chat/Message -> Gemini contents
+// ============================================================================
+
+model-path
+meta {
+    no-doc: true,
+    doc: """Internal: `models/<model>`, accepting a model that already has the prefix."""
+}
+fn (model: Str): Str {
+    if(starts-with(model, "models/"), model, `models/${model}`)
+}
+
+generation-config
+meta {
+    doc: """
+    The `generationConfig` for `options`, or null when nothing is set.
+
+    **Example**
+
+    ```hot
+    options ::gemini::chat-tools/ChatRequestOptions({max-tokens: 2048, thinking-budget: 512})
+    config ::gemini::chat-tools/generation-config(options)
+    config.maxOutputTokens  // 2048
+    config.thinkingConfig.thinkingBudget  // 512
+
+    ::gemini::chat-tools/generation-config(::gemini::chat-tools/DEFAULT_REQUEST_OPTIONS)  // null
+    ```
+    """
+}
+fn (options: ChatRequestOptions): Map? {
+    thinking filter-vals({
+        thinkingLevel: options.thinking-level,
+        thinkingBudget: options.thinking-budget,
+        includeThoughts: options.include-thoughts,
+    }, is-some)
+
+    mime cond {
+        is-some(options.response-mime-type) => { options.response-mime-type }
+        is-some(options.response-schema) => { "application/json" }
+        => { null }
+    }
+
+    config filter-vals({
+        maxOutputTokens: options.max-tokens,
+        temperature: options.temperature,
+        thinkingConfig: if(is-empty(thinking), null, thinking),
+        responseMimeType: mime,
+        responseJsonSchema: options.response-schema,
+    }, is-some)
+
+    if(is-empty(config), null, config)
+}
+
+to-function-call-part
+meta {
+    doc: """
+    Convert a `::ai::tool/ToolCall` into a Gemini `functionCall` part. The
+    call's `meta.gemini-id` goes back as the call's `id`, and its
+    `meta.thought-signature` as the part's `thoughtSignature`.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "c1", name: "search", input: {q: "hot"}, meta: {thought-signature: "sig"}})
+    part ::gemini::chat-tools/to-function-call-part(call)
+    part.functionCall  // {name: "search", args: {q: "hot"}}
+    part.thoughtSignature  // "sig"
+    ```
+    """
+}
+fn (call: ::ai-tool/ToolCall): Map {
+    extra or(call.meta, {})
+    function-call filter-vals({
+        id: get(extra, "gemini-id"),
+        name: ::ai-tool/provider-name(call.name),
+        args: or(call.input, {}),
+    }, is-some)
+
+    filter-vals({functionCall: function-call, thoughtSignature: get(extra, "thought-signature")}, is-some)
+}
+
+function-response-value
+meta {
+    no-doc: true,
+    doc: """
+    Internal: a tool result as the JSON object Gemini's
+    `functionResponse.response` must be. A failed result is `{error: ...}`, a
+    Map stays as it is, anything else is `{result: ...}`.
+    """
+}
+fn (m: ::ai-chat/Message): Map {
+    value untype(m.content)
+    cond {
+        eq(m.is-error, true) => { {error: value} }
+        is-map(value) => { value }
+        => { {result: value} }
+    }
+}
+
+to-function-response-part
+meta {
+    doc: """
+    Convert a `role: "tool"` message into a Gemini `functionResponse` part.
+    `calls` maps a tool-call id to the `ToolCall` it answers, which gives
+    the part its name (and its Gemini id, when the call had one). A result
+    whose call is not in `calls` is named by its id.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "c1", name: "search", input: {q: "hot"}})
+    result ::ai::chat/tool-result-message(::ai::tool/ToolResult({id: "c1", output: "3 hits", is-error: false}))
+    part ::gemini::chat-tools/to-function-response-part(result, {c1: call})
+    part.functionResponse  // {name: "search", response: {result: "3 hits"}}
+    ```
+    """
+}
+fn (m: ::ai-chat/Message, calls: Map): Map {
+    id or(m.tool-call-id, "")
+    call get(calls, id)
+    name cond {
+        is-null(call) => { if(is-empty(id), "tool", id) }
+        => { ::ai-tool/provider-name(call.name) }
+    }
+
+    gemini-id cond {
+        is-null(call) => { null }
+        => { get(or(call.meta, {}), "gemini-id") }
+    }
+
+    {functionResponse: filter-vals({id: gemini-id, name: name, response: function-response-value(m)}, is-some)}
+}
+
+to-gemini-part
+meta {
+    no-doc: true,
+    doc: """
+    Internal: a `MessagePart` as a Gemini part. Inline bytes become
+    `inlineData`, a URL becomes `fileData`, and anything else falls back to
+    its text. Null when there is nothing to send.
+    """
+}
+fn cond (p: ::ai-chat/MessagePart): Map? {
+    eq(p.kind, "text") => {
+        text or(p.text, "")
+        if(is-empty(text), null, {text: text})
+    }
+
+    is-some(p.data) => { {inlineData: {mimeType: or(p.mime, "application/octet-stream"), data: p.data}} }
+    is-some(p.url) => { {fileData: filter-vals({mimeType: p.mime, fileUri: p.url}, is-some)} }
+    => {
+        text ::ai-chat/flatten-parts([p])
+        if(is-empty(text), null, {text: text})
+    }
+}
+
+user-parts
+meta {
+    no-doc: true,
+    doc: """Internal: the Gemini parts of a user message, from `parts` when set, else its text."""
+}
+fn (m: ::ai-chat/Message): Vec<Map> {
+    cond {
+        is-null(m.parts) => {
+            text ::ai-chat/message-text(m)
+            if(is-empty(text), [], [{text: text}])
+        }
+        => { filter(map(m.parts, to-gemini-part), is-some) }
+    }
+}
+
+model-parts
+meta {
+    no-doc: true,
+    doc: """Internal: the Gemini parts of an assistant message: its text, then its calls."""
+}
+fn (m: ::ai-chat/Message): Vec<Map> {
+    text ::ai-chat/message-text(m)
+    text-parts if(is-empty(text), [], [{text: text}])
+    concat(text-parts, map(or(m.tool-calls, []), to-function-call-part))
+}
+
+append-content
+meta {
+    no-doc: true,
+    doc: """Internal: `contents` with a `role` turn holding `parts`, unless there are none."""
+}
+fn (contents: Vec, role: Str, parts: Vec): Vec {
+    if(is-empty(parts), contents, concat(contents, [{role: role, parts: parts}]))
+}
+
+flush-results
+meta {
+    no-doc: true,
+    doc: """Internal: close the run of tool results into one `user` turn."""
+}
+fn (state: Map): Map {
+    cond {
+        is-empty(state.results) => { state }
+        => { {...state, contents: append-content(state.contents, "user", state.results), results: []} }
+    }
+}
+
+add-message
+meta {
+    no-doc: true,
+    doc: """
+    Internal: fold one message into the `to-contents` state. Tool results
+    gather until the next non-tool message, so the results that answer one
+    model turn share one `user` turn. `system` messages go to the system
+    instruction, since Gemini refuses a `system` role in `contents`.
+    """
+}
+fn cond (state: Map, m: ::ai-chat/Message): Map {
+    eq(m.role, "tool") => {
+        {...state, results: concat(state.results, [to-function-response-part(m, state.calls)])}
+    }
+
+    eq(m.role, "system") => {
+        text ::ai-chat/message-text(m)
+        if(is-empty(text), state, {...state, system: concat(state.system, [text])})
+    }
+
+    eq(m.role, "assistant") => {
+        flushed flush-results(state)
+        calls reduce(or(m.tool-calls, []), (acc, c) { assoc(acc, c.id, c) }, flushed.calls)
+        {...flushed, calls: calls, contents: append-content(flushed.contents, "model", model-parts(m))}
+    }
+    => {
+        flushed flush-results(state)
+        {...flushed, contents: append-content(flushed.contents, "user", user-parts(m))}
+    }
+}
+
+to-contents
+meta {
+    doc: """
+    Convert a conversation into Gemini `contents` plus the text of any
+    `system` messages: `{contents, system}`. Assistant turns become `model`
+    turns, and the tool results that answer one model turn go in one `user`
+    turn.
+
+    **Example**
+
+    ```hot
+    call ::ai::tool/ToolCall({id: "c1", name: "search", input: {q: "hot"}})
+    out ::gemini::chat-tools/to-contents([
+        ::ai::chat/user-message("Find hot"),
+        ::ai::chat/assistant-message("", [call]),
+        ::ai::chat/tool-result-message(::ai::tool/ToolResult({id: "c1", output: "3 hits", is-error: false})),
+    ])
+    map(out.contents, %.role)  // ["user", "model", "user"]
+    out.contents[2].parts[0].functionResponse.name  // "search"
+    ```
+    """
+}
+fn (messages: Vec<::ai-chat/Message>): Map {
+    folded reduce(messages, add-message, {contents: [], results: [], calls: {}, system: []})
+    done flush-results(folded)
+    {contents: done.contents, system: done.system}
+}
+
+to-function-declaration
+meta {
+    doc: """
+    Convert a `::ai::tool/Tool` into a Gemini function declaration. The
+    input schema goes in `parametersJsonSchema`, which takes standard JSON
+    Schema, and is left out for a tool that takes no arguments.
+
+    **Example**
+
+    ```hot
+    tool ::ai::tool/Tool({
+      name: "search",
+      description: "Search the docs.",
+      input-schema: {type: "object", properties: {q: {type: "string"}}, required: ["q"]},
+      fn: (input) { [] }
+    })
+    decl ::gemini::chat-tools/to-function-declaration(tool)
+    decl.name  // "search"
+    decl.parametersJsonSchema.required  // ["q"]
+    ```
+    """
+}
+fn (t: ::ai-tool/Tool): Map {
+    schema t.input-schema
+    props if(is-map(schema), get(schema, "properties"), null)
+    has-args cond {
+        not(is-map(props)) => { false }
+        => { not(is-empty(props)) }
+    }
+
+    filter-vals({
+        name: ::ai-tool/provider-name(t.name),
+        description: t.description,
+        parametersJsonSchema: if(has-args, schema, null),
+    }, is-some)
+}
+
+build-request
+meta {
+    doc: """
+    The `generateContent` request body for a conversation, pure. `system`
+    and any `system` messages become `systemInstruction`; `tools` become one
+    `functionDeclarations` set, left out when there are none. With
+    `options.cached-content` set, the system instruction, tools and tool
+    config are left out, since Gemini takes them from the cache.
+
+    **Example**
+
+    ```hot
+    request ::gemini::chat-tools/build-request(
+      [::ai::chat/user-message("Hi")],
+      "Be brief.",
+      null,
+      ::gemini::chat-tools/ChatRequestOptions({max-tokens: 256})
+    )
+    request.systemInstruction  // {parts: [{text: "Be brief."}]}
+    request.generationConfig  // {maxOutputTokens: 256}
+    ```
+    """
+}
+fn (messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): Map {
+    converted to-contents(messages)
+    system-texts filter(concat(if(is-null(system), [], [system]), converted.system), (s) { not(is-empty(s)) })
+    declarations if(is-null(tools), [], map(tools, to-function-declaration))
+    uses-cache is-some(options.cached-content)
+
+    system-instruction cond {
+        uses-cache => { null }
+        is-empty(system-texts) => { null }
+        => { {parts: [{text: join(system-texts, "\n\n")}]} }
+    }
+
+    tool-sets cond {
+        uses-cache => { null }
+        is-empty(declarations) => { null }
+        => { [{functionDeclarations: declarations}] }
+    }
+
+    tool-config cond {
+        uses-cache => { null }
+        is-null(options.tool-mode) => { null }
+        => { {functionCallingConfig: {mode: options.tool-mode}} }
+    }
+
+    filter-vals({
+        contents: converted.contents,
+        systemInstruction: system-instruction,
+        tools: tool-sets,
+        toolConfig: tool-config,
+        generationConfig: generation-config(options),
+        safetySettings: options.safety-settings,
+        cachedContent: options.cached-content,
+    }, is-some)
+}
+
+// ============================================================================
+// Inbound: Gemini response -> ::ai::chat/ChatReply
+// ============================================================================
+
+part-text
+meta {
+    doc: """
+    The visible text of a response part. A thought part (`thought: true`)
+    is the model's reasoning, not its answer, so it reads as empty.
+
+    **Example**
+
+    ```hot
+    ::gemini::chat-tools/part-text({text: "Hello"})  // "Hello"
+    ::gemini::chat-tools/part-text({text: "Let me think.", thought: true})  // ""
+    ```
+    """
+}
+fn (part: Map): Str {
+    if(eq(get(part, "thought"), true), "", or(get(part, "text"), ""))
+}
+
+part-tool-call
+meta {
+    doc: """
+    Convert a `functionCall` part into a `::ai::tool/ToolCall`, or null for
+    any other part. A Gemini id and the part's `thoughtSignature` go in
+    `meta` (`gemini-id`, `thought-signature`); a call with no Gemini id gets
+    a generated one.
+
+    **Example**
+
+    ```hot
+    call ::gemini::chat-tools/part-tool-call({functionCall: {id: "fc1", name: "search", args: {q: "hot"}}, thoughtSignature: "sig"})
+    call.id  // "fc1"
+    call.meta  // {gemini-id: "fc1", thought-signature: "sig"}
+
+    ::gemini::chat-tools/part-tool-call({text: "Hello"})  // null
+    ```
+    """
+}
+fn (part: Map): ::ai-tool/ToolCall? {
+    function-call get(part, "functionCall")
+    cond {
+        not(is-map(function-call)) => { null }
+        => {
+            given-id get(function-call, "id")
+            has-id cond {
+                not(is-str(given-id)) => { false }
+                => { not(is-empty(given-id)) }
+            }
+
+            extra filter-vals({
+                gemini-id: if(has-id, given-id, null),
+                thought-signature: get(part, "thoughtSignature"),
+            }, is-some)
+
+            ::ai-tool/ToolCall({
+                id: if(has-id, given-id, `gemini_${Str(::hot::uuid/Uuid())}`),
+                name: or(get(function-call, "name"), ""),
+                input: or(get(function-call, "args"), {}),
+                meta: if(is-empty(extra), null, extra),
+            })
+        }
+    }
+}
+
+response-usage
+meta {
+    doc: """
+    Normalize Gemini's `usageMetadata` into `{input-tokens, output-tokens,
+    total-tokens, cache-read-tokens, thought-tokens}`. `input-tokens`
+    includes the cached tokens, and `output-tokens` the thought tokens, as
+    for the other providers.
+
+    **Example**
+
+    ```hot
+    ::gemini::chat-tools/response-usage({promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 30, cachedContentTokenCount: 80, totalTokenCount: 150})
+    // {input-tokens: 100, output-tokens: 50, total-tokens: 150, cache-read-tokens: 80, thought-tokens: 30}
+
+    ::gemini::chat-tools/response-usage(null)  // null
+    ```
+    """
+}
+fn (u: Any): Map? {
+    cond {
+        not(is-map(u)) => { null }
+        => {
+            usage ::ai-chat/make-usage(u, PROVIDER_NAME, null)
+            {
+                input-tokens: or(usage.input-tokens, 0),
+                output-tokens: or(usage.output-tokens, 0),
+                total-tokens: or(usage.total-tokens, 0),
+                cache-read-tokens: or(usage.cache-read-tokens, 0),
+                thought-tokens: or(usage.thought-tokens, 0),
+            }
+        }
+    }
+}
+
+stop-reason
+meta {
+    doc: """
+    Map a Gemini `finishReason` to `ChatReply.stop-reason`: `"tool_use"`
+    when the reply holds calls, `"max_tokens"` for `MAX_TOKENS`, and
+    `"end_turn"` otherwise.
+
+    **Example**
+
+    ```hot
+    ::gemini::chat-tools/stop-reason("STOP", true)  // "tool_use"
+    ::gemini::chat-tools/stop-reason("MAX_TOKENS", false)  // "max_tokens"
+    ::gemini::chat-tools/stop-reason("STOP", false)  // "end_turn"
+    ```
+    """
+}
+fn cond (finish-reason: Str?, has-calls: Bool): Str {
+    has-calls => { "tool_use" }
+    eq(finish-reason, "MAX_TOKENS") => { "max_tokens" }
+    => { "end_turn" }
+}
+
+finish-reply
+meta {
+    no-doc: true,
+    doc: """
+    Internal: the `ChatReply` for gathered text, calls and finish details,
+    or an `empty-reply` `ReplyError` when there is neither text nor a call.
+    """
+}
+fn (acc: Map): ::ai-chat/ChatReply {
+    has-calls not(is-empty(acc.calls))
+    cond {
+        and(is-empty(acc.text), not(has-calls)) => {
+            err(ReplyError({
+                kind: "empty-reply",
+                finish-reason: acc.finish-reason,
+                block-reason: acc.block-reason,
+                message: acc.finish-message,
+            }))
+        }
+        => {
+            ::ai-chat/ChatReply({
+                text: if(is-empty(acc.text), null, acc.text),
+                tool-calls: if(has-calls, acc.calls, null),
+                stop-reason: stop-reason(acc.finish-reason, has-calls),
+                usage: acc.usage,
+                raw: acc.raw,
+            })
+        }
+    }
+}
+
+first-candidate
+meta {
+    no-doc: true,
+    doc: """Internal: the first candidate of a response or chunk, or an empty Map."""
+}
+fn (data: Map): Map {
+    candidates get(data, "candidates")
+    cond {
+        not(is-vec(candidates)) => { {} }
+        is-empty(candidates) => { {} }
+        => { or(first(candidates), {}) }
+    }
+}
+
+parse-response
+meta {
+    doc: """
+    Normalize a `generateContent` response body into a
+    `::ai::chat/ChatReply`. Thought parts are left out of the text, and
+    `functionCall` parts become `tool-calls`. A response with neither text
+    nor a call is an Err carrying `ReplyError`.
+
+    **Example**
+
+    ```hot
+    reply ::gemini::chat-tools/parse-response({
+      candidates: [{content: {role: "model", parts: [{text: "Hello"}]}, finishReason: "STOP"}],
+      usageMetadata: {promptTokenCount: 5, candidatesTokenCount: 1, totalTokenCount: 6}
+    })
+    reply.text  // "Hello"
+    reply.stop-reason  // "end_turn"
+    reply.usage.total-tokens  // 6
+    ```
+    """
+}
+fn (body: Map): ::ai-chat/ChatReply {
+    candidate first-candidate(body)
+    parts or(get-in(candidate, ["content", "parts"]), [])
+
+    finish-reply({
+        text: join(map(parts, part-text), ""),
+        calls: filter(map(parts, part-tool-call), is-some),
+        finish-reason: get(candidate, "finishReason"),
+        block-reason: get-in(body, ["promptFeedback", "blockReason"]),
+        finish-message: get(candidate, "finishMessage"),
+        usage: response-usage(get(body, "usageMetadata")),
+        raw: body,
+    })
+}
+
+reply-from-response
+meta {
+    doc: """
+    The `ChatReply` for a `generateContent` HTTP response. A refused call
+    (status 400 or more) is an Err carrying `::gemini::api/HttpError` with
+    Gemini's decoded error body.
+
+    **Example**
+
+    ```hot
+    refused ::hot::http/HttpResponse({status: 429, headers: {}, body: {error: {code: 429, status: "RESOURCE_EXHAUSTED"}}})
+    reply ::gemini::chat-tools/reply-from-response(refused)
+    err-value(reply).status  // 429
+    err-value(reply).body.error.status  // "RESOURCE_EXHAUSTED"
+    ```
+    """
+}
+fn (response: ::hot::http/HttpResponse): ::ai-chat/ChatReply {
+    cond {
+        is-ok-response(response) => { parse-response(response.body) }
+        => { err(HttpError(response)) }
+    }
+}
+
+// ============================================================================
+// Public entry points
+// ============================================================================
+
+chat-with-tools
+meta {
+    ai-provider: {
+        variant: "Gemini",
+        detect-prefixes: ["gemini"],
+        display-name: "Google Gemini",
+        capabilities: ["tools", "streaming", "vision", "system-prompt"],
+    },
+    doc: """
+    Tools-aware chat function compatible with `::ai::chat/run-loop`.
+
+    Parameters
+
+    - `model` — Gemini model id (e.g. `"gemini-2.5-flash"`).
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt.
+    - `tools` — optional `Vec<::ai::tool/Tool>`. When non-empty, tools are
+      offered to the model and `functionCall` parts become
+      `ChatReply.tool-calls`.
+
+    Returns a normalized `::ai::chat/ChatReply`. A refused call is an Err
+    carrying `::gemini::api/HttpError`; a reply with no text and no call is
+    an Err carrying `ReplyError`.
+
+    **Example**
+
+    ```hot
+    add fn (x: Int, y: Int): Int { add(x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::gemini::chat-tools/chat-with-tools,
+        model: "gemini-2.5-flash",
+        tools: [::ai::tool/from-fn(add)]
+    })
+
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS)
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-options
+meta {
+    doc: """
+    `chat-with-tools` with explicit `ChatRequestOptions` (output ceiling,
+    thinking, cache, safety, response schema). Bind it in a closure to keep
+    the four-argument chat contract with model-specific controls. A trailing
+    `opts` carries per-call credentials and settings.
+
+    **Example**
+
+    ```hot
+    options ::gemini::chat-tools/ChatRequestOptions({max-tokens: 4096, thinking-budget: 1024})
+
+    reply ::gemini::chat-tools/chat-with-tools-options(
+      "gemini-2.5-flash",
+      [::ai::chat/user-message("Summarize the release notes.")],
+      "Be brief.",
+      null,
+      options
+    )
+    reply.text
+    reply.usage.thought-tokens
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
+    request build-request(messages, system, tools, options)
+    response ::gemini::api/call("POST", `/v1beta/${model-path(model)}:generateContent`, {}, request, opts)
+    cond {
+        is-err(response) => { response }
+        => { reply-from-response(response) }
+    }
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+EMPTY_STATE {
+    text: "",
+    calls: [],
+    finish-reason: null,
+    block-reason: null,
+    finish-message: null,
+    usage: null,
+}
+
+chunk-data
+meta {
+    no-doc: true,
+    doc: """Internal: the parsed JSON of an SSE event, whose `data` may be a Str or a Map. Null when it isn't JSON."""
+}
+fn (event: Any): Map? {
+    data if(is-map(event), get(event, "data"), null)
+    cond {
+        is-map(data) => { data }
+        is-str(data) => {
+            decoded from-json(data)
+            cond {
+                is-err(decoded) => { null }
+                is-map(decoded) => { decoded }
+                => { null }
+            }
+        }
+        => { null }
+    }
+}
+
+handle-part
+meta {
+    no-doc: true,
+    doc: """
+    Internal: fold one streamed part into the state. Gemini sends a function
+    call whole, so a call is one `ToolUseStart`, one `ToolUseInputDelta`
+    holding its whole input, and one `ToolUseEnd`. Thought text is not
+    streamed.
+    """
+}
+fn (state: Map, part: Map, on-delta: Fn): Map {
+    call part-tool-call(part)
+    cond {
+        is-some(call) => {
+            on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: call.id, name: call.name})))
+            on-delta(ReplyDelta.ToolUseInputDelta(ToolUseInputDelta({id: call.id, partial-input-json: to-json(call.input)})))
+            on-delta(ReplyDelta.ToolUseEnd(ToolUseEnd({id: call.id})))
+            {...state, calls: concat(state.calls, [call])}
+        }
+        => {
+            text part-text(part)
+            cond {
+                is-empty(text) => { state }
+                => {
+                    on-delta(ReplyDelta.TextDelta(TextDelta({text: text})))
+                    {...state, text: concat(state.text, text)}
+                }
+            }
+        }
+    }
+}
+
+handle-chunk
+meta {
+    doc: """
+    Fold one parsed stream chunk into the stream state, sending its
+    `ReplyDelta` events to `on-delta`. A chunk carrying `error` is an Err
+    holding `::gemini::api/HttpError` (status 200, since the call itself
+    succeeded). `usageMetadata` is cumulative, so the latest replaces the
+    last.
+
+    **Example**
+
+    ```hot
+    chunk {candidates: [{content: {role: "model", parts: [{text: "Hi"}]}, finishReason: "STOP"}]}
+    state ::gemini::chat-tools/handle-chunk(::gemini::chat-tools/EMPTY_STATE, chunk, ::ai::chat/noop-on-delta)
+    state.text  // "Hi"
+    state.finish-reason  // "STOP"
+    ```
+    """
+}
+fn (state: Map, data: Map?, on-delta: Fn): Map {
+    cond {
+        is-null(data) => { state }
+        is-some(get(data, "error")) => { err(HttpError({status: 200, headers: {}, body: data})) }
+        => {
+            candidate first-candidate(data)
+            parts or(get-in(candidate, ["content", "parts"]), [])
+            after reduce(parts, (acc, part) { handle-part(acc, part, on-delta) }, state)
+            usage get(data, "usageMetadata")
+            {
+                ...after,
+                finish-reason: or(get(candidate, "finishReason"), after.finish-reason),
+                finish-message: or(get(candidate, "finishMessage"), after.finish-message),
+                block-reason: or(get-in(data, ["promptFeedback", "blockReason"]), after.block-reason),
+                usage: if(is-map(usage), usage, after.usage),
+            }
+        }
+    }
+}
+
+drain-stream
+meta {
+    no-doc: true,
+    doc: """
+    Internal: tail-recursively consume `iter` into the stream state. An
+    `error` event, or a chunk carrying `error`, ends it in an Err holding
+    `HttpError`, and nothing after it is read.
+    """
+}
+fn cond (iter: Any, on-delta: Fn, state: Map): Map {
+    => {
+        n next(iter)
+        cond {
+            n.done => { state }
+            eq(get(n.value, "event"), "error") => { err(HttpError({status: 200, headers: {}, body: get(n.value, "data")})) }
+            => {
+                next-state handle-chunk(state, chunk-data(n.value), on-delta)
+                cond {
+                    is-err(next-state) => { next-state }
+                    => { drain-stream(iter, on-delta, next-state) }
+                }
+            }
+        }
+    }
+}
+
+finalize-state
+meta {
+    doc: """
+    Convert the final stream state into a `ChatReply`. A stream that ended
+    with no finish reason was cut short and is an Err carrying an
+    `incomplete-stream` `ReplyError`; one with neither text nor a call is an
+    `empty-reply` Err.
+
+    **Example**
+
+    ```hot
+    state {...::gemini::chat-tools/EMPTY_STATE, text: "Hi", finish-reason: "STOP"}
+    ::gemini::chat-tools/finalize-state(state).text  // "Hi"
+
+    cut ::gemini::chat-tools/finalize-state({...::gemini::chat-tools/EMPTY_STATE, text: "Hel"})
+    err-value(cut).kind  // "incomplete-stream"
+    ```
+    """
+}
+fn (state: Map): ::ai-chat/ChatReply {
+    cond {
+        and(is-null(state.finish-reason), is-null(state.block-reason)) => {
+            err(ReplyError({kind: "incomplete-stream", finish-reason: null, block-reason: null, message: null}))
+        }
+        => { finish-reply({...state, usage: response-usage(state.usage), raw: null}) }
+    }
+}
+
+chat-with-tools-stream
+meta {
+    doc: """
+    Streaming counterpart to `chat-with-tools`, compatible with
+    `::ai::chat/run-loop-stream`. Translates Gemini SSE chunks into
+    `::ai::chat/ReplyDelta` events delivered via `on-delta`, and returns the
+    aggregated `ChatReply` once the stream ends.
+
+    Parameters
+
+    - `model` — Gemini model id.
+    - `messages` — conversation history as `Vec<::ai::chat/Message>`.
+    - `system` — optional system prompt.
+    - `tools` — optional `Vec<::ai::tool/Tool>`.
+    - `on-delta` — callback `(delta: ReplyDelta): Null` invoked for every
+      event. Use `::ai::chat/noop-on-delta` if you only want the reply.
+
+    A refused call or an error partway through is an Err carrying
+    `::gemini::api/HttpError`; a stream cut short or a reply with nothing
+    in it is an Err carrying `ReplyError`. `on-delta` gets no `Stop` then.
+
+    **Example**
+
+    ```hot
+    on-text (delta) {
+        match delta {
+            ::ai::chat/ReplyDelta.TextDelta => { print(delta.text) }
+            => { null }
+        }
+    }
+
+    reply ::gemini::chat-tools/chat-with-tools-stream(
+        "gemini-2.5-flash",
+        [::ai::chat/user-message("Hi")],
+        null,
+        null,
+        on-text
+    )
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS)
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-stream-options
+meta {
+    doc: """
+    Streaming `chat-with-tools` with explicit `ChatRequestOptions`.
+
+    **Example**
+
+    ```hot
+    options ::gemini::chat-tools/ChatRequestOptions({max-tokens: 4096, thinking-level: "low"})
+
+    reply ::gemini::chat-tools/chat-with-tools-stream-options(
+      "gemini-3-flash",
+      [::ai::chat/user-message("Summarize the release notes.")],
+      "Be brief.",
+      null,
+      ::ai::chat/noop-on-delta,
+      options
+    )
+    reply.text
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
+    request build-request(messages, system, tools, options)
+    response ::gemini::api/call-stream("POST", `/v1beta/${model-path(model)}:streamGenerateContent?alt=sse`, {}, request, "sse", opts)
+    cond {
+        is-err(response) => { response }
+        gte(response.status, 400) => { err(refused-stream(response)) }
+        => {
+            drain-stream(response.body, on-delta, EMPTY_STATE)
+                |> if-ok((final-state) { finalize-state(final-state) })
+                |> if-ok((reply) {
+                    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+                    reply
+                })
+        }
+    }
+}

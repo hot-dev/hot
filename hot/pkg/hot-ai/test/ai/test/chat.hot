@@ -236,6 +236,62 @@ meta ["test"] fn () {
     assert(is-null(usage.cost-usd), "cost not provided")
 }
 
+test-make-usage-from-gemini-shape
+meta ["test"] fn () {
+    raw {promptTokenCount: 100, candidatesTokenCount: 20, thoughtsTokenCount: 30, cachedContentTokenCount: 80, totalTokenCount: 150}
+    usage ::chat/make-usage(raw, "Google Gemini", "gemini-2.5-flash")
+    assert-eq(100, usage.input-tokens, "promptTokenCount already holds the cached tokens")
+    assert-eq(50, usage.output-tokens, "thinking counts as output, as it does for the other providers")
+    assert-eq(30, usage.thought-tokens)
+    assert-eq(80, usage.cache-read-tokens)
+    assert-eq(150, usage.total-tokens)
+}
+
+test-make-usage-prefers-the-reported-total
+meta ["test"] fn () {
+    // A provider's total can hold tokens input + output doesn't (tool-use prompts, thinking).
+    usage ::chat/make-usage({input_tokens: 10, output_tokens: 5, total_tokens: 40}, "X", "m")
+    assert-eq(40, usage.total-tokens)
+    summed ::chat/make-usage({input_tokens: 10, output_tokens: 5}, "X", "m")
+    assert-eq(15, summed.total-tokens, "with no total it sums")
+}
+
+test-make-usage-reads-normalized-cache-keys
+meta ["test"] fn () {
+    usage ::chat/make-usage({input-tokens: 100, output-tokens: 5, cache-read-tokens: 90, cache-write-tokens: 4, thought-tokens: 2}, "Anthropic", "m")
+    assert-eq(90, usage.cache-read-tokens)
+    assert-eq(4, usage.cache-write-tokens)
+    assert-eq(2, usage.thought-tokens)
+    openai ::chat/make-usage({prompt_tokens: 10, completion_tokens: 8, prompt_tokens_details: {cached_tokens: 6}, completion_tokens_details: {reasoning_tokens: 3}}, "OpenAI", "m")
+    assert-eq(6, openai.cache-read-tokens)
+    assert-eq(3, openai.thought-tokens)
+}
+
+test-make-usage-without-cache-data-leaves-it-null
+meta ["test"] fn () {
+    usage ::chat/make-usage({input_tokens: 1, output_tokens: 1}, "X", "m")
+    assert(is-null(usage.cache-read-tokens), "no cache data")
+    assert(is-null(usage.thought-tokens), "no thought data")
+}
+
+test-tool-result-message-carries-a-failure
+meta ["test"] fn () {
+    failed ::chat/tool-result-message(::ai::tool/ToolResult({id: "t1", output: "boom", is-error: true}))
+    assert-eq(true, failed.is-error)
+    assert-eq("t1", failed.tool-call-id)
+    fine ::chat/tool-result-message(::ai::tool/ToolResult({id: "t2", output: "ok", is-error: false}))
+    assert(is-null(fine.is-error), "a success leaves it unset")
+}
+
+test-tool-call-meta-stays-out-of-the-token-estimate
+meta ["test"] fn () {
+    plain ::ai::tool/ToolCall({id: "c1", name: "search", input: {q: "hot"}})
+    signed ::ai::tool/ToolCall({id: "c1", name: "search", input: {q: "hot"}, meta: {thought-signature: pad-start("", 4000, "A")}})
+    a ::chat/count-tokens-heuristic([::chat/assistant-message("", [plain])], "m")
+    b ::chat/count-tokens-heuristic([::chat/assistant-message("", [signed])], "m")
+    assert-eq(a, b, "an opaque signature isn't text the model reads")
+}
+
 test-make-usage-handles-null-raw
 meta ["test"] fn () {
     usage ::chat/make-usage(null, "Anthropic", "claude-sonnet-4-5")
