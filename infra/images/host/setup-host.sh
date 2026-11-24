@@ -245,7 +245,11 @@ enable_debug = false
 enable_tracing = false
 kernel_modules = []
 debug_console_enabled = false
-dial_timeout_ms = 30000
+# The sleep between attempts to reach the agent, as the release sets it, and
+# the overall time for them. runtime-rs refuses a config whose budget is below
+# the sleep, and fails every box.
+dial_timeout_ms = 10
+reconnect_timeout_ms = 30000
 
 [runtime]
 name = "virt_container"

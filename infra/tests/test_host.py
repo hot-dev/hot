@@ -453,7 +453,11 @@ class HostImage(unittest.TestCase):
         kata = tomllib.loads(heredoc(KATA_CONFIG).replace("${rootfs}", "/rootfs.img"))
         self.assertEqual({key: kata["runtime"][key] for key in ("name", "hypervisor_name", "agent_name")},
                          {"name": "virt_container", "hypervisor_name": "qemu", "agent_name": "kata"})
-        self.assertEqual(kata["agent"]["kata"]["dial_timeout_ms"], 30000)
+        # runtime-rs refuses a config whose overall budget is below the sleep
+        # between attempts: every box would fail to start.
+        agent = kata["agent"]["kata"]
+        self.assertEqual((agent["dial_timeout_ms"], agent["reconnect_timeout_ms"]), (10, 30000))
+        self.assertGreaterEqual(agent["reconnect_timeout_ms"], agent["dial_timeout_ms"])
         # Keys only the Go runtime reads would be silently ignored.
         for section, key in (("hypervisor.qemu", "use_vsock"), ("hypervisor.qemu", "firmware_volume"),
                              ("agent.kata", "dial_timeout"), ("runtime", "disable_guest_empty_dir")):
