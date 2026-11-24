@@ -263,11 +263,15 @@ valid_hypervisor_paths = ["/opt/kata/bin/qemu-system-x86_64"]
 kernel_params = "agent.log_vport=1025 init=/usr/local/sbin/hot-init"
 enable_annotations = ["enable_iommu", "kernel_params", "default_vcpus", "default_memory"]
 default_vcpus = 1
+# runtime-rs sizes a box's VM as these overheads plus the box's own limits.
+# They default to 0, which gave a 64 MB nano box a 64 MB VM that could not run
+# it. These match the Go runtime, which added default_vcpus and default_memory.
+overhead_vcpus = 1.0
 default_maxvcpus = 0
 default_memory = 512
-# Static sizing adds each box's memory limit to default_memory, so this must
-# hold the largest box (SYSTEM_MAX_MEMORY_MB, 8192, in the task worker's
-# box_limits.rs) on top of it. Kata lowers it to the host's RAM, and the task
+overhead_memory = 512
+# This must hold the largest box (SYSTEM_MAX_MEMORY_MB, 8192, in the task
+# worker's box_limits.rs) on top of overhead_memory. Kata lowers it to the host's RAM, and the task
 # worker's budget keeps boxes within that.
 default_maxmemory = 9216
 memory_slots = 10
@@ -307,7 +311,8 @@ hypervisor_name = "qemu"
 agent_name = "kata"
 create_container_timeout = 60
 enable_debug = false
-internetworking_model = "macvtap"
+# runtime-rs has no macvtap model: any other name gives the VM no route out.
+internetworking_model = "tcfilter"
 disable_guest_seccomp = true
 enable_tracing = false
 disable_new_netns = false

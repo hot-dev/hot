@@ -409,8 +409,18 @@ class HostImage(unittest.TestCase):
         self.assertTrue(kata["runtime"]["static_sandbox_resource_mgmt"])
         limits = (ROOT.parent / "crates/hot_task_worker/src/box_limits.rs").read_text()
         largest = int(re.search(r"SYSTEM_MAX_MEMORY_MB: u64 = ([0-9_]+);", limits).group(1).replace("_", ""))
-        # Static sizing starts each VM with default_memory plus the box's limit.
-        self.assertGreaterEqual(qemu["default_maxmemory"], qemu["default_memory"] + largest)
+        # runtime-rs starts each VM with overhead_memory plus the box's limit,
+        # and the Go runtime added default_memory: keep them the same.
+        self.assertEqual(qemu["overhead_memory"], qemu["default_memory"])
+        self.assertEqual(qemu["overhead_vcpus"], qemu["default_vcpus"])
+        self.assertGreaterEqual(qemu["default_maxmemory"], qemu["overhead_memory"] + largest)
+
+    def test_box_networks_use_a_model_runtime_rs_has(self):
+        kata = tomllib.loads(heredoc(KATA_CONFIG)
+                             .replace("${rootfs}", "/rootfs.img"))
+        # runtime-rs knows tcfilter, l3forwarding and none, and treats any other
+        # name as none: an internet box would get an interface and no route.
+        self.assertEqual(kata["runtime"]["internetworking_model"], "tcfilter")
 
     def test_docker_takes_no_address_range_of_its_own(self):
         daemon = json.loads(heredoc("/etc/docker/daemon.json"))

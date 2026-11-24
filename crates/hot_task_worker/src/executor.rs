@@ -2521,7 +2521,7 @@ finally:
 
             // Set up CNI networking if the task requires internet access.
             // This creates a netns with a veth pair + bridge so Kata's
-            // macvtap model can wire it into the VM.
+            // tcfilter model can wire it into the VM.
             let needs_network = limits.is_some_and(|l| l.network);
             let mut netns_path = if needs_network {
                 match crate::cni::setup(&container_id).await {
