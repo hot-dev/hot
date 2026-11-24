@@ -2648,11 +2648,23 @@ finally:
                             }
                             // Its Rust runtime keeps one in /run/kata on the host,
                             // reached through PID 1's mounts, as hotbox is.
-                            let _ = tokio::process::Command::new(IN_HOST_MOUNTS[0])
-                                .args(&IN_HOST_MOUNTS[1..])
-                                .args(["rm", "-rf", "--", &format!("/run/kata/{cid}")])
-                                .output()
-                                .await;
+                            // Bounded, as a cleanup step is, and never into a
+                            // mount left below it, such as a box's /data.
+                            let _ = tokio::time::timeout(
+                                KATA_CLEANUP_STEP_TIMEOUT,
+                                tokio::process::Command::new(IN_HOST_MOUNTS[0])
+                                    .args(&IN_HOST_MOUNTS[1..])
+                                    .args([
+                                        "rm",
+                                        "-rf",
+                                        "--one-file-system",
+                                        "--",
+                                        &format!("/run/kata/{cid}"),
+                                    ])
+                                    .kill_on_drop(true)
+                                    .output(),
+                            )
+                            .await;
                             if needs_network {
                                 netns_path = None;
                             }

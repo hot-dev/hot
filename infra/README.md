@@ -49,7 +49,8 @@ Implemented:
   [`images/packer`](images/packer), built by
   [`images/build-host.sh`](images/build-host.sh)): Ubuntu 24.04 with Docker,
   Kata on QEMU through Kata's Rust runtime, a dedicated containerd, CNI, `cosign`, a guest image, and a fallback
-  copy of `hotbox`. Each start of a task worker installs its release's own `hotbox`,
+  copy of `hotbox`. The guest image is Kata's Ubuntu root, booted by a short init
+  script (`hot-init`) in place of its systemd, which saves about 2 s per box. Each start of a task worker installs its release's own `hotbox`,
   and boxes use that ([Security updates](#security-updates)); they never run the
   copy in the guest image. SSH is masked, and Packer builds without SSH. Kata
   state lives on the data disk and stays off until it is mounted; box storage

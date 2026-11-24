@@ -483,6 +483,8 @@ class HostImage(unittest.TestCase):
         self.assertIn("\nulimit -n 1073741824\n", init)
         self.assertIn("\necho -997 > /proc/self/oom_score_adj\n", init)
         self.assertIn("\n/usr/bin/kata-agent &\n", init)
+        # Boxes share the guest's network namespace, so its localhost.
+        self.assertLess(init.index("\nip link set lo up\n"), init.index("\n/usr/bin/kata-agent &\n"))
         self.assertTrue(init.endswith("\necho o > /proc/sysrq-trigger"))
         for mount in ("proc /proc", "sysfs /sys", "cgroup2 /sys/fs/cgroup", "tmpfs /run", "tmpfs /tmp",
                       "devpts /dev/pts", "tmpfs /dev/shm"):

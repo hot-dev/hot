@@ -193,9 +193,12 @@ mount -t tmpfs -o nosuid,nodev tmpfs /tmp
 mkdir -p /dev/pts /dev/shm
 mount -t devpts -o nosuid,noexec,gid=5,mode=620,ptmxmode=000 devpts /dev/pts
 mount -t tmpfs -o nosuid,nodev tmpfs /dev/shm
+# systemd brings up the loopback itself; a box's localhost is the guest's.
+ip link set lo up
 # What systemd-sysctl applies: key = value lines, "-" marking a key that may be
 # missing, the last line with or without its newline.
 for conf in /usr/lib/sysctl.d/*.conf; do
+    [[ -f $conf ]] || continue
     while IFS='=' read -r key value || [[ -n $key ]]; do
         key=${key//[[:space:]]/}
         [[ -n $key && $key != [\#\;]* ]] || continue
