@@ -2498,7 +2498,8 @@ finally:
                     &mut images,
                     image,
                     extras.and_then(|e| e.registry_auth.clone()),
-                    crate::resource_budget::disk_admission_mb(requested_disk_mb),
+                    // /data is not in the pool: see `pool_admission_mb`.
+                    crate::resource_budget::pool_admission_mb(requested_disk_mb),
                 )
                 .await;
             // Stamp the phase end on success and mid-pull failure alike
