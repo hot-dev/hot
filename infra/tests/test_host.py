@@ -468,6 +468,45 @@ class HostImage(unittest.TestCase):
         self.assertIn("kata-containers.img)", SETUP)
         self.assertNotIn("kata-ubuntu-", SETUP)
 
+    def test_the_guest_boots_hot_init_from_its_own_root(self):
+        init_path = '"$work/guest-root/usr/local/sbin/hot-init"'
+        init = heredoc(init_path)
+        kata = tomllib.loads(heredoc(KATA_CONFIG).replace("${rootfs}", "/rootfs.img"))
+        self.assertIn(" init=/usr/local/sbin/hot-init", kata["hypervisor"]["qemu"]["kernel_params"])
+        # Written into the root before it is packed, and executable.
+        self.assertLess(SETUP.index(f"cat > {init_path}"), SETUP.index("mkfs.erofs"))
+        self.assertLess(SETUP.index(f"chmod 0755 {init_path}"), SETUP.index("mkfs.erofs"))
+        self.assertTrue(init.startswith("#!/bin/bash\n"))
+        subprocess.run(["bash", "-n"], input=init, text=True, check=True)
+        # The agent runs as a child, with kata-agent.service's limits, and the
+        # VM powers off once it is gone.
+        self.assertIn("\nulimit -n 1073741824\n", init)
+        self.assertIn("\necho -997 > /proc/self/oom_score_adj\n", init)
+        self.assertIn("\n/usr/bin/kata-agent &\n", init)
+        self.assertTrue(init.endswith("\necho o > /proc/sysrq-trigger"))
+        for mount in ("proc /proc", "sysfs /sys", "cgroup2 /sys/fs/cgroup", "tmpfs /run", "tmpfs /tmp",
+                      "devpts /dev/pts", "tmpfs /dev/shm"):
+            self.assertRegex(init, rf"\nmount -t {mount.split()[0]} .*{re.escape(mount)}\n")
+
+    def test_hot_init_applies_sysctl_d_as_systemd_does(self):
+        init = heredoc('"$work/guest-root/usr/local/sbin/hot-init"')
+        loop = re.search(r"\nfor conf in /usr/lib/sysctl\.d/\*\.conf; do\n.*?\n *done < \"\$conf\"\ndone\n", init, re.S).group(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            confs, proc = Path(tmp, "sysctl.d"), Path(tmp, "sys")
+            confs.mkdir()
+            for key in ("kernel/printk", "net/ipv4/conf/all/rp_filter", "vm/max_map_count"):
+                (proc / key).parent.mkdir(parents=True, exist_ok=True)
+                (proc / key).write_text("old\n")
+            (confs / "55-a.conf").write_text("# comment\n; also\n\nkernel.printk = 4 4 1 7\n"
+                                             "net.ipv4.conf.all.rp_filter=2\n-net.core.missing = 1\n")
+            (confs / "55-b.conf").write_text("vm.max_map_count=1048576")
+            script = loop.replace("/usr/lib/sysctl.d", str(confs)).replace('"/proc/sys/', f'"{proc}/')
+            subprocess.run(["bash", "-c", script], check=True)
+            self.assertEqual((proc / "kernel/printk").read_text(), "4 4 1 7\n")
+            self.assertEqual((proc / "net/ipv4/conf/all/rp_filter").read_text(), "2\n")
+            self.assertEqual((proc / "vm/max_map_count").read_text(), "1048576\n")
+            self.assertFalse((proc / "net/core").exists())
+
     def test_boxes_start_on_a_host_without_selinux(self):
         # Kata creates no container when guest SELinux is on and the host has
         # none, and an absent setting leaves it on. Ubuntu ships AppArmor.

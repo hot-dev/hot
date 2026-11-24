@@ -174,6 +174,53 @@ fsck.erofs --preserve --extract="$work/guest-root" "$work/base.erofs"
 # Boxes never run this copy: a box's container has its own root, and the
 # bind-mounted hotbox.
 install -D -m 0755 "$work/hotbox" "$work/guest-root/usr/local/bin/hotbox"
+# The guest boots this in place of the image's systemd (init= in kernel_params),
+# which takes about 2 s of every box start to reach the agent. It gives the
+# agent what the image's kata-containers.target does: the mounts, the sysctl.d
+# settings, /tmp, and kata-agent.service's limits. It leaves out the rest
+# (udev, journald, timers, chrony): as in Kata's own initrd guests, kvmclock
+# sets the clock at boot. The agent runs as a child, as under systemd; run as
+# PID 1, this agent never answers.
+install -d -m 0755 "$work/guest-root/usr/local/sbin"
+cat > "$work/guest-root/usr/local/sbin/hot-init" <<'INIT'
+#!/bin/bash
+exec </dev/console >/dev/console 2>&1
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t cgroup2 -o nosuid,nodev,noexec,nsdelegate,memory_recursiveprot cgroup2 /sys/fs/cgroup
+mount -t tmpfs -o nosuid,nodev,mode=755 tmpfs /run
+mount -t tmpfs -o nosuid,nodev tmpfs /tmp
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o nosuid,noexec,gid=5,mode=620,ptmxmode=000 devpts /dev/pts
+mount -t tmpfs -o nosuid,nodev tmpfs /dev/shm
+# What systemd-sysctl applies: key = value lines, "-" marking a key that may be
+# missing, the last line with or without its newline.
+for conf in /usr/lib/sysctl.d/*.conf; do
+    while IFS='=' read -r key value || [[ -n $key ]]; do
+        key=${key//[[:space:]]/}
+        [[ -n $key && $key != [\#\;]* ]] || continue
+        key=${key#-}
+        value=${value#"${value%%[![:space:]]*}"}
+        echo "$value" > "/proc/sys/${key//.//}" 2>/dev/null
+    done < "$conf"
+done
+# systemd sets these itself: the first two so kata-agent.service's LimitNOFILE
+# fits.
+echo 9223372036854775807 > /proc/sys/fs/file-max
+echo 2147483584 > /proc/sys/fs/nr_open
+echo 512 > /proc/sys/net/unix/max_dgram_qlen
+[[ -s /etc/hostname ]] && echo "$(< /etc/hostname)" > /proc/sys/kernel/hostname
+ulimit -n 1073741824
+echo -997 > /proc/self/oom_score_adj
+/usr/bin/kata-agent &
+agent=$!
+# Reap whatever is left to PID 1 while the agent runs, then power off, as
+# kata-agent.service's FailureAction does.
+while kill -0 "$agent" 2>/dev/null; do wait; done
+sync
+echo o > /proc/sysrq-trigger
+INIT
+chmod 0755 "$work/guest-root/usr/local/sbin/hot-init"
 mkfs.erofs --quiet -zlz4hc "$work/root.erofs" "$work/guest-root"
 mib=$(( ($(stat -c %s "$work/root.erofs") + 1048575) >> 20 ))
 rm -f "$rootfs"
@@ -210,7 +257,7 @@ rootfs_type = "erofs"
 disable_image_nvdimm = true
 machine_type = "q35"
 valid_hypervisor_paths = ["/opt/kata/bin/qemu-system-x86_64"]
-kernel_params = "agent.log_vport=1025"
+kernel_params = "agent.log_vport=1025 init=/usr/local/sbin/hot-init"
 enable_annotations = ["enable_iommu", "kernel_params", "default_vcpus", "default_memory"]
 default_vcpus = 1
 default_maxvcpus = 0
