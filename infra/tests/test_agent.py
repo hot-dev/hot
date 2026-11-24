@@ -180,10 +180,11 @@ class Recorder:
             return subprocess.CompletedProcess(command, 0, stdout="\n".join(rows) + "\n" if rows else
                                                "No devices found\n", stderr="")
         if command[:2] == ["dmsetup", "remove"]:
-            if command[2] in self.box_devices:
-                if self.box_devices[command[2]]:
+            name = command[-1]
+            if name in self.box_devices:
+                if self.box_devices[name]:
                     raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
-                del self.box_devices[command[2]]
+                del self.box_devices[name]
             elif self.box_devices:
                 raise subprocess.CalledProcessError(1, command, stderr="Device or resource busy")
             else:
@@ -10457,6 +10458,9 @@ class Resume(AgentHarness):
 
 
 class ResetBoxStore(AgentHarness):
+    HOLD_STOP = ["systemctl", "stop", "hot-box-pool-hold.timer", "hot-box-pool-hold.service"]
+    HOLD_START = ["systemctl", "start", "hot-box-pool-hold.timer"]
+
     def setUp(self):
         super().setUp()
         self.agent.reconcile()
@@ -10479,9 +10483,10 @@ class ResetBoxStore(AgentHarness):
         self.assertFalse(self.store.exists())
         self.assertEqual(self.box_file.read_text(), "kept")
         commands = self.run.commands
-        order = [["systemctl", "stop", "kata-containerd.service"], ["dmsetup", "remove", "hot-devpool"],
+        order = [["systemctl", "stop", "kata-containerd.service"], self.HOLD_STOP,
+                 ["dmsetup", "remove", "--retry", "hot-devpool"],
                  ["losetup", "-d", "/dev/loop1"], ["losetup", "-d", "/dev/loop0"],
-                 ["systemctl", "start", "kata-containerd.service"]]
+                 ["systemctl", "start", "kata-containerd.service"], self.HOLD_START]
         self.assertEqual([c for c in commands if c in order], order)
         self.assertEqual(self.run.compose_calls()[0], "stop --timeout 120 task-worker")
         self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
@@ -10497,10 +10502,47 @@ class ResetBoxStore(AgentHarness):
                     self.agent.command("reset-box-store", request_id="r1")
                 self.assertTrue((self.pool / "data").exists())
                 self.assertTrue(self.store.exists())
-                self.assertNotIn(["dmsetup", "remove", "hot-devpool"], self.run.commands)
-                # Put back as it was: containerd and the task worker run again.
-                self.assertEqual(self.run.commands[-1][-2:], ["--force-recreate", "task-worker"])
+                self.assertNotIn(["dmsetup", "remove", "--retry", "hot-devpool"], self.run.commands)
+                # Put back as it was: containerd, the task worker and the
+                # pool's hold run again.
+                self.assertEqual(self.run.commands[-2][-2:], ["--force-recreate", "task-worker"])
+                self.assertEqual(self.run.commands[-1], self.HOLD_START)
                 self.assertIn(["systemctl", "start", "kata-containerd.service"], self.run.commands)
+
+    def test_a_refused_store_left_in_place_still_says_why(self):
+        # A containerd that refused the store fails to start again; the task
+        # worker comes back all the same, and the reason is the error.
+        recorder = self.run
+        self.run.box_devices = {"hot-devpool-snap-3": 1}
+
+        def no_start(command, **kwargs):
+            if command == ["systemctl", "start", "kata-containerd.service"]:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="Job failed")
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_start
+        with self.assertRaisesRegex(agent_module.AgentError, "left as it was: 1 box devices"):
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertEqual(self.run.commands[-1], self.HOLD_START)
+        self.assertTrue((self.pool / "data").exists())
+
+    def test_a_task_worker_that_does_not_start_after_the_reset_says_what_next(self):
+        recorder = self.run
+
+        def no_worker(command, **kwargs):
+            if "--force-recreate" in command:
+                recorder.commands.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="no such image")
+            return recorder(command, **kwargs)
+        self.agent.run_command = no_worker
+        self.agent.box_pool_shortfall = lambda: None
+        with self.assertRaises(agent_module.CommandFailed) as raised:
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertIn("reset, and the task worker did not start", str(raised.exception))
+        self.assertIn("task-worker", raised.exception.details["recovery"])
+        self.assertFalse(self.pool.exists())
+        self.assertEqual(self.run.commands[-1], self.HOLD_START)
 
     def test_a_closed_box_device_goes_with_the_pool(self):
         # A box created and never started leaves its device active, and no
@@ -10508,8 +10550,8 @@ class ResetBoxStore(AgentHarness):
         self.run.box_devices = {"hot-devpool-snap-10": 0}
         self.agent.command("reset-box-store", request_id="r1")
         commands = self.run.commands
-        self.assertLess(commands.index(["dmsetup", "remove", "hot-devpool-snap-10"]),
-                        commands.index(["dmsetup", "remove", "hot-devpool"]))
+        self.assertLess(commands.index(["dmsetup", "remove", "--retry", "hot-devpool-snap-10"]),
+                        commands.index(["dmsetup", "remove", "--retry", "hot-devpool"]))
         self.assertFalse(self.pool.exists())
 
     def test_a_stopped_installation_stays_stopped(self):

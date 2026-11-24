@@ -4518,6 +4518,19 @@ class Agent:
             # The task worker ends its boxes as it stops.
             self.compose(bundle, "stop", "--timeout", "120", "task-worker")
         self.run_command(["systemctl", "stop", "kata-containerd.service"])
+        # hot-box-pool-hold.timer rewrites the pool's files each minute, so it
+        # waits until they are gone and a new pool is made.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            self.run_command(["systemctl", "stop", "hot-box-pool-hold.timer", "hot-box-pool-hold.service"])
+        try:
+            return self.reset_stopped_box_store(bundle, request_id, running)
+        finally:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                self.run_command(["systemctl", "start", "hot-box-pool-hold.timer"])
+
+    def reset_stopped_box_store(self, bundle, request_id, running):
+        """reset-box-store, once the task worker and Kata's containerd have
+        stopped."""
         # The pool's snapshot devices, and how many hold each open. A box
         # never started leaves its device active and closed, which the pool
         # can lose; one a box still uses is open.
@@ -4540,17 +4553,22 @@ class Agent:
         if held or shims:
             left = (([f"{len(held)} box devices"] if held else [])
                     + (["Kata shims"] if shims else []))
-            self.run_command(["systemctl", "start", "kata-containerd.service"])
+            # Put back as it was, as far as it goes: a containerd that refused
+            # the store fails to start again, and the next cycle brings back a
+            # task worker that does not start here (finish_restarts).
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                self.run_command(["systemctl", "start", "kata-containerd.service"])
             if running:
-                self.restart(bundle, "task-worker", request_id)
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    self.restart(bundle, "task-worker", request_id)
             raise AgentError(f"The box store was left as it was: {' and '.join(left)} still run after the task worker "
                              "stopped. Replace the instance, which keeps the data disk and starts with no box running, "
                              "then run reset-box-store again")
         try:
             for name in devices:
-                self.run_command(["dmsetup", "remove", name])
+                self.run_command(["dmsetup", "remove", "--retry", name])
             if self.box_pool_active():
-                self.run_command(["dmsetup", "remove", BOX_POOL])
+                self.run_command(["dmsetup", "remove", "--retry", BOX_POOL])
             pool = self.data_root / "kata/devmapper"
             for name in ("data", "meta"):
                 backing = pool / name
@@ -4580,7 +4598,11 @@ class Agent:
                                 recovery="Run diagnostics for why, then reset-box-store again. Until it starts, box "
                                          "tasks wait; code tasks run") from error
         if running:
-            self.restart(bundle, "task-worker", request_id)
+            try:
+                self.restart(bundle, "task-worker", request_id)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CommandFailed(f"The box store was reset, and the task worker did not start: "
+                                    f"{self.explain(error)}", recovery=self.restart_recovery("task-worker")) from error
         return notes
 
     def stop_services(self, bundle):
