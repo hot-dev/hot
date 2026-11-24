@@ -46,6 +46,32 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+refused-stream
+meta {
+    doc: """
+    The `HttpError` for a streaming call the API refused, with the reason read
+    from the response. Its `body` is what a plain call's would be: the decoded
+    JSON (`{error: {code, message, status}}`), or the text when it isn't JSON.
+
+    **Example**
+
+    ```hot
+    body {contents: [{role: "user", parts: [{text: "Hello!"}]}]}
+    response ::gemini::api/call-stream("POST", "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", {}, body, "sse", {})
+    if(gte(response.status, 400), err(::gemini::api/refused-stream(response)), response)
+    ```
+    """
+}
+fn (response: StreamingHttpResponse): HttpError {
+  text join(map(collect(response.body), Str), "")
+  decoded from-json(text)
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: if(is-err(decoded), text, decoded)
+  })
+}
+
 non-blank
 meta {
     doc: """
@@ -265,7 +291,10 @@ meta {
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
   resolved resolve(opts)
-  ::hot::http/request(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved))
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved)) }
+  }
 }
 
 call-stream
@@ -293,7 +322,10 @@ meta {
 }
 fn (method: Str, path: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
   resolved resolve(opts)
-  ::hot::http/request-stream(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved), format)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request-stream(build-request(method, `${resolved.base-url}${path}`, additional-headers, body, resolved), format) }
+  }
 }
 
 request
@@ -339,7 +371,11 @@ fn
 },
 // 5-arity: per-call opts; `url` is used as given
 (method: Str, url: Str, additional-headers: Map, body: Any, opts: Map): HttpResponse {
-  ::hot::http/request(build-request(method, url, additional-headers, body, resolve(opts)))
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request(build-request(method, url, additional-headers, body, resolved)) }
+  }
 }
 
 request-stream
@@ -377,5 +413,9 @@ fn
 },
 // 6-arity: per-call opts; `url` is used as given
 (method: Str, url: Str, additional-headers: Map, body: Any, format: Str, opts: Map): StreamingHttpResponse {
-  ::hot::http/request-stream(build-request(method, url, additional-headers, body, resolve(opts)), format)
+  resolved resolve(opts)
+  cond {
+    is-err(resolved) => { resolved }
+    => { ::hot::http/request-stream(build-request(method, url, additional-headers, body, resolved), format) }
+  }
 }

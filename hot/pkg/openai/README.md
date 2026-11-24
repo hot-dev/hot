@@ -7,7 +7,7 @@ OpenAI API bindings for Hot: Chat Completions with streaming, a tools-aware adap
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/openai": "1.3.5"
+"hot.dev/openai": "1.3.6"
 ```
 
 ## Setup

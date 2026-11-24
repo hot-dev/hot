@@ -42,6 +42,14 @@ resource "google_compute_subnetwork" "hot" {
   region                   = local.config.region
   ip_cidr_range            = local.config.network.cidr
   private_ip_google_access = true
+  # A record of who talked to whom, for looking into an incident afterwards.
+  # Half the flows, summed over ten minutes, keep the log volume small. A
+  # setting changed by hand is put back at the next apply.
+  log_config {
+    aggregation_interval = "INTERVAL_10_MIN"
+    flow_sampling        = 0.5
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
 }
 resource "google_compute_router" "egress" {
   count   = local.new_network ? 1 : 0
