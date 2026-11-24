@@ -1741,6 +1741,24 @@ fn kata_root_readonly(writable_rootfs: bool) -> bool {
     !writable_rootfs
 }
 
+/// The OCI annotations for a box's Kata sandbox.
+///
+/// A box without a network runs in a new network namespace with only `lo`.
+/// Kata's Rust runtime polls such a namespace for 5 seconds, waiting for
+/// interfaces a hook might add, before it starts the box. Its "none"
+/// networking model skips that wait, and attaches no network, which such a
+/// box has none of anyway. Kata applies runtime annotations without
+/// `enable_annotations`, which lists only hypervisor ones.
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kata_annotations(netns_path: Option<&str>) -> serde_json::Value {
+    if netns_path.is_some() {
+        serde_json::json!({})
+    } else {
+        serde_json::json!({ "io.katacontainers.config.runtime.internetworking_model": "none" })
+    }
+}
+
 /// Give every Kata sandbox its own cgroup.
 ///
 /// When `linux.cgroupsPath` is omitted, the Kata runtime falls back to the
@@ -3571,7 +3589,8 @@ finally:
                     "cgroupsPath": kata_cgroups_path(container_id),
                     "namespaces": namespaces
                 },
-                "mounts": mounts
+                "mounts": mounts,
+                "annotations": kata_annotations(netns_path)
             })
         }
 
@@ -4553,6 +4572,19 @@ mod kata_tests {
         assert_ne!(
             super::retry_container_id(base, 2),
             super::retry_container_id(base, 3)
+        );
+    }
+
+    #[test]
+    fn test_a_box_without_a_network_skips_katas_interface_wait() {
+        assert_eq!(
+            super::kata_annotations(None),
+            serde_json::json!({ "io.katacontainers.config.runtime.internetworking_model": "none" })
+        );
+        // A box with a network keeps the configured model, which attaches it.
+        assert_eq!(
+            super::kata_annotations(Some("/var/run/netns/box")),
+            serde_json::json!({})
         );
     }
 
