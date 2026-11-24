@@ -96,7 +96,7 @@ jobs:
       - name: Enlarge the pagefile (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/windows-pagefile.ps1 -SizeGB 16 -Drives D:,C:
+        run: "./scripts/windows-pagefile.ps1 -SizeGB 16 -Drives D:,C:"
 
       - name: Windows installer scope and directory tests
         if: runner.os == 'Windows'
