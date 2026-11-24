@@ -44,6 +44,62 @@ enum Command {
         /// Hot storage path (e.g. hot://uploads/video.mp4)
         path: String,
     },
+    /// Forward TCP connections to the task worker's file server. The task
+    /// worker runs this in a relay container beside a box that has no
+    /// network, on Docker Desktop or OrbStack, where the file server is a
+    /// TCP port on the host that only a bridged container can reach.
+    #[command(hide = true)]
+    Relay {
+        /// Address to listen on, such as 0.0.0.0:7400
+        listen: String,
+        /// Address to forward each connection to
+        to: String,
+    },
+}
+
+/// Connections a relay forwards at once; the rest wait to be accepted.
+const RELAY_MAX_CONNECTIONS: usize = 32;
+/// How long a relay waits to reach the file server for one connection.
+const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Accept connections on `listen` and pipe each one to `to`, until killed.
+/// The relay container is capped at 64 pids and 64 MB: it runs on one thread
+/// and forwards at most RELAY_MAX_CONNECTIONS at a time.
+async fn relay(listen: &str, to: &str) -> ExitCode {
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("hotbox relay: cannot listen on {listen}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(RELAY_MAX_CONNECTIONS));
+    loop {
+        let Ok(slot) = slots.clone().acquire_owned().await else {
+            return ExitCode::FAILURE;
+        };
+        let mut inbound = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                // Such as too many open files: wait rather than spin.
+                eprintln!("hotbox relay: accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let to = to.to_string();
+        tokio::spawn(async move {
+            let _slot = slot;
+            let connect = tokio::net::TcpStream::connect(&to);
+            match tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect).await {
+                Ok(Ok(mut outbound)) => {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+                Ok(Err(e)) => eprintln!("hotbox relay: cannot reach {to}: {e}"),
+                Err(_) => eprintln!("hotbox relay: timed out reaching {to}"),
+            }
+        });
+    }
 }
 
 fn parse_hot_path(s: &str) -> Option<&str> {
@@ -54,9 +110,33 @@ fn is_hot_path(s: &str) -> bool {
     s.starts_with(HOT_SCHEME)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Relay { listen, to } = &cli.command {
+        // One thread, and few blocking ones (address lookups), under the
+        // relay container's pid limit.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(2)
+            .build();
+        return match runtime {
+            Ok(runtime) => runtime.block_on(relay(listen, to)),
+            Err(e) => {
+                eprintln!("hotbox relay: cannot start: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime.block_on(run(cli)),
+        Err(e) => {
+            eprintln!("hotbox: cannot start: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> ExitCode {
     let client = client::HotboxClient::from_env();
 
     let result = match cli.command {
@@ -106,6 +186,7 @@ async fn main() -> ExitCode {
             };
             cmd_info(&client, hot_path).await
         }
+        Command::Relay { .. } => unreachable!("relay returns before the client is made"),
     };
 
     match result {

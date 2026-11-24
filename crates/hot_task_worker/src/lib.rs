@@ -4136,6 +4136,8 @@ async fn recover_containers(
         worker_id,
     )
     .await;
+    // After adoption, so a relay whose box was adopted stays.
+    executor.sweep_box_relays().await;
 
     // Clean up orphaned data volumes only after container adoption has
     // identified all live containers and their mounted volume paths.
@@ -5372,6 +5374,7 @@ async fn process_container_task(
         && extras.entrypoint.is_none()
         && extras.data_volume_path.is_none()
         && extras.registry_auth.is_none()
+        && extras.host_file_server.is_none()
     {
         None
     } else {
@@ -10410,9 +10413,11 @@ fn build_container_extras(
 ) -> executor::ContainerExtras {
     let mut extras = executor::ContainerExtras::default();
     let is_docker = matches!(backend, executor::Backend::Docker);
+    let mut hotbox = None;
 
     if is_docker {
         if let Some(path) = find_hotbox_binary() {
+            hotbox = Some(path.to_string_lossy().into_owned());
             extras.binds.push(format!(
                 "{}:/usr/local/bin/hotbox:ro",
                 path.to_string_lossy()
@@ -10437,14 +10442,11 @@ fn build_container_extras(
                 extras.extra_env.push(format!("HOTBOX_VSOCK_PORT={}", port));
             }
         } else if handle.is_tcp() {
-            // TCP transport (macOS Docker Desktop where VirtioFS doesn't support Unix sockets).
-            // The container connects back to the host via host.docker.internal,
-            // which requires bridge networking even when the task doesn't request internet.
+            // TCP transport (Docker Desktop and OrbStack, whose bind mounts
+            // carry no Unix sockets). The Docker executor decides how the box
+            // reaches it, by whether the box has a network.
             if let Some(port) = handle.tcp_port() {
-                extras
-                    .extra_env
-                    .push(format!("HOTBOX_URL=http://host.docker.internal:{}", port));
-                extras.needs_host_network = true;
+                extras.host_file_server = Some(executor::HostFileServer { port, hotbox });
             }
         } else {
             // Docker on Linux: bind-mount only the Unix socket file itself (not
