@@ -572,12 +572,66 @@ pub struct ContainerExtras {
     pub entrypoint: Option<Vec<String>>,
     /// Host path to the data volume mount point (bind-mounted at `/data` inside the container).
     pub data_volume_path: Option<String>,
-    /// When true, the container needs host network access for the file server transport
-    /// (TCP on macOS where VirtioFS doesn't support Unix socket bind mounts).
-    pub needs_host_network: bool,
+    /// The task's file server, when it is a TCP port on this host: Docker
+    /// Desktop and OrbStack carry no Unix sockets through bind mounts. See
+    /// `docker_box_network` for how a box reaches it.
+    pub host_file_server: Option<HostFileServer>,
     /// Credential for pulling a private image, opened from the task's sealed
     /// `registry-auth`. Used for the pull only; its `Debug` hides the secret.
     pub registry_auth: Option<Arc<hot::lang::hot::r#box::registry_auth::RegistryCredential>>,
+}
+
+/// A task's file server listening on a TCP port of the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFileServer {
+    pub port: u16,
+    /// The hotbox binary mounted into the box, which its relay runs too.
+    /// Without one nothing in the box uses the file server.
+    pub hotbox: Option<String>,
+}
+
+/// How a Docker box gets its network, and the file server when it is a TCP
+/// port of the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DockerBoxNetwork {
+    /// No network at all.
+    None,
+    /// Docker's bridge, with HOTBOX_URL when there is a file server, which a
+    /// bridged container reaches at host.docker.internal.
+    Bridge { hotbox_url: Option<String> },
+    /// A network of its own that reaches nothing outside Docker, and a relay
+    /// container on it, at `DOCKER_RELAY_ALIAS`, that forwards only to the
+    /// file server's port. A box without a network keeps it: bridging it to
+    /// reach the file server would give it the internet too.
+    Relay { port: u16, hotbox: String },
+}
+
+/// The relay's name on a box's own network, and its port there.
+pub(crate) const DOCKER_RELAY_ALIAS: &str = "hotbox";
+pub(crate) const DOCKER_RELAY_PORT: u16 = 7400;
+
+pub(crate) fn docker_box_network(
+    wants_network: bool,
+    file_server: Option<&HostFileServer>,
+) -> DockerBoxNetwork {
+    match file_server {
+        None if wants_network => DockerBoxNetwork::Bridge { hotbox_url: None },
+        None => DockerBoxNetwork::None,
+        Some(server) if wants_network => DockerBoxNetwork::Bridge {
+            hotbox_url: Some(format!(
+                "HOTBOX_URL=http://host.docker.internal:{}",
+                server.port
+            )),
+        },
+        Some(HostFileServer { hotbox: None, .. }) => DockerBoxNetwork::None,
+        Some(HostFileServer {
+            port,
+            hotbox: Some(hotbox),
+        }) => DockerBoxNetwork::Relay {
+            port: *port,
+            hotbox: hotbox.clone(),
+        },
+    }
 }
 
 /// VMM selection within the Kata backend.
@@ -882,6 +936,16 @@ impl BoxExecutor {
         }
     }
 
+    /// Remove the file-server relays and box networks a worker that stopped
+    /// mid-box left on Docker. No-op for Kata, whose boxes need no relay.
+    pub async fn sweep_box_relays(&self) {
+        match self {
+            Self::Docker(e) => e.sweep_relays().await,
+            #[cfg(all(target_os = "linux", feature = "kata"))]
+            Self::Kata(_) => {}
+        }
+    }
+
     /// Force-cleanup an orphan container previously returned by
     /// `list_orphan_containers`. Best-effort; never returns an error.
     #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
@@ -903,9 +967,13 @@ mod docker {
     use crate::log_accumulator::LogAccumulator;
     use bollard::Docker;
     use bollard::auth::DockerCredentials;
-    use bollard::models::{ContainerCreateBody, HostConfig};
+    use bollard::models::{
+        ContainerCreateBody, EndpointSettings, HostConfig, NetworkConnectRequest,
+        NetworkCreateRequest,
+    };
     use bollard::query_parameters::{
-        CreateImageOptionsBuilder, ListContainersOptionsBuilder, WaitContainerOptionsBuilder,
+        CreateImageOptionsBuilder, ListContainersOptionsBuilder, PruneNetworksOptionsBuilder,
+        RemoveContainerOptionsBuilder, WaitContainerOptionsBuilder,
     };
     use futures::stream::StreamExt;
     use std::collections::HashMap;
@@ -914,6 +982,26 @@ mod docker {
         pub(crate) docker: Docker,
         semaphore: Arc<Semaphore>,
         slot_timeout_secs: u64,
+    }
+
+    /// A box's relay to the file server: its container, and the box's own
+    /// network, which the box container's labels name.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Relay {
+        pub(crate) container: String,
+        pub(crate) network: String,
+    }
+
+    /// `hot.dev/managed-by` on relay containers and box networks. Not the
+    /// boxes' value, so a restarted worker never adopts a relay as a box.
+    pub(crate) const RELAY_MANAGED_BY: &str = "hot-task-worker-relay";
+    const RELAY_CONTAINER_LABEL: &str = "hot.dev/relay-container";
+    const RELAY_NETWORK_LABEL: &str = "hot.dev/relay-network";
+
+    fn relay_failed(error: bollard::errors::Error) -> ExecutorError {
+        ExecutorError::Create(format!(
+            "the box's file-server relay did not start: {error}"
+        ))
     }
 
     impl DockerExecutor {
@@ -1084,18 +1172,16 @@ mod docker {
             let cpu_quota = limits.map_or(50000, |l| l.cpu_quota as i64);
             let tmp_size = limits.map_or(500, |l| l.tmp_size_mb);
             let wants_network = limits.is_some_and(|l| l.network);
-            let needs_host_network = extras.is_some_and(|e| e.needs_host_network);
-            let network_mode = if wants_network || needs_host_network {
-                "bridge"
-            } else {
-                "none"
-            };
+            let (network_mode, hotbox_url, relay) = self
+                .prepare_box_network(image, wants_network, extras, trace_id)
+                .await?;
 
             let merged_env = {
                 let mut all_env = env.unwrap_or_default();
                 if let Some(ext) = extras {
                     all_env.extend(ext.extra_env.iter().cloned());
                 }
+                all_env.extend(hotbox_url.iter().cloned());
                 if all_env.is_empty() {
                     None
                 } else {
@@ -1115,6 +1201,10 @@ mod docker {
             if let Some(tid) = trace_id {
                 labels.insert("hot.dev/task-id".to_string(), tid.to_string());
             }
+            if let Some(relay) = &relay {
+                labels.insert(RELAY_CONTAINER_LABEL.to_string(), relay.container.clone());
+                labels.insert(RELAY_NETWORK_LABEL.to_string(), relay.network.clone());
+            }
 
             let writable = extras.is_some_and(|e| e.writable_rootfs);
             let entrypoint = extras.and_then(|e| e.entrypoint.clone());
@@ -1125,7 +1215,7 @@ mod docker {
                 env: merged_env,
                 labels: Some(labels),
                 host_config: Some(HostConfig {
-                    network_mode: Some(network_mode.to_string()),
+                    network_mode: Some(network_mode.clone()),
                     memory: Some(memory_bytes),
                     memory_swap: Some(memory_bytes),
                     cpu_quota: Some(cpu_quota),
@@ -1159,18 +1249,22 @@ mod docker {
                 ..Default::default()
             };
 
-            let container = self
-                .docker
-                .create_container(None, config)
-                .await
-                .map_err(|e| ExecutorError::Create(e.to_string()))?;
+            let container = match self.docker.create_container(None, config).await {
+                Ok(container) => container,
+                Err(e) => {
+                    if let Some(relay) = &relay {
+                        self.teardown_relay(relay).await;
+                    }
+                    return Err(ExecutorError::Create(e.to_string()));
+                }
+            };
 
             let container_id = container.id.clone();
 
             if let Err(e) = self.docker.start_container(&container_id, None).await {
                 // Remove the Created container so failed starts never leak
                 // containers or stall cancellation-quota settlement.
-                self.docker.remove_container(&container_id, None).await.ok();
+                self.remove_container(&container_id).await;
                 return Err(ExecutorError::Start(e.to_string()));
             }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
@@ -1274,13 +1368,235 @@ mod docker {
 
         /// Kill and remove a container.
         pub async fn kill_and_remove(&self, container_id: &str) {
+            let relay = self.relay_of(container_id).await;
             self.docker.kill_container(container_id, None).await.ok();
             self.docker.remove_container(container_id, None).await.ok();
+            if let Some(relay) = relay {
+                self.teardown_relay(&relay).await;
+            }
         }
 
-        /// Remove a stopped container.
+        /// Remove a stopped container, and its relay if it has one.
         pub async fn remove_container(&self, container_id: &str) {
+            let relay = self.relay_of(container_id).await;
             self.docker.remove_container(container_id, None).await.ok();
+            if let Some(relay) = relay {
+                self.teardown_relay(&relay).await;
+            }
+        }
+
+        /// The network mode for a box and the HOTBOX_URL it is given, after
+        /// starting the relay to its file server when it needs one.
+        async fn prepare_box_network(
+            &self,
+            image: &str,
+            wants_network: bool,
+            extras: Option<&ContainerExtras>,
+            trace_id: Option<&str>,
+        ) -> ExecutorResult<(String, Option<String>, Option<Relay>)> {
+            let file_server = extras.and_then(|e| e.host_file_server.as_ref());
+            match docker_box_network(wants_network, file_server) {
+                DockerBoxNetwork::None => Ok(("none".to_string(), None, None)),
+                DockerBoxNetwork::Bridge { hotbox_url } => {
+                    Ok(("bridge".to_string(), hotbox_url, None))
+                }
+                DockerBoxNetwork::Relay { port, hotbox } => {
+                    let relay = self.start_relay(image, port, &hotbox, trace_id).await?;
+                    Ok((
+                        relay.network.clone(),
+                        Some(format!(
+                            "HOTBOX_URL=http://{DOCKER_RELAY_ALIAS}:{DOCKER_RELAY_PORT}"
+                        )),
+                        Some(relay),
+                    ))
+                }
+            }
+        }
+
+        /// Give a box without a network a network of its own, which reaches
+        /// nothing outside Docker, and on it a relay that forwards only to its
+        /// file server: a container on Docker's bridge, which reaches the host,
+        /// running `hotbox relay`. The relay runs from the box's own image,
+        /// which is pulled already; hotbox is static, so any image does.
+        async fn start_relay(
+            &self,
+            image: &str,
+            port: u16,
+            hotbox: &str,
+            trace_id: Option<&str>,
+        ) -> ExecutorResult<Relay> {
+            let network = format!("hot-box-{}", uuid::Uuid::new_v4().simple());
+            let mut labels = HashMap::new();
+            labels.insert(
+                "hot.dev/managed-by".to_string(),
+                RELAY_MANAGED_BY.to_string(),
+            );
+            if let Some(tid) = trace_id {
+                labels.insert("hot.dev/task-id".to_string(), tid.to_string());
+            }
+            self.docker
+                .create_network(NetworkCreateRequest {
+                    name: network.clone(),
+                    driver: Some("bridge".to_string()),
+                    internal: Some(true),
+                    labels: Some(labels.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(relay_failed)?;
+            const RELAY_MEMORY: i64 = 64 * 1024 * 1024;
+            let created = self
+                .docker
+                .create_container(
+                    None,
+                    ContainerCreateBody {
+                        image: Some(image.to_string()),
+                        entrypoint: Some(vec!["/hotbox".to_string()]),
+                        cmd: Some(vec![
+                            "relay".to_string(),
+                            format!("0.0.0.0:{DOCKER_RELAY_PORT}"),
+                            format!("host.docker.internal:{port}"),
+                        ]),
+                        labels: Some(labels),
+                        user: Some("65534:65534".to_string()),
+                        host_config: Some(HostConfig {
+                            network_mode: Some("bridge".to_string()),
+                            binds: Some(vec![format!("{hotbox}:/hotbox:ro")]),
+                            memory: Some(RELAY_MEMORY),
+                            memory_swap: Some(RELAY_MEMORY),
+                            pids_limit: Some(64),
+                            readonly_rootfs: Some(true),
+                            security_opt: Some(vec!["no-new-privileges".to_string()]),
+                            cap_drop: Some(vec!["ALL".to_string()]),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            let relay = match created {
+                Ok(container) => Relay {
+                    container: container.id,
+                    network,
+                },
+                Err(e) => {
+                    self.docker.remove_network(&network).await.ok();
+                    return Err(relay_failed(e));
+                }
+            };
+            let started = match self
+                .docker
+                .connect_network(
+                    &relay.network,
+                    NetworkConnectRequest {
+                        container: relay.container.clone(),
+                        endpoint_config: Some(EndpointSettings {
+                            aliases: Some(vec![DOCKER_RELAY_ALIAS.to_string()]),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await
+            {
+                Ok(()) => self.docker.start_container(&relay.container, None).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = started {
+                self.teardown_relay(&relay).await;
+                return Err(relay_failed(e));
+            }
+            Ok(relay)
+        }
+
+        /// Remove a relay and its box's network. Best-effort: the box
+        /// container goes first, since Docker keeps a network something uses.
+        async fn teardown_relay(&self, relay: &Relay) {
+            let force = RemoveContainerOptionsBuilder::default().force(true).build();
+            self.docker
+                .remove_container(&relay.container, Some(force))
+                .await
+                .ok();
+            self.docker.remove_network(&relay.network).await.ok();
+        }
+
+        /// The relay a box container's labels name, if it has one.
+        async fn relay_of(&self, container_id: &str) -> Option<Relay> {
+            let labels = self
+                .docker
+                .inspect_container(container_id, None)
+                .await
+                .ok()?
+                .config?
+                .labels?;
+            Some(Relay {
+                container: labels.get(RELAY_CONTAINER_LABEL)?.clone(),
+                network: labels.get(RELAY_NETWORK_LABEL)?.clone(),
+            })
+        }
+
+        /// Remove what a worker that stopped mid-box left: a relay whose box
+        /// is gone, and box networks nothing uses. Networks a minute old or
+        /// more only, so one another worker on this daemon is setting up stays.
+        pub async fn sweep_relays(&self) {
+            let mut filters = HashMap::new();
+            filters.insert(
+                "label".to_string(),
+                vec![format!("hot.dev/managed-by={RELAY_MANAGED_BY}")],
+            );
+            let options = ListContainersOptionsBuilder::default()
+                .all(true)
+                .filters(&filters)
+                .build();
+            let relays = self
+                .docker
+                .list_containers(Some(options))
+                .await
+                .unwrap_or_default();
+            for relay in relays {
+                let Some(id) = relay.id else { continue };
+                let task = relay
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get("hot.dev/task-id").cloned());
+                let box_left = match task {
+                    Some(task) => {
+                        let mut filters = HashMap::new();
+                        filters.insert(
+                            "label".to_string(),
+                            vec![
+                                "hot.dev/managed-by=hot-task-worker".to_string(),
+                                format!("hot.dev/task-id={task}"),
+                            ],
+                        );
+                        let options = ListContainersOptionsBuilder::default()
+                            .all(true)
+                            .filters(&filters)
+                            .build();
+                        // An answer that fails keeps the relay.
+                        self.docker
+                            .list_containers(Some(options))
+                            .await
+                            .map_or(true, |boxes| !boxes.is_empty())
+                    }
+                    None => false,
+                };
+                if !box_left {
+                    let force = RemoveContainerOptionsBuilder::default().force(true).build();
+                    self.docker.remove_container(&id, Some(force)).await.ok();
+                }
+            }
+            let mut filters = HashMap::new();
+            filters.insert(
+                "label".to_string(),
+                vec![format!("hot.dev/managed-by={RELAY_MANAGED_BY}")],
+            );
+            filters.insert("until".to_string(), vec!["1m".to_string()]);
+            let options = PruneNetworksOptionsBuilder::default()
+                .filters(&filters)
+                .build();
+            if let Err(e) = self.docker.prune_networks(Some(options)).await {
+                tracing::warn!("Failed to remove unused box networks: {e}");
+            }
         }
 
         pub async fn cleanup_task_containers(&self, task_id: &str) {
@@ -1339,12 +1655,9 @@ mod docker {
             let cpu_quota = limits.map_or(50000, |l| l.cpu_quota as i64);
             let tmp_size = limits.map_or(500, |l| l.tmp_size_mb);
             let wants_network = limits.is_some_and(|l| l.network);
-            let needs_host_network = extras.is_some_and(|e| e.needs_host_network);
-            let network_mode = if wants_network || needs_host_network {
-                "bridge".to_string()
-            } else {
-                "none".to_string()
-            };
+            let (network_mode, hotbox_url, relay) = self
+                .prepare_box_network(image, wants_network, extras, trace_id)
+                .await?;
 
             // Merge extra env vars from ContainerExtras (e.g. HOTBOX_SOCKET)
             let merged_env = {
@@ -1352,6 +1665,7 @@ mod docker {
                 if let Some(ext) = extras {
                     all_env.extend(ext.extra_env.iter().cloned());
                 }
+                all_env.extend(hotbox_url.iter().cloned());
                 if all_env.is_empty() {
                     None
                 } else {
@@ -1371,6 +1685,10 @@ mod docker {
             );
             if let Some(tid) = trace_id {
                 labels.insert("hot.dev/task-id".to_string(), tid.to_string());
+            }
+            if let Some(relay) = &relay {
+                labels.insert(RELAY_CONTAINER_LABEL.to_string(), relay.container.clone());
+                labels.insert(RELAY_NETWORK_LABEL.to_string(), relay.network.clone());
             }
 
             let writable = extras.is_some_and(|e| e.writable_rootfs);
@@ -1416,11 +1734,15 @@ mod docker {
                 ..Default::default()
             };
 
-            let container = self
-                .docker
-                .create_container(None, config)
-                .await
-                .map_err(|e| ExecutorError::Create(e.to_string()))?;
+            let container = match self.docker.create_container(None, config).await {
+                Ok(container) => container,
+                Err(e) => {
+                    if let Some(relay) = &relay {
+                        self.teardown_relay(relay).await;
+                    }
+                    return Err(ExecutorError::Create(e.to_string()));
+                }
+            };
 
             let container_id = container.id.clone();
 
@@ -1428,7 +1750,7 @@ mod docker {
             if let Err(e) = self.docker.start_container(&container_id, None).await {
                 // Remove the Created container so failed starts never leak
                 // containers or stall cancellation-quota settlement.
-                self.docker.remove_container(&container_id, None).await.ok();
+                self.remove_container(&container_id).await;
                 return Err(ExecutorError::Start(e.to_string()));
             }
             timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
@@ -1490,7 +1812,7 @@ mod docker {
                         false
                     };
 
-                    self.docker.remove_container(&container_id, None).await.ok();
+                    self.remove_container(&container_id).await;
 
                     tracing::debug!(
                         trace_id = trace_id,
@@ -1525,8 +1847,7 @@ mod docker {
                         "box.container.timeout"
                     );
 
-                    self.docker.kill_container(&container_id, None).await.ok();
-                    self.docker.remove_container(&container_id, None).await.ok();
+                    self.kill_and_remove(&container_id).await;
 
                     Ok(ContainerOutput {
                         exit_code: -1,
@@ -4417,6 +4738,136 @@ mod tests {
     /// Exercises the cleanup path used when the task worker's outer deadline
     /// cancels container setup/execution. Run explicitly on a Docker host with:
     /// `cargo test -p hot_task_worker docker_outer_timeout_cleanup_removes_container -- --ignored`
+    #[test]
+    fn test_a_box_without_a_network_reaches_its_file_server_only_through_a_relay() {
+        let server = |hotbox: Option<&str>| HostFileServer {
+            port: 52001,
+            hotbox: hotbox.map(str::to_string),
+        };
+        assert_eq!(
+            docker_box_network(true, None),
+            DockerBoxNetwork::Bridge { hotbox_url: None }
+        );
+        assert_eq!(docker_box_network(false, None), DockerBoxNetwork::None);
+        assert_eq!(
+            docker_box_network(true, Some(&server(Some("/hotbox")))),
+            DockerBoxNetwork::Bridge {
+                hotbox_url: Some("HOTBOX_URL=http://host.docker.internal:52001".to_string())
+            }
+        );
+        // Never the bridge, which would give it the internet as well.
+        assert_eq!(
+            docker_box_network(false, Some(&server(Some("/hotbox")))),
+            DockerBoxNetwork::Relay {
+                port: 52001,
+                hotbox: "/hotbox".to_string()
+            }
+        );
+        // No hotbox in the box: nothing there uses the file server.
+        assert_eq!(
+            docker_box_network(false, Some(&server(None))),
+            DockerBoxNetwork::None
+        );
+    }
+
+    /// Runs on Docker Desktop or OrbStack, whose file servers are host TCP
+    /// ports, with a Linux hotbox built by `scripts/build-hotbox.sh`.
+    #[tokio::test]
+    #[ignore = "requires Docker Desktop or OrbStack and target/hotbox-linux-*"]
+    async fn docker_box_without_a_network_reaches_only_its_file_server() {
+        use tokio::io::AsyncWriteExt;
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        let hotbox = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/hotbox-linux-{arch}"))
+            .canonicalize()
+            .expect("build hotbox with scripts/build-hotbox.sh");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                stream.write_all(b"file-server-ok\n").await.ok();
+            }
+        });
+        let executor = docker::DockerExecutor::new(1, 5).expect("connect to Docker");
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let limits = crate::box_limits::BoxLimits {
+            tmp_size_mb: 16,
+            disk_size_mb: 64,
+            memory_mb: 64,
+            timeout_secs: 60,
+            cpu_quota: 50_000,
+            network: false,
+            size: crate::box_limits::BoxSize::Nano,
+        };
+        let extras = ContainerExtras {
+            host_file_server: Some(HostFileServer {
+                port,
+                hotbox: Some(hotbox.to_string_lossy().into_owned()),
+            }),
+            ..Default::default()
+        };
+        // HOTBOX_URL names the relay: http://hotbox:7400.
+        let script = "echo \"$HOTBOX_URL\"; nc hotbox 7400 </dev/null; \
+            wget -q -T 4 -O /dev/null http://1.1.1.1 && echo egress-open || echo egress-blocked"
+            .to_string();
+        let mut timings = ContainerTimings::default();
+        let container_id = executor
+            .create_and_start(
+                "alpine:3.21",
+                Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
+                None,
+                Some(&task_id),
+                Some(&limits),
+                Some(&extras),
+                &mut timings,
+            )
+            .await
+            .expect("start the box and its relay");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            executor.wait_not_running(&container_id),
+        )
+        .await
+        .expect("box finished");
+        let (stdout, stderr) = executor.collect_logs(&container_id).await.unwrap();
+        let relay = executor
+            .docker
+            .inspect_container(&container_id, None)
+            .await
+            .unwrap()
+            .config
+            .unwrap()
+            .labels
+            .unwrap();
+        let (relay_container, network) = (
+            relay["hot.dev/relay-container"].clone(),
+            relay["hot.dev/relay-network"].clone(),
+        );
+        executor.remove_container(&container_id).await;
+        assert!(stdout.contains("http://hotbox:7400"), "{stdout} {stderr}");
+        assert!(stdout.contains("file-server-ok"), "{stdout} {stderr}");
+        assert!(stdout.contains("egress-blocked"), "{stdout} {stderr}");
+        // The relay and the box's network go with the box.
+        assert!(
+            executor
+                .docker
+                .inspect_container(&relay_container, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            executor
+                .docker
+                .inspect_network(&network, None)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires a local Docker daemon and may pull alpine:3.21"]
     async fn docker_outer_timeout_cleanup_removes_container() {

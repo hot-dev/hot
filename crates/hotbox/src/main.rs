@@ -44,6 +44,48 @@ enum Command {
         /// Hot storage path (e.g. hot://uploads/video.mp4)
         path: String,
     },
+    /// Forward TCP connections to the task worker's file server. The task
+    /// worker runs this in a relay container beside a box that has no
+    /// network, on Docker Desktop or OrbStack, where the file server is a
+    /// TCP port on the host that only a bridged container can reach.
+    #[command(hide = true)]
+    Relay {
+        /// Address to listen on, such as 0.0.0.0:7400
+        listen: String,
+        /// Address to forward each connection to
+        to: String,
+    },
+}
+
+/// Accept connections on `listen` and pipe each one to `to`, until killed.
+async fn relay(listen: &str, to: &str) -> ExitCode {
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("hotbox relay: cannot listen on {listen}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    loop {
+        let mut inbound = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                // Such as too many open files: wait rather than spin.
+                eprintln!("hotbox relay: accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let to = to.to_string();
+        tokio::spawn(async move {
+            match tokio::net::TcpStream::connect(&to).await {
+                Ok(mut outbound) => {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+                Err(e) => eprintln!("hotbox relay: cannot reach {to}: {e}"),
+            }
+        });
+    }
 }
 
 fn parse_hot_path(s: &str) -> Option<&str> {
@@ -57,6 +99,9 @@ fn is_hot_path(s: &str) -> bool {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Relay { listen, to } = &cli.command {
+        return relay(listen, to).await;
+    }
     let client = client::HotboxClient::from_env();
 
     let result = match cli.command {
@@ -106,6 +151,7 @@ async fn main() -> ExitCode {
             };
             cmd_info(&client, hot_path).await
         }
+        Command::Relay { .. } => unreachable!("relay returns before the client is made"),
     };
 
     match result {
