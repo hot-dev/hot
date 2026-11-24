@@ -10577,8 +10577,62 @@ class ResetBoxStore(AgentHarness):
             self.agent.command("reset-box-store", request_id="r1")
         self.assertIn("did not start", str(raised.exception))
         self.assertIn("reset-box-store again", raised.exception.details["recovery"])
-        # The next cycle brings the task worker back.
-        self.assertEqual(self.agent.state()["restarting"], {"task-worker": "r1"})
+        # The task worker runs code tasks meanwhile.
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertNotIn("restarting", self.agent.state())
+
+    def test_a_refusal_after_the_store_is_gone_is_a_failure(self):
+        def refused():
+            raise agent_module.AgentError("The operator secret bundle must be a JSON object of names and values")
+        self.agent.configure_host = refused
+        report = self.agent.answer("reset-box-store", request_id="r1")
+        self.assertEqual(report["state"], "failed")
+        self.assertIn("box store is empty", report["error"])
+        self.assertFalse(self.pool.exists())
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+
+    def test_what_would_fail_the_restart_is_refused_before_anything_stops(self):
+        for name, setup in (
+                ("operator bundle", lambda: self.cloud.secrets.__setitem__(self.agent.references["operator"], "x")),
+                ("restore pending", lambda: setattr(self.agent, "restore_pending", lambda state, release: "pending")),
+                ("data left behind", lambda: setattr(self.agent, "bundle_left_behind", lambda bundle, state: True))):
+            with self.subTest(name), mock.patch.object(self.agent, "restore_pending", self.agent.restore_pending), \
+                    mock.patch.object(self.agent, "bundle_left_behind", self.agent.bundle_left_behind), \
+                    mock.patch.dict(self.cloud.secrets):
+                setup()
+                self.run.commands.clear()
+                report = self.agent.answer("reset-box-store", request_id="r1")
+                self.assertEqual(report["state"], "rejected")
+                # Only looked: the guest network reads the host's addresses.
+                self.assertEqual([c for c in self.run.commands if "stop" in c], [])
+                self.assertEqual(self.run.compose_calls(), [])
+                self.assertTrue(self.pool.exists())
+                self.assertNotIn("restarting", self.agent.state())
+
+    def test_devices_that_cannot_be_listed_keep_the_store(self):
+        recorder = self.run
+
+        def unlisted(command, **kwargs):
+            if command[:3] == ["dmsetup", "info", "-c"]:
+                raise subprocess.CalledProcessError(1, command, stderr="/dev/mapper/control: open failed")
+            return recorder(command, **kwargs)
+        self.agent.run_command = unlisted
+        with self.assertRaisesRegex(agent_module.AgentError, "left as it was: its devices could not be listed"):
+            self.agent.command("reset-box-store", request_id="r1")
+        self.assertTrue((self.pool / "data").exists())
+        self.assertNotIn(["dmsetup", "remove", "--retry", "hot-devpool"], self.run.commands)
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+
+    def test_a_cycle_that_brings_the_task_worker_back_says_nothing_for_the_reset(self):
+        # As after an agent that died mid-reset: the task worker is noted
+        # under no request ID.
+        self.agent.note_restarts(started={"task-worker": ""})
+        reports = []
+        with mock.patch.object(self.agent, "report", lambda **status: reports.append(status)):
+            self.agent.finish_restarts()
+        self.assertEqual(self.run.compose_calls()[-1], "up -d --force-recreate task-worker")
+        self.assertEqual(reports, [])
+        self.assertNotIn("restarting", self.agent.state())
 
     def test_a_scalable_host_is_refused(self):
         with mock.patch.object(render, "scalable", lambda config: True):
