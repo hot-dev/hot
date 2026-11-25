@@ -1,0 +1,294 @@
+::xai::ai ns
+meta {
+    doc: """
+    hot-ai integration for xAI (Grok). The functions here satisfy the
+    `::ai::chat` chat contract, so a Grok model runs under
+    `::ai::chat/run-loop` and `run-loop-stream` with tools. They send
+    xAI's OpenAI-compatible Chat Completions API through OpenAI's
+    chat-tools adapter, with the key and base URL from `::xai::api/resolve`.
+
+    `hot-ai`'s built-in registry leaves every provider's `chat-fn` null.
+    Wire these on `ChatOptions`, or register `provider()` with
+    `::ai::chat/with-providers`. The registration claims models whose id
+    starts with `grok`, plus any id written as `xai/<model>` (the `xai/`
+    part is stripped before the call).
+
+    Per-call keys ride in `ChatOptions.provider-opts` with the keys of
+    `::xai::api/resolve`: `api-key` and `base-url`.
+
+    **Example**
+
+    ```hot
+    bigger fn (x: Int, y: Int): Int { if(gt(x, y), x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::xai::ai/chat-with-tools,
+        chat-stream-fn: ::xai::ai/chat-with-tools-stream,
+        model: "grok-4.7",
+        tools: [::ai::tool/from-fn(bigger)]
+    })
+    answer ::ai::chat/run-loop(opts, "Which is larger, 17 or 25?")
+    ```
+    """
+}
+
+::tools ::openai::chat-tools
+::oai   ::openai::api
+
+ChatRequestOptions ::tools/ChatRequestOptions
+
+DEFAULT_MAX_TOKENS 4096
+MODEL_PREFIX "xai/"
+CAPABILITIES ["tools", "streaming", "vision", "json-mode"]
+
+DEFAULT_REQUEST_OPTIONS
+meta {
+    doc: """
+    Request options for xAI: a 4096-token output ceiling. Build your own
+    `::openai::chat-tools/ChatRequestOptions` for another ceiling or
+    `reasoning-effort`.
+    """
+}
+
+::tools/ChatRequestOptions({max-completion-tokens: DEFAULT_MAX_TOKENS})
+
+is-xai-model
+meta {
+    doc: """
+    True for model ids this provider claims: ids starting with `grok`, and
+    the `xai/<model>` routing form (case-insensitive).
+
+    **Example**
+
+    ```hot
+    ::xai::ai/is-xai-model("grok-4.7")       // => true
+    ::xai::ai/is-xai-model("xai/grok-4.6")  // => true
+    ::xai::ai/is-xai-model("gpt-4o")         // => false
+    ```
+    """
+}
+fn (model: Str): Bool {
+    m lowercase(model)
+    or(starts-with(m, "grok"), starts-with(m, MODEL_PREFIX))
+}
+
+model-id
+meta {
+    doc: """
+    The id sent to xAI: `model` without a leading `xai/`.
+
+    **Example**
+
+    ```hot
+    ::xai::ai/model-id("xai/grok-4.7")  // => "grok-4.7"
+    ::xai::ai/model-id("grok-4.7")      // => "grok-4.7"
+    ```
+    """
+}
+fn (model: Str): Str {
+    cond {
+        starts-with(lowercase(model), MODEL_PREFIX) => { slice(model, length(MODEL_PREFIX)) }
+        => { model }
+    }
+}
+
+endpoint
+meta {
+    doc: """
+    The `::openai::api/Endpoint` for one call: `opts` over ctx over defaults,
+    by `::xai::api/resolve`. An Err when no key is set, when the key in
+    `opts` is blank, or when `opts` has a `base-url` and no `api-key`.
+
+    **Example**
+
+    ```hot
+    ::xai::ai/endpoint({api-key: "tenant-key"}).base-url  // => "https://api.x.ai/v1"
+    ```
+    """
+}
+fn (opts: Map): ::oai/Endpoint {
+    resolved ::xai::api/resolve(opts)
+    cond {
+        is-err(resolved) => { resolved }
+        => { ::oai/endpoint(resolved.base-url, resolved.api-key) }
+    }
+}
+
+chat-with-tools
+meta {
+    ai-provider: {
+        variant: "Xai",
+        detect-prefixes: ["grok", "xai/"],
+        display-name: "xAI",
+        capabilities: ["tools", "streaming", "vision", "json-mode"],
+    },
+    doc: """
+    Tools-aware chat function for `::ai::chat/run-loop`. Takes the
+    `::ai::chat` contract `(model, messages, system, tools)`, plus a
+    trailing `opts` Map for per-call credentials (`api-key`, `base-url`).
+    Returns a normalized `::ai::chat/ChatReply`, or an Err for a missing
+    key or a refused call.
+
+    **Example**
+
+    ```hot
+    reply ::xai::ai/chat-with-tools(
+        "grok-4.7",
+        [::ai::chat/user-message("Say hi.")],
+        "Be brief.",
+        null,
+        {api-key: ::hot::ctx/get("tenant.xai.key")}
+    )
+    reply.text
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?): ::ai::chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, {})
+},
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, opts: Map): ::ai::chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-options
+meta {
+    doc: """
+    `chat-with-tools` with explicit `::openai::chat-tools/ChatRequestOptions`
+    (output ceiling, `reasoning-effort`, `extra-body`). Bind it in a closure
+    to keep the four-argument chat contract.
+
+    **Example**
+
+    ```hot
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 8192, reasoning-effort: "low"})
+    chat (model, messages, system, tools) {
+        ::xai::ai/chat-with-tools-options(model, messages, system, tools, options)
+    }
+    opts ::ai::chat/ChatOptions({chat-fn: chat, model: "grok-4.3"})
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, options: ChatRequestOptions): ::ai::chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, options, {})
+},
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, options: ChatRequestOptions, opts: Map): ::ai::chat/ChatReply {
+    ep endpoint(opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::tools/chat-with-tools-at(ep, model-id(model), messages, system, tools, options) }
+    }
+}
+
+chat-with-tools-stream
+meta {
+    doc: """
+    Streaming `chat-with-tools` for `::ai::chat/run-loop-stream`: calls
+    `on-delta` with each `::ai::chat/ReplyDelta` and returns the same
+    `ChatReply`. A trailing `opts` Map carries per-call credentials.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-stream-fn: ::xai::ai/chat-with-tools-stream,
+        model: "grok-4.7"
+    })
+    ::ai::chat/run-loop-stream(opts, "Tell me a joke.", (delta) { print(delta) })
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, on-delta: Fn): ::ai::chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, {})
+},
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, on-delta: Fn, opts: Map): ::ai::chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-stream-options
+meta {
+    doc: """
+    `chat-with-tools-stream` with explicit
+    `::openai::chat-tools/ChatRequestOptions`, and an optional trailing
+    `opts` Map.
+
+    **Example**
+
+    ```hot
+    options ::openai::chat-tools/ChatRequestOptions({max-completion-tokens: 2048})
+    reply ::xai::ai/chat-with-tools-stream-options(
+        "grok-4.7",
+        [::ai::chat/user-message("Count to three.")],
+        null,
+        null,
+        ::ai::chat/noop-on-delta,
+        options
+    )
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai::chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, options, {})
+},
+(model: Str, messages: Vec<::ai::chat/Message>, system: Str?, tools: Vec<::ai::tool/Tool>?, on-delta: Fn, options: ChatRequestOptions, opts: Map): ::ai::chat/ChatReply {
+    ep endpoint(opts)
+    cond {
+        is-err(ep) => { ep }
+        => { ::tools/chat-with-tools-stream-at(ep, model-id(model), messages, system, tools, on-delta, options) }
+    }
+}
+
+provider
+meta {
+    doc: """
+    An `::ai::chat/ProviderRegistration` for xAI, for
+    `::ai::chat/with-providers`. Its variant is `Provider.Xai`, and it claims
+    `grok*` and `xai/*` models. Each call resolves the key then
+    (`xai.api.key`, or `api-key` in `ChatOptions.provider-opts`), so it
+    builds with no key set. Pass `ChatRequestOptions` to change the output
+    ceiling or reasoning effort.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        model: "grok-4.7",
+        providers: ::ai::chat/with-providers([::xai::ai/provider()])
+    })
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+fn
+(): ::ai::chat/ProviderRegistration {
+    provider(DEFAULT_REQUEST_OPTIONS)
+},
+(options: ChatRequestOptions): ::ai::chat/ProviderRegistration {
+    o options
+    ::ai::chat/ProviderRegistration({
+        variant: ::ai::chat/Provider.Xai,
+        detect: is-xai-model,
+        display-name: "xAI",
+        chat-fn: (model, messages, system, tools) {
+            chat-with-tools-options(model, messages, system, tools, o, {})
+        },
+        chat-stream-fn: (model, messages, system, tools, on-delta) {
+            chat-with-tools-stream-options(model, messages, system, tools, on-delta, o, {})
+        },
+        chat-opts-fn: (model, messages, system, tools, provider-opts) {
+            chat-with-tools-options(model, messages, system, tools, o, or(provider-opts, {}))
+        },
+        chat-stream-opts-fn: (model, messages, system, tools, on-delta, provider-opts) {
+            chat-with-tools-stream-options(model, messages, system, tools, on-delta, o, or(provider-opts, {}))
+        },
+        embed-fn: null,
+        meta: {
+            base-url: ::xai/BASE_URL,
+            model-prefix: MODEL_PREFIX,
+            capabilities: CAPABILITIES
+        }
+    })
+}

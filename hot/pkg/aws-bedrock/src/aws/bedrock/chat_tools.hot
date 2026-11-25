@@ -1,0 +1,944 @@
+::aws::bedrock::chat-tools ns
+meta {
+    doc: """
+    hot-ai tool-calling adapter for Amazon Bedrock, over the Converse API.
+    `chat-with-tools` and `chat-with-tools-stream` satisfy the `::ai::chat`
+    chat contract, so any Bedrock model that supports tool use (Claude,
+    Nova, Llama, Mistral and others) runs under `::ai::chat/run-loop` and
+    `run-loop-stream`.
+
+    `hot-ai`'s built-in registry has no Bedrock entry, and leaves every
+    provider's `chat-fn` null. Wire these on `ChatOptions`, or register
+    `provider()` with `::ai::chat/with-providers`. The registration claims
+    ids written as `bedrock/<model id>`; the prefix is stripped before the
+    call.
+
+    Credentials and region come from `::aws::core/resolve`: the trailing
+    `opts` (or `ChatOptions.provider-opts`) first, then ctx. Calls are
+    SigV4-signed.
+
+    - A call's id is Bedrock's `toolUseId`. Reasoning blocks from a model
+      with extended thinking ride on the first call's `ToolCall.meta` as
+      `reasoning`, and go back on the next turn, which Claude requires.
+    - Tool results that answer one assistant turn go back in one user turn.
+      A failed result is sent with `status: "error"`.
+    - The Converse stream arrives as one AWS event stream body. The adapter
+      parses it once the response is in, then sends each `ReplyDelta` in
+      order, so deltas come all at once rather than as tokens arrive.
+    - A refused call is an Err holding `::aws::core/AwsError`. An exception
+      inside the stream, a stream with no stop reason, and a reply with no
+      text and no call are Errs holding a `ReplyError`.
+
+    **Example**
+
+    ```hot
+    bigger fn (x: Int, y: Int): Int { if(gt(x, y), x, y) }
+
+    opts ::ai::chat/ChatOptions({
+        chat-fn: ::aws::bedrock::chat-tools/chat-with-tools,
+        chat-stream-fn: ::aws::bedrock::chat-tools/chat-with-tools-stream,
+        model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        tools: [::ai::tool/from-fn(bigger)]
+    })
+    answer ::ai::chat/run-loop(opts, "Which is larger, 17 or 25?")
+    ```
+    """
+}
+
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+::es      ::aws::eventstream
+
+AwsError     ::aws::core/AwsError
+resolve      ::aws::core/resolve
+send-signed  ::aws::core/send-signed
+service-url  ::aws::core/service-url
+uri-encode   ::aws::core/uri-encode
+is-ok-response ::hot::http/is-ok-response
+
+ReplyDelta         ::ai-chat/ReplyDelta
+TextDelta          ::ai-chat/TextDelta
+ToolUseStart       ::ai-chat/ToolUseStart
+ToolUseInputDelta  ::ai-chat/ToolUseInputDelta
+ToolUseEnd         ::ai-chat/ToolUseEnd
+StreamStop         ::ai-chat/StreamStop
+
+PROVIDER_NAME "AWS Bedrock"
+MODEL_PREFIX "bedrock/"
+DEFAULT_MAX_TOKENS 4096
+
+ChatRequestOptions
+meta {
+    doc: """
+    Per-request controls for the Bedrock adapter. Every field is optional
+    and left out of the request when null.
+
+    - `max-tokens`: output ceiling, `inferenceConfig.maxTokens` (default 4096).
+    - `temperature`, `top-p`, `stop-sequences`: the rest of `inferenceConfig`.
+    - `tool-mode`: `"auto"`, `"any"` (the model must call a tool), or a tool
+      name (the model must call that one). Sent as `toolConfig.toolChoice`.
+    - `additional-fields`: `additionalModelRequestFields`, for model
+      settings Converse doesn't name, such as Claude's
+      `{thinking: {type: "enabled", budget_tokens: 2048}}`.
+    - `guardrail`: `guardrailConfig`
+      (`{guardrailIdentifier, guardrailVersion}`).
+    """
+}
+type {
+    max-tokens: Int?,
+    temperature: Dec?,
+    top-p: Dec?,
+    stop-sequences: Vec<Str>?,
+    tool-mode: Str?,
+    additional-fields: Map?,
+    guardrail: Map?
+}
+
+DEFAULT_REQUEST_OPTIONS
+meta { doc: """No overrides: a 4096-token ceiling and the model's own defaults.""" }
+ChatRequestOptions({})
+
+ReplyError
+meta {
+    doc: """
+    A Converse reply that can't become a `ChatReply`.
+
+    - `kind`: `"empty-reply"` (no text and no call), `"incomplete-stream"`
+      (the stream ended with no stop reason), or `"stream-exception"` (an
+      exception event inside the stream).
+    - `stop-reason`: Bedrock's `stopReason`, when there was one (for
+      example `guardrail_intervened` or `content_filtered`).
+    - `message`: what happened.
+    """
+}
+type {
+    kind: Str,
+    stop-reason: Str?,
+    message: Str
+}
+
+// ============================================================================
+// Request
+// ============================================================================
+
+model-id
+meta {
+    doc: """
+    The id sent to Bedrock: `model` without a leading `bedrock/`.
+
+    **Example**
+
+    ```hot
+    ::aws::bedrock::chat-tools/model-id("bedrock/us.amazon.nova-pro-v1:0")  // => "us.amazon.nova-pro-v1:0"
+    ```
+    """
+}
+fn (model: Str): Str {
+    cond {
+        starts-with(lowercase(model), MODEL_PREFIX) => { slice(model, length(MODEL_PREFIX)) }
+        => { model }
+    }
+}
+
+image-format
+meta {
+    no-doc: true,
+    doc: """Internal: the Converse image `format` for a media type."""
+}
+fn (mime: Str?): Str {
+    m lowercase(or(mime, ""))
+    cond {
+        contains(m, "jpeg") => { "jpeg" }
+        contains(m, "jpg") => { "jpeg" }
+        contains(m, "gif") => { "gif" }
+        contains(m, "webp") => { "webp" }
+        => { "png" }
+    }
+}
+
+to-block
+meta {
+    no-doc: true,
+    doc: """Internal: a `MessagePart` as a Converse content block. Inline image bytes become an `image` block; anything else falls back to its text. Null when there is nothing to send."""
+}
+fn cond (p: ::ai-chat/MessagePart): Map? {
+    eq(p.kind, "text") => {
+        text or(p.text, "")
+        if(is-empty(text), null, {text: text})
+    }
+
+    and(eq(p.kind, "image"), is-some(p.data)) => { {image: {format: image-format(p.mime), source: {bytes: p.data}}} }
+    => {
+        text ::ai-chat/flatten-parts([p])
+        if(is-empty(text), null, {text: text})
+    }
+}
+
+text-blocks
+meta {
+    no-doc: true,
+    doc: """Internal: a message's text as content blocks: one, or none when blank."""
+}
+fn (m: ::ai-chat/Message): Vec<Map> {
+    text ::ai-chat/message-text(m)
+    if(is-empty(trim(text)), [], [{text: text}])
+}
+
+user-blocks
+meta {
+    no-doc: true,
+    doc: """Internal: the content blocks of a user message, from `parts` when set, else its text."""
+}
+fn (m: ::ai-chat/Message): Vec<Map> {
+    cond {
+        is-null(m.parts) => { text-blocks(m) }
+        => { filter(map(m.parts, to-block), is-some) }
+    }
+}
+
+tool-use-block
+meta {
+    no-doc: true,
+    doc: """Internal: a `ToolCall` as a Converse `toolUse` block."""
+}
+fn (call: ::ai-tool/ToolCall): Map {
+    {toolUse: {toolUseId: call.id, name: ::ai-tool/provider-name(call.name), input: or(call.input, {})}}
+}
+
+assistant-blocks
+meta {
+    no-doc: true,
+    doc: """Internal: the content blocks of an assistant message: reasoning kept on its calls, then its text, then its calls."""
+}
+fn (m: ::ai-chat/Message): Vec<Map> {
+    calls or(m.tool-calls, [])
+    reasoning reduce(calls, (acc, c) { concat(acc, or(get(or(c.meta, {}), "reasoning"), [])) }, [])
+    concat(reasoning, text-blocks(m), map(calls, tool-use-block))
+}
+
+tool-result-content
+meta {
+    no-doc: true,
+    doc: """Internal: a tool's output as `toolResult.content`: a Map as `json`, a Str as `text`, anything else as JSON text."""
+}
+fn cond (value: Any): Vec<Map> {
+    is-null(value) => { [{text: "(no output)"}] }
+    is-map(value) => { [{json: value}] }
+    is-str(value) => { [{text: if(is-empty(value), "(no output)", value)}] }
+    => { [{text: to-json(value)}] }
+}
+
+tool-result-block
+meta {
+    no-doc: true,
+    doc: """Internal: a `role: "tool"` message as a Converse `toolResult` block, with `status: "error"` when the tool failed."""
+}
+fn (m: ::ai-chat/Message): Map {
+    {toolResult: filter-vals({
+        toolUseId: m.tool-call-id,
+        content: tool-result-content(m.content),
+        status: if(eq(m.is-error, true), "error", null)
+    }, is-some)}
+}
+
+add-turn
+meta {
+    no-doc: true,
+    doc: """Internal: `turns` with `blocks` added as a `role` turn. Converse needs roles to alternate, so blocks for the same role as the last turn join it. No blocks, no turn."""
+}
+fn (turns: Vec<Map>, role: Str, blocks: Vec<Map>): Vec<Map> {
+    cond {
+        is-empty(blocks) => { turns }
+        and(not(is-empty(turns)), eq(last(turns).role, role)) => {
+            prev last(turns)
+            concat(slice(turns, 0, sub(length(turns), 1)), [{role: role, content: concat(prev.content, blocks)}])
+        }
+        => { concat(turns, [{role: role, content: blocks}]) }
+    }
+}
+
+add-message
+meta {
+    no-doc: true,
+    doc: """Internal: fold one `Message` into `{turns, system}`."""
+}
+fn (state: Map, m: ::ai-chat/Message): Map {
+    cond {
+        eq(m.role, "system") => { {...state, system: concat(state.system, text-blocks(m))} }
+        eq(m.role, "assistant") => { {...state, turns: add-turn(state.turns, "assistant", assistant-blocks(m))} }
+        eq(m.role, "tool") => { {...state, turns: add-turn(state.turns, "user", [tool-result-block(m)])} }
+        => { {...state, turns: add-turn(state.turns, "user", user-blocks(m))} }
+    }
+}
+
+tool-spec
+meta {
+    no-doc: true,
+    doc: """Internal: a `Tool` as a Converse `toolSpec`."""
+}
+fn (t: ::ai-tool/Tool): Map {
+    {toolSpec: filter-vals({
+        name: ::ai-tool/provider-name(t.name),
+        description: t.description,
+        inputSchema: {json: t.input-schema}
+    }, is-some)}
+}
+
+tool-choice
+meta {
+    no-doc: true,
+    doc: """Internal: `toolConfig.toolChoice` for a `tool-mode`."""
+}
+fn (mode: Str?): Map? {
+    cond {
+        is-null(mode) => { null }
+        eq(mode, "auto") => { {auto: {}} }
+        eq(mode, "any") => { {any: {}} }
+        => { {tool: {name: ::ai-tool/provider-name(mode)}} }
+    }
+}
+
+build-request
+meta {
+    doc: """
+    The Converse request body for `messages`, `system`, `tools` and
+    `options`. `system` and any `role: "system"` messages become `system`;
+    tool results become `toolResult` blocks in a user turn; an empty tool
+    list leaves out `toolConfig`.
+
+    **Example**
+
+    ```hot
+    body ::aws::bedrock::chat-tools/build-request(
+        [::ai::chat/user-message("Hi")],
+        "Be brief.",
+        null,
+        ::aws::bedrock::chat-tools/DEFAULT_REQUEST_OPTIONS
+    )
+    body.system           // [{text: "Be brief."}]
+    body.messages[0].role // "user"
+    ```
+    """
+}
+fn (messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): Map {
+    base-system if(is-empty(trim(or(system, ""))), [], [{text: system}])
+    folded reduce(messages, add-message, {turns: [], system: base-system})
+    tool-list or(tools, [])
+    tool-config cond {
+        is-empty(tool-list) => { null }
+        => { filter-vals({tools: map(tool-list, tool-spec), toolChoice: tool-choice(options.tool-mode)}, is-some) }
+    }
+
+    inference filter-vals({
+        maxTokens: or(options.max-tokens, DEFAULT_MAX_TOKENS),
+        temperature: options.temperature,
+        topP: options.top-p,
+        stopSequences: options.stop-sequences
+    }, is-some)
+    filter-vals({
+        messages: folded.turns,
+        system: if(is-empty(folded.system), null, folded.system),
+        inferenceConfig: inference,
+        toolConfig: tool-config,
+        additionalModelRequestFields: options.additional-fields,
+        guardrailConfig: options.guardrail
+    }, is-some)
+}
+
+// ============================================================================
+// Reply
+// ============================================================================
+
+usage-of
+meta {
+    no-doc: true,
+    doc: """Internal: Converse `usage` as a `ChatUsage`."""
+}
+fn (usage: Map?, model: Str): ::ai-chat/ChatUsage {
+    u or(usage, {})
+    ::ai-chat/make-usage({
+        input-tokens: get(u, "inputTokens"),
+        output-tokens: get(u, "outputTokens"),
+        total-tokens: get(u, "totalTokens"),
+        cache-read-tokens: get(u, "cacheReadInputTokens"),
+        cache-write-tokens: get(u, "cacheWriteInputTokens")
+    }, PROVIDER_NAME, model)
+}
+
+with-reasoning
+meta {
+    no-doc: true,
+    doc: """Internal: `calls` with `reasoning` blocks kept on the first call's `meta`, so they go back on the next turn."""
+}
+fn (calls: Vec<::ai-tool/ToolCall>, reasoning: Vec<Map>): Vec<::ai-tool/ToolCall> {
+    cond {
+        is-empty(calls) => { calls }
+        is-empty(reasoning) => { calls }
+        => {
+            head first(calls)
+            meta {...or(head.meta, {}), reasoning: reasoning}
+            concat([::ai-tool/ToolCall({...untype(head), meta: meta})], rest(calls))
+        }
+    }
+}
+
+finish-reply
+meta {
+    no-doc: true,
+    doc: """Internal: a `ChatReply` from parsed text, calls and stop reason, or a `ReplyError` Err when there is no text and no call."""
+}
+fn (text: Str, calls: Vec<::ai-tool/ToolCall>, stop: Str?, usage: ::ai-chat/ChatUsage, raw: Any): ::ai-chat/ChatReply {
+    cond {
+        and(is-empty(text), is-empty(calls)) => {
+            err(ReplyError({
+                kind: "empty-reply",
+                stop-reason: stop,
+                message: `Bedrock returned no text and no tool call (stopReason: ${or(stop, "none")}).`
+            }))
+        }
+        => {
+            ::ai-chat/ChatReply({
+                text: text,
+                tool-calls: if(is-empty(calls), null, calls),
+                stop-reason: cond {
+                    not(is-empty(calls)) => { "tool_use" }
+                    eq(stop, "max_tokens") => { "max_tokens" }
+                    => { "end_turn" }
+                },
+                usage: usage,
+                raw: raw
+            })
+        }
+    }
+}
+
+block-call
+meta {
+    no-doc: true,
+    doc: """Internal: a Converse `toolUse` block as a `ToolCall`."""
+}
+fn (block: Map): ::ai-tool/ToolCall {
+    tu block.toolUse
+    ::ai-tool/ToolCall({id: tu.toolUseId, name: tu.name, input: or(get(tu, "input"), {})})
+}
+
+parse-response
+meta {
+    doc: """
+    A Converse response body as a normalized `::ai::chat/ChatReply`: text
+    blocks joined, `toolUse` blocks as calls, reasoning blocks kept on the
+    first call. An Err holding `ReplyError` when there is no text and no
+    call.
+
+    **Example**
+
+    ```hot
+    body {
+        output: {message: {role: "assistant", content: [{text: "Hi there."}]}},
+        stopReason: "end_turn",
+        usage: {inputTokens: 5, outputTokens: 3, totalTokens: 8}
+    }
+    reply ::aws::bedrock::chat-tools/parse-response(body, "us.amazon.nova-micro-v1:0")
+    reply.text               // "Hi there."
+    reply.usage.total-tokens // 8
+    ```
+    """
+}
+fn (body: Map, model: Str): ::ai-chat/ChatReply {
+    blocks or(get-in(body, ["output", "message", "content"]), [])
+    text join(map(filter(blocks, (b) { is-some(get(b, "text")) }), (b) { b.text }), "")
+    reasoning filter(blocks, (b) { is-some(get(b, "reasoningContent")) })
+    calls map(filter(blocks, (b) { is-some(get(b, "toolUse")) }), block-call)
+    finish-reply(text, with-reasoning(calls, reasoning), get(body, "stopReason"), usage-of(get(body, "usage"), model), body)
+}
+
+converse-url
+meta {
+    no-doc: true,
+    doc: """Internal: the Converse URL for a model and action."""
+}
+fn (resolved: Map, model: Str, action: Str): Str {
+    `${service-url(resolved, "bedrock-runtime")}/model/${uri-encode(model)}/${action}`
+}
+
+// ============================================================================
+// Entry points
+// ============================================================================
+
+chat-with-tools
+meta {
+    ai-provider: {
+        variant: "Bedrock",
+        detect-prefixes: ["bedrock/"],
+        display-name: "AWS Bedrock",
+        capabilities: ["tools", "streaming", "vision", "system-prompt"],
+    },
+    doc: """
+    Tools-aware chat function for `::ai::chat/run-loop`, over Bedrock's
+    Converse API. Takes the `::ai::chat` contract
+    `(model, messages, system, tools)`, plus a trailing `opts` Map with
+    `::aws::core/resolve` keys (`access-key-id`, `secret-access-key`,
+    `session-token`, `region`, `endpoint`, ...). `model` is a Bedrock model
+    id or inference profile, with or without a `bedrock/` prefix.
+
+    **Example**
+
+    ```hot
+    reply ::aws::bedrock::chat-tools/chat-with-tools(
+        "us.amazon.nova-pro-v1:0",
+        [::ai::chat/user-message("Say hi.")],
+        "Be brief.",
+        null,
+        {region: "us-east-1"}
+    )
+    reply.text
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-options
+meta {
+    doc: """
+    `chat-with-tools` with explicit `ChatRequestOptions` (output ceiling,
+    sampling, tool mode, model fields such as thinking, a guardrail). Bind it
+    in a closure to keep the four-argument chat contract.
+
+    **Example**
+
+    ```hot
+    options ::aws::bedrock::chat-tools/ChatRequestOptions({
+        max-tokens: 8192,
+        additional-fields: {thinking: {type: "enabled", budget_tokens: 2048}}
+    })
+    chat (model, messages, system, tools) {
+        ::aws::bedrock::chat-tools/chat-with-tools-options(model, messages, system, tools, options)
+    }
+    opts ::ai::chat/ChatOptions({chat-fn: chat, model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"})
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
+    id model-id(model)
+    resolved resolve(opts)
+    cond {
+        is-err(resolved) => { resolved }
+        => {
+            body to-json(build-request(messages, system, tools, options))
+            headers {"Content-Type": "application/json", "Accept": "application/json"}
+            response send-signed("POST", converse-url(resolved, id, "converse"), "bedrock", resolved, headers, body)
+            cond {
+                is-err(response) => { response }
+                is-ok-response(response) => { parse-response(response.body, id) }
+                => { err(AwsError(response)) }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Streaming
+// ============================================================================
+
+EMPTY_STATE {
+    text: "",
+    calls: [],
+    reasoning: [],
+    open: null,
+    reasoning-text: "",
+    signature: null,
+    redacted: null,
+    stop-reason: null,
+    usage: null
+}
+
+event-payload
+meta {
+    no-doc: true,
+    doc: """Internal: an event's JSON payload as a Map, or `{}`."""
+}
+fn (message: ::es/Message): Map {
+    text Str(message.payload)
+    cond {
+        is-empty(trim(text)) => { {} }
+        => {
+            data from-json(text)
+            if(is-map(data), data, {})
+        }
+    }
+}
+
+close-block
+meta {
+    no-doc: true,
+    doc: """Internal: finish the open block: a tool call becomes a `ToolCall` (with `ToolUseEnd`), gathered reasoning becomes a reasoning block."""
+}
+fn (state: Map, on-delta: Fn): Map {
+    open state.open
+    cond {
+        is-some(open) => {
+            on-delta(ReplyDelta.ToolUseEnd(ToolUseEnd({id: open.id})))
+            raw trim(open.json)
+            input if(is-empty(raw), {}, from-json(raw))
+            call ::ai-tool/ToolCall({id: open.id, name: open.name, input: if(is-map(input), input, {})})
+            {...state, calls: concat(state.calls, [call]), open: null}
+        }
+
+        is-some(state.redacted) => {
+            {...state, reasoning: concat(state.reasoning, [{reasoningContent: {redactedContent: state.redacted}}]), redacted: null}
+        }
+
+        not(is-empty(state.reasoning-text)) => {
+            block {reasoningContent: {reasoningText: filter-vals({text: state.reasoning-text, signature: state.signature}, is-some)}}
+            {...state, reasoning: concat(state.reasoning, [block]), reasoning-text: "", signature: null}
+        }
+        => { state }
+    }
+}
+
+handle-delta
+meta {
+    no-doc: true,
+    doc: """Internal: fold one `contentBlockDelta` into the state."""
+}
+fn (state: Map, delta: Map, on-delta: Fn): Map {
+    text get(delta, "text")
+    tool-input get-in(delta, ["toolUse", "input"])
+    reasoning get(delta, "reasoningContent")
+    cond {
+        is-some(text) => {
+            on-delta(ReplyDelta.TextDelta(TextDelta({text: text})))
+            {...state, text: concat(state.text, text)}
+        }
+
+        and(is-some(tool-input), is-some(state.open)) => {
+            on-delta(ReplyDelta.ToolUseInputDelta(ToolUseInputDelta({id: state.open.id, partial-input-json: tool-input})))
+            {...state, open: {...state.open, json: concat(state.open.json, tool-input)}}
+        }
+
+        is-some(reasoning) => {
+            cond {
+                is-some(get(reasoning, "text")) => { {...state, reasoning-text: concat(state.reasoning-text, reasoning.text)} }
+                is-some(get(reasoning, "signature")) => { {...state, signature: reasoning.signature} }
+                is-some(get(reasoning, "redactedContent")) => { {...state, redacted: reasoning.redactedContent} }
+                => { state }
+            }
+        }
+        => { state }
+    }
+}
+
+handle-event
+meta {
+    doc: """
+    Fold one parsed Converse stream event into the stream state, sending its
+    `ReplyDelta` events to `on-delta`. An exception event is an Err holding
+    `ReplyError` (`kind: "stream-exception"`).
+
+    **Example**
+
+    ```hot
+    event ::aws::eventstream/Message({
+        headers: {":message-type": "event", ":event-type": "contentBlockDelta"},
+        payload: Bytes(to-json({contentBlockIndex: 0, delta: {text: "Hi"}}))
+    })
+    state ::aws::bedrock::chat-tools/handle-event(::aws::bedrock::chat-tools/EMPTY_STATE, event, ::ai::chat/noop-on-delta)
+    state.text  // "Hi"
+    ```
+    """
+}
+fn (state: Map, message: ::es/Message, on-delta: Fn): Map {
+    kind ::es/get-header(message, ":message-type")
+    event ::es/get-header(message, ":event-type")
+    data event-payload(message)
+    cond {
+        ne(kind, "event") => {
+            name or(::es/get-header(message, ":exception-type"), ::es/get-header(message, ":error-code"), "exception")
+            err(ReplyError({
+                kind: "stream-exception",
+                stop-reason: null,
+                message: `${name}: ${or(get(data, "message"), get(data, "Message"), ::es/get-header(message, ":error-message"), "no message")}`
+            }))
+        }
+
+        eq(event, "contentBlockStart") => {
+            tu get-in(data, ["start", "toolUse"])
+            cond {
+                is-null(tu) => { state }
+                => {
+                    on-delta(ReplyDelta.ToolUseStart(ToolUseStart({id: tu.toolUseId, name: tu.name})))
+                    {...state, open: {id: tu.toolUseId, name: tu.name, json: ""}}
+                }
+            }
+        }
+
+        eq(event, "contentBlockDelta") => { handle-delta(state, or(get(data, "delta"), {}), on-delta) }
+        eq(event, "contentBlockStop") => { close-block(state, on-delta) }
+        eq(event, "messageStop") => { {...state, stop-reason: get(data, "stopReason")} }
+        eq(event, "metadata") => { {...state, usage: get(data, "usage")} }
+        => { state }
+    }
+}
+
+drain-events
+meta {
+    no-doc: true,
+    doc: """Internal: fold every event into the state, stopping at the first Err."""
+}
+fn cond (events: Vec<::es/Message>, i: Int, state: Map, on-delta: Fn): Map {
+    gte(i, length(events)) => { state }
+    => {
+        next handle-event(state, events[i], on-delta)
+        cond {
+            is-err(next) => { next }
+            => { drain-events(events, add(i, 1), next, on-delta) }
+        }
+    }
+}
+
+finalize-state
+meta {
+    no-doc: true,
+    doc: """Internal: the final stream state as a `ChatReply`, or a `ReplyError` Err when the stream ended with no stop reason."""
+}
+fn (state: Map, model: Str): ::ai-chat/ChatReply {
+    closed close-block(state, ::ai-chat/noop-on-delta)
+    cond {
+        is-null(closed.stop-reason) => {
+            err(ReplyError({kind: "incomplete-stream", stop-reason: null, message: "The Bedrock stream ended with no stop reason."}))
+        }
+        => {
+            finish-reply(
+                closed.text,
+                with-reasoning(closed.calls, closed.reasoning),
+                closed.stop-reason,
+                usage-of(closed.usage, model),
+                {stopReason: closed.stop-reason, usage: closed.usage}
+            )
+        }
+    }
+}
+
+parse-stream-body
+meta {
+    doc: """
+    Parse a Converse stream body (AWS event stream bytes) into a `ChatReply`,
+    sending each `ReplyDelta` to `on-delta` in order and a final
+    `ReplyDelta.Stop`.
+
+    **Example**
+
+    ```hot
+    frame fn (event: Str, payload: Map): ::aws::eventstream/Message {
+        ::aws::eventstream/Message({headers: {":message-type": "event", ":event-type": event}, payload: Bytes(to-json(payload))})
+    }
+    events [
+        frame("contentBlockDelta", {contentBlockIndex: 0, delta: {text: "Hi"}}),
+        frame("contentBlockStop", {contentBlockIndex: 0}),
+        frame("messageStop", {stopReason: "end_turn"})
+    ]
+    reply ::aws::bedrock::chat-tools/reply-from-events(events, "us.amazon.nova-micro-v1:0", ::ai::chat/noop-on-delta)
+    reply.text  // "Hi"
+    ```
+    """
+}
+fn (body: Any, model: Str, on-delta: Fn): ::ai-chat/ChatReply {
+    bytes cond {
+        is-bytes(body) => { body }
+        is-str(body) => { Bytes(body) }
+        => { Bytes("") }
+    }
+
+    reply-from-events(::es/parse-stream(bytes), model, on-delta)
+}
+
+reply-from-events
+meta {
+    doc: """
+    Fold parsed Converse stream events into a `ChatReply`, sending each
+    `ReplyDelta` to `on-delta` and a final `ReplyDelta.Stop`. See
+    `parse-stream-body` for an example.
+    """
+}
+fn (events: Vec<::es/Message>, model: Str, on-delta: Fn): ::ai-chat/ChatReply {
+    drained drain-events(events, 0, EMPTY_STATE, on-delta)
+    cond {
+        is-err(drained) => { drained }
+        => {
+            reply finalize-state(drained, model)
+            cond {
+                is-err(reply) => { reply }
+                => {
+                    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+                    reply
+                }
+            }
+        }
+    }
+}
+
+chat-with-tools-stream
+meta {
+    doc: """
+    Streaming `chat-with-tools` for `::ai::chat/run-loop-stream`, over
+    Converse's stream endpoint. Calls `on-delta` with each
+    `::ai::chat/ReplyDelta` and returns the same `ChatReply`. The deltas are
+    sent once the whole stream is in. A trailing `opts` Map carries
+    `::aws::core/resolve` keys.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        chat-stream-fn: ::aws::bedrock::chat-tools/chat-with-tools-stream,
+        model: "us.amazon.nova-pro-v1:0"
+    })
+    ::ai::chat/run-loop-stream(opts, "Tell me a joke.", (delta) { print(delta) })
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, opts: Map): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, opts)
+}
+
+chat-with-tools-stream-options
+meta {
+    doc: """
+    `chat-with-tools-stream` with explicit `ChatRequestOptions`, and an
+    optional trailing `opts` Map.
+
+    **Example**
+
+    ```hot
+    options ::aws::bedrock::chat-tools/ChatRequestOptions({max-tokens: 2048})
+    reply ::aws::bedrock::chat-tools/chat-with-tools-stream-options(
+        "us.amazon.nova-pro-v1:0",
+        [::ai::chat/user-message("Count to three.")],
+        null,
+        null,
+        ::ai::chat/noop-on-delta,
+        options
+    )
+    ```
+    """
+}
+fn
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(model, messages, system, tools, on-delta, options, {})
+},
+(model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions, opts: Map): ::ai-chat/ChatReply {
+    id model-id(model)
+    resolved resolve(opts)
+    cond {
+        is-err(resolved) => { resolved }
+        => {
+            body to-json(build-request(messages, system, tools, options))
+            headers {"Content-Type": "application/json", "Accept": "application/vnd.amazon.eventstream"}
+            response send-signed("POST", converse-url(resolved, id, "converse-stream"), "bedrock", resolved, headers, body)
+            cond {
+                is-err(response) => { response }
+                is-ok-response(response) => { parse-stream-body(response.body, id, on-delta) }
+                => { err(AwsError(response)) }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Registration
+// ============================================================================
+
+Bedrock
+meta { doc: """Bedrock's identity in `::ai::chat/Provider`.""" }
+type {
+    name: Str
+}
+
+Bedrock -> ::ai::chat/Provider.Bedrock
+
+BEDROCK_PROVIDER
+meta { doc: """The `variant` of every Bedrock registration.""" }
+::ai::chat/Provider.Bedrock({name: PROVIDER_NAME})
+
+is-bedrock-model
+meta {
+    doc: """
+    True for ids written as `bedrock/<model id>` (case-insensitive). Bare
+    Bedrock ids (`anthropic.claude-...`, `us.amazon.nova-...`) aren't
+    claimed, so they don't take models from the Anthropic or OpenAI entries.
+
+    **Example**
+
+    ```hot
+    ::aws::bedrock::chat-tools/is-bedrock-model("bedrock/us.amazon.nova-pro-v1:0")  // => true
+    ::aws::bedrock::chat-tools/is-bedrock-model("claude-sonnet-4-5")              // => false
+    ```
+    """
+}
+fn (model: Str): Bool {
+    starts-with(lowercase(model), MODEL_PREFIX)
+}
+
+provider
+meta {
+    doc: """
+    An `::ai::chat/ProviderRegistration` for Bedrock, for
+    `::ai::chat/with-providers`. Its variant is `Provider.Bedrock`, and it
+    claims `bedrock/<model id>` models. Credentials and region resolve on
+    each call (ctx, or `ChatOptions.provider-opts`). Pass
+    `ChatRequestOptions` for another ceiling, thinking or a guardrail.
+
+    **Example**
+
+    ```hot
+    opts ::ai::chat/ChatOptions({
+        model: "bedrock/us.amazon.nova-pro-v1:0",
+        providers: ::ai::chat/with-providers([::aws::bedrock::chat-tools/provider()])
+    })
+    answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
+    ```
+    """
+}
+fn
+(): ::ai::chat/ProviderRegistration {
+    provider(DEFAULT_REQUEST_OPTIONS)
+},
+(options: ChatRequestOptions): ::ai::chat/ProviderRegistration {
+    o options
+    ::ai::chat/ProviderRegistration({
+        variant: BEDROCK_PROVIDER,
+        detect: is-bedrock-model,
+        display-name: PROVIDER_NAME,
+        chat-fn: (model, messages, system, tools) {
+            chat-with-tools-options(model, messages, system, tools, o, {})
+        },
+        chat-stream-fn: (model, messages, system, tools, on-delta) {
+            chat-with-tools-stream-options(model, messages, system, tools, on-delta, o, {})
+        },
+        chat-opts-fn: (model, messages, system, tools, provider-opts) {
+            chat-with-tools-options(model, messages, system, tools, o, or(provider-opts, {}))
+        },
+        chat-stream-opts-fn: (model, messages, system, tools, on-delta, provider-opts) {
+            chat-with-tools-stream-options(model, messages, system, tools, on-delta, o, or(provider-opts, {}))
+        },
+        embed-fn: null,
+        meta: {
+            model-prefix: MODEL_PREFIX,
+            capabilities: ["tools", "streaming", "vision", "system-prompt"]
+        }
+    })
+}

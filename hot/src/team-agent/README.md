@@ -200,6 +200,8 @@ hot ctx set telegram.chat.id   "-1001234567890"
 hot ctx set anthropic.api.key "sk-ant-..."
 # …and/or
 hot ctx set openai.api.key    "sk-..."
+hot ctx set gemini.api.key    "..."         # gemini-* models
+hot ctx set xai.api.key       "xai-..."     # grok-* models
 
 # Optional
 hot ctx set brain.model            "claude-sonnet-4-5"
@@ -463,7 +465,7 @@ These tests do not require any Telegram, Slack, or LLM credentials.
 | `/decisions <N>` | Same, custom window |
 | `/search <query>` | Semantic search — returns raw matching messages with scores |
 | `/ai` | Show AI model; list switchable aliases |
-| `/ai <alias>` | Switch AI model (e.g. `/ai sonnet`, `/ai gpt`) |
+| `/ai <alias>` | Switch AI model (e.g. `/ai sonnet`, `/ai gpt`, `/ai gemini`, `/ai grok`) |
 | `/stats` | Messages recorded, top contributors (7d), AI calls + tokens today, active days |
 | `/diag` | Active **transport**, model, polling/webhook/voice config, memory store sizes, registered sessions, recent errors |
 

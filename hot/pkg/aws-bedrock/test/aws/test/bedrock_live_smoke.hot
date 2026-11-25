@@ -1,0 +1,135 @@
+::aws::test::bedrock-live-smoke ns
+meta {
+    doc: """
+    Live network smoke tests for the Bedrock hot-ai adapter.
+
+    Gated by `HOT_LIVE_TESTS`, so the normal suite stays hermetic and
+    offline. They also need AWS credentials with Bedrock model access, passed
+    as per-call opts from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+    `AWS_SESSION_TOKEN` (optional), in `AWS_REGION` (default `us-east-1`).
+    `BEDROCK_SMOKE_MODEL` picks the model or inference profile (default
+    `us.amazon.nova-micro-v1:0`).
+
+    ```bash
+    HOT_LIVE_TESTS=1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... hot test --project pkg-test-aws ::aws::test::bedrock-live-smoke
+    ```
+
+    With `HOT_LIVE_TESTS` unset every test here passes without a call.
+    """
+}
+
+::env  ::hot::env
+::ct   ::aws::bedrock::chat-tools
+::chat ::ai::chat
+::tool ::ai::tool
+
+is-live fn (): Bool {
+    and(not(is-empty(::env/get("HOT_LIVE_TESTS", ""))), not(is-empty(::env/get("AWS_ACCESS_KEY_ID", ""))))
+}
+
+smoke-model fn (): Str { ::env/get("BEDROCK_SMOKE_MODEL", "us.amazon.nova-micro-v1:0") }
+
+aws-opts fn (): Map {
+    token ::env/get("AWS_SESSION_TOKEN", "")
+    filter-vals({
+        "access-key-id": ::env/get("AWS_ACCESS_KEY_ID", ""),
+        "secret-access-key": ::env/get("AWS_SECRET_ACCESS_KEY", ""),
+        "session-token": if(is-empty(token), null, token),
+        region: ::env/get("AWS_REGION", "us-east-1")
+    }, is-some)
+}
+
+get-weather
+meta { doc: """Test fixture: the weather in a city.""" }
+fn (city: Str): Str { `${city}: 18C and clear` }
+
+current-year
+meta { doc: """Test fixture: a tool that takes no arguments.""" }
+fn (): Int { 2031 }
+
+WEATHER_TOOL ::tool/from-fn(get-weather, {name: "get_weather", description: "The current weather in one city."})
+YEAR_TOOL ::tool/from-fn(current-year, {name: "current_year", description: "The current year. Takes no arguments."})
+
+chat-opts fn (tools: Vec<::tool/Tool>): ::chat/ChatOptions {
+    ::chat/ChatOptions({
+        chat-opts-fn: ::ct/chat-with-tools,
+        chat-stream-opts-fn: ::ct/chat-with-tools-stream,
+        model: smoke-model(),
+        provider-opts: aws-opts(),
+        tools: tools,
+        max-iterations: 6,
+    })
+}
+
+test-live-text
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            opts ::chat/ChatOptions({
+                chat-opts-fn: ::ct/chat-with-tools,
+                model: smoke-model(),
+                provider-opts: aws-opts(),
+                system: "Reply with exactly the word pong, in lowercase, and nothing else.",
+                max-iterations: 1,
+            })
+            answer ::chat/run-loop(opts, "ping")
+            assert(contains(lowercase(answer), "pong"), `text reply, got ${answer}`)
+        }
+    }
+}
+
+test-live-parallel-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::chat/run-loop(chat-opts([WEATHER_TOOL]), "Call get_weather for Paris and for Rome, then tell me both results.")
+            assert(contains(answer, "Paris"), `names Paris, got ${answer}`)
+            assert(contains(answer, "Rome"), `names Rome, got ${answer}`)
+            assert(contains(answer, "18"), `uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-stream-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::chat/run-loop-stream(chat-opts([WEATHER_TOOL]), "Call get_weather for Oslo, then tell me the result.", ::chat/noop-on-delta)
+            assert(contains(answer, "18"), `stream uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-zero-arg-tool
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::chat/run-loop(chat-opts([YEAR_TOOL]), "Use the current_year tool and tell me the year it returns.")
+            assert(contains(answer, "2031"), `uses the zero-arg tool, got ${answer}`)
+        }
+    }
+}
+
+test-live-bad-credentials-are-an-err
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            bad {"access-key-id": "AKIANOTREAL0000000000", "secret-access-key": "not-a-real-secret-key-000000000000000000", region: ::env/get("AWS_REGION", "us-east-1")}
+            reply ::ct/chat-with-tools(smoke-model(), [::chat/user-message("Hi")], null, null, bad)
+            assert(is-err(reply), "a refused call is an Err")
+            assert(gte(err-value(reply).status, 400), "with its status")
+            streamed ::ct/chat-with-tools-stream(smoke-model(), [::chat/user-message("Hi")], null, null, ::chat/noop-on-delta, bad)
+            assert(is-err(streamed), "a refused stream is an Err")
+        }
+    }
+}

@@ -166,15 +166,18 @@ meta {
     or register it with `with-providers` and pass the registry as
     `ChatOptions.providers`. The adapters are
     `::anthropic::chat-tools/chat-with-tools`,
-    `::openai::chat-tools/chat-with-tools` and
-    `::gemini::chat-tools/chat-with-tools`, each with a `-stream`
-    counterpart.
+    `::openai::chat-tools/chat-with-tools`,
+    `::gemini::chat-tools/chat-with-tools`,
+    `::xai::ai/chat-with-tools` and
+    `::aws::bedrock::chat-tools/chat-with-tools`, each with a `-stream`
+    counterpart. OpenAI-compatible servers (Groq, OpenRouter, Ollama, ...)
+    and Qwen register through `hot.dev/openai-compatible` and `hot.dev/qwen`.
 
     ```hot
     opts ::ai::chat/ChatOptions({
         chat-fn: ::gemini::chat-tools/chat-with-tools,
         chat-stream-fn: ::gemini::chat-tools/chat-with-tools-stream,
-        model: "gemini-2.5-flash",
+        model: "gemini-3.8-flash",
     })
     ```
 
@@ -1307,6 +1310,19 @@ meta {
     - `model-context-window` — explicit context-window size in
       tokens. When unset, the budget check uses
       `max-context-tokens` directly without computing a percentage.
+    - `on-final-reply` — called when the model replies with no tool
+      calls, as `(reply: ChatReply, messages: Vec<Message>) -> Str?`,
+      where `messages` is the history the model answered. Return null or
+      an empty Str to accept the reply. Return a Str to send it to the
+      model as a user turn and ask again, for example "You haven't called
+      submit_result yet." Each extra turn counts toward `max-iterations`.
+      An Err it returns ends the loop with that Err.
+    - `fail-on-tool-error` — when `true`, a failed tool call ends the
+      loop with an Err holding a `ToolFailure`, instead of going back to
+      the model as an error result. Use it when the failure should be
+      retried by the platform, not explained by the model. A tool's own
+      `fail-on-error` wins over this. A call to a tool that doesn't exist
+      always goes back to the model.
 
     **Example**
 
@@ -1348,7 +1364,9 @@ type {
     model-context-window: Int?,
     chat-opts-fn: Fn?,
     chat-stream-opts-fn: Fn?,
-    provider-opts: Map?
+    provider-opts: Map?,
+    on-final-reply: Fn?,
+    fail-on-tool-error: Bool?
 }
 
 // ============================================================================
@@ -1439,14 +1457,19 @@ meta {
     On each iteration:
 
     1. Call `chat-fn` with the running message list.
-    2. If the reply has no tool calls, return its text.
-    3. Otherwise, dispatch every tool call via `::ai::tool/dispatch`,
+    2. If the reply has no tool calls, return its text. When
+       `on-final-reply` is set and returns a Str, send that as a user
+       turn and loop instead.
+    3. Otherwise, dispatch every tool call via `::ai::tool/dispatch`.
+       If a tool marked `ends-run` succeeded, return its output. Else
        append the assistant turn and one tool-result turn per call,
        and loop.
 
     Errors from individual tool calls are surfaced back to the model
     as `tool-result-message` entries with the failure text — the model
-    is allowed to recover. Hitting `max-iterations` raises a `fail`.
+    is allowed to recover. With `fail-on-tool-error` (or a tool's
+    `fail-on-error`), a failed call ends the loop with an Err holding a
+    `ToolFailure` instead. Hitting `max-iterations` raises a `fail`.
 
     **Example**
 
@@ -1752,6 +1775,149 @@ fn (opts: ChatOptions, iteration: Int, activations: Vec<Map>): Null {
     }
 }
 
+ToolFailure
+meta {
+    doc: """
+    Why `run-loop` stopped on a failed tool call, when
+    `ChatOptions.fail-on-tool-error` or the tool's `fail-on-error` is on.
+    The loop returns it as an Err.
+
+    - `tool`: the tool's name, as the model called it.
+    - `call-id`: the call's id.
+    - `input`: the input the model passed.
+    - `error`: the tool's failure, as `ToolResult.output` holds it.
+    - `iteration`: the turn it happened on, from 1.
+
+    **Example**
+
+    ```hot
+    failure ::ai::chat/ToolFailure({tool: "charge", call-id: "c1", input: {}, error: "card declined", iteration: 2})
+    failure.error  // "card declined"
+    ```
+    """
+}
+type {
+    tool: Str,
+    call-id: Str,
+    input: Map,
+    error: Any,
+    iteration: Int
+}
+
+final-nudge
+meta {
+    no-doc: true,
+    doc: """Internal: what `on-final-reply` asks the model next, or null to accept the reply."""
+}
+fn (opts: ChatOptions, reply: ChatReply, messages: Vec<Message>): Str? {
+    hook opts.on-final-reply
+    cond {
+        is-null(hook) => { null }
+        => {
+            nudge hook(reply, messages)
+            cond {
+                is-err(nudge) => { nudge }
+                not(is-str(nudge)) => { null }
+                is-empty(trim(nudge)) => { null }
+                => { nudge }
+            }
+        }
+    }
+}
+
+nudged-messages
+meta {
+    no-doc: true,
+    doc: """Internal: the history after a reply `on-final-reply` sent back, with the reply's text (when it had any) and the nudge as a user turn."""
+}
+fn (messages: Vec<Message>, reply: ChatReply, nudge: Str): Vec<Message> {
+    text or(reply.text, "")
+    said if(is-empty(trim(text)), [], [assistant-message(text, null)])
+    concat(messages, said, [user-message(nudge)])
+}
+
+call-for
+meta {
+    no-doc: true,
+    doc: """Internal: the call a result answers."""
+}
+fn (calls: Vec<::ai::tool/ToolCall>, id: Str): ::ai::tool/ToolCall? {
+    find-first(calls, (c) { eq(c.id, id) })
+}
+
+tool-for
+meta {
+    no-doc: true,
+    doc: """Internal: the tool a result's call named, or null when the call named no known tool."""
+}
+fn (tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, result: ::ai::tool/ToolResult): ::ai::tool/Tool? {
+    call call-for(calls, result.id)
+    if(is-null(call), null, ::tool/find-by-name(tools, call.name))
+}
+
+is-fatal-failure
+meta {
+    no-doc: true,
+    doc: """Internal: true when a failed result should end the loop: the tool's `fail-on-error`, else `fail-on-tool-error`. A call to an unknown tool never is."""
+}
+fn (opts: ChatOptions, tool: ::ai::tool/Tool?): Bool {
+    cond {
+        is-null(tool) => { false }
+        is-some(tool.fail-on-error) => { eq(tool.fail-on-error, true) }
+        => { eq(opts.fail-on-tool-error, true) }
+    }
+}
+
+fatal-result
+meta {
+    no-doc: true,
+    doc: """Internal: the first failed result that ends the loop, or null."""
+}
+fn (opts: ChatOptions, tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, results: Vec<::ai::tool/ToolResult>): ::ai::tool/ToolResult? {
+    find-first(results, (r) { and(r.is-error, is-fatal-failure(opts, tool-for(tools, calls, r))) })
+}
+
+finishing-result
+meta {
+    no-doc: true,
+    doc: """Internal: the first successful result from a tool marked `ends-run`, or null."""
+}
+fn (tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, results: Vec<::ai::tool/ToolResult>): ::ai::tool/ToolResult? {
+    find-first(results, (r) {
+        tool tool-for(tools, calls, r)
+        and(not(r.is-error), and(is-some(tool), eq(get(tool, "ends-run"), true)))
+    })
+}
+
+tool-failure
+meta {
+    no-doc: true,
+    doc: """Internal: the Err `run-loop` returns for a fatal tool failure."""
+}
+fn (result: ::ai::tool/ToolResult, calls: Vec<::ai::tool/ToolCall>, iteration: Int): Any {
+    call call-for(calls, result.id)
+    err(ToolFailure({
+        tool: call.name,
+        call-id: result.id,
+        input: or(call.input, {}),
+        error: result.output,
+        iteration: iteration
+    }))
+}
+
+result-text
+meta {
+    no-doc: true,
+    doc: """Internal: the loop's answer from an `ends-run` tool's output: a Str as is, anything else as JSON."""
+}
+fn (output: Any): Str {
+    cond {
+        is-null(output) => { "" }
+        is-str(output) => { output }
+        => { to-json(output) }
+    }
+}
+
 run-loop-step
 meta {
     no-doc: true,
@@ -1771,11 +1937,22 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
             is-err(reply) => { reply }
             is-empty(calls) => {
                 emit-step(opts, iteration, reply, null)
-                or(reply.text, "")
+                nudge final-nudge(opts, reply, messages)
+                cond {
+                    is-err(nudge) => { nudge }
+                    is-null(nudge) => { or(reply.text, "") }
+                    => { run-loop-step(opts, nudged-messages(messages, reply, nudge), tools, sub(remaining, 1), resolver, active-skills) }
+                }
             }
             => {
                 results map(calls, (call) { ::tool/dispatch(tools, call) })
                 emit-step(opts, iteration, reply, results)
+                failure fatal-result(opts, tools, calls, results)
+                finish finishing-result(tools, calls, results)
+                cond {
+                    is-some(failure) => { tool-failure(failure, calls, iteration) }
+                    is-some(finish) => { result-text(finish.output) }
+                    => {
                 activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
                 emit-skill-activations(opts, iteration, activated.activations)
                 tool-msgs map(results, tool-result-message)
@@ -1785,6 +1962,8 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
                     tool-msgs
                 )
                 run-loop-step(opts, next-messages, activated.tools, sub(remaining, 1), resolver, activated.active)
+                    }
+                }
             }
         }
     }
@@ -1936,11 +2115,22 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
             is-err(reply) => { reply }
             is-empty(calls) => {
                 emit-step(opts, iteration, reply, null)
-                or(reply.text, "")
+                nudge final-nudge(opts, reply, messages)
+                cond {
+                    is-err(nudge) => { nudge }
+                    is-null(nudge) => { or(reply.text, "") }
+                    => { run-loop-stream-step(opts, nudged-messages(messages, reply, nudge), tools, sub(remaining, 1), on-delta, resolver, active-skills) }
+                }
             }
             => {
                 results map(calls, (call) { ::tool/dispatch(tools, call) })
                 emit-step(opts, iteration, reply, results)
+                failure fatal-result(opts, tools, calls, results)
+                finish finishing-result(tools, calls, results)
+                cond {
+                    is-some(failure) => { tool-failure(failure, calls, iteration) }
+                    is-some(finish) => { result-text(finish.output) }
+                    => {
                 activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
                 emit-skill-activations(opts, iteration, activated.activations)
                 tool-msgs map(results, tool-result-message)
@@ -1950,6 +2140,8 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
                     tool-msgs
                 )
                 run-loop-stream-step(opts, next-messages, activated.tools, sub(remaining, 1), on-delta, resolver, activated.active)
+                    }
+                }
             }
         }
     }

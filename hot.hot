@@ -36,6 +36,8 @@ hot.project.hot-dev.deps {
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
+    "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/xai": { "local": "./hot/pkg/xai" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
@@ -43,7 +45,7 @@ hot.project.hot-dev.deps {
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
 
     // Optional package families intentionally omitted from hot-dev:
-    // gemini, xai, qwen, AWS, Discord modules, email, Stripe, Twilio,
+    // qwen, AWS, Discord modules, email, Stripe, Twilio,
     // Supabase, and unused box-tool packages. See hot-pkg-all for static
     // package inventory checks.
 }
@@ -532,7 +534,9 @@ hot.project.pkg-test-aws.test.paths [
     "./hot/pkg/aws-sqs/test"
 ]
 hot.project.pkg-test-aws.test.capture true
-hot.project.pkg-test-aws.deps {}
+hot.project.pkg-test-aws.deps {
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+}
 
 // gemini unit tests (request building, credential resolver; hermetic)
 hot.project.pkg-test-gemini.src.paths ["./hot/pkg/gemini/src"]
@@ -547,7 +551,8 @@ hot.project.pkg-test-xai.src.paths ["./hot/pkg/xai/src"]
 hot.project.pkg-test-xai.test.paths ["./hot/pkg/xai/test"]
 hot.project.pkg-test-xai.test.capture true
 hot.project.pkg-test-xai.deps {
-    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" }
+    "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
+    "hot.dev/openai": { "local": "./hot/pkg/openai" }
 }
 
 // postmark unit tests (request building, credential resolver; hermetic)
@@ -1358,6 +1363,8 @@ hot.project.demo-team-agent.deps {
     "hot.dev/slack":     { "local": "./hot/pkg/slack" },
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/openai":    { "local": "./hot/pkg/openai" },
+    "hot.dev/gemini":    { "local": "./hot/pkg/gemini" },
+    "hot.dev/xai":       { "local": "./hot/pkg/xai" },
     "hot.dev/whisper":   { "local": "./hot/pkg/whisper" },
 }
 

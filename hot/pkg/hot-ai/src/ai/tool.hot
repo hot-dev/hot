@@ -43,6 +43,15 @@ meta {
       Used by external MCP wrappers (`::ai::mcp/from-server`) and other
       tools whose schema is supplied by an external system. Defaults
       to `false`.
+    - `ends-run` — when `true`, a successful call to this tool ends
+      `run-loop`, and the tool's output is the loop's answer (a `Str` as
+      is, anything else as JSON). Use it for a `finish` or `submit_result`
+      tool. A failed call goes back to the model as usual, so it can fix
+      the input. Defaults to `false`.
+    - `fail-on-error` — when `true`, a failed call to this tool ends
+      `run-loop` with an Err holding a `::ai::chat/ToolFailure`, instead of
+      going back to the model. When `false`, it always goes back, whatever
+      `ChatOptions.fail-on-tool-error` says. Null follows that option.
 
     **Example**
 
@@ -70,7 +79,9 @@ type {
     input-schema: Map,
     output-schema: Map?,
     fn: Fn,
-    pass-input: Bool?
+    pass-input: Bool?,
+    ends-run: Bool?,
+    fail-on-error: Bool?
 }
 
 ToolCall
@@ -205,7 +216,8 @@ meta {
     The function's qualified name becomes `Tool.name`, its
     `meta {doc: ...}` becomes `description`, and its parameter types
     are converted to a JSON-Schema input. Pass an `overrides` map to
-    customize any of these fields.
+    customize any of these fields, or to set `ends-run` and
+    `fail-on-error`.
 
     **Example**
 
@@ -221,6 +233,10 @@ meta {
         name: "add-numbers",
         description: "Add two integers and return the sum."
     })
+
+    // A tool whose successful call ends the run
+    finish fn (answer: Str): Str { answer }
+    t3 ::ai::tool/from-fn(finish, {name: "finish", ends-run: true})
     ```
     """
 }
@@ -247,7 +263,9 @@ fn
             get(schema, "output-schema"),
             null
         ),
-        fn: f
+        fn: f,
+        ends-run: get(overrides, "ends-run"),
+        fail-on-error: get(overrides, "fail-on-error")
     })
 }
 
@@ -348,9 +366,12 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
 
             match attempt {
                 Result.Err => {
+                    // A bare fail(msg) carries no data, so the model would
+                    // see an empty error. Name the tool instead.
+                    reason err-value(attempt)
                     ToolResult({
                         id: call.id,
-                        output: err-value(attempt),
+                        output: if(is-null(reason), `Tool ${call.name} failed.`, reason),
                         is-error: true,
                     })
                 }

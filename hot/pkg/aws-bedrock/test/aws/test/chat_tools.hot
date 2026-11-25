@@ -1,0 +1,474 @@
+::aws::test::bedrock-chat-tools ns
+meta ["test"]
+
+// Hermetic: no network, no aws.* context. A `transport` in opts stands in for the network.
+
+::ct   ::aws::bedrock::chat-tools
+::chat ::ai::chat
+::tool ::ai::tool
+::ctx  ::hot::ctx
+::es   ::aws::eventstream
+
+HttpResponse ::hot::http/HttpResponse
+ReplyDelta   ::chat/ReplyDelta
+
+from-int ::hot::bytes/from-int
+crc32    ::hot::bytes/crc32
+
+MODEL "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+RUNTIME "https://bedrock-runtime.eu-west-1.amazonaws.com"
+OPTS ::ct/DEFAULT_REQUEST_OPTIONS
+
+get-weather
+meta { doc: """Test fixture: the weather in a city.""" }
+fn (city: Str): Str { `${city}: 18C` }
+
+WEATHER ::tool/from-fn(get-weather, {name: "get_weather", description: "Weather in a city."})
+
+creds fn (transport: Fn): Map {
+    {"access-key-id": "AKIDOPTS", "secret-access-key": "opts-secret", region: "eu-west-1", transport: transport}
+}
+
+// Every call is answered with `status` and a JSON body; the request is kept under ctx `key`.
+json-answer fn (key: Str, status: Int, body: Map): Map {
+    k key
+    s status
+    b body
+    creds((req) {
+        ::ctx/set(k, req)
+        HttpResponse({status: s, headers: {"content-type": "application/json"}, body: Bytes(to-json(b)), body-bytes: Bytes(to-json(b))})
+    })
+}
+
+// An AWS event stream frame with Str headers and a JSON payload.
+header-bytes fn (name: Str, value: Str): Bytes {
+    n Bytes(name)
+    v Bytes(value)
+    concat(Bytes([length(n)]), n, Bytes([7]), from-int(length(v), 2), v)
+}
+
+frame fn (headers: Map, payload: Map): Bytes {
+    hb reduce(keys(headers), (acc, k) { concat(acc, header-bytes(k, get(headers, k))) }, Bytes(""))
+    pb Bytes(to-json(payload))
+    total add(16, add(length(hb), length(pb)))
+    prelude concat(from-int(total, 4), from-int(length(hb), 4))
+    body concat(prelude, from-int(crc32(prelude), 4), hb, pb)
+    concat(body, from-int(crc32(body), 4))
+}
+
+event fn (name: Str, payload: Map): Bytes {
+    frame({":message-type": "event", ":event-type": name, ":content-type": "application/json"}, payload)
+}
+
+stream-answer fn (key: Str, frames: Vec<Bytes>): Map {
+    k key
+    body reduce(frames, (acc, f) { concat(acc, f) }, Bytes(""))
+    creds((req) {
+        ::ctx/set(k, req)
+        HttpResponse({status: 200, headers: {"content-type": "application/vnd.amazon.eventstream"}, body: body, body-bytes: body})
+    })
+}
+
+// The labels of the deltas a stream sends, kept under ctx `key`.
+recorder fn (key: Str): Fn {
+    ::ctx/set(key, [])
+    (delta) {
+        label match delta {
+            ReplyDelta.TextDelta => { `text:${delta.text}` }
+            ReplyDelta.ToolUseStart => { `start:${delta.name}` }
+            ReplyDelta.ToolUseInputDelta => { `input:${delta.partial-input-json}` }
+            ReplyDelta.ToolUseEnd => { "end" }
+            ReplyDelta.Stop => { `stop:${delta.reason}` }
+            => { "other" }
+        }
+
+        ::ctx/set(key, concat(or(::ctx/get(key), []), [label]))
+        null
+    }
+}
+
+sent-body fn (key: Str): Map { from-json(Str(::ctx/get(key).body)) }
+
+TEXT_BODY {
+    output: {message: {role: "assistant", content: [{text: "Hi there."}]}},
+    stopReason: "end_turn",
+    usage: {inputTokens: 12, outputTokens: 4, totalTokens: 16, cacheReadInputTokens: 8, cacheWriteInputTokens: 2}
+}
+
+TWO_CALLS_BODY {
+    output: {message: {role: "assistant", content: [
+        {reasoningContent: {reasoningText: {text: "Two cities.", signature: "sig-1"}}},
+        {text: "Checking."},
+        {toolUse: {toolUseId: "tu_1", name: "get_weather", input: {city: "Paris"}}},
+        {toolUse: {toolUseId: "tu_2", name: "get_weather", input: {city: "Rome"}}}
+    ]}},
+    stopReason: "tool_use",
+    usage: {inputTokens: 30, outputTokens: 20, totalTokens: 50}
+}
+
+// ============================================================================
+// Request building
+// ============================================================================
+
+test-build-request-text
+meta ["test"]
+fn () {
+    body ::ct/build-request([::chat/user-message("Hi")], "Be brief.", null, OPTS)
+    assert-eq([{text: "Be brief."}], body.system)
+    assert-eq([{role: "user", content: [{text: "Hi"}]}], body.messages)
+    assert-eq({maxTokens: 4096}, body.inferenceConfig)
+    assert(is-null(get(body, "toolConfig")), "no tools, no toolConfig")
+}
+
+test-build-request-system-messages-join-the-system-prompt
+meta ["test"]
+fn () {
+    msgs [::chat/Message({role: "system", content: "Rule two."}), ::chat/user-message("Hi")]
+    body ::ct/build-request(msgs, "Rule one.", null, OPTS)
+    assert-eq([{text: "Rule one."}, {text: "Rule two."}], body.system)
+    assert-eq(1, length(body.messages))
+}
+
+test-build-request-no-system
+meta ["test"]
+fn () {
+    body ::ct/build-request([::chat/user-message("Hi")], null, null, OPTS)
+    assert(is-null(get(body, "system")))
+}
+
+test-build-request-tools
+meta ["test"]
+fn () {
+    body ::ct/build-request([::chat/user-message("Hi")], null, [WEATHER], ::ct/ChatRequestOptions({tool-mode: "any"}))
+    spec body.toolConfig.tools[0].toolSpec
+    assert-eq("get_weather", spec.name)
+    assert-eq("Weather in a city.", spec.description)
+    assert-eq("object", spec.inputSchema.json.type)
+    assert-eq({any: {}}, body.toolConfig.toolChoice)
+}
+
+test-build-request-tool-mode-names-a-tool
+meta ["test"]
+fn () {
+    body ::ct/build-request([::chat/user-message("Hi")], null, [WEATHER], ::ct/ChatRequestOptions({tool-mode: "get_weather"}))
+    assert-eq({tool: {name: "get_weather"}}, body.toolConfig.toolChoice)
+}
+
+test-build-request-options
+meta ["test"]
+fn () {
+    options ::ct/ChatRequestOptions({
+        max-tokens: 100,
+        temperature: 0.5,
+        stop-sequences: ["END"],
+        additional-fields: {thinking: {type: "enabled", budget_tokens: 1024}},
+        guardrail: {guardrailIdentifier: "g1", guardrailVersion: "1"}
+    })
+    body ::ct/build-request([::chat/user-message("Hi")], null, null, options)
+    assert-eq({maxTokens: 100, temperature: 0.5, stopSequences: ["END"]}, body.inferenceConfig)
+    assert-eq({thinking: {type: "enabled", budget_tokens: 1024}}, body.additionalModelRequestFields)
+    assert-eq("g1", body.guardrailConfig.guardrailIdentifier)
+}
+
+test-build-request-tool-round-trip
+meta ["test"]
+fn () {
+    calls [
+        ::tool/ToolCall({id: "tu_1", name: "get_weather", input: {city: "Paris"}, meta: {reasoning: [{reasoningContent: {reasoningText: {text: "t", signature: "s"}}}]}}),
+        ::tool/ToolCall({id: "tu_2", name: "get_weather", input: {city: "Rome"}})
+    ]
+    msgs [
+        ::chat/user-message("Weather?"),
+        ::chat/assistant-message("Checking.", calls),
+        ::chat/tool-result-message(::tool/ToolResult({id: "tu_1", output: "Paris: 18C", is-error: false})),
+        ::chat/tool-result-message(::tool/ToolResult({id: "tu_2", output: "no data", is-error: true}))
+    ]
+    body ::ct/build-request(msgs, null, [WEATHER], OPTS)
+    assert-eq(3, length(body.messages), "user, assistant, one user turn of results")
+
+    assistant body.messages[1]
+    assert-eq("assistant", assistant.role)
+    assert-eq({reasoningContent: {reasoningText: {text: "t", signature: "s"}}}, assistant.content[0], "reasoning goes back first")
+    assert-eq({text: "Checking."}, assistant.content[1])
+    assert-eq({toolUse: {toolUseId: "tu_1", name: "get_weather", input: {city: "Paris"}}}, assistant.content[2])
+    assert-eq("tu_2", assistant.content[3].toolUse.toolUseId)
+
+    results body.messages[2]
+    assert-eq("user", results.role)
+    assert-eq({toolResult: {toolUseId: "tu_1", content: [{text: "Paris: 18C"}]}}, results.content[0])
+    assert-eq({toolResult: {toolUseId: "tu_2", content: [{text: "no data"}], status: "error"}}, results.content[1])
+}
+
+test-build-request-map-results-go-as-json
+meta ["test"]
+fn () {
+    msg ::chat/tool-result-message(::tool/ToolResult({id: "tu_1", output: {temp: 18}, is-error: false}))
+    body ::ct/build-request([::chat/user-message("Hi"), msg], null, null, OPTS)
+    assert-eq([{json: {temp: 18}}], body.messages[0].content[1].toolResult.content)
+}
+
+test-build-request-merges-adjacent-user-turns
+meta ["test"]
+fn () {
+    body ::ct/build-request([::chat/user-message("One."), ::chat/user-message("Two.")], null, null, OPTS)
+    assert-eq([{role: "user", content: [{text: "One."}, {text: "Two."}]}], body.messages)
+}
+
+test-build-request-drops-empty-assistant-text
+meta ["test"]
+fn () {
+    calls [::tool/ToolCall({id: "tu_1", name: "get_weather", input: {city: "Oslo"}})]
+    body ::ct/build-request([::chat/user-message("Hi"), ::chat/assistant-message("", calls)], null, null, OPTS)
+    assert-eq(1, length(body.messages[1].content), "just the toolUse block")
+}
+
+test-build-request-image-part
+meta ["test"]
+fn () {
+    msg ::chat/Message({
+        role: "user",
+        content: "What is this?",
+        parts: [::chat/text-part("What is this?"), ::chat/MessagePart({kind: "image", mime: "image/jpeg", data: "QUJD"})]
+    })
+    body ::ct/build-request([msg], null, null, OPTS)
+    assert-eq({text: "What is this?"}, body.messages[0].content[0])
+    assert-eq({image: {format: "jpeg", source: {bytes: "QUJD"}}}, body.messages[0].content[1])
+}
+
+test-model-id
+meta ["test"]
+fn () {
+    assert-eq(MODEL, ::ct/model-id(`bedrock/${MODEL}`))
+    assert-eq(MODEL, ::ct/model-id(MODEL))
+}
+
+// ============================================================================
+// Reply parsing
+// ============================================================================
+
+test-parse-text-reply
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TEXT_BODY, MODEL)
+    assert-eq("Hi there.", reply.text)
+    assert(is-null(reply.tool-calls))
+    assert-eq("end_turn", reply.stop-reason)
+    assert-eq(12, reply.usage.input-tokens)
+    assert-eq(4, reply.usage.output-tokens)
+    assert-eq(16, reply.usage.total-tokens)
+    assert-eq(8, reply.usage.cache-read-tokens)
+    assert-eq(2, reply.usage.cache-write-tokens)
+    assert-eq("AWS Bedrock", reply.usage.provider)
+}
+
+test-parse-two-calls-keeps-reasoning-on-the-first
+meta ["test"]
+fn () {
+    reply ::ct/parse-response(TWO_CALLS_BODY, MODEL)
+    assert-eq("tool_use", reply.stop-reason)
+    assert-eq("Checking.", reply.text)
+    assert-eq(2, length(reply.tool-calls))
+    first-call reply.tool-calls[0]
+    assert-eq("tu_1", first-call.id)
+    assert-eq({city: "Paris"}, first-call.input)
+    assert-eq([{reasoningContent: {reasoningText: {text: "Two cities.", signature: "sig-1"}}}], first-call.meta.reasoning)
+    assert(is-null(reply.tool-calls[1].meta), "only the first call carries it")
+}
+
+test-parse-max-tokens
+meta ["test"]
+fn () {
+    reply ::ct/parse-response({...TEXT_BODY, stopReason: "max_tokens"}, MODEL)
+    assert-eq("max_tokens", reply.stop-reason)
+}
+
+test-parse-empty-reply-is-an-err
+meta ["test"]
+fn () {
+    reply ::ct/parse-response({output: {message: {role: "assistant", content: []}}, stopReason: "guardrail_intervened"}, MODEL)
+    assert(is-err(reply))
+    assert-eq("empty-reply", err-value(reply).kind)
+    assert-eq("guardrail_intervened", err-value(reply).stop-reason)
+}
+
+// ============================================================================
+// Calls through a transport
+// ============================================================================
+
+test-chat-sends-a-signed-converse-request
+meta ["test"]
+fn () {
+    opts json-answer("test.bedrock.req", 200, TEXT_BODY)
+    reply ::ct/chat-with-tools(`bedrock/${MODEL}`, [::chat/user-message("Hi")], "Be brief.", [WEATHER], opts)
+    assert-eq("Hi there.", reply.text)
+
+    req ::ctx/get("test.bedrock.req")
+    assert-eq(`${RUNTIME}/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse`, req.url)
+    assert(contains(get(req.headers, "Authorization"), "/eu-west-1/bedrock/aws4_request"))
+    sent sent-body("test.bedrock.req")
+    assert-eq("get_weather", sent.toolConfig.tools[0].toolSpec.name)
+    assert-eq([{text: "Be brief."}], sent.system)
+}
+
+test-chat-refused-is-an-aws-error
+meta ["test"]
+fn () {
+    opts json-answer("test.bedrock.refused", 400, {message: "The model returned a validation error."})
+    reply ::ct/chat-with-tools(MODEL, [::chat/user-message("Hi")], null, null, opts)
+    assert(is-err(reply))
+    assert-eq(400, err-value(reply).status)
+}
+
+test-chat-without-credentials-is-an-err
+meta ["test"]
+fn () {
+    reply ::ct/chat-with-tools(MODEL, [::chat/user-message("Hi")], null, null, {region: "eu-west-1"})
+    assert(is-err(reply))
+}
+
+test-stream-text-and-a-call
+meta ["test"]
+fn () {
+    frames [
+        event("messageStart", {role: "assistant"}),
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {text: "Let me "}}),
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {text: "check."}}),
+        event("contentBlockStop", {contentBlockIndex: 0}),
+        event("contentBlockStart", {contentBlockIndex: 1, start: {toolUse: {toolUseId: "tu_1", name: "get_weather"}}}),
+        event("contentBlockDelta", {contentBlockIndex: 1, delta: {toolUse: {input: "{\"city\":"}}}),
+        event("contentBlockDelta", {contentBlockIndex: 1, delta: {toolUse: {input: "\"Oslo\"}"}}}),
+        event("contentBlockStop", {contentBlockIndex: 1}),
+        event("messageStop", {stopReason: "tool_use"}),
+        event("metadata", {usage: {inputTokens: 10, outputTokens: 7, totalTokens: 17}, metrics: {latencyMs: 300}})
+    ]
+    on-delta recorder("test.bedrock.stream")
+    reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Weather in Oslo?")], null, [WEATHER], on-delta, stream-answer("test.bedrock.stream.req", frames))
+    assert-eq("Let me check.", reply.text)
+    assert-eq("tool_use", reply.stop-reason)
+    assert-eq({city: "Oslo"}, reply.tool-calls[0].input)
+    assert-eq(17, reply.usage.total-tokens)
+    assert-eq(
+        ["text:Let me ", "text:check.", "start:get_weather", "input:{\"city\":", "input:\"Oslo\"}", "end", "stop:tool_use"],
+        ::ctx/get("test.bedrock.stream")
+    )
+    req ::ctx/get("test.bedrock.stream.req")
+    assert(ends-with(req.url, "/converse-stream"))
+    assert-eq("application/vnd.amazon.eventstream", get(req.headers, "Accept"))
+}
+
+test-stream-keeps-reasoning-on-the-call
+meta ["test"]
+fn () {
+    frames [
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {reasoningContent: {text: "Think "}}}),
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {reasoningContent: {text: "hard."}}}),
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {reasoningContent: {signature: "sig-9"}}}),
+        event("contentBlockStop", {contentBlockIndex: 0}),
+        event("contentBlockStart", {contentBlockIndex: 1, start: {toolUse: {toolUseId: "tu_1", name: "get_weather"}}}),
+        event("contentBlockDelta", {contentBlockIndex: 1, delta: {toolUse: {input: "{\"city\":\"Lima\"}"}}}),
+        event("contentBlockStop", {contentBlockIndex: 1}),
+        event("messageStop", {stopReason: "tool_use"})
+    ]
+    reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Lima?")], null, [WEATHER], ::chat/noop-on-delta, stream-answer("test.bedrock.r.req", frames))
+    assert-eq("", reply.text, "reasoning text stays out of the reply")
+    assert-eq([{reasoningContent: {reasoningText: {text: "Think hard.", signature: "sig-9"}}}], reply.tool-calls[0].meta.reasoning)
+}
+
+test-stream-exception-is-an-err
+meta ["test"]
+fn () {
+    frames [
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {text: "Hi"}}),
+        frame({":message-type": "exception", ":exception-type": "throttlingException", ":content-type": "application/json"}, {message: "Too many requests"})
+    ]
+    reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Hi")], null, null, ::chat/noop-on-delta, stream-answer("test.bedrock.x.req", frames))
+    assert(is-err(reply))
+    assert-eq("stream-exception", err-value(reply).kind)
+    assert-eq("throttlingException: Too many requests", err-value(reply).message)
+}
+
+test-stream-cut-short-is-an-err
+meta ["test"]
+fn () {
+    frames [event("contentBlockDelta", {contentBlockIndex: 0, delta: {text: "Hi"}})]
+    reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Hi")], null, null, ::chat/noop-on-delta, stream-answer("test.bedrock.c.req", frames))
+    assert(is-err(reply))
+    assert-eq("incomplete-stream", err-value(reply).kind)
+}
+
+test-stream-refused-is-an-aws-error
+meta ["test"]
+fn () {
+    opts json-answer("test.bedrock.sr", 403, {message: "Access denied"})
+    reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Hi")], null, null, ::chat/noop-on-delta, opts)
+    assert(is-err(reply))
+    assert-eq(403, err-value(reply).status)
+}
+
+// ============================================================================
+// run-loop
+// ============================================================================
+
+// Calls get_weather until a toolResult comes back, then answers with it.
+looping-transport fn (): Fn {
+    (req) {
+        body from-json(Str(req.body))
+        turns body.messages
+        last-turn last(turns)
+        result find-first(last-turn.content, (b) { is-some(get(b, "toolResult")) })
+        reply cond {
+            is-null(result) => { TWO_CALLS_BODY }
+            => {
+                // The reasoning block must come back on the assistant turn.
+                prev-idx sub(length(turns), 2)
+                assistant get(turns, prev-idx)
+                kept is-some(get(assistant.content[0], "reasoningContent"))
+                {
+                    output: {message: {role: "assistant", content: [{text: `Got ${length(last-turn.content)} results, reasoning kept: ${Str(kept)}.`}]}},
+                    stopReason: "end_turn",
+                    usage: {inputTokens: 1, outputTokens: 1, totalTokens: 2}
+                }
+            }
+        }
+
+        HttpResponse({status: 200, headers: {"content-type": "application/json"}, body: Bytes(to-json(reply)), body-bytes: Bytes(to-json(reply))})
+    }
+}
+
+test-run-loop-with-two-calls
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        chat-opts-fn: ::ct/chat-with-tools,
+        model: MODEL,
+        provider-opts: creds(looping-transport()),
+        tools: [WEATHER],
+        max-iterations: 3
+    })
+    assert-eq("Got 2 results, reasoning kept: true.", ::chat/run-loop(opts, "Weather in Paris and Rome?"))
+}
+
+test-run-loop-via-the-registry
+meta ["test"]
+fn () {
+    opts ::chat/ChatOptions({
+        model: `bedrock/${MODEL}`,
+        providers: ::chat/with-providers([::ct/provider()]),
+        provider-opts: creds(looping-transport()),
+        tools: [WEATHER],
+        max-iterations: 3
+    })
+    assert-eq("Got 2 results, reasoning kept: true.", ::chat/run-loop(opts, "Weather in Paris and Rome?"))
+}
+
+test-provider-registration
+meta ["test"]
+fn () {
+    reg ::ct/provider()
+    assert-eq("AWS Bedrock", reg.display-name)
+    assert(reg.detect(`bedrock/${MODEL}`))
+    assert(not(reg.detect(MODEL)), "bare ids are not claimed")
+    assert(not(reg.detect("claude-sonnet-4-5")))
+    assert-eq(::ct/BEDROCK_PROVIDER, reg.variant)
+    assert-eq("AWS Bedrock", reg.variant.name)
+}

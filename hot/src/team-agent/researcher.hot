@@ -63,9 +63,23 @@ researcher Researcher({
 // Researcher and Team Agent can run different models).
 // ============================================================================
 
+// A `(model, prompt, system) -> Str` chat fn from a tools-aware one.
+single-shot fn (chat-with-tools: Fn): Fn {
+  chat chat-with-tools
+  (model, prompt, system) {
+    reply chat(model, [::chat/user-message(prompt)], system, null)
+    cond {
+      is-err(reply) => { reply }
+      => { or(reply.text, "") }
+    }
+  }
+}
+
 provider-to-chat-fn fn match (provider: ::chat/Provider): Fn {
   ::chat/Provider.Anthropic => { ::anthropic-chat/chat }
   ::chat/Provider.OpenAi    => { ::openai-chat/chat }
+  ::chat/Provider.Gemini    => { single-shot(::gemini::chat-tools/chat-with-tools) }
+  ::chat/Provider.Xai       => { single-shot(::xai::ai/chat-with-tools) }
   =>                           { ::openai-chat/chat }
 }
 

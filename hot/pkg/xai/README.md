@@ -7,7 +7,7 @@ xAI API bindings for Hot.
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/xai": "1.2.5"
+"hot.dev/xai": "1.3.0"
 ```
 
 ## Configuration
@@ -143,6 +143,34 @@ response ::responses/create(::responses/CreateResponseRequest({
 }))
 ```
 
+## Tool calling with hot-ai
+
+`::xai::ai` satisfies the `::ai::chat` chat contract, so a Grok model can run under `::ai::chat/run-loop` and `run-loop-stream` with tools. It sends xAI's OpenAI-compatible Chat Completions API through `hot.dev/openai`'s chat-tools adapter. `hot-ai`'s built-in registry leaves every provider's `chat-fn` null, so wire it on `ChatOptions`:
+
+```hot
+get-weather fn (city: Str): Str { `${city}: 18C` }
+
+opts ::ai::chat/ChatOptions({
+    chat-fn: ::xai::ai/chat-with-tools,
+    chat-stream-fn: ::xai::ai/chat-with-tools-stream,
+    model: "grok-4.3",
+    tools: [::ai::tool/from-fn(get-weather)]
+})
+
+answer ::ai::chat/run-loop(opts, "What's the weather in Paris?")
+```
+
+Or register it, so `grok-*` and `xai/<model>` ids route to xAI:
+
+```hot
+opts ::ai::chat/ChatOptions({
+    model: "grok-4.7",
+    providers: ::ai::chat/with-providers([::xai::ai/provider()])
+})
+```
+
+For a per-call key, use `chat-opts-fn` and `chat-stream-opts-fn` (or the registry) with `provider-opts: {api-key: tenant-key}`. For another output ceiling or `reasoning-effort`, bind `chat-with-tools-options` with an `::openai::chat-tools/ChatRequestOptions` in a closure, or pass one to `provider(...)`. A missing key and a refused call each come back as an Err you can check with `is-err`.
+
 ## Image Generation
 
 Generate images with `grok-imagine-image` (the default). File helpers return unified `AIMedia.Image` values from `::ai::media`.
@@ -253,6 +281,7 @@ Constants in `::xai::models`:
 | Module | Description |
 |--------|-------------|
 | `::xai::responses` | Chat Responses API (main chat interface) |
+| `::xai::ai` | hot-ai tool-calling adapter for `run-loop` |
 | `::xai::images` | Image generation |
 | `::xai::search` | Live web and X search |
 | `::xai::collections` | Collections (document storage and search) |
