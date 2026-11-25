@@ -14,14 +14,15 @@ failing-tools-chat fn (model: Str, messages: Vec<::chat/Message>, system: Str?, 
     err("refused")
 }
 
+// Compared by name: under the JIT, eq on two references to one fn is false.
 test-gemini-and-grok-models-get-their-own-adapters
 meta ["test"]
 fn () {
     assert-eq(Provider.Gemini, ::chat/detect-provider("gemini-3.8-flash"))
     assert-eq(Provider.Xai, ::chat/detect-provider("grok-4.3"))
-    assert-eq(::gemini::chat-tools/chat-with-tools, ::agent/provider-to-chat-with-tools-fn(Provider.Gemini))
-    assert-eq(::xai::ai/chat-with-tools, ::agent/provider-to-chat-with-tools-fn(Provider.Xai))
-    assert-eq(::anthropic::chat-tools/chat-with-tools, ::agent/provider-to-chat-with-tools-fn(Provider.Anthropic))
+    assert-eq(Str(::gemini::chat-tools/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Gemini)))
+    assert-eq(Str(::xai::ai/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Xai)))
+    assert-eq(Str(::anthropic::chat-tools/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Anthropic)))
 }
 
 test-the-model-aliases-include-gemini-and-grok
