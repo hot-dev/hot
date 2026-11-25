@@ -2911,7 +2911,9 @@ f fn (n: Int): Vec {
         prog.constants.push(Constant::FunctionRef("::t/f".into()));
         let mut rewrote = false;
         for inst in &mut lam.instructions {
-            if let Instruction::LoadVar { dest, .. } = inst {
+            if let Instruction::LoadVar { dest, var_name } = inst
+                && const_str(&prog, *var_name).as_deref() == Some("g")
+            {
                 *inst = Instruction::LoadConst {
                     dest: *dest,
                     constant: fn_const,

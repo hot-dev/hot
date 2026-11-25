@@ -280,9 +280,11 @@ fn () {
 test-failure-output-keeps-an-err-map-whole
 meta ["test"]
 fn () {
-    // An Err the tool returned has no `err` key: every field reaches the model.
+    // An Err the tool returned has no `err` key (or has extra keys beside `msg` and `err`): every field reaches the model.
     rate {msg: "rate limited", retry_after: 30, code: 429}
     assert-eq(rate, ::tool/failure-output(rate, "t"))
+    with-err {msg: "failed", err: "timeout", retry_after: 5}
+    assert-eq(with-err, ::tool/failure-output(with-err, "t"))
     assert-eq({msg: 5}, ::tool/failure-output({msg: 5}, "t"))
     // A halt's detail is dropped only when it is just `{error: msg}`.
     assert-eq({message: "bad", data: {error: "bad", field: "x"}}, ::tool/failure-output({msg: "bad", err: {error: "bad", field: "x"}}, "t"))

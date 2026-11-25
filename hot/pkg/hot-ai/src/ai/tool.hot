@@ -340,11 +340,12 @@ meta {
     """
 }
 fn (payload: Any, tool-name: Str): Any {
-    // A halt's payload is a typed `::hot::run/Failure`; read it as a Map.
-    // Only a halt has both `msg` and `err`: an Err Map the tool returned,
-    // such as `{msg, code}`, stays whole.
+    // A halt's payload is a typed `::hot::run/Failure` (or a runtime error's
+    // `{msg, err}` map); both have only the two keys `msg` and `err`, so an
+    // Err Map the tool returned — such as `{msg, code}` or `{msg, err, code}` —
+    // stays whole.
     plain if(is-null(payload), null, untype(payload))
-    is-halt and(is-map(plain), in("err", keys(plain)), is-str(get(plain, "msg")))
+    is-halt and(is-map(plain), eq(length(keys(plain)), 2), in("err", keys(plain)), is-str(get(plain, "msg")))
     msg if(is-halt, get(plain, "msg"), null)
     detail if(is-halt, get(plain, "err"), null)
     cond {
