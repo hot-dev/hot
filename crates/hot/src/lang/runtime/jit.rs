@@ -8393,7 +8393,18 @@ impl<'a> EmitCtx<'a> {
                             .call(self.helper_refs.copy_dec, &[const_ptr, slot_ptr]);
                         (RawKind::Dec, slot_ptr)
                     }
-                    Some(Constant::StringRef(s)) | Some(Constant::FunctionRef(s)) => {
+                    // A function value, as the interpreter loads it (see
+                    // `LoadFunctionRef`).
+                    Some(Constant::FunctionRef(s)) => (
+                        RawKind::OwnedVal,
+                        builder.ins().iconst(
+                            types::I64,
+                            baked_owned_val(crate::lang::runtime::function_ref::function_ref(
+                                s.to_string(),
+                            )),
+                        ),
+                    ),
+                    Some(Constant::StringRef(s)) => {
                         if let Some(token) = encode_special_string_const(s) {
                             (
                                 RawKind::StringConst,
@@ -8596,8 +8607,12 @@ impl<'a> EmitCtx<'a> {
                 dest,
                 function_name,
             } => {
+                // The same value the interpreter loads: a FunctionRef, so a
+                // function compares equal however the tier that made it.
                 let name = constant_string(self.program, *function_name)?;
-                let val = baked_owned_val(Val::Str(name.to_string().into()));
+                let val = baked_owned_val(crate::lang::runtime::function_ref::function_ref(
+                    name.to_string(),
+                ));
                 let value = builder.ins().iconst(types::I64, val);
                 self.define_register(builder, *dest, RawKind::OwnedVal, value)?;
                 if let Ok(idx) = self.remap_reg(*dest) {
