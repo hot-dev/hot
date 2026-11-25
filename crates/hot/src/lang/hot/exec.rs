@@ -13,7 +13,7 @@ fn is_task_context(vm: &crate::lang::runtime::vm::VirtualMachine) -> bool {
     vm.get_task_receiver().is_some()
 }
 
-fn failure_type(vm: &crate::lang::runtime::vm::VirtualMachine) -> &'static str {
+pub(crate) fn failure_type(vm: &crate::lang::runtime::vm::VirtualMachine) -> &'static str {
     if is_task_context(vm) {
         "::hot::task/Failure"
     } else {

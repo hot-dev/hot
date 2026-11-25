@@ -5037,7 +5037,8 @@ unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64, name_ptr: i64) -> i6
 
 /// Call a function by name through the VM. Used when the function isn't in
 /// program.functions (e.g., built-in type constructors like Vec, Str, etc.).
-/// `name_ptr` is an OwnedVal pointer to a Val::Str containing the function name.
+/// `name_ptr` is an OwnedVal pointer to the callee: a `Val::Str` name, a
+/// `FunctionRef` (what a function value is), or a lambda.
 unsafe fn hot_jit_call_vm_by_name_body(
     name_ptr: i64,
     args_ptr: *const i64,

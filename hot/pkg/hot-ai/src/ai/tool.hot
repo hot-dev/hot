@@ -323,32 +323,40 @@ fn (tools: Vec<Tool>, name: Str): Tool? {
 failure-output
 meta {
     doc: """
-    What the model sees for a failed tool call, from the error payload:
-    a halt (`fail(msg)`, `fail(msg, data)`, a runtime error) becomes its
-    message, or `{message, data}` when it carries data beyond the message.
-    An Err value the tool returned stays as is. A null payload names the
-    tool.
+    What the model sees for a failed tool call, from the error payload.
+    A halt, a typed `Failure` (`fail(msg)`, `fail(msg, data)`, an error the
+    call stopped on) or `Cancellation` (`cancel(msg)`, `cancel(msg, data)`),
+    becomes its message, or `{message, data}` when it carries data beyond
+    the message. An Err value the tool returned stays as is, a Map with
+    `msg` and `err` keys included. A null payload names the tool.
 
     **Example**
 
     ```hot
-    ::ai::tool/failure-output({msg: "card declined", err: "card declined"}, "charge")  // "card declined"
-    ::ai::tool/failure-output({msg: "bad input", err: {field: "amount"}}, "charge")   // {message: "bad input", data: {field: "amount"}}
-    ::ai::tool/failure-output(null, "charge")                                         // "Tool charge failed."
+    Failure ::hot::run/Failure
+    ::ai::tool/failure-output(Failure({msg: "card declined", err: "card declined"}), "charge")  // "card declined"
+    ::ai::tool/failure-output(Failure({msg: "bad input", err: {field: "amount"}}), "charge")   // {message: "bad input", data: {field: "amount"}}
+    ::ai::tool/failure-output({msg: "rate limited", code: 429}, "charge")                      // {msg: "rate limited", code: 429}
+    ::ai::tool/failure-output(null, "charge")                                                  // "Tool charge failed."
     ```
     """
 }
 fn (payload: Any, tool-name: Str): Any {
-    // A halt's payload is a typed `::hot::run/Failure`; read it as a Map.
-    plain if(is-null(payload), null, untype(payload))
+    // A halt is a typed `Failure` (`fail()`, or an error the call stopped
+    // on) or `Cancellation` (`cancel()`). Anything else is an Err value the
+    // tool returned, and stays whole.
+    failed or(is-type(payload, ::hot::run/Failure), is-type(payload, ::hot::task/Failure))
+    cancelled or(is-type(payload, ::hot::run/Cancellation), is-type(payload, ::hot::task/Cancellation))
+    plain if(or(failed, cancelled), untype(payload), null)
     msg if(is-map(plain), get(plain, "msg"), null)
-    detail if(is-map(plain), get(plain, "err"), null)
+    detail if(is-map(plain), get(plain, if(cancelled, "data", "err")), null)
     cond {
         is-null(payload) => { `Tool ${tool-name} failed.` }
         not(is-str(msg)) => { payload }
         is-null(detail) => { msg }
         eq(detail, msg) => { msg }
-        and(is-map(detail), eq(get(detail, "error"), msg)) => { msg }
+        // An error the call stopped on has just `{error: msg}` as detail.
+        and(failed, eq(detail, {error: msg})) => { msg }
         => { {message: msg, data: detail} }
     }
 }

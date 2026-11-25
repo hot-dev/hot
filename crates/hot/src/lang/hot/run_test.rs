@@ -5067,8 +5067,12 @@ bogus fn (): Vec {
     map([1], (x) { c.Blue })
 }
 attempt ::hot::internal::exec/contain(bogus, [])
-[is-err(attempt), contains(err-message(attempt), "Type '::t/Color' does not have variant 'Blue'")]"#;
-        assert_same_with_and_without_jit(src, &val!([true, true]));
+[
+    is-err(attempt),
+    is-type(err-value(attempt), ::hot::run/Failure),
+    contains(err-message(attempt), "Type '::t/Color' does not have variant 'Blue'"),
+]"#;
+        assert_same_with_and_without_jit(src, &val!([true, true, true]));
     }
 
     /// Like the Map form, a named call on a type with custom constructors goes

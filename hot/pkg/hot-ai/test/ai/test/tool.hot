@@ -2,6 +2,8 @@
 meta ["test"]
 
 ::tool ::ai::tool
+Failure ::hot::run/Failure
+Cancellation ::hot::run/Cancellation
 
 // ---------------------------------------------------------------------------
 // Fixture functions used as tools
@@ -269,10 +271,82 @@ fn () {
 test-failure-output-shapes
 meta ["test"]
 fn () {
-    assert-eq("m", ::tool/failure-output({msg: "m", err: "m"}, "t"))
-    assert-eq("m", ::tool/failure-output({msg: "m", err: null}, "t"))
-    assert-eq("m", ::tool/failure-output({msg: "m", err: {error: "m"}}, "t"))
-    assert-eq({message: "m", data: [1]}, ::tool/failure-output({msg: "m", err: [1]}, "t"))
+    assert-eq("m", ::tool/failure-output(Failure({msg: "m", err: "m"}), "t"))
+    assert-eq("m", ::tool/failure-output(Failure({msg: "m", err: null}), "t"))
+    assert-eq("m", ::tool/failure-output(Failure({msg: "m", err: {error: "m"}}), "t"))
+    assert-eq({message: "m", data: [1]}, ::tool/failure-output(Failure({msg: "m", err: [1]}), "t"))
+    assert-eq("m", ::tool/failure-output(Cancellation({msg: "m", data: null}), "t"))
     assert-eq("plain", ::tool/failure-output("plain", "t"))
     assert-eq("Tool t failed.", ::tool/failure-output(null, "t"))
+}
+
+test-failure-output-keeps-an-err-map-whole
+meta ["test"]
+fn () {
+    // An Err Map the tool returned isn't a Failure: every field reaches the
+    // model, whatever its keys.
+    rate {msg: "rate limited", retry_after: 30, code: 429}
+    assert-eq(rate, ::tool/failure-output(rate, "t"))
+    shaped {msg: "failed", err: "timeout"}
+    assert-eq(shaped, ::tool/failure-output(shaped, "t"))
+    with-err {msg: "failed", err: "timeout", retry_after: 5}
+    assert-eq(with-err, ::tool/failure-output(with-err, "t"))
+    assert-eq({msg: 5}, ::tool/failure-output({msg: 5}, "t"))
+    // A halt's detail is dropped only when it is just `{error: msg}`.
+    assert-eq({message: "bad", data: {error: "bad", field: "x"}}, ::tool/failure-output(Failure({msg: "bad", err: {error: "bad", field: "x"}}), "t"))
+}
+
+take-two fn (a: Str, b: Str): Str { a }
+
+call-with-one fn (f: Fn, a: Str): Str { f(a) }
+
+test-failure-output-of-an-error-the-call-stopped-on
+meta ["test"]
+fn () {
+    // Not a fail(): the contained call's own error, typed as a Failure.
+    contained ::hot::internal::exec/contain(call-with-one, [take-two, "x"])
+    assert(is-err(contained))
+    assert(is-type(err-value(contained), Failure))
+    out ::tool/failure-output(err-value(contained), "t")
+    assert(is-str(out), `a message, got ${to-json(out)}`)
+    assert(contains(out, "expects 2 arguments"), out)
+}
+
+returns-rate-limited
+meta {doc: "Test fixture: a tool that returns an Err Map."}
+fn (input: Str): Any { err({msg: "rate limited", retry_after: 30}) }
+
+fails-with-detail
+meta {doc: "Test fixture: a tool that fails with data beside the message."}
+fn (input: Str): Str { fail("bad", {error: "bad", field: "x"}) }
+
+cancels
+meta {doc: "Test fixture: a tool that cancels."}
+fn (input: Str): Str { cancel("stopped by user") }
+
+cancels-with-data
+meta {doc: "Test fixture: a tool that cancels with data."}
+fn (input: Str): Str { cancel("stopped", {why: "quota"}) }
+
+test-dispatch-cancel-sends-its-message
+meta ["test"]
+fn () {
+    plain dispatch-one(cancels, "cancel")
+    assert(plain.is-error)
+    assert-eq("stopped by user", plain.output)
+    with-data dispatch-one(cancels-with-data, "cancel-data")
+    assert-eq({message: "stopped", data: {why: "quota"}}, with-data.output)
+    // A returned Err Map shaped like a Cancellation is still the tool's own.
+    assert-eq({msg: "m", data: 1}, ::tool/failure-output({msg: "m", data: 1}, "t"))
+}
+
+test-dispatch-keeps-a-returned-err-map-and-fail-data
+meta ["test"]
+fn () {
+    rate dispatch-one(returns-rate-limited, "rate")
+    assert(rate.is-error)
+    assert-eq({msg: "rate limited", retry_after: 30}, rate.output)
+    failed dispatch-one(fails-with-detail, "detail")
+    assert(failed.is-error)
+    assert-eq({message: "bad", data: {error: "bad", field: "x"}}, failed.output)
 }
