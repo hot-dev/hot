@@ -22,9 +22,9 @@ permissions:
 
 jobs:
   hot:
-    uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.15
+    uses: hot-dev/hot/.github/workflows/selfhost-plan.yml@v3.0.16
     with:
-      hot_version: v3.0.15
+      hot_version: v3.0.16
       cloud: aws
       # scalable for a scalable installation, here and in the release and
       # command workflows.

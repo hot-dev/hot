@@ -36,6 +36,18 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.15 to 3.0.16 {#upgrading-from-3-0-15-to-3-0-16}
+
+**No database migrations.** 3.0.16 runs on a 3.0.15 database as is.
+
+**What to check in a self-hosted installation:**
+
+- A host image built from this release has containerd 2.4.2, Kata Containers 4.4.0 on Kata's Rust runtime, and CNI plugins 1.10.0. A release and a host image can move in either order: this release's task worker runs on an older host image, and an older worker runs on the new one.
+- On a single machine, a new host image opens the box image store on the data disk that the old one wrote. If Kata's containerd refuses it, `diagnostics` reports it down and box tasks wait. Run `reset-box-store`. Box images pull again, and each box's `/data` is kept. Setting `host_image` back and applying also opens the store as before.
+- A network the stacks create (`network.mode: new`) now keeps flow logs. The next apply updates the GCP subnet in place, or adds a VPC flow log, a log group and an IAM role on AWS. A narrow AWS apply policy may need `ec2:CreateFlowLogs`.
+
+**Behavior change: a contained call's own error is a typed `Failure`.** Where Hot contains a halt, as in AI tool dispatch, an error the call stopped on without `fail()` is now a `::hot::run/Failure` (`::hot::task/Failure` in a task). It was an untyped `{msg, err}` map. hot-ai 1.11.0 relies on this and needs Hot 3.0.16.
+
 ## Upgrading from Hot 3.0.14 to 3.0.15 {#upgrading-from-3-0-14-to-3-0-15}
 
 **No database migrations.** 3.0.15 runs on a 3.0.14 database as is.
