@@ -320,6 +320,39 @@ fn (tools: Vec<Tool>, name: Str): Tool? {
     })
 }
 
+failure-output
+meta {
+    doc: """
+    What the model sees for a failed tool call, from the error payload:
+    a halt (`fail(msg)`, `fail(msg, data)`, a runtime error) becomes its
+    message, or `{message, data}` when it carries data beyond the message.
+    An Err value the tool returned stays as is. A null payload names the
+    tool.
+
+    **Example**
+
+    ```hot
+    ::ai::tool/failure-output({msg: "card declined", err: "card declined"}, "charge")  // "card declined"
+    ::ai::tool/failure-output({msg: "bad input", err: {field: "amount"}}, "charge")   // {message: "bad input", data: {field: "amount"}}
+    ::ai::tool/failure-output(null, "charge")                                         // "Tool charge failed."
+    ```
+    """
+}
+fn (payload: Any, tool-name: Str): Any {
+    // A halt's payload is a typed `::hot::run/Failure`; read it as a Map.
+    plain if(is-null(payload), null, untype(payload))
+    msg if(is-map(plain), get(plain, "msg"), null)
+    detail if(is-map(plain), get(plain, "err"), null)
+    cond {
+        is-null(payload) => { `Tool ${tool-name} failed.` }
+        not(is-str(msg)) => { payload }
+        is-null(detail) => { msg }
+        eq(detail, msg) => { msg }
+        and(is-map(detail), eq(get(detail, "error"), msg)) => { msg }
+        => { {message: msg, data: detail} }
+    }
+}
+
 dispatch
 meta {
     doc: """
@@ -329,7 +362,8 @@ meta {
     incoming call and whose `output` is the function's return value.
 
     Errors from the underlying function are caught and returned with
-    `is-error: true` so the model can react on the next turn.
+    `is-error: true` so the model can react on the next turn. The output
+    is the failure's message (see `failure-output`).
 
     **Example**
 
@@ -366,12 +400,11 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
 
             match attempt {
                 Result.Err => {
-                    // A bare fail(msg) carries no data, so the model would
-                    // see an empty error. Name the tool instead.
-                    reason err-value(attempt)
+                    // Inside a `Result.Err` arm `attempt` is already the
+                    // error payload: `err-value(attempt)` would be null.
                     ToolResult({
                         id: call.id,
-                        output: if(is-null(reason), `Tool ${call.name} failed.`, reason),
+                        output: failure-output(attempt, call.name),
                         is-error: true,
                     })
                 }

@@ -236,7 +236,7 @@ fn () {
     assert-eq("c1", failure.call-id)
     assert-eq({input: "x"}, failure.input)
     assert-eq(1, failure.iteration)
-    assert-eq("Tool flaky failed.", failure.error)
+    assert-eq("flaky rejected 'x'", failure.error)
 }
 
 test-a-tool-fail-on-error-true-ends-the-loop-on-its-own
