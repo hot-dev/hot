@@ -4,6 +4,7 @@ meta ["test"]
 ::api    ::gemini::api
 ::ctx    ::hot::ctx
 ::chat   ::gemini::chat
+::ct     ::gemini::chat-tools
 ::models ::gemini::models
 ::files  ::gemini::files
 ::cached ::gemini::cachedcontents
@@ -191,6 +192,17 @@ meta ["test"] fn () {
     assert-reached-offline-url(() { ::chat/chat("m", "hi", OFFLINE) }, "chat")
     assert-reached-offline-url(() { ::chat/chat("m", "hi", "be brief", OFFLINE) }, "chat system")
     assert-reached-offline-url(() { ::chat/chat("m", "hi", null, 5, OFFLINE) }, "chat max-tokens")
+}
+
+test-opts-reach-chat-tools
+meta ["test"] fn () {
+    history [::ai::chat/user-message("hi")]
+    opts ::ct/DEFAULT_REQUEST_OPTIONS
+    assert-reached-offline-url(() { ::ct/chat-with-tools("m", history, null, null, OFFLINE) }, "chat-with-tools")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-options("m", history, null, null, opts, OFFLINE) }, "chat-with-tools-options")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream("m", history, null, null, ::ai::chat/noop-on-delta, OFFLINE) }, "chat-with-tools-stream")
+    assert-reached-offline-url(() { ::ct/chat-with-tools-stream-options("m", history, null, null, ::ai::chat/noop-on-delta, opts, OFFLINE) }, "chat-with-tools-stream-options")
+    assert-reached-offline-url(() { ::ct/count-tokens(history, "m", OFFLINE) }, "count-tokens")
 }
 
 test-opts-reach-models

@@ -207,6 +207,27 @@ fn () {
     assert-eq([{json: {temp: 18}}], body.messages[0].content[1].toolResult.content)
 }
 
+WeatherReading type {
+    city: Str,
+    temp: Int
+}
+
+test-build-request-struct-results-are-untyped-json
+meta ["test"]
+fn () {
+    msg ::chat/tool-result-message(::tool/ToolResult({id: "tu_1", output: WeatherReading({city: "Paris", temp: 18}), is-error: false}))
+    body ::ct/build-request([::chat/user-message("Hi"), msg], null, null, OPTS)
+    assert-eq([{json: {city: "Paris", temp: 18}}], body.messages[0].content[1].toolResult.content)
+}
+
+test-build-request-omits-blank-tool-description
+meta ["test"]
+fn () {
+    blank ::tool/Tool({name: "ping", description: "  ", input-schema: {type: "object", properties: {}}, fn: () { "pong" }})
+    body ::ct/build-request([::chat/user-message("Hi")], null, [blank], OPTS)
+    assert(not(in("description", keys(body.toolConfig.tools[0].toolSpec))), "blank descriptions are omitted")
+}
+
 test-build-request-merges-adjacent-user-turns
 meta ["test"]
 fn () {
@@ -253,12 +274,16 @@ fn () {
     assert-eq("Hi there.", reply.text)
     assert(is-null(reply.tool-calls))
     assert-eq("end_turn", reply.stop-reason)
-    assert-eq(12, reply.usage.input-tokens)
+    assert-eq(22, reply.usage.input-tokens, "Bedrock inputTokens excludes cache reads and writes")
     assert-eq(4, reply.usage.output-tokens)
-    assert-eq(16, reply.usage.total-tokens)
+    assert-eq(26, reply.usage.total-tokens)
     assert-eq(8, reply.usage.cache-read-tokens)
     assert-eq(2, reply.usage.cache-write-tokens)
     assert-eq("AWS Bedrock", reply.usage.provider)
+
+    uncached ::ct/parse-response({...TEXT_BODY, usage: {inputTokens: 12, outputTokens: 4, totalTokens: 16}}, MODEL)
+    assert-eq(12, uncached.usage.input-tokens)
+    assert-eq(16, uncached.usage.total-tokens)
 }
 
 test-parse-two-calls-keeps-reasoning-on-the-first
@@ -280,6 +305,15 @@ meta ["test"]
 fn () {
     reply ::ct/parse-response({...TEXT_BODY, stopReason: "max_tokens"}, MODEL)
     assert-eq("max_tokens", reply.stop-reason)
+}
+
+test-parse-preserves-non-end-turn-stop-reasons
+meta ["test"]
+fn () {
+    guarded ::ct/parse-response({...TEXT_BODY, stopReason: "guardrail_intervened"}, MODEL)
+    assert-eq("guardrail_intervened", guarded.stop-reason)
+    stopped ::ct/parse-response({...TEXT_BODY, stopReason: "stop_sequence"}, MODEL)
+    assert-eq("stop_sequence", stopped.stop-reason)
 }
 
 test-parse-empty-reply-is-an-err
@@ -317,6 +351,17 @@ fn () {
     reply ::ct/chat-with-tools(MODEL, [::chat/user-message("Hi")], null, null, opts)
     assert(is-err(reply))
     assert-eq(400, err-value(reply).status)
+}
+
+test-chat-200-with-non-json-body-is-an-err
+meta ["test"]
+fn () {
+    opts creds((req) {
+        HttpResponse({status: 200, headers: {"content-type": "text/html"}, body: "<html>bad gateway</html>", body-bytes: Bytes("<html>bad gateway</html>")})
+    })
+    reply ::ct/chat-with-tools(MODEL, [::chat/user-message("Hi")], null, null, opts)
+    assert(is-err(reply), "a 200 with a non-Map body is an Err, not a halt")
+    assert-eq(200, err-value(reply).status)
 }
 
 test-chat-without-credentials-is-an-err
@@ -372,6 +417,17 @@ fn () {
     reply ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Lima?")], null, [WEATHER], ::chat/noop-on-delta, stream-answer("test.bedrock.r.req", frames))
     assert-eq("", reply.text, "reasoning text stays out of the reply")
     assert-eq([{reasoningContent: {reasoningText: {text: "Think hard.", signature: "sig-9"}}}], reply.tool-calls[0].meta.reasoning)
+
+    combined [
+        event("contentBlockDelta", {contentBlockIndex: 0, delta: {reasoningContent: {text: "One chunk.", signature: "sig-both"}}}),
+        event("contentBlockStop", {contentBlockIndex: 0}),
+        event("contentBlockStart", {contentBlockIndex: 1, start: {toolUse: {toolUseId: "tu_2", name: "get_weather"}}}),
+        event("contentBlockDelta", {contentBlockIndex: 1, delta: {toolUse: {input: "{\"city\":\"Lima\"}"}}}),
+        event("contentBlockStop", {contentBlockIndex: 1}),
+        event("messageStop", {stopReason: "tool_use"})
+    ]
+    both ::ct/chat-with-tools-stream(MODEL, [::chat/user-message("Lima?")], null, [WEATHER], ::chat/noop-on-delta, stream-answer("test.bedrock.rb.req", combined))
+    assert-eq([{reasoningContent: {reasoningText: {text: "One chunk.", signature: "sig-both"}}}], both.tool-calls[0].meta.reasoning, "text and signature in the same delta are both kept")
 }
 
 test-stream-exception-is-an-err

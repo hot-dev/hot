@@ -273,13 +273,29 @@ fn (m: ::ai-chat/Message, calls: Map): Map {
     {functionResponse: filter-vals({id: gemini-id, name: name, response: function-response-value(m)}, is-some)}
 }
 
+is-gemini-file-uri
+meta {
+    no-doc: true,
+    doc: """Internal: true when `url` is a URI Gemini's `fileData.fileUri` accepts."""
+}
+fn (url: Str): Bool {
+    u lowercase(url)
+    or(
+        starts-with(u, "https://generativelanguage.googleapis.com/"),
+        starts-with(u, "gs://"),
+        starts-with(u, "https://www.youtube.com/"),
+        starts-with(u, "https://youtu.be/")
+    )
+}
+
 to-gemini-part
 meta {
     no-doc: true,
     doc: """
-    Internal: a `MessagePart` as a Gemini part. Inline bytes become
-    `inlineData`, a URL becomes `fileData`, and anything else falls back to
-    its text. Null when there is nothing to send.
+    Internal: a `MessagePart` as a Gemini part. Non-empty inline bytes become
+    `inlineData`, a Gemini Files / `gs://` / YouTube URI becomes `fileData`,
+    and anything else falls back to its text. Null when there is nothing to
+    send.
     """
 }
 fn cond (p: ::ai-chat/MessagePart): Map? {
@@ -288,8 +304,13 @@ fn cond (p: ::ai-chat/MessagePart): Map? {
         if(is-empty(text), null, {text: text})
     }
 
-    is-some(p.data) => { {inlineData: {mimeType: or(p.mime, "application/octet-stream"), data: p.data}} }
-    is-some(p.url) => { {fileData: filter-vals({mimeType: p.mime, fileUri: p.url}, is-some)} }
+    and(is-str(p.data), not(is-empty(p.data))) => {
+        {inlineData: {mimeType: or(p.mime, "application/octet-stream"), data: p.data}}
+    }
+
+    and(is-str(p.url), and(not(is-empty(p.url)), is-gemini-file-uri(p.url))) => {
+        {fileData: filter-vals({mimeType: p.mime, fileUri: p.url}, is-some)}
+    }
     => {
         text ::ai-chat/flatten-parts([p])
         if(is-empty(text), null, {text: text})
@@ -325,10 +346,17 @@ fn (m: ::ai-chat/Message): Vec<Map> {
 append-content
 meta {
     no-doc: true,
-    doc: """Internal: `contents` with a `role` turn holding `parts`, unless there are none."""
+    doc: """Internal: `contents` with `parts` added as a `role` turn. Adjacent turns with the same role merge so `user` and `model` alternate; empty `parts` are skipped."""
 }
 fn (contents: Vec, role: Str, parts: Vec): Vec {
-    if(is-empty(parts), contents, concat(contents, [{role: role, parts: parts}]))
+    cond {
+        is-empty(parts) => { contents }
+        and(not(is-empty(contents)), eq(last(contents).role, role)) => {
+            prev last(contents)
+            concat(slice(contents, 0, sub(length(contents), 1)), [{role: role, parts: concat(prev.parts, parts)}])
+        }
+        => { concat(contents, [{role: role, parts: parts}]) }
+    }
 }
 
 flush-results
@@ -402,6 +430,32 @@ fn (messages: Vec<::ai-chat/Message>): Map {
     {contents: done.contents, system: done.system}
 }
 
+schema-has-args
+meta {
+    no-doc: true,
+    doc: """Internal: true when a JSON Schema describes arguments (non-empty `properties`, combinators, `$ref`, `patternProperties`, or map-valued `additionalProperties`)."""
+}
+fn (schema: Any): Bool {
+    cond {
+        not(is-map(schema)) => { false }
+        is-empty(schema) => { false }
+        => {
+            props get(schema, "properties")
+            has-props and(is-map(props), not(is-empty(props)))
+            pattern-props get(schema, "patternProperties")
+            has-extra or(
+                is-some(get(schema, "anyOf")),
+                is-some(get(schema, "oneOf")),
+                is-some(get(schema, "allOf")),
+                is-some(get(schema, "$ref")),
+                is-map(get(schema, "additionalProperties")),
+                and(is-map(pattern-props), not(is-empty(pattern-props)))
+            )
+            or(has-props, has-extra)
+        }
+    }
+}
+
 to-function-declaration
 meta {
     doc: """
@@ -426,16 +480,10 @@ meta {
 }
 fn (t: ::ai-tool/Tool): Map {
     schema t.input-schema
-    props if(is-map(schema), get(schema, "properties"), null)
-    has-args cond {
-        not(is-map(props)) => { false }
-        => { not(is-empty(props)) }
-    }
-
     filter-vals({
         name: ::ai-tool/provider-name(t.name),
         description: t.description,
-        parametersJsonSchema: if(has-args, schema, null),
+        parametersJsonSchema: if(schema-has-args(schema), schema, null),
     }, is-some)
 }
 
@@ -602,8 +650,9 @@ stop-reason
 meta {
     doc: """
     Map a Gemini `finishReason` to `ChatReply.stop-reason`: `"tool_use"`
-    when the reply holds calls, `"max_tokens"` for `MAX_TOKENS`, and
-    `"end_turn"` otherwise.
+    when the reply holds calls, `"max_tokens"` for `MAX_TOKENS`,
+    `"end_turn"` for `STOP` or null, and the lowercased reason otherwise
+    (for example `"safety"` or `"recitation"` on a partial reply).
 
     **Example**
 
@@ -611,13 +660,15 @@ meta {
     ::gemini::chat-tools/stop-reason("STOP", true)  // "tool_use"
     ::gemini::chat-tools/stop-reason("MAX_TOKENS", false)  // "max_tokens"
     ::gemini::chat-tools/stop-reason("STOP", false)  // "end_turn"
+    ::gemini::chat-tools/stop-reason("SAFETY", false)  // "safety"
     ```
     """
 }
 fn cond (finish-reason: Str?, has-calls: Bool): Str {
     has-calls => { "tool_use" }
     eq(finish-reason, "MAX_TOKENS") => { "max_tokens" }
-    => { "end_turn" }
+    or(is-null(finish-reason), eq(finish-reason, "STOP")) => { "end_turn" }
+    => { lowercase(finish-reason) }
 }
 
 finish-reply
@@ -720,7 +771,7 @@ meta {
 }
 fn (response: ::hot::http/HttpResponse): ::ai-chat/ChatReply {
     cond {
-        is-ok-response(response) => { parse-response(response.body) }
+        and(is-ok-response(response), is-map(response.body)) => { parse-response(response.body) }
         => { err(HttpError(response)) }
     }
 }
@@ -811,6 +862,43 @@ fn
     cond {
         is-err(response) => { response }
         => { reply-from-response(response) }
+    }
+}
+
+// ============================================================================
+// Token counting
+// ============================================================================
+
+count-tokens
+meta {
+    doc: """
+    Count the input tokens a `Vec<::ai::chat/Message>` would consume
+    against `model`, using Gemini's `countTokens` endpoint. Compatible
+    with the `count-tokens-fn` slot on `::ai::chat/ChatOptions`.
+
+    For a per-call key, bind the three-argument form in a closure:
+    `(messages, model) { ::gemini::chat-tools/count-tokens(messages, model, {api-key: key}) }`.
+
+    **Example**
+
+    ```hot
+    messages [::ai::chat/user-message("How many tokens is this?")]
+    ::gemini::chat-tools/count-tokens(messages, "gemini-4-hydrogen")
+    ```
+    """
+}
+fn
+(messages: Vec<::ai-chat/Message>, model: Str): Int {
+    count-tokens(messages, model, {})
+},
+(messages: Vec<::ai-chat/Message>, model: Str, opts: Map): Int {
+    converted to-contents(messages)
+    body {contents: converted.contents}
+    response ::gemini::api/call("POST", `/v1beta/${model-path(model)}:countTokens`, {}, body, opts)
+    cond {
+        is-err(response) => { response }
+        and(is-ok-response(response), is-map(response.body)) => { or(get(response.body, "totalTokens"), 0) }
+        => { err(HttpError(response)) }
     }
 }
 
@@ -923,17 +1011,21 @@ drain-stream
 meta {
     no-doc: true,
     doc: """
-    Internal: tail-recursively consume `iter` into the stream state. An
-    `error` event, or a chunk carrying `error`, ends it in an Err holding
-    `HttpError`, and nothing after it is read.
+    Internal: tail-recursively consume `iter` into the stream state. A
+    transport error from `next(iter)` passes through as its Err; an `error`
+    event or a chunk carrying `error` ends it in an Err holding `HttpError`,
+    and nothing after it is read.
     """
 }
 fn cond (iter: Any, on-delta: Fn, state: Map): Map {
     => {
         n next(iter)
         cond {
+            is-err(n) => { n }
             n.done => { state }
-            eq(get(n.value, "event"), "error") => { err(HttpError({status: 200, headers: {}, body: get(n.value, "data")})) }
+            and(is-map(n.value), eq(get(n.value, "event"), "error")) => {
+                err(HttpError({status: 200, headers: {}, body: or(chunk-data(n.value), get(n.value, "data"))}))
+            }
             => {
                 next-state handle-chunk(state, chunk-data(n.value), on-delta)
                 cond {
@@ -1022,6 +1114,20 @@ fn
     chat-with-tools-stream-options(model, messages, system, tools, on-delta, DEFAULT_REQUEST_OPTIONS, opts)
 }
 
+consume-stream
+meta {
+    no-doc: true,
+    doc: """Internal: drain an SSE iterator into a `ChatReply` and emit the terminal `ReplyDelta.Stop` on success."""
+}
+fn (iter: Any, on-delta: Fn): ::ai-chat/ChatReply {
+    drain-stream(iter, on-delta, EMPTY_STATE)
+        |> if-ok((final-state) { finalize-state(final-state) })
+        |> if-ok((reply) {
+            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+            reply
+        })
+}
+
 chat-with-tools-stream-options
 meta {
     doc: """
@@ -1054,13 +1160,6 @@ fn
     cond {
         is-err(response) => { response }
         gte(response.status, 400) => { err(refused-stream(response)) }
-        => {
-            drain-stream(response.body, on-delta, EMPTY_STATE)
-                |> if-ok((final-state) { finalize-state(final-state) })
-                |> if-ok((reply) {
-                    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
-                    reply
-                })
-        }
+        => { consume-stream(response.body, on-delta) }
     }
 }

@@ -944,10 +944,12 @@ meta {
     (`promptTokenCount`/`candidatesTokenCount`/`thoughtsTokenCount`) and
     the normalized kebab-case keys; missing fields stay `null`.
 
-    Gemini counts thinking apart from `candidatesTokenCount`, so its
-    `thoughtsTokenCount` is added into `output-tokens`, as the other
-    providers already count it. `total-tokens` is the reported total when
-    there is one, otherwise input + output.
+    Anthropic counts cached input tokens apart from `input_tokens`, so its
+    `cache_read_input_tokens` and `cache_creation_input_tokens` are added
+    into `input-tokens`. Gemini counts thinking apart from
+    `candidatesTokenCount`, so its `thoughtsTokenCount` is added into
+    `output-tokens`, as the other providers already count it. `total-tokens`
+    is the reported total when there is one, otherwise input + output.
 
     ```hot
     usage ::ai::chat/make-usage({
@@ -971,7 +973,15 @@ meta {
 }
 fn (raw: Map?, provider-name: Str?, model: Str?): ChatUsage {
     src or(raw, {})
-    input-tokens or(get(src, "input-tokens"), get(src, "input_tokens"), get(src, "prompt_tokens"), get(src, "promptTokenCount"), null)
+    anth-input get(src, "input_tokens")
+    anth-cache-read get(src, "cache_read_input_tokens")
+    anth-cache-write get(src, "cache_creation_input_tokens")
+    anth-total-input cond {
+        is-null(anth-input) => { null }
+        => { add(anth-input, add(or(anth-cache-read, 0), or(anth-cache-write, 0))) }
+    }
+
+    input-tokens or(get(src, "input-tokens"), anth-total-input, get(src, "prompt_tokens"), get(src, "promptTokenCount"), null)
     gemini-thoughts get(src, "thoughtsTokenCount")
     gemini-candidates get(src, "candidatesTokenCount")
     gemini-output cond {
@@ -990,12 +1000,12 @@ fn (raw: Map?, provider-name: Str?, model: Str?): ChatUsage {
 
     cache-read-tokens or(
         get(src, "cache-read-tokens"),
-        get(src, "cache_read_input_tokens"),
+        anth-cache-read,
         get(src, "cachedContentTokenCount"),
         get-in(src, ["prompt_tokens_details", "cached_tokens"]),
         null
     )
-    cache-write-tokens or(get(src, "cache-write-tokens"), get(src, "cache_creation_input_tokens"), null)
+    cache-write-tokens or(get(src, "cache-write-tokens"), anth-cache-write, null)
     thought-tokens or(
         get(src, "thought-tokens"),
         gemini-thoughts,
@@ -1836,25 +1846,6 @@ fn (messages: Vec<Message>, reply: ChatReply, nudge: Str): Vec<Message> {
     concat(messages, said, [user-message(nudge)])
 }
 
-call-for
-meta {
-    no-doc: true,
-    doc: """Internal: the call a result answers."""
-}
-fn (calls: Vec<::ai::tool/ToolCall>, id: Str): ::ai::tool/ToolCall? {
-    find-first(calls, (c) { eq(c.id, id) })
-}
-
-tool-for
-meta {
-    no-doc: true,
-    doc: """Internal: the tool a result's call named, or null when the call named no known tool."""
-}
-fn (tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, result: ::ai::tool/ToolResult): ::ai::tool/Tool? {
-    call call-for(calls, result.id)
-    if(is-null(call), null, ::tool/find-by-name(tools, call.name))
-}
-
 is-fatal-failure
 meta {
     no-doc: true,
@@ -1868,24 +1859,26 @@ fn (opts: ChatOptions, tool: ::ai::tool/Tool?): Bool {
     }
 }
 
-fatal-result
+fatal-entry
 meta {
     no-doc: true,
-    doc: """Internal: the first failed result that ends the loop, or null."""
+    doc: """Internal: the first `{call, result}` pair whose failure ends the loop, or null."""
 }
-fn (opts: ChatOptions, tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, results: Vec<::ai::tool/ToolResult>): ::ai::tool/ToolResult? {
-    find-first(results, (r) { and(r.is-error, is-fatal-failure(opts, tool-for(tools, calls, r))) })
+fn (opts: ChatOptions, tools: Vec<::ai::tool/Tool>, dispatched: Vec<Map>): Map? {
+    find-first(dispatched, (entry) {
+        and(entry.result.is-error, is-fatal-failure(opts, ::tool/find-by-name(tools, entry.call.name)))
+    })
 }
 
-finishing-result
+finishing-entry
 meta {
     no-doc: true,
-    doc: """Internal: the first successful result from a tool marked `ends-run`, or null."""
+    doc: """Internal: the first successful `{call, result}` pair from a tool marked `ends-run`, or null."""
 }
-fn (tools: Vec<::ai::tool/Tool>, calls: Vec<::ai::tool/ToolCall>, results: Vec<::ai::tool/ToolResult>): ::ai::tool/ToolResult? {
-    find-first(results, (r) {
-        tool tool-for(tools, calls, r)
-        and(not(r.is-error), and(is-some(tool), eq(get(tool, "ends-run"), true)))
+fn (tools: Vec<::ai::tool/Tool>, dispatched: Vec<Map>): Map? {
+    find-first(dispatched, (entry) {
+        tool ::tool/find-by-name(tools, entry.call.name)
+        and(not(entry.result.is-error), and(is-some(tool), eq(get(tool, "ends-run"), true)))
     })
 }
 
@@ -1894,8 +1887,9 @@ meta {
     no-doc: true,
     doc: """Internal: the Err `run-loop` returns for a fatal tool failure."""
 }
-fn (result: ::ai::tool/ToolResult, calls: Vec<::ai::tool/ToolCall>, iteration: Int): Any {
-    call call-for(calls, result.id)
+fn (entry: Map, iteration: Int): Any {
+    call entry.call
+    result entry.result
     err(ToolFailure({
         tool: call.name,
         call-id: result.id,
@@ -1911,10 +1905,11 @@ meta {
     doc: """Internal: the loop's answer from an `ends-run` tool's output: a Str as is, anything else as JSON."""
 }
 fn (output: Any): Str {
+    value untype(output)
     cond {
-        is-null(output) => { "" }
-        is-str(output) => { output }
-        => { to-json(output) }
+        is-null(value) => { "" }
+        is-str(value) => { value }
+        => { to-json(value) }
     }
 }
 
@@ -1945,13 +1940,14 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
                 }
             }
             => {
-                results map(calls, (call) { ::tool/dispatch(tools, call) })
+                dispatched map(calls, (call) { {call: call, result: ::tool/dispatch(tools, call)} })
+                results map(dispatched, %.result)
                 emit-step(opts, iteration, reply, results)
-                failure fatal-result(opts, tools, calls, results)
-                finish finishing-result(tools, calls, results)
+                failure fatal-entry(opts, tools, dispatched)
+                finish finishing-entry(tools, dispatched)
                 cond {
-                    is-some(failure) => { tool-failure(failure, calls, iteration) }
-                    is-some(finish) => { result-text(finish.output) }
+                    is-some(failure) => { tool-failure(failure, iteration) }
+                    is-some(finish) => { result-text(finish.result.output) }
                     => {
                 activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
                 emit-skill-activations(opts, iteration, activated.activations)
@@ -2123,13 +2119,14 @@ fn cond (opts: ChatOptions, messages: Vec<Message>, tools: Vec<::ai::tool/Tool>,
                 }
             }
             => {
-                results map(calls, (call) { ::tool/dispatch(tools, call) })
+                dispatched map(calls, (call) { {call: call, result: ::tool/dispatch(tools, call)} })
+                results map(dispatched, %.result)
                 emit-step(opts, iteration, reply, results)
-                failure fatal-result(opts, tools, calls, results)
-                finish finishing-result(tools, calls, results)
+                failure fatal-entry(opts, tools, dispatched)
+                finish finishing-entry(tools, dispatched)
                 cond {
-                    is-some(failure) => { tool-failure(failure, calls, iteration) }
-                    is-some(finish) => { result-text(finish.output) }
+                    is-some(failure) => { tool-failure(failure, iteration) }
+                    is-some(finish) => { result-text(finish.result.output) }
                     => {
                 activated ::ai::skill/activate-skills-from-calls(resolver, calls, tools, active-skills)
                 emit-skill-activations(opts, iteration, activated.activations)

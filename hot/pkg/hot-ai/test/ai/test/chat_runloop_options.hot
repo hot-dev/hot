@@ -281,3 +281,46 @@ fn () {
     assert(is-err(answer), "a failed tool call is an Err")
     assert-eq("flaky", err-value(answer).tool)
 }
+
+StructuredAnswer type {
+    answer: Str
+}
+
+finish-struct
+meta { doc: """Test tool: ends the run with a typed struct.""" }
+fn (answer: Str): StructuredAnswer { StructuredAnswer({answer: answer}) }
+
+FINISH_STRUCT ::tool/from-fn(finish-struct, {name: "finish_struct", ends-run: true})
+
+test-ends-run-typed-struct-comes-back-without-type-wrapper
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("finish_struct", {answer: "done"}), [FINISH_STRUCT], {})
+    raw ::chat/run-loop(opts, "Go.")
+    assert(not(contains(raw, "$type")), `no internal type wrapper, got ${raw}`)
+    assert-eq({answer: "done"}, from-json(raw))
+}
+
+test-duplicate-call-ids-pair-positionally
+meta ["test"]
+fn () {
+    // Both calls share an empty id: the first succeeds, the second is fatal.
+    two-calls (model, messages, system, tools) {
+        ::chat/ChatReply({
+            text: "",
+            tool-calls: [
+                ::tool/ToolCall({id: "", name: "finish_map", input: {answer: "ok"}}),
+                ::tool/ToolCall({id: "", name: "flaky", input: {input: "bad"}})
+            ],
+            stop-reason: "tool_use",
+            usage: null,
+            raw: null
+        })
+    }
+
+    opts opts-for(two-calls, [FINISH_MAP, FLAKY_FATAL], {})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(is-err(answer), "the fatal second call still fails even with a duplicate id")
+    assert-eq("flaky", err-value(answer).tool)
+    assert-eq({input: "bad"}, err-value(answer).input)
+}

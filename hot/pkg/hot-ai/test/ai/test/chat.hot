@@ -259,12 +259,29 @@ meta ["test"] fn () {
 test-make-usage-reads-normalized-cache-keys
 meta ["test"] fn () {
     usage ::chat/make-usage({input-tokens: 100, output-tokens: 5, cache-read-tokens: 90, cache-write-tokens: 4, thought-tokens: 2}, "Anthropic", "m")
+    assert-eq(100, usage.input-tokens)
     assert-eq(90, usage.cache-read-tokens)
     assert-eq(4, usage.cache-write-tokens)
     assert-eq(2, usage.thought-tokens)
     openai ::chat/make-usage({prompt_tokens: 10, completion_tokens: 8, prompt_tokens_details: {cached_tokens: 6}, completion_tokens_details: {reasoning_tokens: 3}}, "OpenAI", "m")
     assert-eq(6, openai.cache-read-tokens)
     assert-eq(3, openai.thought-tokens)
+}
+
+test-make-usage-from-raw-anthropic-cache-shape
+meta ["test"] fn () {
+    // Anthropic's input_tokens excludes cached tokens, so make-usage folds them in.
+    usage ::chat/make-usage({
+        input_tokens: 10,
+        cache_read_input_tokens: 900,
+        cache_creation_input_tokens: 90,
+        output_tokens: 5,
+    }, "Anthropic", "claude-sonnet-4-5")
+    assert-eq(1000, usage.input-tokens)
+    assert-eq(900, usage.cache-read-tokens)
+    assert-eq(90, usage.cache-write-tokens)
+    assert-eq(5, usage.output-tokens)
+    assert-eq(1005, usage.total-tokens)
 }
 
 test-make-usage-without-cache-data-leaves-it-null

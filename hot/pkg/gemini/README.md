@@ -43,23 +43,23 @@ A per-call credential is masked in the run's call records, including inside stri
 ### Chat/Generation
 
 ```hot
-response ::gemini::chat/generate({
-    contents: [{role: "user", parts: [{text: "Hello!"}]}]
-}, "gemini-2.0-flash")
+response ::gemini::chat/generate("gemini-4-hydrogen", ::gemini::chat/GenerateContentRequest({
+    contents: [::gemini::chat/user-content("Hello!")]
+}))
 
 // Convenience function
-response ::gemini::chat/chat("gemini-2.0-flash", "What is the capital of France?")
+response ::gemini::chat/chat("gemini-4-hydrogen", "What is the capital of France?")
 ```
 
 ### Streaming
 
 ```hot
-stream ::gemini::chat/generate-stream({
-    contents: [{role: "user", parts: [{text: "Tell me a story"}]}]
-}, "gemini-2.0-flash")
+stream ::gemini::chat/generate-stream("gemini-4-hydrogen", ::gemini::chat/GenerateContentRequest({
+    contents: [::gemini::chat/user-content("Tell me a story")]
+}))
 
 for-each(stream.body, (chunk) {
-    println(chunk)
+    println(::gemini::chat/extract-chunk-text(chunk))
 })
 ```
 

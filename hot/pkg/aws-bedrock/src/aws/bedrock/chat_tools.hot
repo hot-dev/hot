@@ -219,13 +219,16 @@ fn (m: ::ai-chat/Message): Vec<Map> {
 tool-result-content
 meta {
     no-doc: true,
-    doc: """Internal: a tool's output as `toolResult.content`: a Map as `json`, a Str as `text`, anything else as JSON text."""
+    doc: """Internal: a tool's output as `toolResult.content`: a Map (or struct) as `json`, a Str as `text`, anything else as JSON text."""
 }
-fn cond (value: Any): Vec<Map> {
-    is-null(value) => { [{text: "(no output)"}] }
-    is-map(value) => { [{json: value}] }
-    is-str(value) => { [{text: if(is-empty(value), "(no output)", value)}] }
-    => { [{text: to-json(value)}] }
+fn (value: Any): Vec<Map> {
+    v untype(value)
+    cond {
+        is-null(v) => { [{text: "(no output)"}] }
+        is-map(v) => { [{json: v}] }
+        is-str(v) => { [{text: if(is-empty(v), "(no output)", v)}] }
+        => { [{text: to-json(v)}] }
+    }
 }
 
 tool-result-block
@@ -277,9 +280,10 @@ meta {
     doc: """Internal: a `Tool` as a Converse `toolSpec`."""
 }
 fn (t: ::ai-tool/Tool): Map {
+    desc if(is-empty(trim(or(t.description, ""))), null, t.description)
     {toolSpec: filter-vals({
         name: ::ai-tool/provider-name(t.name),
-        description: t.description,
+        description: desc,
         inputSchema: {json: t.input-schema}
     }, is-some)}
 }
@@ -352,16 +356,33 @@ fn (messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?,
 usage-of
 meta {
     no-doc: true,
-    doc: """Internal: Converse `usage` as a `ChatUsage`."""
+    doc: """Internal: Converse `usage` as a `ChatUsage`. Bedrock's `inputTokens` excludes cached tokens, so `cacheReadInputTokens` and `cacheWriteInputTokens` are folded into `input-tokens` (and `total-tokens`) to match `ChatUsage`."""
 }
 fn (usage: Map?, model: Str): ::ai-chat/ChatUsage {
     u or(usage, {})
+    raw-in get(u, "inputTokens")
+    cache-read get(u, "cacheReadInputTokens")
+    cache-write get(u, "cacheWriteInputTokens")
+    cached add(or(cache-read, 0), or(cache-write, 0))
+    total-in cond {
+        is-null(raw-in) => { null }
+        => { add(raw-in, cached) }
+    }
+
+    out get(u, "outputTokens")
+    raw-total get(u, "totalTokens")
+    total cond {
+        is-null(raw-total) => { null }
+        and(is-some(raw-in), and(is-some(out), eq(raw-total, add(raw-in, out)))) => { add(raw-total, cached) }
+        => { raw-total }
+    }
+
     ::ai-chat/make-usage({
-        input-tokens: get(u, "inputTokens"),
-        output-tokens: get(u, "outputTokens"),
-        total-tokens: get(u, "totalTokens"),
-        cache-read-tokens: get(u, "cacheReadInputTokens"),
-        cache-write-tokens: get(u, "cacheWriteInputTokens")
+        input-tokens: total-in,
+        output-tokens: out,
+        total-tokens: total,
+        cache-read-tokens: cache-read,
+        cache-write-tokens: cache-write
     }, PROVIDER_NAME, model)
 }
 
@@ -403,7 +424,8 @@ fn (text: Str, calls: Vec<::ai-tool/ToolCall>, stop: Str?, usage: ::ai-chat/Chat
                 stop-reason: cond {
                     not(is-empty(calls)) => { "tool_use" }
                     eq(stop, "max_tokens") => { "max_tokens" }
-                    => { "end_turn" }
+                    or(is-null(stop), eq(stop, "end_turn")) => { "end_turn" }
+                    => { stop }
                 },
                 usage: usage,
                 raw: raw
@@ -534,12 +556,12 @@ fn
     cond {
         is-err(resolved) => { resolved }
         => {
-            body to-json(build-request(messages, system, tools, options))
+            body to-json(untype(build-request(messages, system, tools, options)))
             headers {"Content-Type": "application/json", "Accept": "application/json"}
             response send-signed("POST", converse-url(resolved, id, "converse"), "bedrock", resolved, headers, body)
             cond {
                 is-err(response) => { response }
-                is-ok-response(response) => { parse-response(response.body, id) }
+                and(is-ok-response(response), is-map(response.body)) => { parse-response(response.body, id) }
                 => { err(AwsError(response)) }
             }
         }
@@ -627,12 +649,12 @@ fn (state: Map, delta: Map, on-delta: Fn): Map {
         }
 
         is-some(reasoning) => {
-            cond {
-                is-some(get(reasoning, "text")) => { {...state, reasoning-text: concat(state.reasoning-text, reasoning.text)} }
-                is-some(get(reasoning, "signature")) => { {...state, signature: reasoning.signature} }
-                is-some(get(reasoning, "redactedContent")) => { {...state, redacted: reasoning.redactedContent} }
-                => { state }
-            }
+            r-text get(reasoning, "text")
+            r-sig get(reasoning, "signature")
+            r-redacted get(reasoning, "redactedContent")
+            s1 if(is-some(r-text), {...state, reasoning-text: concat(state.reasoning-text, r-text)}, state)
+            s2 if(is-some(r-sig), {...s1, signature: r-sig}, s1)
+            if(is-some(r-redacted), {...s2, redacted: r-redacted}, s2)
         }
         => { state }
     }
@@ -846,12 +868,12 @@ fn
     cond {
         is-err(resolved) => { resolved }
         => {
-            body to-json(build-request(messages, system, tools, options))
+            body to-json(untype(build-request(messages, system, tools, options)))
             headers {"Content-Type": "application/json", "Accept": "application/vnd.amazon.eventstream"}
             response send-signed("POST", converse-url(resolved, id, "converse-stream"), "bedrock", resolved, headers, body)
             cond {
                 is-err(response) => { response }
-                is-ok-response(response) => { parse-stream-body(response.body, id, on-delta) }
+                is-ok-response(response) => { parse-stream-body(or(response.body-bytes, response.body), id, on-delta) }
                 => { err(AwsError(response)) }
             }
         }

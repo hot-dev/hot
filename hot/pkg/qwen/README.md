@@ -10,7 +10,7 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/qwen": "1.0.9"
 ```
 
-It pulls in `hot.dev/openai` 1.3.0 and `hot.dev/hot-ai` 1.9.0.
+It pulls in `hot.dev/openai` 1.3.6 and `hot.dev/hot-ai` 1.11.0.
 
 ## Setup
 

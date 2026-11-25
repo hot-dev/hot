@@ -166,3 +166,23 @@ meta ["test"]
 fn () {
     assert(is-null(::ct/response-usage(null)), "null usage stays null")
 }
+
+test-refused-stream-decodes-error-body
+meta ["test"]
+fn () {
+    response ::hot::http/StreamingHttpResponse({
+        status: 401,
+        headers: {},
+        body: Iter(["{\"error\": {\"message\": ", "\"Incorrect API key\"}}"]),
+    })
+    refused ::openai::api/refused-stream(response)
+    assert-eq(401, refused.status)
+    assert-eq("Incorrect API key", refused.body.error.message)
+}
+
+test-drain-openai-stream-returns-err-from-bad-iterator
+meta ["test"]
+fn () {
+    result ::ct/drain-openai-stream("not-an-iterator", ::ai-chat/noop-on-delta, ::ct/EMPTY_STREAM_STATE)
+    assert(is-err(result), "a next(iter) failure is an Err, not a halt")
+}
