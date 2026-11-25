@@ -564,10 +564,16 @@ fn contained_error_payload(
         return cancellation.data;
     }
 
+    // An error that isn't a halt (a call no overload takes, say) is a
+    // Failure too, typed as `fail()` types one, so code reading a contained
+    // Err tells halts from Err values by type.
     let msg = err.to_string();
     crate::val!({
-        "msg": msg.clone(),
-        "err": {"error": msg},
+        "$type": crate::lang::hot::exec::failure_type(vm),
+        "$val": {
+            "msg": msg.clone(),
+            "err": {"error": msg},
+        }
     })
 }
 
