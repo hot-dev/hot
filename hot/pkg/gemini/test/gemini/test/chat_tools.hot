@@ -126,6 +126,14 @@ fn () {
     assert-eq("Once upon", reply.text)
 }
 
+test-partial-text-with-safety-cutoff-keeps-its-stop-reason
+meta ["test"]
+fn () {
+    reply ::ct/parse-response({candidates: [{content: {role: "model", parts: [{text: "Partial"}]}, finishReason: "SAFETY"}]})
+    assert-eq("safety", reply.stop-reason, "non-STOP finish reasons are not hidden as end_turn")
+    assert-eq("Partial", reply.text)
+}
+
 test-an-empty-reply-is-an-err
 meta ["test"]
 fn () {
@@ -166,6 +174,10 @@ fn () {
 
     ok ::ct/reply-from-response(::hot::http/HttpResponse({status: 200, headers: {}, body: TEXT_REPLY}))
     assert-eq("Paris is the capital.", ok.text)
+
+    html ::ct/reply-from-response(::hot::http/HttpResponse({status: 200, headers: {}, body: "<html>bad gateway</html>"}))
+    assert(is-err(html), "a 200 with a non-Map body is an Err, not a halt")
+    assert-eq(200, err-value(html).status)
 }
 
 test-a-refused-stream-keeps-its-reason
@@ -279,6 +291,24 @@ fn () {
     assert-eq(1, length(out.contents), "Gemini refuses a turn with no parts")
 }
 
+test-adjacent-same-role-turns-merge
+meta ["test"]
+fn () {
+    call ::ai-tool/ToolCall({id: "c1", name: "get_weather", input: {city: "Paris"}})
+    out ::ct/to-contents([
+        ::ai-chat/user-message("One."),
+        ::ai-chat/user-message("Two."),
+        ::ai-chat/assistant-message("", [call]),
+        ::ai-chat/tool-result-message(::ai-tool/ToolResult({id: "c1", output: "18C", is-error: false})),
+        ::ai-chat/user-message("Thanks."),
+    ])
+    assert-eq(["user", "model", "user"], map(out.contents, %.role))
+    assert-eq([{text: "One."}, {text: "Two."}], out.contents[0].parts)
+    assert-eq(2, length(out.contents[2].parts), "tool result and following user text share one user turn")
+    assert-eq("get_weather", out.contents[2].parts[0].functionResponse.name)
+    assert-eq({text: "Thanks."}, out.contents[2].parts[1])
+}
+
 test-image-parts-are-inline-data
 meta ["test"]
 fn () {
@@ -292,16 +322,37 @@ fn () {
     assert-eq({inlineData: {mimeType: "image/png", data: "iVBORw0KGgo="}}, parts[1])
 }
 
+test-url-parts-only-use-file-data-for-gemini-uris
+meta ["test"]
+fn () {
+    files-uri "https://generativelanguage.googleapis.com/v1beta/files/abc123"
+    m ::ai-chat/Message({
+        role: "user",
+        content: "",
+        parts: [
+            ::ai-chat/MessagePart({kind: "image", url: files-uri, mime: "image/png"}),
+            ::ai-chat/image-part("https://example.com/cat.png"),
+        ],
+    })
+    parts ::ct/to-contents([m]).contents[0].parts
+    assert-eq({fileData: {mimeType: "image/png", fileUri: files-uri}}, parts[0])
+    assert(is-some(get(parts[1], "text")), "arbitrary external URLs fall back to text instead of 400ing fileData")
+}
+
 test-tool-declarations
 meta ["test"]
 fn () {
     now ::ai-tool/Tool({name: "now", description: "The time.", input-schema: {type: "object", properties: {}}, fn: () { "noon" }})
-    request ::ct/build-request([::ai-chat/user-message("Hi")], null, [WEATHER_TOOL, now], ::ct/DEFAULT_REQUEST_OPTIONS)
+    kv ::ai-tool/Tool({name: "kv", description: "Map input.", input-schema: {type: "object", additionalProperties: {type: "string"}}, fn: (x) { x }})
+    union ::ai-tool/Tool({name: "either", description: "Union input.", input-schema: {anyOf: [{type: "object", properties: {a: {type: "string"}}}]}, fn: (x) { x }})
+    request ::ct/build-request([::ai-chat/user-message("Hi")], null, [WEATHER_TOOL, now, kv, union], ::ct/DEFAULT_REQUEST_OPTIONS)
     declarations request.tools[0].functionDeclarations
-    assert-eq(["get_weather", "now"], map(declarations, %.name))
+    assert-eq(["get_weather", "now", "kv", "either"], map(declarations, %.name))
     assert-eq("object", declarations[0].parametersJsonSchema.type)
     assert-eq(["city"], keys(declarations[0].parametersJsonSchema.properties))
     assert(not(in("parametersJsonSchema", keys(declarations[1]))), "a tool with no arguments sends no schema")
+    assert-eq({type: "string"}, declarations[2].parametersJsonSchema.additionalProperties, "additionalProperties schema is kept")
+    assert(is-some(declarations[3].parametersJsonSchema.anyOf), "anyOf schema is kept")
 
     empty ::ct/build-request([::ai-chat/user-message("Hi")], null, [], ::ct/DEFAULT_REQUEST_OPTIONS)
     assert(not(in("tools", keys(empty))), "an empty tool list sends none")
@@ -414,6 +465,33 @@ fn () {
     assert-eq(200, err-value(result).status)
     assert-eq("UNAVAILABLE", err-value(result).body.error.status)
     assert-eq("message", next(frames).value.event, "nothing after the error is read")
+
+    json-str-error Iter([{event: "error", data: "{\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\"}}"}])
+    decoded ::ct/drain-stream(json-str-error, ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    assert(is-err(decoded), "a JSON-string error event is decoded")
+    assert-eq("UNAVAILABLE", err-value(decoded).body.error.status)
+}
+
+test-drain-stream-returns-err-from-bad-iterator
+meta ["test"]
+fn () {
+    // Passing a non-iterator makes next(iter) return an Err, simulating a mid-stream transport failure.
+    result ::ct/drain-stream("not-an-iterator", ::ai-chat/noop-on-delta, ::ct/EMPTY_STATE)
+    assert(is-err(result), "a next(iter) failure is an Err, not a halt")
+}
+
+test-consume-stream-emits-stop-only-on-success
+meta ["test"]
+fn () {
+    on-ok recorder("test.gemini.stop.ok")
+    reply ::ct/consume-stream(Iter(STREAM_EVENTS), on-ok)
+    assert-eq("Let me check.", reply.text)
+    assert-eq("stop:tool_use", last(::ctx/get("test.gemini.stop.ok")), "Stop is sent on success")
+
+    on-cut recorder("test.gemini.stop.cut")
+    cut ::ct/consume-stream(Iter([{event: "message", data: {candidates: [{content: {role: "model", parts: [{text: "Hel"}]}}]}}]), on-cut)
+    assert(is-err(cut))
+    assert-eq(["text:Hel"], ::ctx/get("test.gemini.stop.cut"), "no Stop when cut short")
 }
 
 test-an-error-payload-inside-the-stream-ends-it

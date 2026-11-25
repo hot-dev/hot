@@ -1,0 +1,49 @@
+::team-agent::test::providers ns
+meta ["test"]
+
+::agent ::team-agent::agent
+::chat  ::ai::chat
+
+Provider ::chat/Provider
+
+fake-tools-chat fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Any): ::chat/ChatReply {
+    ::chat/ChatReply({text: `${model}|${messages[0].content}|${or(system, "")}`, tool-calls: null, stop-reason: "end_turn", usage: null, raw: null})
+}
+
+failing-tools-chat fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Any): ::chat/ChatReply {
+    err("refused")
+}
+
+// Compared by name: under the JIT, eq on two references to one fn is false.
+test-gemini-and-grok-models-get-their-own-adapters
+meta ["test"]
+fn () {
+    assert-eq(Provider.Gemini, ::chat/detect-provider("gemini-3.8-flash"))
+    assert-eq(Provider.Xai, ::chat/detect-provider("grok-4.3"))
+    assert-eq(Str(::gemini::chat-tools/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Gemini)))
+    assert-eq(Str(::xai::ai/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Xai)))
+    assert-eq(Str(::anthropic::chat-tools/chat-with-tools), Str(::agent/provider-to-chat-with-tools-fn(Provider.Anthropic)))
+}
+
+test-the-model-aliases-include-gemini-and-grok
+meta ["test"]
+fn () {
+    assert-eq(Provider.Gemini, ::chat/detect-provider(get(::agent/MODEL_ALIASES, "gemini")))
+    assert-eq(Provider.Xai, ::chat/detect-provider(get(::agent/MODEL_ALIASES, "grok")))
+}
+
+test-single-shot-wraps-a-tools-chat
+meta ["test"]
+fn () {
+    chat ::agent/single-shot(fake-tools-chat)
+    assert-eq("m|hello|sys", chat("m", "hello", "sys"))
+    assert-eq("m|hello|", chat("m", "hello", null))
+}
+
+test-single-shot-keeps-the-err
+meta ["test"]
+fn () {
+    chat ::agent/single-shot(failing-tools-chat)
+    answer chat("m", "hello", null)
+    assert(is-err(answer))
+}

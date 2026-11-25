@@ -235,7 +235,7 @@ fn
     response api-request-stream("POST", "/chat/completions", {}, streaming-request, "sse", opts)
     cond {
         is-err(response) => { response }
-        gte(response.status, 400) => { err(HttpError(response)) }
+        gte(response.status, 400) => { err(::openai::api/refused-stream(response)) }
         => { StreamingChatResponse(response) }
     }
 }
@@ -300,7 +300,7 @@ fn (ep: ::openai::api/Endpoint, request: Map): StreamingChatResponse {
     response ::openai::api/endpoint-request-stream(ep, "POST", "/chat/completions", {}, streaming-request, "sse")
     cond {
         is-err(response) => { response }
-        gte(response.status, 400) => { err(HttpError(response)) }
+        gte(response.status, 400) => { err(::openai::api/refused-stream(response)) }
         => { StreamingChatResponse(response) }
     }
 }

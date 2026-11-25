@@ -1,0 +1,121 @@
+::xai::test::ai ns
+meta ["test"]
+
+// Hermetic: no network, no xai.* context.
+
+::xa ::xai::ai
+
+MSGS [::ai::chat/user-message("Hi")]
+
+test-is-xai-model
+meta ["test"]
+fn () {
+    assert(::xa/is-xai-model("grok-4.7"))
+    assert(::xa/is-xai-model("Grok-4.3"))
+    assert(::xa/is-xai-model("xai/grok-4.6"))
+    assert(not(::xa/is-xai-model("gpt-4o")))
+    assert(not(::xa/is-xai-model("gemini-3.8-flash")))
+}
+
+test-model-id-strips-the-routing-prefix
+meta ["test"]
+fn () {
+    assert-eq("grok-4.7", ::xa/model-id("xai/grok-4.7"))
+    assert-eq("grok-4.7", ::xa/model-id("XAI/grok-4.7"))
+    assert-eq("grok-4.7", ::xa/model-id("grok-4.7"))
+}
+
+test-endpoint-takes-the-key-from-opts
+meta ["test"]
+fn () {
+    ep ::xa/endpoint({api-key: "tenant-key"})
+    assert-eq("https://api.x.ai/v1", ep.base-url)
+    assert-eq("tenant-key", ep.api-key)
+}
+
+test-endpoint-takes-a-base-url-with-its-key
+meta ["test"]
+fn () {
+    ep ::xa/endpoint({api-key: "k", base-url: "https://gw.example.com/v1/"})
+    assert-eq("https://gw.example.com/v1", ep.base-url)
+}
+
+test-endpoint-without-a-key-is-an-err
+meta ["test"]
+fn () {
+    ep ::xa/endpoint({})
+    assert(is-err(ep))
+    assert(contains(err-value(ep), "xai.api.key"))
+}
+
+test-endpoint-with-a-blank-key-is-an-err
+meta ["test"]
+fn () {
+    assert(is-err(::xa/endpoint({api-key: "  "})))
+    assert(is-err(::xa/endpoint({base-url: "https://gw.example.com/v1"})))
+}
+
+test-chat-without-a-key-is-an-err-before-any-call
+meta ["test"]
+fn () {
+    reply ::xa/chat-with-tools("grok-4.7", MSGS, null, null)
+    assert(is-err(reply))
+    assert(contains(err-value(reply), "xai.api.key"))
+
+    streamed ::xa/chat-with-tools-stream("grok-4.7", MSGS, null, null, ::ai::chat/noop-on-delta)
+    assert(is-err(streamed))
+}
+
+test-chat-with-a-blank-key-in-opts-is-an-err
+meta ["test"]
+fn () {
+    reply ::xa/chat-with-tools("grok-4.7", MSGS, null, null, {api-key: ""})
+    assert(is-err(reply))
+    assert(contains(err-value(reply), "blank"))
+}
+
+test-run-loop-returns-the-missing-key-err
+meta ["test"]
+fn () {
+    opts ::ai::chat/ChatOptions({chat-fn: ::xa/chat-with-tools, model: "grok-4.7", max-iterations: 1})
+    assert(is-err(::ai::chat/run-loop(opts, "Hi")))
+}
+
+test-provider-registration
+meta ["test"]
+fn () {
+    reg ::xa/provider()
+    assert-eq(::ai::chat/Provider.Xai, reg.variant)
+    assert-eq("xAI", reg.display-name)
+    assert(reg.detect("grok-4.7"))
+    assert(reg.detect("xai/grok-4.6"))
+    assert(not(reg.detect("claude-sonnet-4-5")))
+    assert-eq("https://api.x.ai/v1", reg.meta.base-url)
+    assert(in("tools", reg.meta.capabilities))
+}
+
+test-registry-routes-grok-to-xai
+meta ["test"]
+fn () {
+    registry ::ai::chat/with-providers([::xa/provider()])
+    hit ::ai::chat/detect-provider-from(registry, "grok-4.7")
+    assert-eq("xAI", hit.display-name)
+    assert(is-some(hit.chat-opts-fn), "the xAI entry is wired")
+}
+
+test-registry-call-without-a-key-is-an-err
+meta ["test"]
+fn () {
+    opts ::ai::chat/ChatOptions({
+        model: "grok-4.7",
+        providers: ::ai::chat/with-providers([::xa/provider()]),
+        max-iterations: 1
+    })
+    assert(is-err(::ai::chat/run-loop(opts, "Hi")))
+}
+
+test-default-request-options
+meta ["test"]
+fn () {
+    assert-eq(4096, ::xa/DEFAULT_REQUEST_OPTIONS.max-completion-tokens)
+}

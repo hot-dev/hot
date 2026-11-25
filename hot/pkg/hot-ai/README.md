@@ -183,6 +183,29 @@ answer ::ai::chat/run-loop(opts, "What is 17 + 25?")
 - `::ai::rag` uses `chat-opts-fn` too. `count-tokens-fn` and a store's `embed-fn` take no `provider-opts`: bind a per-call key in a closure.
 - The run loop keeps `provider-opts` out of chat history, step and delta stream records, skill context and failure payloads, and masks each credential in it in the run's call records, including inside strings like `Bearer ${key}`. A secret shorter than 8 bytes is masked only as a whole value. Records of your own calls that finished before the run loop may already be written, so mark a credential your code fetches with `::hot::ctx/mark-secret` as soon as you have it.
 
+### Ending and steering the run loop
+
+Three opt-in controls change when `run-loop` and `run-loop-stream` stop:
+
+```hot
+finish fn (answer: Str): Str { answer }
+charge fn (amount: Int): Map { {charged: amount} }
+
+opts ::ai::chat/ChatOptions({
+    chat-fn: ::anthropic::chat-tools/chat-with-tools,
+    model: "claude-sonnet-4-5",
+    tools: [
+        ::ai::tool/from-fn(finish, {name: "finish", ends-run: true}),
+        ::ai::tool/from-fn(charge, {name: "charge", fail-on-error: true})
+    ],
+    on-final-reply: (reply, messages) { "Call finish with your answer." }
+})
+```
+
+- **`ends-run` on a tool.** A successful call ends the loop, and the tool's output is the answer (a `Str` as is, anything else as JSON). A failed call goes back to the model, so it can fix the input.
+- **`on-final-reply` on `ChatOptions`.** Called as `(reply, messages)` when the model answers with no tool call. Return null to accept the answer, or a `Str` to send it as a user turn and ask again. Each extra turn counts toward `max-iterations`.
+- **`fail-on-tool-error` on `ChatOptions`, or `fail-on-error` on a tool.** A failed call ends the loop with an Err holding `::ai::chat/ToolFailure` (`tool`, `call-id`, `input`, `error`, `iteration`) instead of going back to the model, so the platform's retry can handle it. A tool's own flag wins over the option, and a call to an unknown tool always goes back to the model.
+
 ### `::ai::memory` — Three-level scoped memory
 
 Session (shared conversation history), User (per-identity data), and KB (shared knowledge base). Plus per-user `Thread` for multi-turn conversations.

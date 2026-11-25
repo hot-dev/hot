@@ -20,6 +20,30 @@ models ::bedrock/list-foundation-models()
 model ::bedrock/get-foundation-model("anthropic.claude-3-haiku-20240307-v1:0")
 ```
 
+## Tool calling with hot-ai
+
+`::aws::bedrock::chat-tools` satisfies the `::ai::chat` chat contract over the Converse API, so any Bedrock model with tool use (Claude, Nova, Llama, Mistral and others) can run under `::ai::chat/run-loop` and `run-loop-stream`:
+
+```hot
+get-weather fn (city: Str): Str { `${city}: 18C` }
+
+opts ::ai::chat/ChatOptions({
+    chat-opts-fn: ::aws::bedrock::chat-tools/chat-with-tools,
+    chat-stream-opts-fn: ::aws::bedrock::chat-tools/chat-with-tools-stream,
+    model: "us.amazon.nova-pro-v1:0",
+    provider-opts: {region: "us-east-1"},
+    tools: [::ai::tool/from-fn(get-weather)]
+})
+
+answer ::ai::chat/run-loop(opts, "What's the weather in Paris?")
+```
+
+`provider-opts` takes the per-call credential keys below (`access-key-id`, `secret-access-key`, `session-token`, `region`, ...); leave it out to use ctx. `::aws::bedrock::chat-tools/provider()` registers Bedrock with `::ai::chat/with-providers` for ids written as `bedrock/<model id>`.
+
+- Reasoning blocks from extended thinking ride on the first call's `ToolCall.meta` and go back on the next turn, as Claude requires. Turn thinking on with `ChatRequestOptions({additional-fields: {thinking: {type: "enabled", budget_tokens: 2048}}})` through `chat-with-tools-options`.
+- The stream arrives as one AWS event stream body, so `run-loop-stream` gets every delta once the reply is in, not token by token.
+- A refused call is an Err holding `AwsError`. An exception inside the stream, a stream with no stop reason and a reply with no text and no call are Errs holding a `ReplyError`.
+
 ## Per-call credentials
 
 Pass `opts` as the last argument of any function to use other credentials for that call, so one run can serve many tenants. Nothing is written to context, so this is safe in parallel flows.

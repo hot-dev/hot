@@ -700,6 +700,7 @@ fn cond (iter: Any, on-delta: Fn, state: Map): Map {
     => {
         n next(iter)
         cond {
+            is-err(n) => { n }
             n.done => { state }
             => { drain-openai-stream(iter, on-delta, handle-stream-event(state, n.value, on-delta)) }
         }
@@ -900,11 +901,16 @@ fn (response: Result, on-delta: Fn): ::ai-chat/ChatReply {
         is-err(response) => { response }
         => {
             final-state drain-openai-stream(response.body, on-delta, EMPTY_STREAM_STATE)
-            emit-tool-use-ends(final-state, on-delta)
-            reply finalize-stream-state(final-state)
+            cond {
+                is-err(final-state) => { final-state }
+                => {
+                    emit-tool-use-ends(final-state, on-delta)
+                    reply finalize-stream-state(final-state)
 
-            on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
-            reply
+                    on-delta(ReplyDelta.Stop(StreamStop({reason: reply.stop-reason, usage: reply.usage})))
+                    reply
+                }
+            }
         }
     }
 }

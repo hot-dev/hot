@@ -37,12 +37,13 @@ FunctionResponse type {
     response: Map
 }
 
-// Content part (text, image, function call or response). `thought` marks a
-// part as the model's reasoning, not its answer. `thoughtSignature` is
-// opaque: send it back on the same part in the next turn.
+// Content part (text, image, file, function call or response). `thought`
+// marks a part as the model's reasoning, not its answer. `thoughtSignature`
+// is opaque: send it back on the same part in the next turn.
 Part type {
     text: Str?,
     inlineData: InlineData?,
+    fileData: FileData?,
     functionCall: FunctionCall?,
     functionResponse: FunctionResponse?,
     thought: Bool?,
@@ -52,6 +53,11 @@ Part type {
 InlineData type {
     mimeType: Str,
     data: Str
+}
+
+FileData type {
+    mimeType: Str?,
+    fileUri: Str
 }
 
 // Content (message equivalent)
@@ -131,6 +137,7 @@ GenerateContentResponse type {
 Candidate type {
     content: Content?,
     finishReason: FinishReason?,
+    finishMessage: Str?,
     safetyRatings: Vec<Map>?,
     index: Int?
 }

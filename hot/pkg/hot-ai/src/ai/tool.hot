@@ -43,6 +43,15 @@ meta {
       Used by external MCP wrappers (`::ai::mcp/from-server`) and other
       tools whose schema is supplied by an external system. Defaults
       to `false`.
+    - `ends-run` — when `true`, a successful call to this tool ends
+      `run-loop`, and the tool's output is the loop's answer (a `Str` as
+      is, anything else as JSON). Use it for a `finish` or `submit_result`
+      tool. A failed call goes back to the model as usual, so it can fix
+      the input. Defaults to `false`.
+    - `fail-on-error` — when `true`, a failed call to this tool ends
+      `run-loop` with an Err holding a `::ai::chat/ToolFailure`, instead of
+      going back to the model. When `false`, it always goes back, whatever
+      `ChatOptions.fail-on-tool-error` says. Null follows that option.
 
     **Example**
 
@@ -70,7 +79,9 @@ type {
     input-schema: Map,
     output-schema: Map?,
     fn: Fn,
-    pass-input: Bool?
+    pass-input: Bool?,
+    ends-run: Bool?,
+    fail-on-error: Bool?
 }
 
 ToolCall
@@ -205,7 +216,8 @@ meta {
     The function's qualified name becomes `Tool.name`, its
     `meta {doc: ...}` becomes `description`, and its parameter types
     are converted to a JSON-Schema input. Pass an `overrides` map to
-    customize any of these fields.
+    customize any of these fields, or to set `ends-run` and
+    `fail-on-error`.
 
     **Example**
 
@@ -221,6 +233,10 @@ meta {
         name: "add-numbers",
         description: "Add two integers and return the sum."
     })
+
+    // A tool whose successful call ends the run
+    finish fn (answer: Str): Str { answer }
+    t3 ::ai::tool/from-fn(finish, {name: "finish", ends-run: true})
     ```
     """
 }
@@ -247,7 +263,9 @@ fn
             get(schema, "output-schema"),
             null
         ),
-        fn: f
+        fn: f,
+        ends-run: get(overrides, "ends-run"),
+        fail-on-error: get(overrides, "fail-on-error")
     })
 }
 
@@ -302,6 +320,39 @@ fn (tools: Vec<Tool>, name: Str): Tool? {
     })
 }
 
+failure-output
+meta {
+    doc: """
+    What the model sees for a failed tool call, from the error payload:
+    a halt (`fail(msg)`, `fail(msg, data)`, a runtime error) becomes its
+    message, or `{message, data}` when it carries data beyond the message.
+    An Err value the tool returned stays as is. A null payload names the
+    tool.
+
+    **Example**
+
+    ```hot
+    ::ai::tool/failure-output({msg: "card declined", err: "card declined"}, "charge")  // "card declined"
+    ::ai::tool/failure-output({msg: "bad input", err: {field: "amount"}}, "charge")   // {message: "bad input", data: {field: "amount"}}
+    ::ai::tool/failure-output(null, "charge")                                         // "Tool charge failed."
+    ```
+    """
+}
+fn (payload: Any, tool-name: Str): Any {
+    // A halt's payload is a typed `::hot::run/Failure`; read it as a Map.
+    plain if(is-null(payload), null, untype(payload))
+    msg if(is-map(plain), get(plain, "msg"), null)
+    detail if(is-map(plain), get(plain, "err"), null)
+    cond {
+        is-null(payload) => { `Tool ${tool-name} failed.` }
+        not(is-str(msg)) => { payload }
+        is-null(detail) => { msg }
+        eq(detail, msg) => { msg }
+        and(is-map(detail), eq(get(detail, "error"), msg)) => { msg }
+        => { {message: msg, data: detail} }
+    }
+}
+
 dispatch
 meta {
     doc: """
@@ -311,7 +362,8 @@ meta {
     incoming call and whose `output` is the function's return value.
 
     Errors from the underlying function are caught and returned with
-    `is-error: true` so the model can react on the next turn.
+    `is-error: true` so the model can react on the next turn. The output
+    is the failure's message (see `failure-output`).
 
     **Example**
 
@@ -348,9 +400,11 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
 
             match attempt {
                 Result.Err => {
+                    // Inside a `Result.Err` arm `attempt` is already the
+                    // error payload: `err-value(attempt)` would be null.
                     ToolResult({
                         id: call.id,
-                        output: err-value(attempt),
+                        output: failure-output(attempt, call.name),
                         is-error: true,
                     })
                 }

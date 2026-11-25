@@ -57,6 +57,24 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+refused-stream
+meta {
+    doc: """
+    The `HttpError` for a streaming call the API refused, with the reason read
+    from the response. Its `body` is what a plain call's would be: the decoded
+    JSON, or the text when it isn't JSON.
+    """
+}
+fn (response: StreamingHttpResponse): HttpError {
+  text join(map(collect(response.body), Str), "")
+  decoded from-json(text)
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: if(is-err(decoded), text, decoded)
+  })
+}
+
 non-blank
 meta {
     doc: """

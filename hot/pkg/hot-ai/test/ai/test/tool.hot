@@ -198,3 +198,81 @@ fn () {
     assert-eq(false, result.is-error)
     assert-eq({a: 1, b: 2}, result.output)
 }
+
+// ---------------------------------------------------------------------------
+// dispatch: what the model sees for a failed call
+// ---------------------------------------------------------------------------
+
+fails-with-msg
+meta {doc: "Fails with a message."}
+fn (input: Str): Str {
+    fail(`rejected '${input}'`)
+}
+
+fails-with-data
+meta {doc: "Fails with a message and data."}
+fn (input: Str): Str {
+    fail("bad input", {field: "input", value: input})
+}
+
+returns-err
+meta {doc: "Returns an Err value."}
+fn (input: Str): Str {
+    err({code: "nope", input: input})
+}
+
+divides-by-zero
+meta {doc: "Raises a runtime error."}
+fn (input: Str): Int {
+    div(1, sub(length(input), length(input)))
+}
+
+dispatch-one fn (f: Fn, name: Str): ::tool/ToolResult {
+    tools [::tool/from-fn(f, {name: name})]
+    ::tool/dispatch(tools, ::tool/ToolCall({id: "c1", name: name, input: {input: "x"}}))
+}
+
+test-dispatch-fail-message-reaches-the-model
+meta ["test"]
+fn () {
+    result dispatch-one(fails-with-msg, "msg")
+    assert(result.is-error)
+    assert-eq("rejected 'x'", result.output)
+    assert-eq("rejected 'x'", ::ai::chat/tool-result-message(result).content)
+}
+
+test-dispatch-fail-with-data-keeps-both
+meta ["test"]
+fn () {
+    result dispatch-one(fails-with-data, "data")
+    assert(result.is-error)
+    assert-eq({message: "bad input", data: {field: "input", value: "x"}}, result.output)
+}
+
+test-dispatch-returned-err-stays-as-is
+meta ["test"]
+fn () {
+    result dispatch-one(returns-err, "returns")
+    assert(result.is-error)
+    assert-eq({code: "nope", input: "x"}, result.output)
+}
+
+test-dispatch-runtime-error-is-a-message
+meta ["test"]
+fn () {
+    result dispatch-one(divides-by-zero, "divide")
+    assert(result.is-error)
+    assert(is-str(result.output), `a message, got ${to-json(result.output)}`)
+    assert(not(is-empty(result.output)), "not empty")
+}
+
+test-failure-output-shapes
+meta ["test"]
+fn () {
+    assert-eq("m", ::tool/failure-output({msg: "m", err: "m"}, "t"))
+    assert-eq("m", ::tool/failure-output({msg: "m", err: null}, "t"))
+    assert-eq("m", ::tool/failure-output({msg: "m", err: {error: "m"}}, "t"))
+    assert-eq({message: "m", data: [1]}, ::tool/failure-output({msg: "m", err: [1]}, "t"))
+    assert-eq("plain", ::tool/failure-output("plain", "t"))
+    assert-eq("Tool t failed.", ::tool/failure-output(null, "t"))
+}

@@ -1,0 +1,326 @@
+::ai::test::chat-runloop-options ns
+meta ["test"]
+
+::chat ::ai::chat
+::tool ::ai::tool
+
+// ============================================================================
+// Fixtures
+// ============================================================================
+
+finish
+meta { doc: """Test tool: ends the run with its answer. Rejects "bad".""" }
+fn (answer: Str): Str {
+    if(eq(answer, "bad"), fail("finish rejected bad"), answer)
+}
+
+finish-map
+meta { doc: """Test tool: ends the run with a Map.""" }
+fn (answer: Str): Map { {answer: answer} }
+
+flaky
+meta { doc: """Test tool that always fails.""" }
+fn (input: Str): Str {
+    fail(`flaky rejected '${input}'`)
+}
+
+FINISH ::tool/from-fn(finish, {name: "finish", ends-run: true})
+FINISH_MAP ::tool/from-fn(finish-map, {name: "finish_map", ends-run: true})
+FLAKY ::tool/from-fn(flaky, {name: "flaky"})
+FLAKY_FATAL ::tool/from-fn(flaky, {name: "flaky", fail-on-error: true})
+FLAKY_SOFT ::tool/from-fn(flaky, {name: "flaky", fail-on-error: false})
+
+count-role fn (messages: Vec<::chat/Message>, role: Str): Int {
+    length(filter(messages, (m) { eq(m.role, role) }))
+}
+
+text-reply fn (text: Str): ::chat/ChatReply {
+    ::chat/ChatReply({text: text, tool-calls: null, stop-reason: "end_turn", usage: null, raw: null})
+}
+
+call-reply fn (id: Str, name: Str, input: Map): ::chat/ChatReply {
+    ::chat/ChatReply({
+        text: "",
+        tool-calls: [::tool/ToolCall({id: id, name: name, input: input})],
+        stop-reason: "tool_use",
+        usage: null,
+        raw: null
+    })
+}
+
+last-tool-result fn (messages: Vec<::chat/Message>): ::chat/Message? {
+    tool-msgs filter(messages, (m) { eq(m.role, "tool") })
+    if(is-empty(tool-msgs), null, last(tool-msgs))
+}
+
+// Text until a user turn says "Call finish.", then a finish call.
+mock-needs-nudge fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    nudged some(messages, (m) { and(eq(m.role, "user"), eq(m.content, "Call finish.")) })
+    if(nudged, call-reply("c1", "finish", {answer: "42"}), text-reply("I think it's 42."))
+}
+
+// Reports how many user and assistant turns it saw.
+mock-counts fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    text-reply(`u${count-role(messages, "user")} a${count-role(messages, "assistant")}`)
+}
+
+// Calls `name` once, then reports what the tool result said.
+mock-calls fn (name: Str, input: Map): Fn {
+    tool-name name
+    tool-input input
+    (model, messages, system, tools) {
+        result last-tool-result(messages)
+        cond {
+            is-null(result) => { call-reply("c1", tool-name, tool-input) }
+            => { text-reply(`saw ${Str(result.content)} error=${Str(or(result.is-error, false))}`) }
+        }
+    }
+}
+
+// finish("bad") first, then finish("good") once the error comes back.
+mock-retries-finish fn (model: Str, messages: Vec<::chat/Message>, system: Str?, tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    result last-tool-result(messages)
+    if(is-null(result), call-reply("c1", "finish", {answer: "bad"}), call-reply("c2", "finish", {answer: "good"}))
+}
+
+stream-of fn (chat: Fn): Fn {
+    inner chat
+    (model, messages, system, tools, on-delta) { inner(model, messages, system, tools) }
+}
+
+opts-for fn (chat: Fn, tools: Vec<::tool/Tool>, extra: Map): ::chat/ChatOptions {
+    ::chat/ChatOptions({
+        ...{chat-fn: chat, chat-stream-fn: stream-of(chat), model: "mock", tools: tools, max-iterations: 5},
+        ...extra
+    })
+}
+
+// ============================================================================
+// on-final-reply
+// ============================================================================
+
+test-on-final-reply-nudges-the-model-to-call-a-tool
+meta ["test"]
+fn () {
+    hook (reply, messages) { "Call finish." }
+    opts opts-for(mock-needs-nudge, [FINISH], {on-final-reply: hook})
+    assert-eq("42", ::chat/run-loop(opts, "What is the answer?"))
+}
+
+test-on-final-reply-null-accepts-the-reply
+meta ["test"]
+fn () {
+    hook (reply, messages) { null }
+    opts opts-for(mock-needs-nudge, [FINISH], {on-final-reply: hook})
+    assert-eq("I think it's 42.", ::chat/run-loop(opts, "What is the answer?"))
+}
+
+test-on-final-reply-empty-str-accepts-the-reply
+meta ["test"]
+fn () {
+    hook (reply, messages) { "  " }
+    opts opts-for(mock-needs-nudge, [FINISH], {on-final-reply: hook})
+    assert-eq("I think it's 42.", ::chat/run-loop(opts, "What is the answer?"))
+}
+
+test-on-final-reply-keeps-the-reply-text-in-history
+meta ["test"]
+fn () {
+    // Nudge until the model has seen three user turns.
+    hook (reply, messages) { if(lt(count-role(messages, "user"), 3), "Again.", null) }
+    opts opts-for(mock-counts, [], {on-final-reply: hook})
+    assert-eq("u3 a2", ::chat/run-loop(opts, "Start."))
+}
+
+test-on-final-reply-sees-the-reply-and-history
+meta ["test"]
+fn () {
+    hook (reply, messages) {
+        assert-eq("u1 a0", reply.text)
+        assert-eq(1, length(messages))
+        null
+    }
+
+    opts opts-for(mock-counts, [], {on-final-reply: hook})
+    assert-eq("u1 a0", ::chat/run-loop(opts, "Start."))
+}
+
+test-on-final-reply-err-ends-the-loop
+meta ["test"]
+fn () {
+    hook (reply, messages) { err("no answer allowed") }
+    opts opts-for(mock-counts, [], {on-final-reply: hook})
+    answer ::chat/run-loop(opts, "Start.")
+    assert(is-err(answer), "the hook's Err comes back")
+    assert-eq("no answer allowed", err-value(answer))
+}
+
+test-on-final-reply-in-the-stream-loop
+meta ["test"]
+fn () {
+    hook (reply, messages) { "Call finish." }
+    opts opts-for(mock-needs-nudge, [FINISH], {on-final-reply: hook})
+    assert-eq("42", ::chat/run-loop-stream(opts, "What is the answer?", ::chat/noop-on-delta))
+}
+
+// ============================================================================
+// ends-run
+// ============================================================================
+
+test-ends-run-tool-output-is-the-answer
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("finish", {answer: "done"}), [FINISH], {})
+    assert-eq("done", ::chat/run-loop(opts, "Go."))
+}
+
+test-ends-run-map-output-comes-back-as-json
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("finish_map", {answer: "done"}), [FINISH_MAP], {})
+    assert-eq({answer: "done"}, from-json(::chat/run-loop(opts, "Go.")))
+}
+
+test-ends-run-failure-goes-back-to-the-model
+meta ["test"]
+fn () {
+    opts opts-for(mock-retries-finish, [FINISH], {})
+    assert-eq("good", ::chat/run-loop(opts, "Go."))
+}
+
+test-without-ends-run-the-loop-asks-again
+meta ["test"]
+fn () {
+    plain ::tool/from-fn(finish, {name: "finish"})
+    opts opts-for(mock-calls("finish", {answer: "done"}), [plain], {})
+    assert-eq("saw done error=false", ::chat/run-loop(opts, "Go."))
+}
+
+test-ends-run-in-the-stream-loop
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("finish", {answer: "done"}), [FINISH], {})
+    assert-eq("done", ::chat/run-loop-stream(opts, "Go.", ::chat/noop-on-delta))
+}
+
+test-from-fn-carries-the-new-flags
+meta ["test"]
+fn () {
+    assert-eq(true, FINISH.ends-run)
+    assert-eq(true, FLAKY_FATAL.fail-on-error)
+    assert-eq(false, FLAKY_SOFT.fail-on-error)
+    assert(is-null(FLAKY.ends-run), "unset by default")
+    assert(is-null(FLAKY.fail-on-error), "unset by default")
+}
+
+// ============================================================================
+// fail-on-tool-error / fail-on-error
+// ============================================================================
+
+test-tool-errors-go-back-to-the-model-by-default
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("flaky", {input: "x"}), [FLAKY], {})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(contains(answer, "error=true"), `the model sees the failure, got ${answer}`)
+}
+
+test-fail-on-tool-error-ends-the-loop-with-a-tool-failure
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("flaky", {input: "x"}), [FLAKY], {fail-on-tool-error: true})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(is-err(answer), "a failed tool call is an Err")
+    failure err-value(answer)
+    assert-eq("flaky", failure.tool)
+    assert-eq("c1", failure.call-id)
+    assert-eq({input: "x"}, failure.input)
+    assert-eq(1, failure.iteration)
+    assert-eq("flaky rejected 'x'", failure.error)
+}
+
+test-a-tool-fail-on-error-true-ends-the-loop-on-its-own
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("flaky", {input: "x"}), [FLAKY_FATAL], {})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(is-err(answer), "the tool's flag is enough")
+    assert-eq("flaky", err-value(answer).tool)
+}
+
+test-a-tool-fail-on-error-false-wins-over-the-option
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("flaky", {input: "x"}), [FLAKY_SOFT], {fail-on-tool-error: true})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(contains(answer, "error=true"), `goes back to the model, got ${answer}`)
+}
+
+test-an-unknown-tool-always-goes-back-to-the-model
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("nope", {}), [FLAKY], {fail-on-tool-error: true})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(contains(answer, "Unknown tool"), `the model hears about it, got ${answer}`)
+}
+
+test-a-failed-ends-run-tool-can-be-fatal
+meta ["test"]
+fn () {
+    opts opts-for(mock-retries-finish, [FINISH], {fail-on-tool-error: true})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(is-err(answer), "failure wins over ends-run")
+    assert-eq("finish", err-value(answer).tool)
+}
+
+test-fail-on-tool-error-in-the-stream-loop
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("flaky", {input: "x"}), [FLAKY], {fail-on-tool-error: true})
+    answer ::chat/run-loop-stream(opts, "Go.", ::chat/noop-on-delta)
+    assert(is-err(answer), "a failed tool call is an Err")
+    assert-eq("flaky", err-value(answer).tool)
+}
+
+StructuredAnswer type {
+    answer: Str
+}
+
+finish-struct
+meta { doc: """Test tool: ends the run with a typed struct.""" }
+fn (answer: Str): StructuredAnswer { StructuredAnswer({answer: answer}) }
+
+FINISH_STRUCT ::tool/from-fn(finish-struct, {name: "finish_struct", ends-run: true})
+
+test-ends-run-typed-struct-comes-back-without-type-wrapper
+meta ["test"]
+fn () {
+    opts opts-for(mock-calls("finish_struct", {answer: "done"}), [FINISH_STRUCT], {})
+    raw ::chat/run-loop(opts, "Go.")
+    assert(not(contains(raw, "$type")), `no internal type wrapper, got ${raw}`)
+    assert-eq({answer: "done"}, from-json(raw))
+}
+
+test-duplicate-call-ids-pair-positionally
+meta ["test"]
+fn () {
+    // Both calls share an empty id: the first succeeds, the second is fatal.
+    two-calls (model, messages, system, tools) {
+        ::chat/ChatReply({
+            text: "",
+            tool-calls: [
+                ::tool/ToolCall({id: "", name: "finish_map", input: {answer: "ok"}}),
+                ::tool/ToolCall({id: "", name: "flaky", input: {input: "bad"}})
+            ],
+            stop-reason: "tool_use",
+            usage: null,
+            raw: null
+        })
+    }
+
+    opts opts-for(two-calls, [FINISH_MAP, FLAKY_FATAL], {})
+    answer ::chat/run-loop(opts, "Go.")
+    assert(is-err(answer), "the fatal second call still fails even with a duplicate id")
+    assert-eq("flaky", err-value(answer).tool)
+    assert-eq({input: "bad"}, err-value(answer).input)
+}

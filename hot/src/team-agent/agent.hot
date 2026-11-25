@@ -28,6 +28,8 @@ meta {
 ::anthropic-chat-tools ::anthropic::chat-tools
 ::openai-chat          ::openai::chat
 ::openai-chat-tools    ::openai::chat-tools
+::gemini-chat-tools    ::gemini::chat-tools
+::xai-ai               ::xai::ai
 
 // AI agent library
 ::session   ::ai::session
@@ -173,6 +175,8 @@ MODEL_ALIASES {
   "opus":     "claude-opus-4-6",
   "gpt":      "gpt-5.2",
   "gpt-mini": "gpt-5-mini",
+  "gemini":   "gemini-3.8-flash",
+  "grok":     "grok-4.3",
 }
 
 DEFAULT_MODEL "claude-sonnet-4-5"
@@ -213,9 +217,24 @@ role-name fn match (role: Role): Str {
   Role.Tool      => { "tool" }
 }
 
+// A legacy `(model, prompt, system) -> Str` chat fn from a tools-aware
+// one, for providers whose packages only ship the run-loop adapter.
+single-shot fn (chat-with-tools: Fn): Fn {
+  chat chat-with-tools
+  (model, prompt, system) {
+    reply chat(model, [::chat/user-message(prompt)], system, null)
+    cond {
+      is-err(reply) => { reply }
+      => { or(reply.text, "") }
+    }
+  }
+}
+
 provider-to-chat-fn fn match (provider: Provider): Fn {
   Provider.Anthropic => { ::anthropic-chat/chat }
   Provider.OpenAi    => { ::openai-chat/chat }
+  Provider.Gemini    => { single-shot(::gemini-chat-tools/chat-with-tools) }
+  Provider.Xai       => { single-shot(::xai-ai/chat-with-tools) }
   =>                    { ::anthropic-chat/chat }
 }
 
@@ -225,6 +244,8 @@ provider-to-chat-fn fn match (provider: Provider): Fn {
 provider-to-chat-with-tools-fn fn match (provider: Provider): Fn {
   Provider.Anthropic => { ::anthropic-chat-tools/chat-with-tools }
   Provider.OpenAi    => { ::openai-chat-tools/chat-with-tools }
+  Provider.Gemini    => { ::gemini-chat-tools/chat-with-tools }
+  Provider.Xai       => { ::xai-ai/chat-with-tools }
   =>                    { ::anthropic-chat-tools/chat-with-tools }
 }
 

@@ -1,0 +1,179 @@
+::xai::test::live-smoke ns
+meta {
+    doc: """
+    Live network smoke tests for the xAI hot-ai adapter, and for the
+    `run-loop` options on a real model.
+
+    Gated by the `HOT_LIVE_TESTS` env var so the normal suite stays
+    hermetic and offline. They also need a real `XAI_API_KEY`, which goes
+    in as a per-call key through `ChatOptions.provider-opts`.
+    `XAI_SMOKE_MODEL` picks the model (default `grok-4.3`).
+
+    ```bash
+    HOT_LIVE_TESTS=1 XAI_API_KEY=... XAI_SMOKE_MODEL=grok-4.7 hot test --project pkg-test-xai ::xai::test::live-smoke
+    ```
+
+    With `HOT_LIVE_TESTS` unset every test here passes without a call.
+    """
+}
+
+::env     ::hot::env
+::xa      ::xai::ai
+::ai-chat ::ai::chat
+::ai-tool ::ai::tool
+
+is-live fn (): Bool {
+    and(not(is-empty(::env/get("HOT_LIVE_TESTS", ""))), not(is-empty(::env/get("XAI_API_KEY", ""))))
+}
+
+smoke-model fn (): Str { ::env/get("XAI_SMOKE_MODEL", "grok-4.3") }
+
+key-opts fn (): Map { {api-key: ::env/get("XAI_API_KEY", "")} }
+
+get-weather
+meta { doc: """Test fixture: the weather in a city.""" }
+fn (city: Str): Str { `${city}: 18C and clear` }
+
+current-year
+meta { doc: """Test fixture: a tool that takes no arguments.""" }
+fn (): Int { 2031 }
+
+submit-answer
+meta { doc: """Test fixture: ends the run with the final answer.""" }
+fn (answer: Str): Str { `SUBMITTED: ${answer}` }
+
+WEATHER_TOOL ::ai-tool/from-fn(get-weather, {name: "get_weather", description: "The current weather in one city."})
+YEAR_TOOL ::ai-tool/from-fn(current-year, {name: "current_year", description: "The current year. Takes no arguments."})
+SUBMIT_TOOL ::ai-tool/from-fn(submit-answer, {name: "submit_answer", description: "Submit the final answer. Call this exactly once when done.", ends-run: true})
+
+chat-opts fn (tools: Vec<::ai-tool/Tool>): ::ai-chat/ChatOptions {
+    ::ai-chat/ChatOptions({
+        chat-opts-fn: ::xa/chat-with-tools,
+        chat-stream-opts-fn: ::xa/chat-with-tools-stream,
+        model: smoke-model(),
+        provider-opts: key-opts(),
+        tools: tools,
+        max-iterations: 6,
+    })
+}
+
+test-live-text
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                chat-opts-fn: ::xa/chat-with-tools,
+                model: smoke-model(),
+                provider-opts: key-opts(),
+                system: "Reply with exactly the word pong, in lowercase, and nothing else.",
+                max-iterations: 1,
+            })
+            answer ::ai-chat/run-loop(opts, "ping")
+            assert(contains(lowercase(answer), "pong"), `text reply, got ${answer}`)
+        }
+    }
+}
+
+test-live-parallel-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop(chat-opts([WEATHER_TOOL]), "Call get_weather for Paris and for Rome, then tell me both results.")
+            assert(contains(answer, "Paris"), `names Paris, got ${answer}`)
+            assert(contains(answer, "Rome"), `names Rome, got ${answer}`)
+            assert(contains(answer, "18"), `uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-stream-tools
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop-stream(chat-opts([WEATHER_TOOL]), "Call get_weather for Oslo, then tell me the result.", ::ai-chat/noop-on-delta)
+            assert(contains(answer, "18"), `stream uses the tool's result, got ${answer}`)
+        }
+    }
+}
+
+test-live-zero-arg-tool
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop(chat-opts([YEAR_TOOL]), "Use the current_year tool and tell me the year it returns.")
+            assert(contains(answer, "2031"), `uses the zero-arg tool, got ${answer}`)
+        }
+    }
+}
+
+test-live-registry
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            opts ::ai-chat/ChatOptions({
+                model: smoke-model(),
+                providers: ::ai-chat/with-providers([::xa/provider()]),
+                provider-opts: key-opts(),
+                system: "Reply with exactly the word pong, in lowercase, and nothing else.",
+                max-iterations: 1,
+            })
+            answer ::ai-chat/run-loop(opts, "ping")
+            assert(contains(lowercase(answer), "pong"), `registry reply, got ${answer}`)
+        }
+    }
+}
+
+test-live-ends-run-tool
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            answer ::ai-chat/run-loop(chat-opts([SUBMIT_TOOL]), "What is 6 times 7? Submit the number with submit_answer.")
+            assert(starts-with(answer, "SUBMITTED: "), `the submit tool's output is the answer, got ${answer}`)
+            assert(contains(answer, "42"), `with the right number, got ${answer}`)
+        }
+    }
+}
+
+test-live-on-final-reply-nudge
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            nudge (reply, messages) { "You did not call submit_answer. Call it now with your answer." }
+            opts ::ai-chat/ChatOptions({...untype(chat-opts([SUBMIT_TOOL])), on-final-reply: nudge})
+            // The system prompt makes a plain-text first reply likely; the nudge gets the call.
+            with-system ::ai-chat/ChatOptions({...untype(opts), system: "Answer in plain text first. Only use tools when asked again."})
+            answer ::ai-chat/run-loop(with-system, "What is the capital of France?")
+            assert(starts-with(answer, "SUBMITTED: "), `nudged into submitting, got ${answer}`)
+            assert(contains(answer, "Paris"), `with the answer, got ${answer}`)
+        }
+    }
+}
+
+test-live-a-bad-key-is-an-err
+meta ["test"]
+fn () {
+    cond {
+        not(is-live()) => { assert(true) }
+        => {
+            bad {api-key: "xai-not-a-real-key-0000000000"}
+            reply ::xa/chat-with-tools(smoke-model(), [::ai-chat/user-message("Hi")], null, null, bad)
+            assert(is-err(reply), "a refused call is an Err")
+            streamed ::xa/chat-with-tools-stream(smoke-model(), [::ai-chat/user-message("Hi")], null, null, ::ai-chat/noop-on-delta, bad)
+            assert(is-err(streamed), "a refused stream is an Err")
+        }
+    }
+}

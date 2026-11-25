@@ -2,15 +2,16 @@
 
 hot.pkg.xai {
   name: "hot.dev/xai",
-  version: "1.2.5",
+  version: "1.3.0",
   hot-min-version: "3.0.2",
-  description: "xAI (Grok) API bindings for Hot. Includes Responses (Chat), Models, Collections (RAG), Images, Live Search (Web/X), and Video APIs.",
+  description: "xAI (Grok) API bindings for Hot. Includes Responses (Chat), a hot-ai tool-calling adapter, Models, Collections (RAG), Images, Live Search (Web/X), and Video APIs.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["ai"],
   deps: {
-    "hot.dev/hot-ai": "1.11.0"
+    "hot.dev/hot-ai": "1.11.0",
+    "hot.dev/openai": "1.3.6"
   },
   src-paths: ["src/"],
   test-paths: ["test/"]
