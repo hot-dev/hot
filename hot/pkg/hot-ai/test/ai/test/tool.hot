@@ -276,3 +276,33 @@ fn () {
     assert-eq("plain", ::tool/failure-output("plain", "t"))
     assert-eq("Tool t failed.", ::tool/failure-output(null, "t"))
 }
+
+test-failure-output-keeps-an-err-map-whole
+meta ["test"]
+fn () {
+    // An Err the tool returned has no `err` key: every field reaches the model.
+    rate {msg: "rate limited", retry_after: 30, code: 429}
+    assert-eq(rate, ::tool/failure-output(rate, "t"))
+    assert-eq({msg: 5}, ::tool/failure-output({msg: 5}, "t"))
+    // A halt's detail is dropped only when it is just `{error: msg}`.
+    assert-eq({message: "bad", data: {error: "bad", field: "x"}}, ::tool/failure-output({msg: "bad", err: {error: "bad", field: "x"}}, "t"))
+}
+
+returns-rate-limited
+meta {doc: "Test fixture: a tool that returns an Err Map."}
+fn (input: Str): Any { err({msg: "rate limited", retry_after: 30}) }
+
+fails-with-detail
+meta {doc: "Test fixture: a tool that fails with data beside the message."}
+fn (input: Str): Str { fail("bad", {error: "bad", field: "x"}) }
+
+test-dispatch-keeps-a-returned-err-map-and-fail-data
+meta ["test"]
+fn () {
+    rate dispatch-one(returns-rate-limited, "rate")
+    assert(rate.is-error)
+    assert-eq({msg: "rate limited", retry_after: 30}, rate.output)
+    failed dispatch-one(fails-with-detail, "detail")
+    assert(failed.is-error)
+    assert-eq({message: "bad", data: {error: "bad", field: "x"}}, failed.output)
+}

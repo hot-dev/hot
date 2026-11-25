@@ -326,29 +326,34 @@ meta {
     What the model sees for a failed tool call, from the error payload:
     a halt (`fail(msg)`, `fail(msg, data)`, a runtime error) becomes its
     message, or `{message, data}` when it carries data beyond the message.
-    An Err value the tool returned stays as is. A null payload names the
-    tool.
+    An Err value the tool returned stays as is, a Map with a `msg` key
+    included. A null payload names the tool.
 
     **Example**
 
     ```hot
     ::ai::tool/failure-output({msg: "card declined", err: "card declined"}, "charge")  // "card declined"
     ::ai::tool/failure-output({msg: "bad input", err: {field: "amount"}}, "charge")   // {message: "bad input", data: {field: "amount"}}
+    ::ai::tool/failure-output({msg: "rate limited", code: 429}, "charge")             // {msg: "rate limited", code: 429}
     ::ai::tool/failure-output(null, "charge")                                         // "Tool charge failed."
     ```
     """
 }
 fn (payload: Any, tool-name: Str): Any {
     // A halt's payload is a typed `::hot::run/Failure`; read it as a Map.
+    // Only a halt has both `msg` and `err`: an Err Map the tool returned,
+    // such as `{msg, code}`, stays whole.
     plain if(is-null(payload), null, untype(payload))
-    msg if(is-map(plain), get(plain, "msg"), null)
-    detail if(is-map(plain), get(plain, "err"), null)
+    is-halt and(is-map(plain), in("err", keys(plain)), is-str(get(plain, "msg")))
+    msg if(is-halt, get(plain, "msg"), null)
+    detail if(is-halt, get(plain, "err"), null)
     cond {
         is-null(payload) => { `Tool ${tool-name} failed.` }
-        not(is-str(msg)) => { payload }
+        not(is-halt) => { payload }
         is-null(detail) => { msg }
         eq(detail, msg) => { msg }
-        and(is-map(detail), eq(get(detail, "error"), msg)) => { msg }
+        // A runtime error's detail is just `{error: msg}`.
+        eq(detail, {error: msg}) => { msg }
         => { {message: msg, data: detail} }
     }
 }

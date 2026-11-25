@@ -2891,4 +2891,41 @@ f fn (items: Vec<Map>): Str {
         let source = Val::vec(vec![record(1)]);
         assert_eq!(run_pipeline(plan, &source), FusedRun::Deopt);
     }
+
+    // The JIT rewrites a function a lambda captures into a
+    // `Constant::FunctionRef`. Read as a value, it is the interpreter's
+    // FunctionRef, not the function's name as a Str.
+    #[test]
+    fn lowers_a_captured_function_as_a_function_ref() {
+        let mut prog = (*compile(
+            r#"::t ns
+f fn (n: Int): Vec {
+    g ::t/f
+    map([n], (x) { g })
+}
+"#,
+        ))
+        .clone();
+        let mut lam = find_lambda(&prog, &["x"]).clone();
+        let fn_const = prog.constants.len() as u32;
+        prog.constants.push(Constant::FunctionRef("::t/f".into()));
+        let mut rewrote = false;
+        for inst in &mut lam.instructions {
+            if let Instruction::LoadVar { dest, .. } = inst {
+                *inst = Instruction::LoadConst {
+                    dest: *dest,
+                    constant: fn_const,
+                };
+                rewrote = true;
+            }
+        }
+        assert!(rewrote, "the lambda reads its capture");
+        let lowered = lower_lambda(&prog, &lam).expect("lower");
+        assert_eq!(
+            lowered.expr,
+            PureExpr::ConstVal(crate::lang::runtime::function_ref::function_ref(
+                "::t/f".to_string()
+            ))
+        );
+    }
 }
