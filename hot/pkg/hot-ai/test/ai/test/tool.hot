@@ -306,6 +306,7 @@ fn () {
     // Not a fail(): the contained call's own error, typed as a Failure.
     contained ::hot::internal::exec/contain(call-with-one, [take-two, "x"])
     assert(is-err(contained))
+    assert(is-type(err-value(contained), Failure))
     out ::tool/failure-output(err-value(contained), "t")
     assert(is-str(out), `a message, got ${to-json(out)}`)
     assert(contains(out, "expects 2 arguments"), out)

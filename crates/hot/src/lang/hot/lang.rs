@@ -557,17 +557,21 @@ fn contained_error_payload(
     vm: &crate::lang::runtime::vm::VirtualMachine,
     err: impl ToString,
 ) -> Val {
-    if let Some(failure) = vm.get_failure() {
-        return failure.data;
-    }
-    if let Some(cancellation) = vm.get_cancellation() {
-        return cancellation.data;
-    }
+    let msg = match vm.get_failure() {
+        Some(failure) if !failure.plain_vm_error => return failure.data,
+        Some(failure) => failure.msg,
+        None => {
+            if let Some(cancellation) = vm.get_cancellation() {
+                return cancellation.data;
+            }
+            err.to_string()
+        }
+    };
 
-    // An error that isn't a halt (a call no overload takes, say) is a
-    // Failure too, typed as `fail()` types one, so code reading a contained
-    // Err tells halts from Err values by type.
-    let msg = err.to_string();
+    // An error that isn't a halt (a call no overload takes, say) — including
+    // one recorded via `record_halt` (`plain_vm_error`) inside a native HOF
+    // or lazy op — is a Failure too, typed as `fail()` types one, so code
+    // reading a contained Err tells halts from Err values by type.
     crate::val!({
         "$type": crate::lang::hot::exec::failure_type(vm),
         "$val": {

@@ -356,7 +356,7 @@ fn (payload: Any, tool-name: Str): Any {
         is-null(detail) => { msg }
         eq(detail, msg) => { msg }
         // An error the call stopped on has just `{error: msg}` as detail.
-        eq(detail, {error: msg}) => { msg }
+        and(failed, eq(detail, {error: msg})) => { msg }
         => { {message: msg, data: detail} }
     }
 }
