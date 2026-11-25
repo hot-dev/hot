@@ -675,3 +675,44 @@ most fn (a: Int, b: Int, c: Int, d: Int): Int { max(a, b, c, d) }
     assert_eq!(results[8], Ok(val!(i64::MAX)));
     assert!(was_compiled, "most stays compiled");
 }
+
+// A function value is a `FunctionRef` in the interpreter. Compiled code
+// loaded a function from another namespace, and one a lambda captured, as
+// its name, a `Str`, so `eq` on functions depended on which tier made them.
+#[test]
+fn jit_function_values_are_the_interpreters_function_refs() {
+    let source = r#"
+::u ns
+
+shout fn (s: Str): Str { s }
+
+::t ns
+
+returned fn (k: Int): Fn { ::u/shout }
+
+captured fn (k: Int): Fn {
+    f ::u/shout
+    g (x) { f }
+    g(k)
+}
+
+same fn (k: Int): Bool { eq(::u/shout, returned(k)) }
+
+same-captured fn (k: Int): Bool { eq(::u/shout, captured(k)) }
+"#;
+    let calls = vec![vec![val!(1)]];
+    for function in ["::t/returned", "::t/captured"] {
+        let (results, was_compiled) = same_outcomes(source, function, &calls);
+        assert!(was_compiled, "{function} compiles");
+        let Ok(value) = &results[0] else {
+            panic!("{function}: {results:?}");
+        };
+        let fn_ref = crate::lang::runtime::function_ref::extract_function_ref(value)
+            .unwrap_or_else(|| panic!("{function} gives a FunctionRef, got {value:?}"));
+        assert_eq!(fn_ref.name(), "::u/shout");
+    }
+    for function in ["::t/same", "::t/same-captured"] {
+        let (results, _) = same_outcomes(source, function, &calls);
+        assert_eq!(results, vec![Ok(val!(true))], "{function}");
+    }
+}

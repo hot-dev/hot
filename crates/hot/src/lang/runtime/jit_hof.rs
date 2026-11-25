@@ -388,6 +388,9 @@ enum RegContent {
     /// target (function name) or a string *value* (e.g. a `concat` operand or a
     /// template part).
     Str(String),
+    /// A loaded function constant: a `Call` target, or as a value the
+    /// `FunctionRef` the interpreter loads for it.
+    FnRef(String),
 }
 
 /// Resolve a register to a value expression. A bare string constant becomes a
@@ -399,6 +402,10 @@ fn reg_as_expr(
     match regs.get(&reg) {
         Some(RegContent::Expr(e, ty)) => Ok((e.clone(), *ty)),
         Some(RegContent::Str(s)) => Ok((PureExpr::ConstVal(Val::from(s.clone())), ExprType::Other)),
+        Some(RegContent::FnRef(s)) => Ok((
+            PureExpr::ConstVal(crate::lang::runtime::function_ref::function_ref(s.clone())),
+            ExprType::Other,
+        )),
         None => Err(Bailout::UndefinedRegister(reg)),
     }
 }
@@ -461,8 +468,11 @@ fn lower_callable_body(
                     Some(Constant::Val(Val::Str(s))) => {
                         regs.insert(*dest, RegContent::Str(s.to_string()));
                     }
-                    Some(Constant::StringRef(s)) | Some(Constant::FunctionRef(s)) => {
+                    Some(Constant::StringRef(s)) => {
                         regs.insert(*dest, RegContent::Str(s.to_string()));
+                    }
+                    Some(Constant::FunctionRef(s)) => {
+                        regs.insert(*dest, RegContent::FnRef(s.to_string()));
                     }
                     // Other constant values (`Dec`, `Null`, ...) are usable as
                     // values directly.
@@ -559,7 +569,7 @@ fn lower_callable_body(
                 args_count,
             } => {
                 let name = match regs.get(function) {
-                    Some(RegContent::Str(n)) => n.clone(),
+                    Some(RegContent::Str(n)) | Some(RegContent::FnRef(n)) => n.clone(),
                     Some(RegContent::Expr(_, _)) => {
                         return Err(Bailout::UndefinedRegister(*function));
                     }

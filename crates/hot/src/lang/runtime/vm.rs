@@ -4477,8 +4477,8 @@ impl VirtualMachine {
                 resolved
             }
             Constant::FunctionRef(name) => {
-                // Create a boxed function reference for deferred execution
-                let boxed = Val::boxed((*name).to_owned());
+                // A function value, the same one `LoadFunctionRef` loads.
+                let boxed = crate::lang::runtime::function_ref::function_ref(name.to_string());
                 tracing::trace!(
                     "VM: LoadConstant ID {} resolved FunctionRef({}) to {:?}",
                     constant_id,
