@@ -40,6 +40,8 @@ hot.project.hot-dev.deps {
     // AI packages used by checked demos
     "hot.dev/anthropic": { "local": "./hot/pkg/anthropic" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
+    "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/xai": { "local": "./hot/pkg/xai" },
 
     // Communication packages used by checked demos
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
