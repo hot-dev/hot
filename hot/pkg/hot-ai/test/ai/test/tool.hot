@@ -298,6 +298,26 @@ fails-with-detail
 meta {doc: "Test fixture: a tool that fails with data beside the message."}
 fn (input: Str): Str { fail("bad", {error: "bad", field: "x"}) }
 
+cancels
+meta {doc: "Test fixture: a tool that cancels."}
+fn (input: Str): Str { cancel("stopped by user") }
+
+cancels-with-data
+meta {doc: "Test fixture: a tool that cancels with data."}
+fn (input: Str): Str { cancel("stopped", {why: "quota"}) }
+
+test-dispatch-cancel-sends-its-message
+meta ["test"]
+fn () {
+    plain dispatch-one(cancels, "cancel")
+    assert(plain.is-error)
+    assert-eq("stopped by user", plain.output)
+    with-data dispatch-one(cancels-with-data, "cancel-data")
+    assert-eq({message: "stopped", data: {why: "quota"}}, with-data.output)
+    // A returned Err Map shaped like a Cancellation is still the tool's own.
+    assert-eq({msg: "m", data: 1}, ::tool/failure-output({msg: "m", data: 1}, "t"))
+}
+
 test-dispatch-keeps-a-returned-err-map-and-fail-data
 meta ["test"]
 fn () {

@@ -324,8 +324,9 @@ failure-output
 meta {
     doc: """
     What the model sees for a failed tool call, from the error payload:
-    a halt (`fail(msg)`, `fail(msg, data)`, a runtime error) becomes its
-    message, or `{message, data}` when it carries data beyond the message.
+    a halt (`fail(msg)`, `fail(msg, data)`, `cancel(msg)`, a runtime error)
+    becomes its message, or `{message, data}` when it carries data beyond
+    the message.
     An Err value the tool returned stays as is, a Map with a `msg` key
     included. A null payload names the tool.
 
@@ -345,9 +346,12 @@ fn (payload: Any, tool-name: Str): Any {
     // Err Map the tool returned — such as `{msg, code}` or `{msg, err, code}` —
     // stays whole.
     plain if(is-null(payload), null, untype(payload))
-    is-halt and(is-map(plain), eq(length(keys(plain)), 2), in("err", keys(plain)), is-str(get(plain, "msg")))
+    // A `cancel()` is a typed `Cancellation`, with its detail in `data`.
+    cancelled or(is-type(payload, ::hot::run/Cancellation), is-type(payload, ::hot::task/Cancellation))
+    failed and(is-map(plain), eq(length(keys(plain)), 2), in("err", keys(plain)), is-str(get(plain, "msg")))
+    is-halt or(cancelled, failed)
     msg if(is-halt, get(plain, "msg"), null)
-    detail if(is-halt, get(plain, "err"), null)
+    detail if(is-halt, get(plain, if(cancelled, "data", "err")), null)
     cond {
         is-null(payload) => { `Tool ${tool-name} failed.` }
         not(is-halt) => { payload }
