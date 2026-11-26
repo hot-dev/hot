@@ -13,8 +13,14 @@ exclude = ["target", "docs/book"]
 
 [profile.dev]
 opt-level = 1
-debug = 1
+# File:line for workspace panic backtraces; no variable info for debuggers.
+debug = "line-tables-only"
 incremental = true
+
+# No debug info for dependencies: their backtrace frames keep function names
+# but lose file:line. Override per crate to step into one in a debugger.
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 opt-level = 3
