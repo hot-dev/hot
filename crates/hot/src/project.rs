@@ -418,6 +418,57 @@ pub fn get_resolved_project_dependencies(
     resolver.resolve_all_dependencies_recursive(&project_deps, &project_overrides)
 }
 
+/// Content-hashed bytecode cache identity for a live build's current source
+/// files (resolved dependencies plus configured project `src_paths`).
+#[derive(Debug, Clone)]
+pub struct LiveBuildCacheKey {
+    pub cache_key: String,
+    pub file_hashes: Vec<crate::lang::cache::bytecode_cache::FileHash>,
+}
+
+/// Discover all live-build `.hot` files (resolved dependencies plus project
+/// `src_paths`), hash them, and calculate the shared bytecode cache key.
+///
+/// Both `hot_worker` and `hot_task_worker` use this helper so live builds share
+/// one content-addressed cache entry per source state instead of evicting each
+/// other or executing stale bytecode after edits.
+///
+/// Performs blocking filesystem I/O; call from a blocking thread in async workers.
+pub fn calculate_live_build_cache_key(
+    conf: &Val,
+    project_name: &str,
+    src_paths: &[String],
+) -> Result<LiveBuildCacheKey, String> {
+    let mut all_source_files = Vec::new();
+
+    if let Ok(resolved_deps) = get_resolved_project_dependencies(conf, project_name) {
+        for dep in &resolved_deps {
+            let dep_path = dep.resolved_path.to_string_lossy().to_string();
+            if let Ok(files) = crate::lang::engine::Engine::discover_hot_files(&dep_path) {
+                all_source_files.extend(files);
+            }
+        }
+    }
+
+    for src_path in src_paths {
+        if let Ok(files) = crate::lang::engine::Engine::discover_hot_files(src_path) {
+            all_source_files.extend(files);
+        }
+    }
+
+    let file_hashes =
+        crate::lang::cache::bytecode_cache::BytecodeCache::hash_files(&all_source_files)?;
+    let cache_key = crate::lang::cache::bytecode_cache::BytecodeCache::calculate_cache_key(
+        project_name,
+        &file_hashes,
+    )?;
+
+    Ok(LiveBuildCacheKey {
+        cache_key,
+        file_hashes,
+    })
+}
+
 /// Result type for compile_project_for_cache to satisfy clippy
 /// Returns (BytecodeProgram, function_mapping, core_functions, type_implementations, AST Program, HotAst)
 pub type CompileForCacheResult = (

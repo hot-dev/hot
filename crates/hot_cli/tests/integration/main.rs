@@ -13,6 +13,8 @@ mod deploy_local;
 #[cfg(unix)]
 mod event_handler_retries;
 #[cfg(unix)]
+mod live_build_cache;
+#[cfg(unix)]
 mod model_stream;
 mod skill_legacy_migration;
 mod undefined_project;

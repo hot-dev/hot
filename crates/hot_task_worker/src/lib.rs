@@ -8529,8 +8529,6 @@ async fn load_bytecode(
     worker_conf: Option<&Val>,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
-    let cache_key = build_id.to_string();
-
     let (db, conf) = match (db, worker_conf) {
         (Some(d), Some(c)) => (d, c),
         _ => {
@@ -8556,28 +8554,22 @@ async fn load_bytecode(
             *build_id,
             Arc::new(hot::lang::hot::resource::get_registry()),
         );
-        if let Ok(cached) = cache.load(&cache_key) {
-            tracing::debug!(build_id = %build_id, "Bytecode cache hit");
-            return Ok((cached, blocking_execution_permit));
-        }
 
+        // Live builds reuse one mutable `build_id` across edits, so cache
+        // lookup must key on freshly hashed source + dependency files (matching
+        // `hot_worker`). Keep both hashing and `cache.load` inside the blocking
+        // closure so file I/O does not run on async runtime threads.
         let build_id = *build_id;
         let cache_for_task = Arc::clone(&cache);
         let conf = conf.clone();
         let (loaded, permit) =
             run_blocking_with_execution_permit(blocking_execution_permit, move || {
-                load_bytecode_live(
-                    &build_id,
-                    &cache_key,
-                    &cache_for_task,
-                    &build,
-                    &project,
-                    &conf,
-                )
+                load_bytecode_live(&build_id, &cache_for_task, &build, &project, &conf)
             })
             .await?;
         Ok((loaded?, permit))
     } else {
+        let cache_key = build_id.to_string();
         load_bytecode_bundle(
             build_id,
             cache_key,
@@ -8591,17 +8583,36 @@ async fn load_bytecode(
     }
 }
 
-/// Load bytecode for a live build by compiling from source paths on disk.
+/// Load bytecode for a live build by content-hashing its current sources and
+/// dependencies, reusing the shared cache entry on hit and compiling on miss.
 fn load_bytecode_live(
     build_id: &Uuid,
-    cache_key: &str,
+    cache: &BytecodeCache,
+    build: &hot::db::Build,
+    project: &hot::db::Project,
+    conf: &Val,
+) -> Result<Arc<CachedBytecode>, String> {
+    load_bytecode_live_with(
+        build_id,
+        cache,
+        build,
+        project,
+        conf,
+        hot::project::calculate_live_build_cache_key,
+    )
+}
+
+fn load_bytecode_live_with<F>(
+    build_id: &Uuid,
     cache: &BytecodeCache,
     _build: &hot::db::Build,
     project: &hot::db::Project,
     conf: &Val,
-) -> Result<Arc<CachedBytecode>, String> {
-    tracing::debug!(build_id = %build_id, project = %project.name, "Bytecode cache miss — compiling live build from source");
-
+    mut calculate_key: F,
+) -> Result<Arc<CachedBytecode>, String>
+where
+    F: FnMut(&Val, &str, &[String]) -> Result<hot::project::LiveBuildCacheKey, String>,
+{
     let src_paths = hot::project::get_project_src_paths(conf, &project.name);
     if src_paths.is_empty() {
         return Err(format!(
@@ -8610,39 +8621,94 @@ fn load_bytecode_live(
         ));
     }
 
-    // Discover all source files (project sources + dependencies)
-    let mut all_source_files = Vec::new();
-    if let Ok(resolved_deps) = hot::project::get_resolved_project_dependencies(conf, &project.name)
-    {
-        for dep in &resolved_deps {
-            let dep_path = dep.resolved_path.to_string_lossy().to_string();
-            if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(&dep_path) {
-                all_source_files.extend(files);
+    let live_key = match calculate_key(conf, &project.name, &src_paths) {
+        Ok(key) => Some(key),
+        Err(first_error) => {
+            // Atomic editor saves or git checkouts can briefly drop a file
+            // between listing and reading. Retry once, then fall back to an
+            // uncached compile so tasks stay as resilient as event handlers.
+            tracing::debug!(
+                build_id = %build_id,
+                project = %project.name,
+                error = %first_error,
+                "Retrying live build cache key calculation after error"
+            );
+            match calculate_key(conf, &project.name, &src_paths) {
+                Ok(key) => Some(key),
+                Err(second_error) => {
+                    tracing::warn!(
+                        build_id = %build_id,
+                        project = %project.name,
+                        error = %second_error,
+                        "Failed to calculate live build cache key after retry; compiling without caching"
+                    );
+                    None
+                }
             }
         }
-    }
-    for src_path in &src_paths {
-        if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(src_path) {
-            all_source_files.extend(files);
-        }
+    };
+
+    let Some(live_key) = live_key else {
+        let (_, artifacts) = hot::lang::engine::Engine::compile_project_for_cache(
+            &src_paths,
+            Some(conf),
+            Some(&project.name),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| format!("Failed to compile live build: {}", e))?;
+        return Ok(hot::lang::engine::Engine::artifacts_to_cached_bytecode(
+            artifacts,
+        ));
+    };
+
+    if let Ok(cached) = cache.load(&live_key.cache_key) {
+        tracing::debug!(
+            build_id = %build_id,
+            project = %project.name,
+            cache_key = %&live_key.cache_key[..live_key.cache_key.len().min(12)],
+            "Bytecode cache hit"
+        );
+        return Ok(cached);
     }
 
-    let file_hashes =
-        hot::lang::cache::bytecode_cache::BytecodeCache::hash_files(&all_source_files)
-            .unwrap_or_default();
+    // Share the per-key in-process compilation lock with `hot_worker` and
+    // sibling tasks so concurrent misses compile a live edit once.
+    let compilation_lock = cache.get_compilation_lock(&live_key.cache_key);
+    let _compilation_guard = compilation_lock.lock();
+    if let Ok(cached) = cache.load(&live_key.cache_key) {
+        tracing::debug!(
+            build_id = %build_id,
+            project = %project.name,
+            cache_key = %&live_key.cache_key[..live_key.cache_key.len().min(12)],
+            "Bytecode cache hit after waiting on compilation lock"
+        );
+        return Ok(cached);
+    }
+
+    tracing::debug!(
+        build_id = %build_id,
+        project = %project.name,
+        cache_key = %&live_key.cache_key[..live_key.cache_key.len().min(12)],
+        "Bytecode cache miss — compiling live build from source"
+    );
 
     hot::lang::engine::Engine::compile_to_cache(
         &src_paths,
         cache,
         &project.name,
-        Some(cache_key),
-        Some(file_hashes),
+        Some(&live_key.cache_key),
+        Some(live_key.file_hashes),
         Some(conf),
     )
     .map_err(|e| format!("Failed to compile live build: {}", e))?;
 
     cache
-        .load(cache_key)
+        .load(&live_key.cache_key)
         .map_err(|e| format!("Failed to load compiled bytecode: {}", e))
 }
 
@@ -11424,7 +11490,15 @@ mod tests {
         .await
         .unwrap();
         drop(permit);
-        assert!(cache.load(&fixture.build_id.to_string()).is_ok());
+        let src_paths = hot::project::get_project_src_paths(&conf, "test-project");
+        let live_key =
+            hot::project::calculate_live_build_cache_key(&conf, "test-project", &src_paths)
+                .unwrap();
+        assert!(cache.load(&live_key.cache_key).is_ok());
+        assert!(
+            cache.load(&fixture.build_id.to_string()).is_err(),
+            "live builds must key on content hash, not build_id"
+        );
 
         let sibling_env = Uuid::now_v7();
         Env::insert_env(
@@ -11459,6 +11533,226 @@ mod tests {
             result.is_err(),
             "a warm cache cannot replace scope authorization"
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_build_shares_content_hash_cache_and_recompiles_on_edit() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-live-edit-{}", Uuid::new_v4()));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let source_file = source.join("live.hot");
+        std::fs::write(&source_file, "::live ns\nanswer fn () { \"v1\" }\n").unwrap();
+
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let conf = val!({
+            "set": {"profile": "selected"},
+            "profile": {"selected": {
+                "user": {"email": "local@hot.dev"}, "org": {"slug": "local"},
+                "env": {"name": "development"}
+            }},
+            "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
+        });
+        let src_paths = hot::project::get_project_src_paths(&conf, "test-project");
+
+        // Warm the shared cache using the same helper and path `hot_worker` uses.
+        let key_v1 =
+            hot::project::calculate_live_build_cache_key(&conf, "test-project", &src_paths)
+                .unwrap();
+        hot::lang::engine::Engine::compile_to_cache(
+            &src_paths,
+            &cache,
+            "test-project",
+            Some(&key_v1.cache_key),
+            Some(key_v1.file_hashes.clone()),
+            Some(&conf),
+        )
+        .unwrap();
+        let event_v1 = cache.load(&key_v1.cache_key).unwrap();
+
+        // Task worker hits the event worker's exact warm entry without recompiling or evicting it.
+        let slots = Arc::new(Semaphore::new(1));
+        let (task_v1, permit) = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            Arc::ptr_eq(&event_v1, &task_v1),
+            "task worker should reuse the warm event-worker cache entry without recompiling"
+        );
+        let event_after_task = cache.load(&key_v1.cache_key).unwrap();
+        assert!(
+            Arc::ptr_eq(&event_v1, &event_after_task),
+            "task worker must not evict the event worker's cache entry"
+        );
+
+        let v1_result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+            "::live/answer",
+            &[],
+            task_v1.clone(),
+            Some(&conf),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(v1_result, Val::from("v1"));
+
+        // Edit the live source file in place: the mutable live build_id is unchanged,
+        // so the very next task load must detect the new content hash and recompile.
+        std::fs::write(&source_file, "::live ns\nanswer fn () { \"v2\" }\n").unwrap();
+        let key_v2 =
+            hot::project::calculate_live_build_cache_key(&conf, "test-project", &src_paths)
+                .unwrap();
+        assert_ne!(key_v1.cache_key, key_v2.cache_key);
+
+        let (task_v2, permit) = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(!Arc::ptr_eq(&task_v1, &task_v2));
+
+        let v2_result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+            "::live/answer",
+            &[],
+            task_v2.clone(),
+            Some(&conf),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(v2_result, Val::from("v2"));
+
+        // Event worker's next lookup sees the updated v2 cache entry without recompiling,
+        // and the superseded v1 entry was cleaned up by scope generation replacement.
+        let event_v2 = cache.load(&key_v2.cache_key).unwrap();
+        assert!(Arc::ptr_eq(&task_v2, &event_v2));
+        assert!(cache.load(&key_v1.cache_key).is_err());
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_build_key_calc_retries_once_then_falls_back_to_uncached_compile() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let build = Build::get_build(&db, &fixture.build_id).await.unwrap();
+        let project = hot::db::Project::get_project(&db, &build.project_id)
+            .await
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-live-retry-{}", Uuid::new_v4()));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("retry.hot"),
+            "::retry ns\nanswer fn () { \"ok\" }\n",
+        )
+        .unwrap();
+        let conf = val!({
+            "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
+        });
+
+        // 1. A transient failure on the first attempt retries once and caches normally.
+        let retry_cache = BytecodeCache::new(directory.join("cache-retry"));
+        let mut attempts = 0usize;
+        let cached = load_bytecode_live_with(
+            &fixture.build_id,
+            &retry_cache,
+            &build,
+            &project,
+            &conf,
+            |c, name, paths| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err("transient vanished file".to_string())
+                } else {
+                    hot::project::calculate_live_build_cache_key(c, name, paths)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+        let src_paths = hot::project::get_project_src_paths(&conf, "test-project");
+        let expected_key =
+            hot::project::calculate_live_build_cache_key(&conf, "test-project", &src_paths)
+                .unwrap();
+        assert!(Arc::ptr_eq(
+            &cached,
+            &retry_cache.load(&expected_key.cache_key).unwrap()
+        ));
+
+        // 2. If both attempts fail, compile without caching instead of failing the task.
+        let uncached_dir = directory.join("cache-uncached");
+        let uncached_cache = BytecodeCache::new(uncached_dir.clone());
+        let mut fail_attempts = 0usize;
+        let compiled = load_bytecode_live_with(
+            &fixture.build_id,
+            &uncached_cache,
+            &build,
+            &project,
+            &conf,
+            |_, _, _| {
+                fail_attempts += 1;
+                Err("persistent hash error".to_string())
+            },
+        )
+        .unwrap();
+        assert_eq!(fail_attempts, 2);
+        assert!(
+            !uncached_dir.exists(),
+            "uncached fallback must not write a cache entry"
+        );
+        let val = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+            "::retry/answer",
+            &[],
+            compiled,
+            Some(&conf),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(val, Val::from("ok"));
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 

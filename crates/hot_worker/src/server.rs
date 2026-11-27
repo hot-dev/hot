@@ -6547,35 +6547,20 @@ async fn find_build_for_function(
                     continue;
                 }
 
-                // Collect source files for cache key
-                let mut all_source_files = Vec::new();
-                if let Ok(resolved_deps) =
-                    hot::project::get_resolved_project_dependencies(worker_conf, &project.name)
-                {
-                    for dep in &resolved_deps {
-                        let dep_path = dep.resolved_path.to_string_lossy().to_string();
-                        if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(&dep_path)
-                        {
-                            all_source_files.extend(files);
-                        }
-                    }
-                }
-                for src_path in &src_paths {
-                    if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(src_path) {
-                        all_source_files.extend(files);
-                    }
-                }
-
-                // Calculate cache key
-                let file_hashes =
-                    hot::lang::cache::bytecode_cache::BytecodeCache::hash_files(&all_source_files)
-                        .unwrap_or_default();
-                let Ok(cache_key) =
-                    hot::lang::cache::bytecode_cache::BytecodeCache::calculate_cache_key(
+                // Calculate content-hashed cache key shared with `hot_task_worker`.
+                // Retry once in case an atomic editor save briefly hid a file.
+                let Ok(live_key) = hot::project::calculate_live_build_cache_key(
+                    worker_conf,
+                    &project.name,
+                    &src_paths,
+                )
+                .or_else(|_| {
+                    hot::project::calculate_live_build_cache_key(
+                        worker_conf,
                         &project.name,
-                        &file_hashes,
+                        &src_paths,
                     )
-                else {
+                }) else {
                     tracing::error!(
                         "ROUTING: Live build {} failed to calculate cache key",
                         build.build_id
@@ -6583,6 +6568,8 @@ async fn find_build_for_function(
                     unavailable_builds += 1;
                     continue;
                 };
+                let cache_key = live_key.cache_key;
+                let file_hashes = live_key.file_hashes;
 
                 let mut check_result = bytecode_has_function(cache, &cache_key, function_name);
 
@@ -7427,30 +7414,29 @@ async fn execute_single_event_handler_inner(
             hashes.len()
         );
         (key, hashes)
-    } else {
-        // Non-bundle: discover and hash files dynamically
-        let mut all_source_files = Vec::new();
-
-        // Load project dependencies for cache key
-        if let Ok(resolved_deps) =
-            hot::project::get_resolved_project_dependencies(worker_conf, &project.name)
-        {
-            for dep in &resolved_deps {
-                let dep_path = dep.resolved_path.to_string_lossy().to_string();
-                if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(&dep_path) {
-                    all_source_files.extend(files);
-                }
+    } else if !is_bundle_build {
+        // Live build: discover and hash dependencies + project source files
+        // using the same content-hash helper as `hot_task_worker`. Retry once
+        // for transient atomic editor saves before falling back to uncached.
+        match hot::project::calculate_live_build_cache_key(worker_conf, &project.name, &src_paths)
+            .or_else(|_| {
+                hot::project::calculate_live_build_cache_key(worker_conf, &project.name, &src_paths)
+            }) {
+            Ok(live_key) => (live_key.cache_key, live_key.file_hashes),
+            Err(e) => {
+                tracing::warn!("Failed to calculate live build cache key: {}", e);
+                (String::new(), Vec::new())
             }
         }
-
-        // Add source files
+    } else {
+        // Bundle build without manifest (fallback): hash only bundled src_paths
+        // without resolving host dependencies.
+        let mut all_source_files = Vec::new();
         for src_path in &src_paths {
             if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(src_path) {
                 all_source_files.extend(files);
             }
         }
-
-        // Calculate file hashes for cache validation
         let hashes =
             match hot::lang::cache::bytecode_cache::BytecodeCache::hash_files(&all_source_files) {
                 Ok(h) => h,
@@ -7459,8 +7445,6 @@ async fn execute_single_event_handler_inner(
                     Vec::new()
                 }
             };
-
-        // Calculate cache key
         let key = match hot::lang::cache::bytecode_cache::BytecodeCache::calculate_cache_key(
             &project.name,
             &hashes,
@@ -7471,7 +7455,6 @@ async fn execute_single_event_handler_inner(
                 String::new()
             }
         };
-
         (key, hashes)
     };
 
@@ -7504,50 +7487,20 @@ async fn execute_single_event_handler_inner(
     let cached_bytecode = if !cache_key.is_empty() && effective_cache.exists(&cache_key) {
         match effective_cache.load(&cache_key) {
             Ok(cached) => {
-                // For bundle builds with manifest, we trust the manifest's hashes
-                // (they were computed at build time and are authoritative)
-                // For non-bundle builds, validate files haven't changed
-                if bundle_manifest.is_some() {
-                    debug!(
-                        "✓ Bytecode cache hit for bundle '{}' (key: {}) - trusting manifest hashes",
-                        project.name,
-                        &cache_key[..cache_key.len().min(12)]
-                    );
-                    Some(cached)
-                } else {
-                    // Non-bundle: discover files and validate hashes
-                    let mut all_source_files = Vec::new();
-                    for src_path in &src_paths {
-                        if let Ok(files) = hot::lang::engine::Engine::discover_hot_files(src_path) {
-                            all_source_files.extend(files);
-                        }
-                    }
-
-                    match hot::lang::cache::bytecode_cache::BytecodeCache::validate_file_hashes(
-                        &all_source_files,
-                        &cached.metadata.file_hashes,
-                    ) {
-                        Ok(true) => {
-                            debug!(
-                                "✓ Bytecode cache hit for project '{}' (key: {})",
-                                project.name,
-                                &cache_key[..cache_key.len().min(12)]
-                            );
-                            Some(cached)
-                        }
-                        Ok(false) => {
-                            debug!(
-                                "✗ Bytecode cache invalid for project '{}' - files changed, will recompile",
-                                project.name
-                            );
-                            None
-                        }
-                        Err(e) => {
-                            tracing::warn!("Cache validation failed: {}, will recompile", e);
-                            None
-                        }
-                    }
-                }
+                // Both bundle manifests and live builds already address the
+                // cache by a fresh content hash of all compiled inputs (sources
+                // plus dependencies), so a key hit is already hash-validated.
+                debug!(
+                    "✓ Bytecode cache hit for {} '{}' (key: {})",
+                    if bundle_manifest.is_some() {
+                        "bundle"
+                    } else {
+                        "project"
+                    },
+                    project.name,
+                    &cache_key[..cache_key.len().min(12)]
+                );
+                Some(cached)
             }
             Err(e) => {
                 tracing::warn!("Failed to load cache: {}, will compile from source", e);
