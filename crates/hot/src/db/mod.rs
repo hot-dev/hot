@@ -497,6 +497,9 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "schema": DEFAULT_DB_SCHEMA,
         "statement-timeout-ms": 30_000i64,
         "lock-timeout-ms": 5_000i64,
+        "min-connections": i64::from(crate::runtime_budget::DEFAULT_POSTGRES_MIN_CONNECTIONS),
+        "max-connections": "auto",
+        "reserved-connections": crate::runtime_budget::DEFAULT_POSTGRES_RESERVED_CONNECTIONS as i64,
     });
 
     // Extract db-specific configuration from the full config
@@ -591,6 +594,102 @@ pub fn redact_password(uri: &str) -> String {
             None => uri.to_string(),
         },
     }
+}
+
+/// Fail fast on pool acquisition instead of stalling callers indefinitely.
+const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Reap burst connections after 60s idle while `min_connections` keeps a warm
+/// baseline open for immediate reuse.
+const POSTGRES_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Periodically recycle connections (30 minutes) so PostgreSQL backends release
+/// session-local memory and prepared-statement caches.
+const POSTGRES_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(1800);
+/// Ping pooled connections idle for at least this long before returning them
+/// to a caller.
+///
+/// sqlx's idle reaper runs on a period of `min(idle_timeout, max_lifetime)`
+/// (60s), so a connection returned just after a reaper tick can remain in the
+/// idle queue for nearly `2 * idle_timeout` (~120s) before reaping. In
+/// distributed deployments (Cloud SQL Auth Proxy, RDS Proxy, PgBouncer, NAT
+/// gateways, L4 load balancers, or primary failovers), intermediaries can
+/// silently half-close idle TCP sockets within that window.
+///
+/// Pairing `test_before_acquire(false)` with this conditional `before_acquire`
+/// ping preserves both latency and distributed reliability:
+/// - Hot/warm connections (`idle_for < 30s`) incur zero extra network RTT.
+/// - Longer-idle connections (`idle_for >= 30s`) run PostgreSQL's lightweight
+///   protocol `Sync` ping (`Connection::ping`) inside `Pool::acquire`, so dead
+///   sockets are hard-closed and transparently replaced before
+///   `ScopedPgPool::begin` sends `BEGIN; SELECT hot.apply_scope(...)`.
+const POSTGRES_IDLE_PING_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Validate a PostgreSQL schema identifier before interpolating it into session
+/// initialization SQL.
+///
+/// Accepts lowercase ASCII SQL identifiers (`[a-z_][a-z0-9_]*`, up to
+/// PostgreSQL's 63-byte `NAMEDATALEN - 1` limit), rejecting uppercase
+/// characters (which PostgreSQL folds to lowercase when creating unquoted
+/// schemas while `SET search_path = "Mixed"` preserves case and silently falls
+/// back to `public`), quotes, semicolons, whitespace, `$` (which has special
+/// `$user` meaning in `search_path`), NUL bytes, and other characters that
+/// could break quoting or inject SQL.
+fn validate_postgres_schema_name(schema: &str) -> Result<&str, DatabaseError> {
+    if schema.is_empty() || schema.len() > 63 {
+        return Err(DatabaseError::Connection(sqlx::Error::Configuration(
+            format!(
+                "Invalid PostgreSQL schema name {:?}: must be 1..=63 lowercase ASCII identifier characters",
+                schema
+            )
+            .into(),
+        )));
+    }
+    let mut chars = schema.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !(first_ok && rest_ok) {
+        return Err(DatabaseError::Connection(sqlx::Error::Configuration(
+            format!(
+                "Invalid PostgreSQL schema name {:?}: must match [a-z_][a-z0-9_]* (lowercase ASCII identifier)",
+                schema
+            )
+            .into(),
+        )));
+    }
+    Ok(schema)
+}
+
+/// Build the single multi-statement PostgreSQL `after_connect` session init SQL.
+///
+/// Executed via `sqlx::raw_sql` (PostgreSQL Simple Query protocol, no prepared
+/// statements), combining `search_path`, `statement_timeout`, `lock_timeout`,
+/// and optional `jit = off` into a single network round trip per new connection.
+fn build_postgres_after_connect_sql(
+    schema: &str,
+    statement_timeout_ms: i64,
+    lock_timeout_ms: i64,
+    jit: bool,
+) -> Result<String, DatabaseError> {
+    let schema = validate_postgres_schema_name(schema)?;
+    // Defense-in-depth double-quoted identifier escaping even after strict
+    // identifier validation above. Double-quoting preserves exact schema casing.
+    let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
+    let statement_timeout_ms = statement_timeout_ms.clamp(0, i64::from(i32::MAX));
+    let lock_timeout_ms = lock_timeout_ms.clamp(0, i64::from(i32::MAX));
+
+    let mut sql = format!(
+        "SET search_path = {quoted_schema}, \"public\"; \
+         SET statement_timeout = {statement_timeout_ms}; \
+         SET lock_timeout = {lock_timeout_ms}"
+    );
+    // Hot's statements are short lookups. Under RLS their cost estimates can
+    // still cross PostgreSQL's JIT thresholds, and compiling then dwarfs
+    // running them.
+    if !jit {
+        sql.push_str("; SET jit = off");
+    }
+    Ok(sql)
 }
 
 /// Create a database connection pool
@@ -704,51 +803,45 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                 .clamp(0, i64::from(i32::MAX));
 
             let jit = conf.get_bool_or_default("db.jit", conf.get_bool_or_default("jit", false));
+            let after_connect_sql: std::sync::Arc<str> = build_postgres_after_connect_sql(
+                &schema,
+                statement_timeout_ms,
+                lock_timeout_ms,
+                jit,
+            )?
+            .into();
             let max_connections = crate::runtime_budget::derive_postgres_pool_connections(conf);
+            let min_connections =
+                crate::runtime_budget::derive_postgres_pool_min_connections(conf, max_connections);
             tracing::debug!(
-                "Postgres pool max_connections={} from derived local execution budget",
+                "Postgres pool min_connections={}, max_connections={}",
+                min_connections,
                 max_connections
             );
 
             let db = PgPoolOptions::new()
                 .max_connections(max_connections)
+                .min_connections(min_connections)
                 .test_before_acquire(false)
                 .before_acquire(|connection, metadata| {
                     Box::pin(async move {
-                        if metadata.idle_for >= std::time::Duration::from_secs(30) {
+                        if metadata.idle_for >= POSTGRES_IDLE_PING_THRESHOLD {
                             sqlx::Connection::ping(connection).await?;
                         }
                         Ok(true)
                     })
                 })
-                .acquire_timeout(std::time::Duration::from_secs(5)) // Fail fast instead of hanging
-                .idle_timeout(std::time::Duration::from_secs(60))
-                .max_lifetime(std::time::Duration::from_secs(1800)) // 30 minutes
+                .acquire_timeout(POSTGRES_ACQUIRE_TIMEOUT)
+                .idle_timeout(POSTGRES_IDLE_TIMEOUT)
+                .max_lifetime(POSTGRES_MAX_LIFETIME)
                 .after_connect(move |conn, _meta| {
-                    let schema = schema.clone();
+                    let init_sql = std::sync::Arc::clone(&after_connect_sql);
                     Box::pin(async move {
-                        // Set search_path so queries use the correct schema
-                        conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set search_path = '{}', 'public'",
-                            schema
-                        )))
-                        .await?;
-                        conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set statement_timeout = {}",
-                            statement_timeout_ms
-                        )))
-                        .await?;
-                        conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set lock_timeout = {}",
-                            lock_timeout_ms
-                        )))
-                        .await?;
-                        // Hot's statements are short lookups. Under RLS their
-                        // cost estimates can still cross PostgreSQL's JIT
-                        // thresholds, and compiling then dwarfs running them.
-                        if !jit {
-                            conn.execute("set jit = off").await?;
-                        }
+                        // Run all session SET statements in one Simple Query
+                        // network round trip without preparing statements.
+                        sqlx::raw_sql(sqlx::AssertSqlSafe(init_sql))
+                            .execute(conn)
+                            .await?;
                         Ok(())
                     })
                 })
@@ -974,6 +1067,8 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
                 "db.schema",
                 &conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA),
             );
+            let schema = validate_postgres_schema_name(&schema)?.to_string();
+            let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
             let ledger_schema = schema.clone();
             let migrator = sqlx::migrate::Migrator::new(DatabaseType::Postgres.migration_dir()?)
                 .await
@@ -981,11 +1076,10 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .after_connect(move |conn, _meta| {
-                    let schema = schema.clone();
+                    let quoted_schema = quoted_schema.clone();
                     Box::pin(async move {
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set search_path = '{}', 'public'",
-                            schema
+                            "SET search_path = {quoted_schema}, \"public\""
                         )))
                         .await?;
                         Ok(())
@@ -1343,6 +1437,8 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                     conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA)
                 }
             };
+            let schema = validate_postgres_schema_name(&schema)?.to_string();
+            let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
             tracing::debug!("Using Postgres migration schema: {}", schema);
             let marker_schema = schema.clone();
 
@@ -1356,6 +1452,7 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                 .max_connections(1)
                 .after_connect(move |conn, _meta| {
                     let schema = schema.clone();
+                    let quoted_schema = quoted_schema.clone();
                     Box::pin(async move {
                         conn.execute(sqlx::AssertSqlSafe(format!(
                             "set lock_timeout = {}",
@@ -1364,14 +1461,12 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                         .await?;
                         tracing::debug!("Creating schema if not exists: {}", schema);
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "create schema if not exists {}",
-                            schema
+                            "create schema if not exists {quoted_schema}"
                         )))
                         .await?;
                         tracing::debug!("Setting migration search path to: {}", schema);
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set search_path = '{}', 'public'",
-                            schema
+                            "set search_path = {quoted_schema}, \"public\""
                         )))
                         .await?;
                         Ok(())
@@ -2407,5 +2502,218 @@ RAIgVLtiEAJqJUn5jcrbBp64dybn2lSZLjwWiOuRu/15XO8CIHYES7qOpXLcobdc
                 expected_prefix
             );
         }
+    }
+
+    // ========================================================================
+    // Postgres pool tuning & after_connect SQL builder tests
+    // ========================================================================
+
+    #[test]
+    fn postgres_after_connect_sql_merges_settings_with_jit_off_and_on() {
+        let with_jit_off = build_postgres_after_connect_sql("hot", 30_000, 5_000, false).unwrap();
+        assert_eq!(
+            with_jit_off,
+            "SET search_path = \"hot\", \"public\"; \
+             SET statement_timeout = 30000; \
+             SET lock_timeout = 5000; \
+             SET jit = off"
+        );
+
+        let with_jit_on = build_postgres_after_connect_sql("hot", 30_000, 5_000, true).unwrap();
+        assert_eq!(
+            with_jit_on,
+            "SET search_path = \"hot\", \"public\"; \
+             SET statement_timeout = 30000; \
+             SET lock_timeout = 5000"
+        );
+
+        // Negative and out-of-range timeouts clamp safely to PostgreSQL's 0..=i32::MAX range.
+        let clamped = build_postgres_after_connect_sql("hot", -50, i64::MAX, false).unwrap();
+        assert_eq!(
+            clamped,
+            format!(
+                "SET search_path = \"hot\", \"public\"; \
+                 SET statement_timeout = 0; \
+                 SET lock_timeout = {}; \
+                 SET jit = off",
+                i32::MAX
+            )
+        );
+    }
+
+    #[test]
+    fn postgres_after_connect_sql_validates_and_quotes_schema() {
+        let max_len_schema = "a".repeat(63);
+        for valid in ["hot", "public", "_app_v2", "my_schema_1", &max_len_schema] {
+            let sql = build_postgres_after_connect_sql(valid, 10_000, 2_000, true).unwrap();
+            assert!(
+                sql.starts_with(&format!("SET search_path = \"{valid}\", \"public\";")),
+                "unexpected SQL for valid schema {valid:?}: {sql}"
+            );
+        }
+
+        let too_long = "a".repeat(64);
+        for invalid in [
+            "",
+            &too_long,
+            "HOT",
+            "MySchema_1",
+            "123abc",
+            "$user",
+            "hot-dev",
+            "hot public",
+            "hot, pg_catalog",
+            "hot'; DROP TABLE org; --",
+            "hot\"; DROP TABLE org; --",
+            "hot\0",
+            "hot\nSET role = postgres",
+        ] {
+            let err = build_postgres_after_connect_sql(invalid, 30_000, 5_000, false)
+                .expect_err(&format!("expected schema {invalid:?} to be rejected"));
+            assert!(
+                matches!(
+                    err,
+                    DatabaseError::Connection(sqlx::Error::Configuration(_))
+                ),
+                "expected configuration error for {invalid:?}, got: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_create_db_pool_rejects_invalid_schema_before_connecting() {
+        let conf = crate::val!({
+            "db": {
+                "uri": "postgres://hot_runtime:x@127.0.0.1:1/hot",
+                "schema": "hot\"; DROP TABLE org; --",
+                "rls": {"enforce": false},
+            }
+        });
+        let err = create_db_pool(&conf)
+            .await
+            .err()
+            .expect("invalid schema must fail before connecting");
+        assert!(
+            matches!(
+                err,
+                DatabaseError::Connection(sqlx::Error::Configuration(_))
+            ),
+            "expected configuration error, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_migration_paths_reject_invalid_schema_before_connecting() {
+        for bad_schema in ["MySchema", "hot\"; DROP TABLE org; --"] {
+            let conf = crate::val!({
+                "db": {
+                    "uri": "postgres://hot_runtime:x@127.0.0.1:1/hot",
+                    "migration-uri": "postgres://hot_owner:x@127.0.0.1:1/hot",
+                    "schema": bad_schema,
+                }
+            });
+            let state_err = migration_state(&conf)
+                .await
+                .expect_err("migration_state must reject invalid schema before connecting");
+            assert!(
+                matches!(
+                    state_err,
+                    DatabaseError::Connection(sqlx::Error::Configuration(_))
+                ),
+                "expected configuration error from migration_state for {bad_schema:?}, got: {state_err:?}"
+            );
+
+            let migrate_err = run_migrations(&conf)
+                .await
+                .expect_err("run_migrations must reject invalid schema before connecting");
+            assert!(
+                matches!(
+                    migrate_err,
+                    DatabaseError::Connection(sqlx::Error::Configuration(_))
+                ),
+                "expected configuration error from run_migrations for {bad_schema:?}, got: {migrate_err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_resolved_conf_includes_default_and_overrides_pool_sizing() {
+        let defaults = get_resolved_conf(Val::map_empty());
+        assert_eq!(defaults.get_int("min-connections"), 2);
+        assert_eq!(defaults.get_str("max-connections"), "auto");
+        assert_eq!(defaults.get_int("reserved-connections"), 4);
+        assert_eq!(
+            crate::runtime_budget::derive_postgres_pool_connections(&defaults),
+            10
+        );
+
+        // Resolved db_conf (as passed by hot_api and hot_app) preserves
+        // explicit max-connections, min-connections, and reserved-connections.
+        let explicit = get_resolved_conf(crate::val!({
+            "db": {
+                "min-connections": 0i64,
+                "max-connections": 40i64,
+                "reserved-connections": 8i64,
+            }
+        }));
+        assert_eq!(explicit.get_int("min-connections"), 0);
+        assert_eq!(explicit.get_int("max-connections"), 40);
+        assert_eq!(explicit.get_int("reserved-connections"), 8);
+        let max_conns = crate::runtime_budget::derive_postgres_pool_connections(&explicit);
+        assert_eq!(max_conns, 40);
+        assert_eq!(
+            crate::runtime_budget::derive_postgres_pool_min_connections(&explicit, max_conns),
+            0
+        );
+    }
+
+    #[test]
+    fn postgres_idle_ping_threshold_stays_below_idle_timeout() {
+        const {
+            assert!(POSTGRES_IDLE_PING_THRESHOLD.as_secs() < POSTGRES_IDLE_TIMEOUT.as_secs());
+            assert!(POSTGRES_IDLE_TIMEOUT.as_secs() < POSTGRES_MAX_LIFETIME.as_secs());
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_pool_applies_merged_after_connect_and_min_connections() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
+            return;
+        };
+        let conf = crate::val!({
+            "uri": uri,
+            "schema": "hot",
+            "rls": {"enforce": false},
+            "statement-timeout-ms": 12_345i64,
+            "lock-timeout-ms": 2_345i64,
+            "jit": false,
+            "min-connections": 2i64,
+        });
+        let DatabasePool::Postgres(pool) = create_db_pool(&conf).await.unwrap() else {
+            panic!("expected Postgres pool");
+        };
+        assert!(
+            pool.size() >= 2,
+            "expected at least 2 warm connections, got {}",
+            pool.size()
+        );
+        let health = pool.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Health));
+        let (search_path, stmt_timeout, lock_timeout, jit): (String, String, String, String) =
+            sqlx::query_as(
+                "SELECT current_setting('search_path'), \
+                        current_setting('statement_timeout'), \
+                        current_setting('lock_timeout'), \
+                        current_setting('jit')",
+            )
+            .fetch_one(&health)
+            .await
+            .unwrap();
+        assert!(search_path.contains("hot"), "search_path={search_path}");
+        assert!(search_path.contains("public"), "search_path={search_path}");
+        assert_eq!(stmt_timeout, "12345ms");
+        assert_eq!(lock_timeout, "2345ms");
+        assert_eq!(jit, "off");
+        pool.close().await;
     }
 }

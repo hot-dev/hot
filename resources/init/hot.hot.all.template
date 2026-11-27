@@ -76,6 +76,13 @@ hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
 hot.db.schema "hot"
 hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
 hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
+// PostgreSQL only: connection pool sizing per process.
+// max-connections: "auto" derives from worker/task concurrency + reserved-connections (floor 10, cap 50);
+// an explicit integer sets the pool size directly for any process (including API and App).
+hot.db.max-connections ::env/get("HOT_DB_MAX_CONNECTIONS", "auto")
+hot.db.reserved-connections Int(::env/get("HOT_DB_RESERVED_CONNECTIONS", "4"))
+// Warm connections kept open per process (clamped to pool max; 0 disables).
+hot.db.min-connections Int(::env/get("HOT_DB_MIN_CONNECTIONS", "2"))
 // PostgreSQL only: the schema owner's URI, for `hot db migrate` and index
 // provisioning. Services connect with db.uri, a restricted runtime login.
 // Give HOT_DB_MIGRATION_URI to migration jobs only.
@@ -415,8 +422,6 @@ hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
 hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
 hot.worker.vm-memory-mb Int(::env/get("HOT_WORKER_VM_MEMORY_MB", "256"))
 hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "512"))
-hot.worker.db-reserved-connections Int(::env/get("HOT_WORKER_DB_RESERVED_CONNECTIONS", "4"))
-hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
 hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
 hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
 hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
