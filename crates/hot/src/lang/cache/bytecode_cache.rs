@@ -242,8 +242,7 @@ struct CacheFilePayloadEncode<'a> {
 }
 
 /// Decode a decompressed cache payload into a runtime-ready
-/// [`CachedBytecode`]. Shared by the on-disk cache and the hot-std
-/// release artifact. Performs no metadata validation — callers decide
+/// [`CachedBytecode`]. Performs no metadata validation — callers decide
 /// what "valid" means for their context.
 pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedBytecode>, String> {
     // Borrowed view: the byte sections alias `decompressed` directly instead

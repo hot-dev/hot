@@ -982,6 +982,16 @@ const CONTAINER_SHELL_FLAGS: &str = "-ec";
 
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_stream_pubsub(config, None).await
+}
+
+/// Run the task worker, optionally reusing a caller-provided [`StreamPubSub`]
+/// (used by `hot dev` in memory/SQLite mode so in-process services share the
+/// same pub/sub hub for SSE events and `::hot::task/await` wakeups).
+pub async fn run_with_stream_pubsub(
+    config: TaskWorkerConfig,
+    stream_pubsub: Option<Arc<StreamPubSub>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_task_fairness_conf(&config.worker_conf)?;
     validate_egress_proxy_backend(config.container_backend, &config.worker_conf)?;
     guest_network::configure(guest_network::GuestNetworkPolicy::from_conf(
@@ -1331,15 +1341,20 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     )?;
     hot::notification_queue::init_alert_queue(Arc::new(alert_queue));
 
-    let pubsub_type = match config.queue_type {
-        QueueType::Memory | QueueType::Sqlite => hot::stream::StreamPubSubType::Memory,
-        QueueType::Redis => hot::stream::StreamPubSubType::Redis,
+    let stream_publisher = match stream_pubsub {
+        Some(pubsub) => pubsub,
+        None => {
+            let pubsub_type = match config.queue_type {
+                QueueType::Memory | QueueType::Sqlite => hot::stream::StreamPubSubType::Memory,
+                QueueType::Redis => hot::stream::StreamPubSubType::Redis,
+            };
+            Arc::new(StreamPubSub::new(
+                pubsub_type,
+                config.redis_uri.clone(),
+                config.redis_cluster,
+            )?)
+        }
     };
-    let stream_publisher = Arc::new(StreamPubSub::new(
-        pubsub_type,
-        config.redis_uri.clone(),
-        config.redis_cluster,
-    )?);
 
     if !startup_orphan_recovery.dead_lettered_messages.is_empty() {
         let failed = reconcile_dead_lettered_tasks(
