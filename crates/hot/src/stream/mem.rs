@@ -3,6 +3,7 @@
 //! This is used for single-process deployments (`hot dev`) where the worker
 //! and API run in the same process.
 
+use super::wakeup::{TaskWakeupGuard, TaskWakeupHub};
 use super::{
     EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, McpSseTransportSessionBinding,
     McpSseTransportSessionStore, StreamEvent, StreamNext, StreamPubSubError, StreamPublisher,
@@ -37,6 +38,8 @@ pub struct MemStreamPubSub {
     env_channels: Arc<RwLock<AHashMap<Uuid, broadcast::Sender<EnvEvent>>>>,
     /// Ephemeral MCP HTTP+SSE transport session bindings.
     mcp_sse_transport_sessions: Arc<RwLock<AHashMap<Uuid, McpSseTransportSessionBinding>>>,
+    /// In-process wakeup hub for `::hot::task/await`.
+    task_wakeups: Arc<TaskWakeupHub>,
 }
 
 impl MemStreamPubSub {
@@ -47,7 +50,21 @@ impl MemStreamPubSub {
             channels: Arc::new(RwLock::new(AHashMap::new())),
             env_channels: Arc::new(RwLock::new(AHashMap::new())),
             mcp_sse_transport_sessions: Arc::new(RwLock::new(AHashMap::new())),
+            task_wakeups: Arc::new(TaskWakeupHub::new()),
         }
+    }
+
+    pub fn watch_task_completion(&self, task_id: Uuid) -> TaskWakeupGuard {
+        self.task_wakeups.register(task_id)
+    }
+
+    pub fn notify_task_wakeup(&self, task_id: Uuid) {
+        self.task_wakeups.notify(task_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_wakeup_waiter_count(&self) -> usize {
+        self.task_wakeups.active_waiter_count()
     }
 
     /// Get or create a broadcast sender for a stream
@@ -324,6 +341,9 @@ impl McpSseTransportSessionStore for MemStreamPubSub {
 #[async_trait]
 impl EnvPublisher for MemStreamPubSub {
     async fn publish_env(&self, event: EnvEvent) -> Result<(), StreamPubSubError> {
+        if let EnvEvent::TaskComplete { task_id, .. } = &event {
+            self.task_wakeups.notify(*task_id);
+        }
         let env_id = event.env_id();
         let sender = self.get_or_create_env_sender(env_id).await;
 
@@ -564,5 +584,50 @@ mod tests {
         // Cleanup should remove the channel since no active receivers
         pubsub.cleanup_empty_channels().await;
         assert_eq!(pubsub.channels.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_task_completion_wakeup_routing_and_cleanup() {
+        let pubsub = MemStreamPubSub::new();
+        let cloned = pubsub.clone();
+        let env_id = Uuid::now_v7();
+        let task_a = Uuid::now_v7();
+        let task_b = Uuid::now_v7();
+
+        let guard_a1 = pubsub.watch_task_completion(task_a);
+        let guard_a2 = cloned.watch_task_completion(task_a);
+        let guard_b = pubsub.watch_task_completion(task_b);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 3);
+
+        cloned
+            .publish_env(EnvEvent::TaskComplete {
+                task_id: task_a,
+                env_id,
+                stream_id: Uuid::now_v7(),
+                function_name: "::app/work".to_string(),
+                status: "completed".to_string(),
+                duration_ms: Some(5),
+                error: None,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_millis(50), guard_a1.notified())
+            .await
+            .expect("waiter 1 on task_a must wake");
+        tokio::time::timeout(Duration::from_millis(50), guard_a2.notified())
+            .await
+            .expect("waiter 2 on task_a via clone must wake");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), guard_b.notified())
+                .await
+                .is_err(),
+            "unrelated task_b waiter must stay quiet"
+        );
+
+        drop(guard_a1);
+        drop(guard_a2);
+        drop(guard_b);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
     }
 }
