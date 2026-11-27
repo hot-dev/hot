@@ -681,28 +681,34 @@ impl BytecodeCache {
         cache_path.exists()
     }
 
+    /// Load cached bytecode from the in-memory LRU cache only (never touches disk).
+    /// Safe to call on async runtime threads without risking blocking I/O.
+    pub fn load_from_memory(&self, cache_key: &str) -> Option<Arc<CachedBytecode>> {
+        let memory_key = self.memory_key(cache_key);
+        let mut cache = GLOBAL_MEMORY_CACHE.lock();
+        if let Some(entry) = cache.get_mut(&memory_key) {
+            if validate_cache_metadata(&entry.bytecode.metadata, cache_key).is_ok() {
+                entry.last_accessed = std::time::Instant::now();
+                tracing::debug!(
+                    "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
+                    entry.bytecode.metadata.project_name,
+                    entry.bytecode.function_mapping.len(),
+                    entry.bytecode.core_functions.len(),
+                    entry.bytecode.ast_program.namespaces.len()
+                );
+                return Some(Arc::clone(&entry.bytecode));
+            }
+            cache.remove(&memory_key);
+        }
+        None
+    }
+
     /// Load cached bytecode (checks global memory first, then disk)
     /// Returns Arc<CachedBytecode> to avoid expensive clones on each access
     pub fn load(&self, cache_key: &str) -> Result<Arc<CachedBytecode>, String> {
-        let memory_key = self.memory_key(cache_key);
         // Check global in-memory cache first
-        {
-            let mut cache = GLOBAL_MEMORY_CACHE.lock();
-            if let Some(entry) = cache.get_mut(&memory_key) {
-                if validate_cache_metadata(&entry.bytecode.metadata, cache_key).is_ok() {
-                    // Update last accessed time
-                    entry.last_accessed = std::time::Instant::now();
-                    tracing::debug!(
-                        "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
-                        entry.bytecode.metadata.project_name,
-                        entry.bytecode.function_mapping.len(),
-                        entry.bytecode.core_functions.len(),
-                        entry.bytecode.ast_program.namespaces.len()
-                    );
-                    return Ok(Arc::clone(&entry.bytecode));
-                }
-                cache.remove(&memory_key);
-            }
+        if let Some(cached) = self.load_from_memory(cache_key) {
+            return Ok(cached);
         }
 
         // Not in memory, load from disk
@@ -764,14 +770,23 @@ impl BytecodeCache {
         self.ensure_cache_dir()?;
         validate_cache_metadata(&metadata, cache_key)?;
 
-        let scope = Self::scope_id(&metadata.project_name, &metadata.file_hashes);
+        // Deployed bundle builds are keyed by immutable build UUIDs and may
+        // share a project name across orgs, environments, or rolling deploys
+        // without per-file hashes. Skipping program-scope generation collapse
+        // for UUID keys prevents same-named projects on a shared worker from
+        // evicting each other's warm bytecode; bundle entries are reclaimed by
+        // `forget_evicted_bundle` and the age-based sweep instead.
+        let scope = (!super::is_uuid(cache_key))
+            .then(|| Self::scope_id(&metadata.project_name, &metadata.file_hashes));
         let cache_path = self.cache_file_path(cache_key);
 
         // Serialize generation replacement for this scope. Unsynchronized, two
         // processes saving different generations would each delete the other's
         // freshly written entry. Best effort: if the lock is unavailable, skip
         // pruning rather than prune unsynchronized.
-        let mut scope_lock = self.acquire_scope_lock(&scope).ok();
+        let mut scope_lock = scope
+            .as_deref()
+            .and_then(|s| self.acquire_scope_lock(s).ok());
         let scope_guard = scope_lock.as_mut().and_then(|lock| lock.write().ok());
 
         tracing::debug!("Saving bytecode cache to: {}", cache_path.display());
@@ -838,8 +853,8 @@ impl BytecodeCache {
         // project accumulate tens of entries between prunes.
         // Replace only the entry this scope itself published — never a
         // neighbouring program's warm cache.
-        if scope_guard.is_some() {
-            let marker = self.scope_marker_path(&scope);
+        if let (Some(scope), Some(_)) = (scope.as_deref(), scope_guard.as_ref()) {
+            let marker = self.scope_marker_path(scope);
             if let Ok(previous) = std::fs::read_to_string(&marker) {
                 let previous = previous.trim();
                 // Never build a deletion path from unvalidated file contents:
@@ -2037,6 +2052,49 @@ mod tests {
             "a marker that is not a valid cache key must never name a deletion target"
         );
         assert!(cache.exists(&key), "the new generation is still published");
+    }
+
+    #[test]
+    fn saving_uuid_keyed_builds_with_same_project_name_never_evicts_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BytecodeCache::new(dir.path().join("cache"));
+        let save_bundle = |build_id: &str| {
+            let metadata = create_cache_metadata("app", Vec::new(), build_id.to_string());
+            let empty_program = || crate::lang::ast::Program {
+                namespaces: indexmap::IndexMap::new(),
+                current_namespace: crate::lang::ast::NsPath::new(),
+            };
+            cache
+                .save(
+                    build_id,
+                    &create_test_bytecode_program(),
+                    metadata,
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &empty_program(),
+                    &crate::lang::ast::HotAst::from_program(empty_program()),
+                    &Default::default(),
+                    &Default::default(),
+                )
+                .expect("save bundle");
+        };
+
+        let first = uuid::Uuid::now_v7().to_string();
+        let second = uuid::Uuid::now_v7().to_string();
+        save_bundle(&first);
+        save_bundle(&second);
+
+        assert!(
+            cache.exists(&first),
+            "first bundle build must remain on disk when another build of the same project name is saved"
+        );
+        assert!(
+            cache.load_from_memory(&first).is_some(),
+            "first bundle build must remain warm in RAM when another build of the same project name is saved"
+        );
+        assert!(cache.exists(&second));
+        assert!(cache.load_from_memory(&second).is_some());
     }
 
     /// Save one generation of the `demo` program with the given content.

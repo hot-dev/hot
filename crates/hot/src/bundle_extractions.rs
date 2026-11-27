@@ -50,6 +50,13 @@ pub struct BundleLease {
     _lock: Option<File>,
 }
 
+impl BundleLease {
+    /// The build whose extraction this lease pins on disk.
+    pub fn build_id(&self) -> Uuid {
+        self.build_id
+    }
+}
+
 impl Drop for BundleLease {
     fn drop(&mut self) {
         let mut leases = self.leases.lock();

@@ -63,7 +63,7 @@ fn is_scope_marker_stem(stem: &str) -> bool {
 }
 
 /// Hyphenated UUID (8-4-4-4-12 lowercase hex), as used for bundle cache keys.
-fn is_uuid(value: &str) -> bool {
+pub(crate) fn is_uuid(value: &str) -> bool {
     let mut groups = value.split('-');
     let lengths = [8, 4, 4, 4, 12];
     for expected in lengths {

@@ -3137,7 +3137,7 @@ async fn process_task_inner(
     let stream_id = Uuid::parse_str(&request.stream_id)?;
     let env_id = Uuid::parse_str(&request.env_id)?;
     let build_id = Uuid::parse_str(&request.build_id)?;
-    let _bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
+    let bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
@@ -3325,7 +3325,7 @@ async fn process_task_inner(
     let mut request = synthesize_task_request_from_row(&task);
     request.org_id = Some(env.org_id.to_string());
     request.project_id = Some(project.project_id.to_string());
-    request.project_name = Some(project.name);
+    request.project_name = Some(project.name.clone());
     let timeout_ms = request.timeout_ms;
 
     let queue_wait_ms = queue_timing.queue_wait.as_millis().min(i64::MAX as u128) as i64;
@@ -3489,6 +3489,7 @@ async fn process_task_inner(
                     return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
                 }
             };
+            let _bundle_lease = bundle_lease;
             let run_db = Arc::clone(&db);
             let result = process_container_task(
                 request,
@@ -3615,6 +3616,10 @@ async fn process_task_inner(
                 stream_id,
                 env_id,
                 build_id,
+                env.org_id,
+                build,
+                project,
+                bundle_lease,
                 timeout_ms,
                 task.retry_attempt,
                 RetryConfig::from_meta(task.options.as_ref()),
@@ -6450,6 +6455,10 @@ async fn process_code_task(
     stream_id: Uuid,
     env_id: Uuid,
     build_id: Uuid,
+    durable_org_id: Uuid,
+    build: Build,
+    project: hot::db::Project,
+    bundle_lease: hot::bundle_extractions::BundleLease,
     timeout_ms: u64,
     retry_attempt: i16,
     retry_config: RetryConfig,
@@ -6470,10 +6479,7 @@ async fn process_code_task(
     let code_setup_started_at = chrono::Utc::now();
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
-    let org_id = request
-        .org_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok());
+    let org_id = Some(durable_org_id);
 
     let setup = async {
         emit_task_started(
@@ -6490,9 +6496,7 @@ async fn process_code_task(
         // Hot, never runs here, even after its project is redeployed. One
         // made by a newer Hot of this major version only reaches this point
         // after waiting `NEWER_RUNTIME_WAIT` for a newer task worker.
-        if let Ok(build) = Build::get_build(&db, &build_id).await
-            && let Some(reason) = build.runtime_version_error_message()
-        {
+        if let Some(reason) = build.runtime_version_error_message() {
             return Err(if build_awaits_newer_runtime(&build) {
                 format!(
                     "{reason}. No task worker running a newer Hot took the task within {} \
@@ -6509,6 +6513,12 @@ async fn process_code_task(
             Arc::clone(&bytecode_cache),
             Some(&db),
             Some(&worker_conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: durable_org_id,
+            },
+            &bundle_lease,
             blocking_execution_permit,
         )
         .await?;
@@ -6859,7 +6869,6 @@ async fn process_code_task(
     let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id)
         .unwrap_or_else(|| Arc::new(hot::lang::hot::resource::ResourceRegistry::default()));
     let workload_started_at = chrono::Utc::now();
-    let bundle_lease = BUNDLE_EXTRACTIONS.lease(build_id);
     let (execution_complete, _execution_watch) =
         hot::execution_watchdog::tasks().execution(org_id, task_id);
     let task_handle = tokio::task::spawn_blocking(move || {
@@ -8522,11 +8531,51 @@ where
         .map_err(|error| format!("Blocking setup task failed: {error}"))
 }
 
+/// Build/project metadata already fetched by `process_task_inner` so
+/// `load_bytecode` does not repeat immutable DB lookups on every code task.
+struct PreloadedBuild<'a> {
+    build: &'a hot::db::Build,
+    project: &'a hot::db::Project,
+    org_id: Uuid,
+}
+
+/// Fast path for warm bundle builds.
+///
+/// Safe only while:
+/// 1. The caller holds an active `BundleLease` for `build_id` (pinning the
+///    extracted directory that `ResourceRegistry` points into).
+/// 2. The in-memory `ResourceRegistry` for `build_id` is already hydrated
+///    (rules out a process restart where disk bytecode survived without the
+///    registry, and rules out local eviction via `forget_evicted_bundle`).
+/// 3. Bytecode is hot in `GLOBAL_MEMORY_CACHE` (`load_from_memory` never
+///    performs blocking disk I/O or decompression on async runtime threads).
+/// 4. The extracted directory still holds `manifest.hot` (guards against a
+///    sibling process sharing the extraction root having evicted it while this
+///    process held zero leases).
+fn try_warm_bundle_fast_path(
+    build_id: &Uuid,
+    cache_key: &str,
+    cache: &BytecodeCache,
+    bundle_lease: &hot::bundle_extractions::BundleLease,
+) -> Option<Arc<CachedBytecode>> {
+    if bundle_lease.build_id() != *build_id {
+        return None;
+    }
+    hot::lang::hot::resource::get_build_registry(build_id)?;
+    let cached = cache.load_from_memory(cache_key)?;
+    if !bundle_extract_is_complete(&bundle_extract_dir(build_id)) {
+        return None;
+    }
+    Some(cached)
+}
+
 async fn load_bytecode(
     build_id: &Uuid,
     cache: Arc<BytecodeCache>,
     db: Option<&DatabasePool>,
     worker_conf: Option<&Val>,
+    preloaded: PreloadedBuild<'_>,
+    bundle_lease: &hot::bundle_extractions::BundleLease,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     let (db, conf) = match (db, worker_conf) {
@@ -8539,16 +8588,8 @@ async fn load_bytecode(
         }
     };
 
-    let build = hot::db::Build::get_build(db, build_id)
-        .await
-        .map_err(|e| format!("Failed to fetch build {}: {}", build_id, e))?;
-
-    let project = hot::db::Project::get_project(db, &build.project_id)
-        .await
-        .map_err(|e| format!("Failed to fetch project: {}", e))?;
-
-    if build.is_live() {
-        hot::profile::authorized_live_project(db, conf, &build).await?;
+    if preloaded.build.is_live() {
+        hot::profile::authorized_live_project(db, conf, preloaded.build).await?;
         // Only an authorized local live build may inherit this host's resources.
         hot::lang::hot::resource::set_build_registry(
             *build_id,
@@ -8562,6 +8603,8 @@ async fn load_bytecode(
         let build_id = *build_id;
         let cache_for_task = Arc::clone(&cache);
         let conf = conf.clone();
+        let build = preloaded.build.clone();
+        let project = preloaded.project.clone();
         let (loaded, permit) =
             run_blocking_with_execution_permit(blocking_execution_permit, move || {
                 load_bytecode_live(&build_id, &cache_for_task, &build, &project, &conf)
@@ -8570,12 +8613,18 @@ async fn load_bytecode(
         Ok((loaded?, permit))
     } else {
         let cache_key = build_id.to_string();
+        if let Some(cached) = try_warm_bundle_fast_path(build_id, &cache_key, &cache, bundle_lease)
+        {
+            tracing::debug!(build_id = %build_id, "Bundle bytecode fast-path cache hit");
+            return Ok((cached, blocking_execution_permit));
+        }
         load_bytecode_bundle(
             build_id,
             cache_key,
             cache,
-            &project,
-            db,
+            preloaded.project,
+            preloaded.org_id,
+            bundle_lease,
             conf,
             blocking_execution_permit,
         )
@@ -8895,10 +8944,10 @@ async fn ensure_bundle_extracted_unlocked(
     env_id: &Uuid,
     conf: &Val,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<(std::path::PathBuf, tokio::sync::OwnedSemaphorePermit), String> {
+) -> Result<(std::path::PathBuf, bool, tokio::sync::OwnedSemaphorePermit), String> {
     let extract_dir = bundle_extract_dir(build_id);
     if bundle_extract_is_complete(&extract_dir) {
-        return Ok((extract_dir, blocking_execution_permit));
+        return Ok((extract_dir, false, blocking_execution_permit));
     }
 
     let storage = hot::storage::build_storage_from_config(conf)
@@ -8915,7 +8964,7 @@ async fn ensure_bundle_extracted_unlocked(
         })
         .await?;
     extracted?;
-    Ok((extract_dir, blocking_execution_permit))
+    Ok((extract_dir, true, blocking_execution_permit))
 }
 
 async fn ensure_bundle_extracted_with_permit(
@@ -8935,8 +8984,10 @@ async fn ensure_bundle_extracted_with_permit(
     // drop; its detached blocking writer below keeps to its own temp dir.
     let flight = bundle_extract_lock(*build_id).await;
     let _guard = flight.lock().await;
-    ensure_bundle_extracted_unlocked(build_id, org_id, env_id, conf, blocking_execution_permit)
-        .await
+    let (extract_dir, _re_extracted, permit) =
+        ensure_bundle_extracted_unlocked(build_id, org_id, env_id, conf, blocking_execution_permit)
+            .await?;
+    Ok((extract_dir, permit))
 }
 
 /// Container-task compatibility wrapper. Container admission is already
@@ -8958,20 +9009,18 @@ async fn ensure_bundle_extracted(
 }
 
 /// Load bytecode for a bundle build by fetching the zip from storage, extracting, and compiling.
+#[allow(clippy::too_many_arguments)]
 async fn load_bytecode_bundle(
     build_id: &Uuid,
     cache_key: String,
     cache: Arc<BytecodeCache>,
     project: &hot::db::Project,
-    db: &DatabasePool,
+    org_id: Uuid,
+    bundle_lease: &hot::bundle_extractions::BundleLease,
     conf: &Val,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
-    tracing::debug!(build_id = %build_id, "Bytecode cache miss — fetching bundle build from storage");
-
-    let env = hot::db::Env::get_env(db, &project.env_id)
-        .await
-        .map_err(|e| format!("Failed to fetch env: {}", e))?;
+    tracing::debug!(build_id = %build_id, "Bundle bytecode fast-path miss — entering single-flight loader");
 
     // Hold the per-build single-flight lock across both extraction and
     // compilation so a thundering herd of tasks on a fresh build compiles
@@ -8979,21 +9028,44 @@ async fn load_bytecode_bundle(
     let flight = bundle_extract_lock(*build_id).await;
     let _guard = flight.lock().await;
 
-    let (extract_dir, blocking_execution_permit) = ensure_bundle_extracted_unlocked(
-        build_id,
-        &env.org_id,
-        &project.env_id,
-        conf,
-        blocking_execution_permit,
-    )
-    .await?;
+    // A waiter that queued behind a cold compile can return immediately now
+    // that the winner hydrated both the resource registry and RAM cache.
+    if let Some(cached) = try_warm_bundle_fast_path(build_id, &cache_key, &cache, bundle_lease) {
+        tracing::debug!(
+            build_id = %build_id,
+            "Bundle bytecode cache hit after waiting on single-flight lock"
+        );
+        return Ok((cached, blocking_execution_permit));
+    }
+
+    let extract_dir = bundle_extract_dir(build_id);
+    let (extract_dir, re_extracted, blocking_execution_permit) =
+        if bundle_extract_is_complete(&extract_dir) {
+            (extract_dir, false, blocking_execution_permit)
+        } else {
+            ensure_bundle_extracted_unlocked(
+                build_id,
+                &org_id,
+                &project.env_id,
+                conf,
+                blocking_execution_permit,
+            )
+            .await?
+        };
 
     let build_id = *build_id;
     let project = project.clone();
     let cache_for_task = Arc::clone(&cache);
     let (loaded, permit) =
         run_blocking_with_execution_permit(blocking_execution_permit, move || {
-            compile_bundle_bytecode(build_id, cache_key, cache_for_task, project, extract_dir)
+            compile_bundle_bytecode(
+                build_id,
+                cache_key,
+                cache_for_task,
+                project,
+                extract_dir,
+                re_extracted,
+            )
         })
         .await?;
     Ok((loaded?, permit))
@@ -9008,20 +9080,30 @@ fn compile_bundle_bytecode(
     cache: Arc<BytecodeCache>,
     project: hot::db::Project,
     extract_dir: std::path::PathBuf,
+    re_extracted: bool,
 ) -> Result<Arc<CachedBytecode>, String> {
-    // Registry hydration precedes even a warm bytecode cache hit: the disk
-    // cache can survive a process restart while the registry cannot.
-    let registry = match hot::bundle::read_bundle_resources(&extract_dir) {
-        Ok(resources) => {
-            hot::lang::hot::resource::build_registry_from_manifest(&resources, &extract_dir)
-        }
-        Err(error) => {
-            tracing::warn!(%build_id, %error, "Invalid bundle resources; using an empty registry");
-            hot::lang::hot::resource::ResourceRegistry::default()
-        }
+    // Hydrate the resource registry when it is absent (cold start, process
+    // restart where disk bytecode survived without the in-memory registry, or
+    // re-extraction after eviction). Reuse the existing registry on a RAM LRU
+    // miss when the extraction was untouched.
+    let registry = if !re_extracted
+        && let Some(existing) = hot::lang::hot::resource::get_build_registry(&build_id)
+    {
+        existing
+    } else {
+        let hydrated = match hot::bundle::read_bundle_resources(&extract_dir) {
+            Ok(resources) => {
+                hot::lang::hot::resource::build_registry_from_manifest(&resources, &extract_dir)
+            }
+            Err(error) => {
+                tracing::warn!(%build_id, %error, "Invalid bundle resources; using an empty registry");
+                hot::lang::hot::resource::ResourceRegistry::default()
+            }
+        };
+        let hydrated = Arc::new(hydrated);
+        hot::lang::hot::resource::set_build_registry(build_id, hydrated.clone());
+        hydrated
     };
-    let registry = Arc::new(registry);
-    hot::lang::hot::resource::set_build_registry(build_id, registry.clone());
     let _resource_guard = hot::lang::hot::resource::ThreadRegistryGuard::install(registry);
     if let Ok(cached) = cache.load(&cache_key) {
         return Ok(cached);
@@ -9042,39 +9124,15 @@ fn compile_bundle_bytecode(
         return Err(format!("No .hot source files found for build {}", build_id));
     }
 
-    let bundle_cache_dir = extract_dir.join(".hot").join("cache");
-    let _ = std::fs::create_dir_all(&bundle_cache_dir);
-    let bundle_cache = BytecodeCache::new(bundle_cache_dir);
-
     hot::lang::engine::Engine::compile_to_cache(
         &src_paths,
-        &bundle_cache,
+        &cache,
         &project.name,
         Some(&cache_key),
         None,
         None, // Bundle dependencies are already included in hot/pkg.
     )
     .map_err(|e| format!("Failed to compile build: {}", e))?;
-
-    // Also save to the primary cache for future hits. The
-    // tool/skill spec registries were already populated when the
-    // bundle cache was written, so we just round-trip them.
-    if let Ok(compiled) = bundle_cache.load(&cache_key)
-        && let Err(e) = cache.save(
-            &cache_key,
-            &compiled.program,
-            compiled.metadata.clone(),
-            &compiled.function_mapping,
-            &compiled.core_functions,
-            &compiled.type_implementations,
-            &compiled.ast_program,
-            &compiled.hot_ast,
-            &compiled.tool_specs,
-            &compiled.skill_specs,
-        )
-    {
-        tracing::warn!(build_id = %build_id, "Failed to save to primary cache: {}", e);
-    }
 
     cache
         .load(&cache_key)
@@ -11479,12 +11537,23 @@ mod tests {
             }},
             "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
         });
+        let build = Build::get_build(&db, &fixture.build_id).await.unwrap();
+        let project = hot::db::Project::get_project(&db, &build.project_id)
+            .await
+            .unwrap();
+        let lease = BUNDLE_EXTRACTIONS.lease(fixture.build_id);
         let slots = Arc::new(Semaphore::new(1));
         let (_, permit) = load_bytecode(
             &fixture.build_id,
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await
@@ -11517,6 +11586,12 @@ mod tests {
             cache.clone(),
             Some(&db),
             Some(&sibling_conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await;
@@ -11526,6 +11601,12 @@ mod tests {
             cache,
             None,
             None,
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.acquire_owned().await.unwrap(),
         )
         .await;
@@ -11533,6 +11614,7 @@ mod tests {
             result.is_err(),
             "a warm cache cannot replace scope authorization"
         );
+        drop(lease);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -11573,12 +11655,23 @@ mod tests {
         let event_v1 = cache.load(&key_v1.cache_key).unwrap();
 
         // Task worker hits the event worker's exact warm entry without recompiling or evicting it.
+        let build = Build::get_build(&db, &fixture.build_id).await.unwrap();
+        let project = hot::db::Project::get_project(&db, &build.project_id)
+            .await
+            .unwrap();
+        let lease = BUNDLE_EXTRACTIONS.lease(fixture.build_id);
         let slots = Arc::new(Semaphore::new(1));
         let (task_v1, permit) = load_bytecode(
             &fixture.build_id,
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await
@@ -11627,11 +11720,18 @@ mod tests {
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await
         .unwrap();
         drop(permit);
+        drop(lease);
         assert!(!Arc::ptr_eq(&task_v1, &task_v2));
 
         let v2_result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
@@ -11774,6 +11874,10 @@ mod tests {
         )
         .await
         .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        let project = hot::db::Project::get_project(&db, &build.project_id)
+            .await
+            .unwrap();
         let directory = std::env::temp_dir().join(format!("hot-bundle-scope-{build_id}"));
         let source = directory.join("src");
         let resources = directory.join("resources");
@@ -11814,11 +11918,18 @@ mod tests {
         );
         let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
         let slots = Arc::new(Semaphore::new(1));
+        let lease = BUNDLE_EXTRACTIONS.lease(build_id);
         let (compiled, permit) = load_bytecode(
             &build_id,
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await
@@ -11841,6 +11952,12 @@ mod tests {
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.clone().acquire_owned().await.unwrap(),
         )
         .await
@@ -11860,6 +11977,12 @@ mod tests {
             cache.clone(),
             Some(&db),
             Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
             slots.acquire_owned().await.unwrap(),
         )
         .await
@@ -11872,10 +11995,236 @@ mod tests {
                 .is_empty()
         );
         assert!(cache.exists(&build_id.to_string()));
+        drop(lease);
         forget_evicted_bundle(&cache, build_id);
         assert!(resource::get_build_registry(&build_id).is_none());
         assert!(!cache.exists(&build_id.to_string()));
         std::fs::remove_dir_all(extract_dir).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn warm_bundle_fast_path_bypasses_extract_lock_and_respects_lease_and_eviction() {
+        use hot::lang::hot::resource;
+
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &build_id,
+            &fixture.project_id,
+            "bundle",
+            0,
+            hot::db::Build::BUILD_TYPE_BUNDLE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        let project = hot::db::Project::get_project(&db, &build.project_id)
+            .await
+            .unwrap();
+
+        let directory = std::env::temp_dir().join(format!("hot-bundle-fast-{build_id}"));
+        let source = directory.join("src");
+        let resources = directory.join("resources");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(source.join("fast.hot"), "::fast ns\nvalue fn () { 42 }\n").unwrap();
+        std::fs::write(resources.join("asset.txt"), "hello").unwrap();
+
+        let bundle = hot::bundle::create_bundle(
+            "test-project",
+            &[source.to_string_lossy().to_string()],
+            &[],
+            &[resources],
+            false,
+            &[],
+        )
+        .unwrap();
+        let zip = hot::bundle::write_bundle_zip(&bundle, &directory).unwrap();
+        let extract_dir = bundle_extract_dir(&build_id);
+        hot::bundle::extract_bundle_to_dir(&zip, &extract_dir).unwrap();
+
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let conf = val!({});
+        let slots = Arc::new(Semaphore::new(2));
+        let lease = BUNDLE_EXTRACTIONS.lease(build_id);
+
+        // Cold load compiles once and populates both the RAM cache and build registry.
+        let (compiled, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert_eq!(
+            resource::get_build_registry(&build_id)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        assert!(
+            !extract_dir.join(".hot/cache").exists(),
+            "bundle compilation should write directly to primary cache without a duplicate bundle-local cache"
+        );
+
+        // 1. Warm fast path: hold the per-build single-flight lock, remove sources,
+        // and corrupt manifest.hot (leaving the marker file present). If the fast
+        // path works, load_bytecode completes immediately without blocking on
+        // bundle_extract_lock and without re-parsing manifest.hot.
+        std::fs::remove_dir_all(extract_dir.join("hot/src")).unwrap();
+        let original_manifest = std::fs::read_to_string(extract_dir.join("manifest.hot")).unwrap();
+        std::fs::write(extract_dir.join("manifest.hot"), "invalid @@ manifest").unwrap();
+        let flight = bundle_extract_lock(build_id).await;
+        let flight_guard = flight.lock().await;
+        let (fast_loaded, permit) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            load_bytecode(
+                &build_id,
+                cache.clone(),
+                Some(&db),
+                Some(&conf),
+                PreloadedBuild {
+                    build: &build,
+                    project: &project,
+                    org_id: fixture.org_id,
+                },
+                &lease,
+                slots.clone().acquire_owned().await.unwrap(),
+            ),
+        )
+        .await
+        .expect("warm fast path must not block on bundle_extract_lock")
+        .unwrap();
+        drop(permit);
+        assert!(Arc::ptr_eq(&compiled, &fast_loaded));
+        assert_eq!(
+            resource::get_build_registry(&build_id)
+                .unwrap()
+                .entries
+                .len(),
+            1,
+            "warm fast path must not re-parse manifest.hot"
+        );
+
+        // 2. Without a matching BundleLease, the fast path must not be taken.
+        let wrong_lease = BUNDLE_EXTRACTIONS.lease(Uuid::now_v7());
+        assert!(
+            try_warm_bundle_fast_path(&build_id, &build_id.to_string(), &cache, &wrong_lease)
+                .is_none()
+        );
+        drop(wrong_lease);
+        drop(flight_guard);
+
+        // 3. A second bundle build sharing the same project name (e.g. staging/prod
+        // or another org) must not evict the first build's warm bytecode.
+        let peer_build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &peer_build_id,
+            &fixture.project_id,
+            "bundle-peer",
+            0,
+            hot::db::Build::BUILD_TYPE_BUNDLE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let peer_build = Build::get_build(&db, &peer_build_id).await.unwrap();
+        let peer_extract_dir = bundle_extract_dir(&peer_build_id);
+        hot::bundle::extract_bundle_to_dir(&zip, &peer_extract_dir).unwrap();
+        let peer_lease = BUNDLE_EXTRACTIONS.lease(peer_build_id);
+        let (_, permit) = load_bytecode(
+            &peer_build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            PreloadedBuild {
+                build: &peer_build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &peer_lease,
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            try_warm_bundle_fast_path(&build_id, &build_id.to_string(), &cache, &lease)
+                .is_some_and(|hit| Arc::ptr_eq(&hit, &compiled)),
+            "compiling a second build with the same project name must not evict the first build from RAM"
+        );
+        assert!(
+            cache.exists(&build_id.to_string()),
+            "compiling a second build with the same project name must not delete the first build from disk"
+        );
+        drop(peer_lease);
+        forget_evicted_bundle(&cache, peer_build_id);
+        std::fs::remove_dir_all(&peer_extract_dir).unwrap();
+
+        // 4. RAM LRU eviction (memory cleared, disk .bc.zst intact, registry intact):
+        // fast path misses (never blocks async thread on disk read), single-flight
+        // blocking loader reloads from disk without recompiling or re-parsing manifest.hot.
+        cache.clear_memory();
+        assert!(
+            try_warm_bundle_fast_path(&build_id, &build_id.to_string(), &cache, &lease).is_none()
+        );
+        let (reloaded, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            PreloadedBuild {
+                build: &build,
+                project: &project,
+                org_id: fixture.org_id,
+            },
+            &lease,
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert_eq!(
+            resource::get_build_registry(&build_id)
+                .unwrap()
+                .entries
+                .len(),
+            1,
+            "disk reload with an intact extraction should reuse the existing resource registry"
+        );
+        assert!(
+            try_warm_bundle_fast_path(&build_id, &build_id.to_string(), &cache, &lease)
+                .is_some_and(|hit| Arc::ptr_eq(&hit, &reloaded)),
+            "disk reload must repopulate the RAM cache for subsequent fast-path hits"
+        );
+
+        // 5. Cross-process eviction detection: if the extracted directory vanished
+        // while this process had no leases (leaving stale registry + RAM entry),
+        // the fast path must bail out instead of returning paths into a missing dir.
+        std::fs::write(extract_dir.join("manifest.hot"), &original_manifest).unwrap();
+        std::fs::remove_dir_all(&extract_dir).unwrap();
+        assert!(
+            try_warm_bundle_fast_path(&build_id, &build_id.to_string(), &cache, &lease).is_none(),
+            "fast path must refuse stale in-memory state when extracted dir is missing"
+        );
+
+        drop(lease);
+        forget_evicted_bundle(&cache, build_id);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
