@@ -86,7 +86,6 @@ fn cached(source: &str) -> Arc<CachedBytecode> {
         function_mapping: compiler.get_function_mapping().clone(),
         core_functions: compiler.get_core_functions().clone(),
         type_implementations: compiler.get_type_implementations().clone(),
-        ast_program: ast.clone(),
         hot_ast: HotAst::from_program(ast),
     })
 }
@@ -158,8 +157,8 @@ foreign-only meta {doc: "foreign-secret", skill: {body: "foreign-secret"}}
 fn (value: Str): Str { value }
 "#,
     );
-    internal_mcp::replace_registry(foreign.tool_specs.clone());
-    internal_skill::replace_registry(foreign.skill_specs.clone());
+    internal_mcp::replace_registry((*foreign.tool_specs).clone());
+    internal_skill::replace_registry((*foreign.skill_specs).clone());
     let tenants = [
         (
             cached(&SOURCE.replace("TENANT-MARKER", "alpha-private")),
@@ -253,11 +252,11 @@ answer [base, skills]
     );
     let empty_cache = cached(&empty_source);
     let mut vm = VirtualMachine::new(
-        empty_cache.runtime_program.clone(),
-        Some(empty_cache.runtime_hot_ast.clone()),
-        empty_cache.runtime_function_mapping.clone(),
-        empty_cache.runtime_core_functions.clone(),
-        empty_cache.runtime_type_implementations.clone(),
+        empty_cache.program.clone(),
+        Some(empty_cache.hot_ast.clone()),
+        empty_cache.function_mapping.clone(),
+        empty_cache.core_functions.clone(),
+        empty_cache.type_implementations.clone(),
         empty_cache.runtime_core_variables.clone(),
         Some(conf()),
     );

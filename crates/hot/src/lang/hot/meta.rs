@@ -170,13 +170,17 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         let function_name = match (lazy_arg, vm.get_hot_ast()) {
             (Some(lambda), Some(hot_ast)) if !function_name.starts_with("::") => {
                 let ns = crate::lang::ast::NsPath::from_string(&lambda.defining_namespace);
-                let declared_there = hot_ast.namespaces.get(&ns).is_some_and(|namespace| {
-                    namespace
-                        .scope
-                        .vars
-                        .keys()
-                        .any(|var| var.sym.name() == function_name && var.meta.is_some())
-                });
+                let declared_there = hot_ast
+                    .program
+                    .namespaces
+                    .get(&ns)
+                    .is_some_and(|namespace| {
+                        namespace
+                            .scope
+                            .vars
+                            .keys()
+                            .any(|var| var.sym.name() == function_name && var.meta.is_some())
+                    });
                 if declared_there {
                     format!("{}/{}", ns, function_name)
                 } else {
@@ -210,7 +214,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                 let ns_path = crate::lang::ast::NsPath(ns_parts);
 
                 // Look up in Hot AST namespaces
-                if let Some(namespace) = hot_ast.namespaces.get(&ns_path) {
+                if let Some(namespace) = hot_ast.program.namespaces.get(&ns_path) {
                     // Search for the variable in the namespace scope
                     for (var, _value) in namespace.scope.vars.iter() {
                         if var.sym.name() == local_name

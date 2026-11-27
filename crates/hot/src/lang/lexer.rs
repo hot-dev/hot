@@ -164,14 +164,6 @@ impl KeywordKind {
             _ => None,
         }
     }
-
-    /// Check if this is a flow keyword (serial, parallel, cond, cond-all)
-    pub fn is_flow_keyword(&self) -> bool {
-        matches!(
-            self,
-            KeywordKind::Serial | KeywordKind::Parallel | KeywordKind::Cond | KeywordKind::CondAll
-        )
-    }
 }
 
 /// Token types produced by the Hot lexer.

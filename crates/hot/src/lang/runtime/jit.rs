@@ -6693,9 +6693,7 @@ fn prescan_return_kind(
                     reg_kinds.insert(*dest, k);
                 }
             }
-            Instruction::StoreVar {
-                var_name, value, ..
-            } => {
+            Instruction::StoreVar { var_name, value } => {
                 if let Some(k) = reg_kinds.get(value).copied() {
                     var_kinds.insert(*var_name, k);
                 }
@@ -8622,9 +8620,7 @@ impl<'a> EmitCtx<'a> {
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
-            Instruction::StoreVar {
-                var_name, value, ..
-            } => {
+            Instruction::StoreVar { var_name, value } => {
                 let name = constant_string(self.program, *var_name)?.to_string();
                 let kind = self.register_kind(*value)?;
                 let mut raw = self.reg_value(builder, *value)?;
@@ -10168,9 +10164,7 @@ fn build_supported_body(
         // A collecting serial flow (`All<Vec>` / `All<Map>`) gathers each
         // binding made directly in its body, as the interpreter's StoreVar
         // tracking does: the values in order, or name -> value.
-        if let Instruction::StoreVar {
-            var_name, value, ..
-        } = instruction
+        if let Instruction::StoreVar { var_name, value } = instruction
             && let Some(flow) = active_flows.last()
             && flow.flow_type == FlowType::Serial
             && let Some(acc_var) = flow.accumulator_var
@@ -15953,7 +15947,6 @@ mod tests {
             function_mapping,
             core_functions: IndexMap::new(),
             type_implementations: IndexMap::new(),
-            ast_program: ast_program.clone(),
             hot_ast: HotAst::from_program(ast_program),
         };
         let cached = Engine::artifacts_to_cached_bytecode(artifacts);
@@ -16032,7 +16025,6 @@ mod tests {
             function_mapping,
             core_functions: IndexMap::new(),
             type_implementations: IndexMap::new(),
-            ast_program: ast_program.clone(),
             hot_ast: HotAst::from_program(ast_program),
         };
         let cached = Engine::artifacts_to_cached_bytecode(artifacts);

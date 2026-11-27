@@ -121,9 +121,7 @@ pub struct CompilationArtifacts {
     pub core_functions: IndexMap<String, u32>,
     /// Type implementations mapping
     pub type_implementations: IndexMap<(String, String), String>,
-    /// Parsed AST program (for metadata enrichment)
-    pub ast_program: crate::lang::ast::Program,
-    /// Pre-built HotAst with variable index
+    /// Pre-built HotAst with shared parsed AST program (`hot_ast.program`) and variable index
     pub hot_ast: crate::lang::ast::HotAst,
 }
 

@@ -309,6 +309,13 @@ pub mod tagged_val_map_serde {
         entries.serialize(serializer)
     }
 
+    pub fn serialize_ref<S: Serializer>(
+        map: &&AHashMap<String, Val>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serialize(map, serializer)
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<AHashMap<String, Val>, D::Error> {

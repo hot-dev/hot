@@ -3,10 +3,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::ConsoleEngineEventEmitter;
-    use crate::lang::bytecode::{SourceLocation, VariableMetadata};
     use crate::lang::engine::Engine;
     use crate::lang::event::ExecutionContext;
-    use crate::val::Val;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -31,27 +29,6 @@ mod tests {
 
         // Test passes if it compiles and creates successfully
         println!("Emitter integration test passed!");
-    }
-
-    #[test]
-    fn test_variable_metadata_creation() {
-        let metadata = VariableMetadata {
-            name: "test_var".to_string(),
-            namespace: "::hot::test".to_string(),
-            static_scope: Some("::hot::test".to_string()),
-            meta: Some(Val::from("test_meta")),
-            source: Some(SourceLocation {
-                file: Some("test.hot".to_string()),
-                line: 10,
-                column: 5,
-                position: 100,
-                length: 8,
-            }),
-        };
-
-        assert_eq!(metadata.name, "test_var");
-        assert_eq!(metadata.namespace, "::hot::test");
-        assert!(metadata.source.is_some());
     }
 
     #[tokio::test]

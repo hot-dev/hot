@@ -594,10 +594,10 @@ impl Engine {
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
     ) -> Result<crate::val::Val, String> {
         let seed = crate::lang::compiler::Compiler::seed_from_compiled(
-            cached.program.clone(),
-            cached.function_mapping.clone(),
-            cached.core_functions.clone(),
-            cached.type_implementations.clone(),
+            (*cached.program).clone(),
+            (*cached.function_mapping).clone(),
+            (*cached.core_functions).clone(),
+            (*cached.type_implementations).clone(),
             (*cached.runtime_core_variables).clone(),
             &cached.ast_program,
         );
@@ -658,12 +658,12 @@ impl Engine {
 
         let cached_artifacts_started = std::time::Instant::now();
         // Use runtime-ready shared artifacts directly (no extension needed).
-        let function_mapping = Arc::clone(&cached.runtime_function_mapping);
-        let core_functions = Arc::clone(&cached.runtime_core_functions);
-        let type_implementations = Arc::clone(&cached.runtime_type_implementations);
-        let program = Arc::clone(&cached.runtime_program);
+        let function_mapping = Arc::clone(&cached.function_mapping);
+        let core_functions = Arc::clone(&cached.core_functions);
+        let type_implementations = Arc::clone(&cached.type_implementations);
+        let program = Arc::clone(&cached.program);
         let instruction_count = program.entry_point.len();
-        let hot_ast = Arc::clone(&cached.runtime_hot_ast);
+        let hot_ast = Arc::clone(&cached.hot_ast);
         let core_variables = Arc::clone(&cached.runtime_core_variables);
         tracing::debug!(
             "TIMING [{}]: vm_cached_artifacts_setup: {:?}",
@@ -751,11 +751,11 @@ impl Engine {
         // would error out with
         // `no schema registered for '...'`.
         let registry_started = std::time::Instant::now();
-        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
-            cached.tool_specs.clone(),
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::clone(
+            &cached.tool_specs,
         ));
         let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
-            Arc::new(cached.skill_specs.clone()),
+            Arc::clone(&cached.skill_specs),
         );
         tracing::debug!(
             "TIMING [{}]: vm_registry_install: {:?}",
@@ -1013,12 +1013,12 @@ impl Engine {
         task_id: Option<uuid::Uuid>,
     ) -> Result<crate::val::Val, String> {
         // Build VM identically to the base method
-        let function_mapping = Arc::clone(&cached.runtime_function_mapping);
-        let core_functions = Arc::clone(&cached.runtime_core_functions);
-        let type_implementations = Arc::clone(&cached.runtime_type_implementations);
-        let program = Arc::clone(&cached.runtime_program);
+        let function_mapping = Arc::clone(&cached.function_mapping);
+        let core_functions = Arc::clone(&cached.core_functions);
+        let type_implementations = Arc::clone(&cached.type_implementations);
+        let program = Arc::clone(&cached.program);
         let instruction_count = program.entry_point.len();
-        let hot_ast = Arc::clone(&cached.runtime_hot_ast);
+        let hot_ast = Arc::clone(&cached.hot_ast);
         let core_variables = Arc::clone(&cached.runtime_core_variables);
 
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
@@ -1080,11 +1080,11 @@ impl Engine {
         // Install tool/skill spec registries from cached bytecode
         // before module-init runs. Same rationale as
         // `call_function_with_cached_bytecode`.
-        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
-            cached.tool_specs.clone(),
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::clone(
+            &cached.tool_specs,
         ));
         let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
-            Arc::new(cached.skill_specs.clone()),
+            Arc::clone(&cached.skill_specs),
         );
 
         // Canonical authority and admission apply to module initialization too;
@@ -1353,34 +1353,43 @@ impl Engine {
             cache_key: cache_key.clone(),
         };
 
-        // Build tool/skill spec registries from the AST so they can be
-        // baked into the cache file. This is what lets cross-process
-        // cache hits and zip-build deployments serve
-        // `::hot::internal::mcp/schema-from-fn` and
-        // `::hot::internal::skill/meta-from-fn` without recompiling.
-        let spec_compiler = crate::lang::compiler::Compiler::new();
-        let tool_specs = spec_compiler.build_tool_specs(&artifacts.ast_program);
-        let skill_specs = spec_compiler.build_skill_specs(&artifacts.ast_program);
-
-        // Save to cache
-        cache.save(
-            &cache_key,
-            &artifacts.program,
-            metadata,
-            &artifacts.function_mapping,
-            &artifacts.core_functions,
-            &artifacts.type_implementations,
-            &artifacts.ast_program,
-            &artifacts.hot_ast,
-            &tool_specs,
-            &skill_specs,
-        )?;
+        // Build CachedBytecode (including tool/skill spec registries and
+        // call-graph ctx requirements) once and persist it without cloning.
+        let cached = Self::artifacts_to_cached_bytecode_with_metadata(metadata, artifacts);
+        cache.save_cached(&cache_key, cached)?;
 
         tracing::debug!(
             "Pre-compiled bytecode saved to cache with key {}",
             &cache_key[..12.min(cache_key.len())]
         );
         Ok(())
+    }
+
+    /// Convert CompilationArtifacts plus cache metadata into a runtime-ready
+    /// [`CachedBytecode`] without cloning any compiled structures.
+    pub fn artifacts_to_cached_bytecode_with_metadata(
+        metadata: crate::lang::cache::bytecode_cache::CacheMetadata,
+        artifacts: CompilationArtifacts,
+    ) -> Arc<crate::lang::cache::bytecode_cache::CachedBytecode> {
+        // Bake the tool/skill spec registries onto the CachedBytecode so
+        // downstream `call_function_with_cached_bytecode` calls and
+        // persisted cache hits can install them without recompiling.
+        let spec_compiler = crate::lang::compiler::Compiler::new();
+        let tool_specs = spec_compiler.build_tool_specs(&artifacts.hot_ast.program);
+        let skill_specs = spec_compiler.build_skill_specs(&artifacts.hot_ast.program);
+
+        Arc::new(crate::lang::cache::bytecode_cache::CachedBytecode::new(
+            metadata,
+            crate::lang::cache::bytecode_cache::CachedBytecodeArtifacts {
+                program: artifacts.program,
+                function_mapping: artifacts.function_mapping,
+                core_functions: artifacts.core_functions,
+                type_implementations: artifacts.type_implementations,
+                hot_ast: artifacts.hot_ast,
+                tool_specs,
+                skill_specs,
+            },
+        ))
     }
 
     /// Convert CompilationArtifacts to CachedBytecode for use with call_function_with_cached_bytecode
@@ -1400,29 +1409,7 @@ impl Engine {
             cache_key: String::new(),
         };
 
-        // Same rationale as `compile_to_cache`: bake the
-        // tool/skill spec registries onto the in-memory CachedBytecode
-        // so that downstream `call_function_with_cached_bytecode` calls
-        // can install them into the global registries before
-        // `vm.execute()` runs module-level statements like
-        // `agent-tools [::tool/from-fn(::ns/fn, ...)]`.
-        let spec_compiler = crate::lang::compiler::Compiler::new();
-        let tool_specs = spec_compiler.build_tool_specs(&artifacts.ast_program);
-        let skill_specs = spec_compiler.build_skill_specs(&artifacts.ast_program);
-
-        Arc::new(crate::lang::cache::bytecode_cache::CachedBytecode::new(
-            metadata,
-            crate::lang::cache::bytecode_cache::CachedBytecodeArtifacts {
-                program: artifacts.program,
-                function_mapping: artifacts.function_mapping,
-                core_functions: artifacts.core_functions,
-                type_implementations: artifacts.type_implementations,
-                ast_program: artifacts.ast_program,
-                hot_ast: artifacts.hot_ast,
-                tool_specs,
-                skill_specs,
-            },
-        ))
+        Self::artifacts_to_cached_bytecode_with_metadata(metadata, artifacts)
     }
 }
 
@@ -1477,7 +1464,6 @@ mod tests {
             function_mapping: compiler.get_function_mapping().clone(),
             core_functions: compiler.get_core_functions().clone(),
             type_implementations: compiler.get_type_implementations().clone(),
-            ast_program: ast_program.clone(),
             hot_ast: HotAst::from_program(ast_program),
         })
     }
