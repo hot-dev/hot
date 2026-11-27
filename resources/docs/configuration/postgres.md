@@ -42,6 +42,7 @@ Hot connects to PostgreSQL with two logins:
 | `hot.db.migration-uri` | `HOT_DB_MIGRATION_URI` | `--db.migration-uri` | Schema owner, for migrations and index provisioning |
 | `hot.db.schema` | | | Must be `hot`, the default |
 | `hot.db.rls.enforce` | `HOT_DB_RLS_ENFORCE` | | Check the runtime login at startup. Default `true` |
+| `hot.db.min-connections` | `HOT_DB_MIN_CONNECTIONS` | | Warm PostgreSQL connections kept open per process. Default `2`, clamped to the pool maximum; `0` disables |
 
 `db.migration-uri` applies only when `db.uri` is a PostgreSQL URI. With
 SQLite, Hot ignores it.
@@ -289,6 +290,21 @@ semantic search. It needs `db.migration-uri`, because index creation runs as
 the schema owner. It skips indexes that already exist and reports interrupted
 ones for repair. Searches still work without these indexes; they scan instead.
 Run it again after you create stores or change an embedding dimension.
+
+## Connection Pool
+
+Each PostgreSQL-backed process keeps `hot.db.min-connections` (default `2`,
+environment variable `HOT_DB_MIN_CONNECTIONS`) warm connections open so the
+first query after an idle period doesn't pay a TLS handshake and session setup.
+The value is clamped to the process's maximum pool size; set it to `0` if you
+run many mostly-idle processes against a tight PostgreSQL `max_connections`
+budget.
+
+Burst connections above the minimum are reaped after 60 seconds idle, and all
+connections recycle after 30 minutes. Connections idle for less than 30 seconds
+are reused without a pre-acquire ping; connections idle for 30 seconds or longer
+are pinged before checkout so sockets half-closed by a proxy or load balancer
+are replaced cleanly.
 
 ## Connection Proxies
 

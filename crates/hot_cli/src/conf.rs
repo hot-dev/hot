@@ -118,6 +118,7 @@ const SETTINGS_WITHOUT_DEFAULTS: &[&str] = &[
 const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_JIT", "jit.mode"),
     ("HOT_DB_MIGRATION_URI", "db.migration-uri"),
+    ("HOT_DB_MIN_CONNECTIONS", "db.min-connections"),
     ("HOT_BUILD_AWS_ACCESS_KEY_ID", "build.aws.access-key-id"),
     (
         "HOT_BUILD_AWS_SECRET_ACCESS_KEY",

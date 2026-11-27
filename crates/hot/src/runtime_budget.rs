@@ -6,6 +6,12 @@ use std::num::NonZeroUsize;
 /// deriving connection counts that exhaust the database's connection limit.
 const DEFAULT_DB_MAX_CONNECTIONS: usize = 50;
 
+/// Default minimum warm connections kept open per Postgres pool when no
+/// explicit `db.min-connections` is configured. Keeps a small baseline warm to
+/// avoid cold TCP/TLS/auth latency on traffic bursts without inflating
+/// fleet-wide idle connection counts.
+pub const DEFAULT_POSTGRES_MIN_CONNECTIONS: u32 = 2;
+
 /// Process memory (MB) held back from the task-worker budget for the runtime
 /// itself before dividing the rest between code VMs and containers.
 const TASK_PROCESS_RESERVE_MB: u64 = 512;
@@ -215,6 +221,21 @@ pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
     derived.min(ceiling).min(u32::MAX as usize) as u32
 }
 
+/// Derive the Postgres pool's `min_connections` setting, always clamped to
+/// `<= max_connections`.
+///
+/// Checks `db.min-connections` (full config) first, then `min-connections`
+/// (resolved `db` section). Explicit `0` disables pre-warming and minimum-size
+/// maintenance; unset or `"auto"` defaults to
+/// `DEFAULT_POSTGRES_MIN_CONNECTIONS.min(max_connections)`.
+pub fn derive_postgres_pool_min_connections(conf: &Val, max_connections: u32) -> u32 {
+    let configured = configured_nonneg_u32(conf, "db.min-connections")
+        .or_else(|| configured_nonneg_u32(conf, "min-connections"));
+    configured
+        .unwrap_or(DEFAULT_POSTGRES_MIN_CONNECTIONS)
+        .min(max_connections)
+}
+
 /// Size the SQLite connection pool. SQLite in WAL mode allows many concurrent
 /// readers but serializes writers at the storage layer, so the pool is sized
 /// for *read* concurrency (worker execution slots) plus a small write headroom.
@@ -278,6 +299,24 @@ fn configured_usize(conf: &Val, path: &str) -> Option<usize> {
                 None
             } else {
                 s.parse::<usize>().ok().filter(|n| *n > 0)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn configured_nonneg_u32(conf: &Val, path: &str) -> Option<u32> {
+    let value = conf.get(path)?;
+    match value {
+        Val::Int(i) if i >= 0 => Some(u32::try_from(i).unwrap_or(u32::MAX)),
+        Val::Str(s) => {
+            let s = s.trim();
+            if s.eq_ignore_ascii_case("auto") || s.is_empty() || s.eq_ignore_ascii_case("null") {
+                None
+            } else {
+                s.parse::<u64>()
+                    .ok()
+                    .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
             }
         }
         _ => None,
@@ -602,5 +641,96 @@ mod tests {
         assert!(budget.resolved <= 10);
         assert!(budget.explicit);
         assert_eq!(budget.backend, "kata");
+    }
+
+    #[test]
+    fn postgres_min_connections_defaults_to_two_and_clamps_to_max() {
+        let conf = val!({});
+
+        assert_eq!(derive_postgres_pool_min_connections(&conf, 10), 2);
+        assert_eq!(derive_postgres_pool_min_connections(&conf, 2), 2);
+        assert_eq!(derive_postgres_pool_min_connections(&conf, 1), 1);
+        assert_eq!(derive_postgres_pool_min_connections(&conf, 0), 0);
+    }
+
+    #[test]
+    fn postgres_min_connections_supports_explicit_zero_and_both_config_paths() {
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": 0i64}}), 10),
+            0
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"min-connections": 0i64}), 10),
+            0
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": "0"}}), 10),
+            0
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": 4i64}}), 10),
+            4
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"min-connections": 3i64}), 10),
+            3
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(
+                &val!({"db": {"min-connections": 0i64}, "min-connections": 4i64}),
+                10
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn postgres_min_connections_clamps_to_max_and_handles_auto_or_invalid() {
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": 25i64}}), 5),
+            5
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": 5i64}}), 1),
+            1
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": "auto"}}), 10),
+            2
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": ""}}), 10),
+            2
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": -1i64}}), 10),
+            2
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(&val!({"db": {"min-connections": "invalid"}}), 10),
+            2
+        );
+        assert_eq!(
+            derive_postgres_pool_min_connections(
+                &val!({"db": {"min-connections": "99999999999"}}),
+                8
+            ),
+            8
+        );
+    }
+
+    #[test]
+    fn postgres_min_connections_respects_derived_tiny_pool_max() {
+        let conf = val!({
+            "worker": {
+                "db-max-connections": 1i64,
+            },
+        });
+
+        let max_connections = derive_postgres_pool_connections(&conf);
+        let min_connections = derive_postgres_pool_min_connections(&conf, max_connections);
+
+        assert_eq!(max_connections, 1);
+        assert_eq!(min_connections, 1);
     }
 }

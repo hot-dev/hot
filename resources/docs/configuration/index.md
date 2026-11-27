@@ -352,6 +352,7 @@ These set what a CLI command does when you don't pass the flag.
 |---------|-------------|---------|
 | `hot.db.statement-timeout-ms` | PostgreSQL statement timeout | `30000` |
 | `hot.db.lock-timeout-ms` | PostgreSQL lock timeout | `5000` |
+| `hot.db.min-connections` | Warm PostgreSQL connections kept open per process, clamped to the pool maximum. `0` disables. Also `HOT_DB_MIN_CONNECTIONS` | `2` |
 | `hot.db.local.retention.call.days` | In local development, the worker deletes call data older than this many days. `-1` keeps it | `7` |
 | `hot.db.sqlite.cache-size-kb` | SQLite page cache, in KiB | `65536` |
 | `hot.db.sqlite.mmap-size-bytes` | Bytes of the database file to memory-map for reads. `0` turns it off | `268435456` |
