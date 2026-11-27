@@ -42,6 +42,8 @@ Hot connects to PostgreSQL with two logins:
 | `hot.db.migration-uri` | `HOT_DB_MIGRATION_URI` | `--db.migration-uri` | Schema owner, for migrations and index provisioning |
 | `hot.db.schema` | | | Must be `hot`, the default |
 | `hot.db.rls.enforce` | `HOT_DB_RLS_ENFORCE` | | Check the runtime login at startup. Default `true` |
+| `hot.db.max-connections` | `HOT_DB_MAX_CONNECTIONS` | | Maximum PostgreSQL connections per process. Default `auto` (derived from concurrency, floor `10`, cap `50`); an explicit integer sets the pool size directly |
+| `hot.db.reserved-connections` | `HOT_DB_RESERVED_CONNECTIONS` | | Extra connections added to the derived pool when `hot.db.max-connections` is `auto`. Default `4` |
 | `hot.db.min-connections` | `HOT_DB_MIN_CONNECTIONS` | | Warm PostgreSQL connections kept open per process. Default `2`, clamped to the pool maximum; `0` disables |
 
 `db.migration-uri` applies only when `db.uri` is a PostgreSQL URI. With
@@ -293,12 +295,22 @@ Run it again after you create stores or change an embedding dimension.
 
 ## Connection Pool
 
-Each PostgreSQL-backed process keeps `hot.db.min-connections` (default `2`,
-environment variable `HOT_DB_MIN_CONNECTIONS`) warm connections open so the
-first query after an idle period doesn't pay a TLS handshake and session setup.
-The value is clamped to the process's maximum pool size; set it to `0` if you
-run many mostly-idle processes against a tight PostgreSQL `max_connections`
-budget.
+Each PostgreSQL-backed process sizes its pool with `hot.db.max-connections`
+(`HOT_DB_MAX_CONNECTIONS`, default `auto`) and `hot.db.min-connections`
+(`HOT_DB_MIN_CONNECTIONS`, default `2`):
+
+- **`hot.db.max-connections`**: When set to an explicit positive integer, that
+  value sets the process's pool size directly — allowing API, App, scheduler,
+  and worker processes to scale up or down independently (a singleton scheduler
+  always keeps at least `2` connections: one for its advisory lock and one for
+  normal queries). When unset or `auto`, Hot derives the pool size from local
+  worker/task execution concurrency plus `hot.db.reserved-connections`
+  (`HOT_DB_RESERVED_CONNECTIONS`, default `4`), clamped between `10` and `50`.
+- **`hot.db.min-connections`**: Warm connections kept open per process so the
+  first query after an idle period doesn't pay a TLS handshake and session
+  setup. Clamped to the process's `max_connections`; set it to `0` if you run
+  many mostly-idle processes against a tight PostgreSQL `max_connections`
+  budget.
 
 Burst connections above the minimum are reaped after 60 seconds idle, and all
 connections recycle after 30 minutes. Connections idle for less than 30 seconds

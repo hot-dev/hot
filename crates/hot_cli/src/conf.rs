@@ -119,6 +119,8 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_JIT", "jit.mode"),
     ("HOT_DB_MIGRATION_URI", "db.migration-uri"),
     ("HOT_DB_MIN_CONNECTIONS", "db.min-connections"),
+    ("HOT_DB_MAX_CONNECTIONS", "db.max-connections"),
+    ("HOT_DB_RESERVED_CONNECTIONS", "db.reserved-connections"),
     ("HOT_BUILD_AWS_ACCESS_KEY_ID", "build.aws.access-key-id"),
     (
         "HOT_BUILD_AWS_SECRET_ACCESS_KEY",
@@ -160,7 +162,6 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_SCHEDULER_HEARTBEAT_PATH", "scheduler.heartbeat-path"),
     ("HOT_TASK_STATUS_PATH", "task.status-path"),
     ("HOT_REDIS_CA_CERT", "redis.ca-cert"),
-    ("HOT_WORKER_DB_MAX_CONNECTIONS", "worker.db-max-connections"),
     ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
     ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
     (
@@ -2065,8 +2066,35 @@ mod tests {
         );
         assert_eq!(env_var_to_conf_key("HOT_REDIS_CA_CERT"), "redis.ca-cert");
         assert_eq!(
-            env_var_to_conf_key("HOT_WORKER_DB_MAX_CONNECTIONS"),
-            "worker.db-max-connections"
+            env_var_to_conf_key("HOT_DB_MAX_CONNECTIONS"),
+            "db.max-connections"
+        );
+        assert_eq!(
+            env_var_to_conf_key("HOT_DB_MIN_CONNECTIONS"),
+            "db.min-connections"
+        );
+        assert_eq!(
+            env_var_to_conf_key("HOT_DB_RESERVED_CONNECTIONS"),
+            "db.reserved-connections"
+        );
+
+        // Verify HOT_DB_MAX_CONNECTIONS raises pool sizing even through
+        // `hot::db::get_resolved_conf`, matching `hot_api` and `hot_app`.
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_DB_MAX_CONNECTIONS".into(), "40".into()),
+                ("HOT_DB_MIN_CONNECTIONS".into(), "0".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        let db_conf = hot::db::get_resolved_conf(conf);
+        let max_conns = hot::runtime_budget::derive_postgres_pool_connections(&db_conf);
+        assert_eq!(max_conns, 40);
+        assert_eq!(
+            hot::runtime_budget::derive_postgres_pool_min_connections(&db_conf, max_conns),
+            0
         );
     }
 

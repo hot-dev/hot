@@ -14,6 +14,7 @@ hot.db.uri ::env/get("HOT_DB_URI", "")
 hot.db.schema "hot"
 hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
 hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
+hot.db.max-connections ::env/get("HOT_DB_MAX_CONNECTIONS", "auto")
 hot.db.min-connections Int(::env/get("HOT_DB_MIN_CONNECTIONS", "2"))
 
 // Logging Configuration

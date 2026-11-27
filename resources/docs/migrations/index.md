@@ -36,6 +36,16 @@ $env:HOT_VERSION = "2.3.0"; irm https://get.hot.dev/install.ps1 | iex
 
 Pinned installs are useful when you need to finish database migrations with an older release line before moving to a newer major version.
 
+## Upgrading from Hot 3.0.16 to 3.0.17 {#upgrading-from-3-0-16-to-3-0-17}
+
+**No database migrations.** 3.0.17 runs on a 3.0.16 database as is.
+
+**What to check in your configuration:**
+
+- `hot.worker.db-max-connections` (`HOT_WORKER_DB_MAX_CONNECTIONS`) and `hot.worker.db-reserved-connections` (`HOT_WORKER_DB_RESERVED_CONNECTIONS`) have been renamed to `hot.db.max-connections` (`HOT_DB_MAX_CONNECTIONS`) and `hot.db.reserved-connections` (`HOT_DB_RESERVED_CONNECTIONS`). There is no alias for the old names. An explicit `hot.db.max-connections` now sets the PostgreSQL pool size directly for any process (including API and App), rather than acting only as a ceiling on derived worker concurrency; `"auto"` derives from worker/task concurrency plus `hot.db.reserved-connections` (floor `10`, cap `50`).
+- Each PostgreSQL-backed process now keeps `hot.db.min-connections` (`HOT_DB_MIN_CONNECTIONS`, default `2`, clamped to the pool maximum) warm connections open. Set `HOT_DB_MIN_CONNECTIONS=0` if you run many mostly-idle processes against a tight PostgreSQL `max_connections` budget.
+- PostgreSQL `hot.db.schema` now requires a lowercase ASCII identifier (`[a-z_][a-z0-9_]*`). Mixed-case schema names fail fast at startup instead of silently falling back to `public`.
+
 ## Upgrading from Hot 3.0.15 to 3.0.16 {#upgrading-from-3-0-15-to-3-0-16}
 
 **No database migrations.** 3.0.16 runs on a 3.0.15 database as is.

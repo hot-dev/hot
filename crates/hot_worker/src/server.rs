@@ -8531,7 +8531,6 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "vm-concurrency": "auto",
         "vm-memory-mb": 256i64,
         "reserved-memory-mb": 512i64,
-        "db-reserved-connections": 4i64,
         "cancel-on-timeout": true,
         "event-ordering": "current",
         "handler-concurrency": "serial",

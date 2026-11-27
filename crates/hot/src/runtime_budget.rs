@@ -1,10 +1,14 @@
 use crate::val::Val;
 use std::num::NonZeroUsize;
 
-/// Default hard ceiling on the derived Postgres pool size when no explicit
-/// `worker.db-max-connections` is configured. Prevents large hosts from
-/// deriving connection counts that exhaust the database's connection limit.
+/// Default cap on the auto-derived Postgres pool size when `db.max-connections`
+/// is unset or `"auto"`. Prevents large hosts from deriving connection counts
+/// that exhaust the database's connection limit.
 const DEFAULT_DB_MAX_CONNECTIONS: usize = 50;
+
+/// Default extra Postgres connections added on top of derived execution
+/// concurrency when `db.max-connections` is `"auto"`.
+pub const DEFAULT_POSTGRES_RESERVED_CONNECTIONS: usize = 4;
 
 /// Default minimum warm connections kept open per Postgres pool when no
 /// explicit `db.min-connections` is configured. Keeps a small baseline warm to
@@ -183,7 +187,36 @@ pub fn derive_task_container_concurrency(
     }
 }
 
+/// Size the Postgres connection pool (`max_connections`).
+///
+/// Checks `db.max-connections` (full config) first, then `max-connections`
+/// (resolved `db` section, as passed by `hot_api` and `hot_app`).
+///
+/// - When explicitly set to a positive integer, that value sets the pool size
+///   directly (subject to the scheduler singleton 2-connection floor), letting
+///   API, App, scheduler, and worker processes raise or lower their pool size
+///   independently.
+/// - When unset or `"auto"`, derives from local worker/task execution
+///   concurrency plus `db.reserved-connections` (default 4), clamped to
+///   `10..=DEFAULT_DB_MAX_CONNECTIONS` (50).
 pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
+    let explicit_floor = if conf.get_bool_or_default("scheduler.singleton", false)
+        && conf.get("scheduler").is_some()
+    {
+        // The scheduler holds one Postgres connection for the lifetime of
+        // its session-level advisory lock. Keep at least one other
+        // connection available for normal scheduler DB work.
+        2
+    } else {
+        1
+    };
+
+    if let Some(explicit) = configured_usize(conf, "db.max-connections")
+        .or_else(|| configured_usize(conf, "max-connections"))
+    {
+        return explicit.max(explicit_floor).min(u32::MAX as usize) as u32;
+    }
+
     let worker_budget = configured_usize(conf, "worker.threads")
         .map(|requested| derive_worker_vm_concurrency(conf, requested).resolved)
         .unwrap_or(0);
@@ -195,30 +228,16 @@ pub fn derive_postgres_pool_connections(conf: &Val) -> u32 {
     } else {
         0
     };
-    let reserved = conf
-        .get_int_or_default("worker.db-reserved-connections", 4)
-        .max(1) as usize;
+    let reserved = configured_nonneg_u32(conf, "db.reserved-connections")
+        .or_else(|| configured_nonneg_u32(conf, "reserved-connections"))
+        .map(|n| (n as usize).max(1))
+        .unwrap_or(DEFAULT_POSTGRES_RESERVED_CONNECTIONS);
     let capacity_budget = worker_budget.max(task_code_budget);
-    let derived = capacity_budget.saturating_add(reserved).max(10);
+    let derived = capacity_budget
+        .saturating_add(reserved)
+        .clamp(10, DEFAULT_DB_MAX_CONNECTIONS);
 
-    // Clamp so large hosts don't derive a pool that exhausts the database's
-    // global connection limit. An explicit `worker.db-max-connections` raises
-    // or lowers the ceiling; otherwise a conservative default cap applies.
-    let explicit_ceiling_floor = if conf.get_bool_or_default("scheduler.singleton", false)
-        && conf.get("scheduler").is_some()
-    {
-        // The scheduler holds one Postgres connection for the lifetime of
-        // its session-level advisory lock. Keep at least one other
-        // connection available for normal scheduler DB work.
-        2
-    } else {
-        1
-    };
-    let ceiling = configured_usize(conf, "worker.db-max-connections")
-        .map(|c| c.max(explicit_ceiling_floor))
-        .unwrap_or(DEFAULT_DB_MAX_CONNECTIONS);
-
-    derived.min(ceiling).min(u32::MAX as usize) as u32
+    derived.min(u32::MAX as usize) as u32
 }
 
 /// Derive the Postgres pool's `min_connections` setting, always clamped to
@@ -458,8 +477,10 @@ mod tests {
             "worker": {
                 "threads": 4i64,
                 "vm-concurrency": 3i64,
-                "db-reserved-connections": 4i64,
                 "shared-process": false,
+            },
+            "db": {
+                "reserved-connections": 4i64,
             },
         });
 
@@ -485,28 +506,44 @@ mod tests {
     }
 
     #[test]
-    fn postgres_pool_respects_explicit_ceiling() {
-        let conf = val!({
+    fn postgres_pool_explicit_max_sets_pool_size_for_any_process_and_both_config_paths() {
+        // Non-worker process (API/App) with no worker/task budget can raise
+        // its pool above the default derived 10, via either full or resolved db conf.
+        assert_eq!(
+            derive_postgres_pool_connections(&val!({"db": {"max-connections": 40i64}})),
+            40
+        );
+        assert_eq!(
+            derive_postgres_pool_connections(&val!({"max-connections": 40i64})),
+            40
+        );
+        assert_eq!(
+            derive_postgres_pool_connections(&val!({"db": {"max-connections": "80"}})),
+            80
+        );
+
+        // Explicit setting also overrides a large worker budget downward.
+        let worker_conf = val!({
             "worker": {
                 "threads": 64i64,
-                "db-max-connections": 20i64,
-                "db-reserved-connections": 4i64,
+            },
+            "db": {
+                "max-connections": 20i64,
+                "reserved-connections": 4i64,
             },
         });
-
-        let max_connections = derive_postgres_pool_connections(&conf);
-
-        assert!(max_connections >= 10);
-        assert!(max_connections <= 20);
+        assert_eq!(derive_postgres_pool_connections(&worker_conf), 20);
     }
 
     #[test]
-    fn postgres_pool_respects_explicit_ceiling_below_default_floor() {
+    fn postgres_pool_respects_explicit_max_below_default_floor() {
         let conf = val!({
             "worker": {
                 "threads": 64i64,
-                "db-max-connections": 5i64,
-                "db-reserved-connections": 4i64,
+            },
+            "db": {
+                "max-connections": 5i64,
+                "reserved-connections": 4i64,
             },
         });
 
@@ -521,8 +558,8 @@ mod tests {
             "scheduler": {
                 "singleton": true,
             },
-            "worker": {
-                "db-max-connections": 1i64,
+            "db": {
+                "max-connections": 1i64,
             },
         });
 
@@ -539,14 +576,35 @@ mod tests {
                 "worker-memory-mb": 2048i64,
                 "code-vm-memory-mb": 256i64,
             },
-            "worker": {
-                "db-reserved-connections": 4i64,
+            "db": {
+                "max-connections": "auto",
+                "reserved-connections": 4i64,
             },
         });
 
         let max_connections = derive_postgres_pool_connections(&conf);
 
         assert_eq!(max_connections, 10);
+    }
+
+    #[test]
+    fn postgres_pool_auto_uses_reserved_connections_and_caps_at_default() {
+        assert_eq!(
+            derive_postgres_pool_connections(&val!({
+                "db": {
+                    "max-connections": "auto",
+                    "reserved-connections": 15i64,
+                },
+            })),
+            15
+        );
+        assert_eq!(
+            derive_postgres_pool_connections(&val!({
+                "max-connections": "auto",
+                "reserved-connections": 100i64,
+            })),
+            50
+        );
     }
 
     #[test]
@@ -722,8 +780,8 @@ mod tests {
     #[test]
     fn postgres_min_connections_respects_derived_tiny_pool_max() {
         let conf = val!({
-            "worker": {
-                "db-max-connections": 1i64,
+            "db": {
+                "max-connections": 1i64,
             },
         });
 

@@ -259,8 +259,6 @@ is named from its key: `HOT_WORKER_RUN_TIMEOUT` sets `hot.worker.run-timeout`.
 | `hot.worker.reserved-memory-mb` | Memory held back from that calculation | `512` |
 | `hot.worker.shared-process` | Count half the CPUs for `auto`, for a worker that shares them with other services | `false` |
 | `hot.worker.max-blocking-executions` | Cap on executions that hold a thread. `-1` is twice the run concurrency | `-1` |
-| `hot.worker.db-max-connections` | Ceiling on the PostgreSQL connection pool. `auto` is 50 | `auto` |
-| `hot.worker.db-reserved-connections` | Connections added to the PostgreSQL pool on top of the run and code-task concurrency | `4` |
 | `hot.worker.local-write-concurrency` | Write headroom added to the SQLite connection pool | `1` |
 | `hot.worker.read-batch-size` | Events read from the queue in one round trip | `8` |
 | `hot.worker.tenant-service-cache-max-entries` | Most entries in the worker's cache of stores and context values. `0` turns it off | `1024` |
@@ -352,6 +350,8 @@ These set what a CLI command does when you don't pass the flag.
 |---------|-------------|---------|
 | `hot.db.statement-timeout-ms` | PostgreSQL statement timeout | `30000` |
 | `hot.db.lock-timeout-ms` | PostgreSQL lock timeout | `5000` |
+| `hot.db.max-connections` | Maximum PostgreSQL connections per process. `auto` derives from worker/task concurrency plus `hot.db.reserved-connections` (floor `10`, cap `50`); an explicit integer sets the pool size directly. Also `HOT_DB_MAX_CONNECTIONS` | `auto` |
+| `hot.db.reserved-connections` | Extra connections added to the derived PostgreSQL pool when `hot.db.max-connections` is `auto`. Also `HOT_DB_RESERVED_CONNECTIONS` | `4` |
 | `hot.db.min-connections` | Warm PostgreSQL connections kept open per process, clamped to the pool maximum. `0` disables. Also `HOT_DB_MIN_CONNECTIONS` | `2` |
 | `hot.db.local.retention.call.days` | In local development, the worker deletes call data older than this many days. `-1` keeps it | `7` |
 | `hot.db.sqlite.cache-size-kb` | SQLite page cache, in KiB | `65536` |

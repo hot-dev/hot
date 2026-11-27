@@ -498,6 +498,8 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "statement-timeout-ms": 30_000i64,
         "lock-timeout-ms": 5_000i64,
         "min-connections": i64::from(crate::runtime_budget::DEFAULT_POSTGRES_MIN_CONNECTIONS),
+        "max-connections": "auto",
+        "reserved-connections": crate::runtime_budget::DEFAULT_POSTGRES_RESERVED_CONNECTIONS as i64,
     });
 
     // Extract db-specific configuration from the full config
@@ -812,7 +814,7 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             let min_connections =
                 crate::runtime_budget::derive_postgres_pool_min_connections(conf, max_connections);
             tracing::debug!(
-                "Postgres pool min_connections={}, max_connections={} from derived local execution budget",
+                "Postgres pool min_connections={}, max_connections={}",
                 min_connections,
                 max_connections
             );
@@ -1065,6 +1067,8 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
                 "db.schema",
                 &conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA),
             );
+            let schema = validate_postgres_schema_name(&schema)?.to_string();
+            let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
             let ledger_schema = schema.clone();
             let migrator = sqlx::migrate::Migrator::new(DatabaseType::Postgres.migration_dir()?)
                 .await
@@ -1072,11 +1076,10 @@ pub async fn migration_state(conf: &Val) -> Result<Option<MigrationState>, Datab
             let pool = PgPoolOptions::new()
                 .max_connections(1)
                 .after_connect(move |conn, _meta| {
-                    let schema = schema.clone();
+                    let quoted_schema = quoted_schema.clone();
                     Box::pin(async move {
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set search_path = '{}', 'public'",
-                            schema
+                            "SET search_path = {quoted_schema}, \"public\""
                         )))
                         .await?;
                         Ok(())
@@ -1434,6 +1437,8 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                     conf.get_str_or_default("schema", DEFAULT_DB_SCHEMA)
                 }
             };
+            let schema = validate_postgres_schema_name(&schema)?.to_string();
+            let quoted_schema = format!("\"{}\"", schema.replace('"', "\"\""));
             tracing::debug!("Using Postgres migration schema: {}", schema);
             let marker_schema = schema.clone();
 
@@ -1447,6 +1452,7 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                 .max_connections(1)
                 .after_connect(move |conn, _meta| {
                     let schema = schema.clone();
+                    let quoted_schema = quoted_schema.clone();
                     Box::pin(async move {
                         conn.execute(sqlx::AssertSqlSafe(format!(
                             "set lock_timeout = {}",
@@ -1455,14 +1461,12 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                         .await?;
                         tracing::debug!("Creating schema if not exists: {}", schema);
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "create schema if not exists {}",
-                            schema
+                            "create schema if not exists {quoted_schema}"
                         )))
                         .await?;
                         tracing::debug!("Setting migration search path to: {}", schema);
                         conn.execute(sqlx::AssertSqlSafe(format!(
-                            "set search_path = '{}', 'public'",
-                            schema
+                            "set search_path = {quoted_schema}, \"public\""
                         )))
                         .await?;
                         Ok(())
@@ -2598,15 +2602,67 @@ RAIgVLtiEAJqJUn5jcrbBp64dybn2lSZLjwWiOuRu/15XO8CIHYES7qOpXLcobdc
         );
     }
 
+    #[tokio::test]
+    async fn postgres_migration_paths_reject_invalid_schema_before_connecting() {
+        for bad_schema in ["MySchema", "hot\"; DROP TABLE org; --"] {
+            let conf = crate::val!({
+                "db": {
+                    "uri": "postgres://hot_runtime:x@127.0.0.1:1/hot",
+                    "migration-uri": "postgres://hot_owner:x@127.0.0.1:1/hot",
+                    "schema": bad_schema,
+                }
+            });
+            let state_err = migration_state(&conf)
+                .await
+                .expect_err("migration_state must reject invalid schema before connecting");
+            assert!(
+                matches!(
+                    state_err,
+                    DatabaseError::Connection(sqlx::Error::Configuration(_))
+                ),
+                "expected configuration error from migration_state for {bad_schema:?}, got: {state_err:?}"
+            );
+
+            let migrate_err = run_migrations(&conf)
+                .await
+                .expect_err("run_migrations must reject invalid schema before connecting");
+            assert!(
+                matches!(
+                    migrate_err,
+                    DatabaseError::Connection(sqlx::Error::Configuration(_))
+                ),
+                "expected configuration error from run_migrations for {bad_schema:?}, got: {migrate_err:?}"
+            );
+        }
+    }
+
     #[test]
-    fn postgres_resolved_conf_includes_default_and_overrides_min_connections() {
+    fn postgres_resolved_conf_includes_default_and_overrides_pool_sizing() {
         let defaults = get_resolved_conf(Val::map_empty());
         assert_eq!(defaults.get_int("min-connections"), 2);
-
-        let disabled = get_resolved_conf(crate::val!({"db": {"min-connections": 0i64}}));
-        assert_eq!(disabled.get_int("min-connections"), 0);
+        assert_eq!(defaults.get_str("max-connections"), "auto");
+        assert_eq!(defaults.get_int("reserved-connections"), 4);
         assert_eq!(
-            crate::runtime_budget::derive_postgres_pool_min_connections(&disabled, 10),
+            crate::runtime_budget::derive_postgres_pool_connections(&defaults),
+            10
+        );
+
+        // Resolved db_conf (as passed by hot_api and hot_app) preserves
+        // explicit max-connections, min-connections, and reserved-connections.
+        let explicit = get_resolved_conf(crate::val!({
+            "db": {
+                "min-connections": 0i64,
+                "max-connections": 40i64,
+                "reserved-connections": 8i64,
+            }
+        }));
+        assert_eq!(explicit.get_int("min-connections"), 0);
+        assert_eq!(explicit.get_int("max-connections"), 40);
+        assert_eq!(explicit.get_int("reserved-connections"), 8);
+        let max_conns = crate::runtime_budget::derive_postgres_pool_connections(&explicit);
+        assert_eq!(max_conns, 40);
+        assert_eq!(
+            crate::runtime_budget::derive_postgres_pool_min_connections(&explicit, max_conns),
             0
         );
     }

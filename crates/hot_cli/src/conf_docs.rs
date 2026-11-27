@@ -27,6 +27,16 @@ const NOT_SETTINGS: &[(&str, &str, &str)] = &[
         "profile.set",
         "the selector 3.0.10 removed, named in its upgrade note",
     ),
+    (
+        "migrations/index.md",
+        "worker.db-max-connections",
+        "renamed to db.max-connections in 3.0.17, named in its upgrade note",
+    ),
+    (
+        "migrations/index.md",
+        "worker.db-reserved-connections",
+        "renamed to db.reserved-connections in 3.0.17, named in its upgrade note",
+    ),
 ];
 
 /// Settings the docs name that the template leaves out. (key, why).
