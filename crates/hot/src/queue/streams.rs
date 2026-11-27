@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use zstd::{Decoder, Encoder};
 
@@ -396,10 +396,12 @@ const PROCESS_BLOCKING_MS: u64 = 5_000;
 /// have no redis-rs response timeout.
 const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Maximum delay before re-checking Redis while all pending entries belong to
-/// active workers. Lease completion notifications normally wake the claimer
-/// sooner; this bound also covers dropped notifications and new backlog.
-const IN_FLIGHT_RECHECK_MS: u64 = 50;
+/// Maximum server-side `XREADGROUP BLOCK` duration (ms) while all pending
+/// entries belong to active workers. Fresh backlog still wakes immediately
+/// inside Redis (no polling delay), while bounding how long a failed/dropped
+/// lease's PEL entry or a newly scheduled delayed retry waits before
+/// `refill_prefetch` re-checks `read_own_pending` and `promote_due_delayed`.
+const IN_FLIGHT_BLOCK_MS: u64 = 250;
 /// Most PEL reads one `release_unstarted` call makes, and the fewest entries
 /// each of them lists.
 const RELEASE_UNSTARTED_MAX_PASSES: usize = 64;
@@ -660,6 +662,28 @@ impl RedisConnectionOwned {
             }
         }
     }
+
+    /// Arm a drop guard that marks this connection broken if the in-flight
+    /// command future is cancelled before completing (e.g. `tokio::select!`
+    /// shutdown or a caller timeout cancelling `XREADGROUP BLOCK`). Disarm
+    /// right after `cmd().await` returns so normal completions keep reusing
+    /// the socket.
+    fn arm_cancel_eviction(&mut self, armed: bool) -> MarkBrokenOnDrop<'_> {
+        MarkBrokenOnDrop { conn: self, armed }
+    }
+}
+
+struct MarkBrokenOnDrop<'a> {
+    conn: &'a mut RedisConnectionOwned,
+    armed: bool,
+}
+
+impl Drop for MarkBrokenOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.conn.broken = true;
+        }
+    }
 }
 
 /// Source of a buffered message.
@@ -854,8 +878,23 @@ impl RedisQueueDrainStats {
 pub struct RedisStreamQueue<T> {
     /// Redis client (cheap to clone, used to create per-worker connections)
     client: RedisClient,
-    /// Per-worker cached connection (created lazily on first use)
+    /// Per-worker cached control/fast-path connection (created lazily on first
+    /// use). Serves `enqueue`, `read_own_pending`, `record_attempt`, `XACK`,
+    /// `touch_pending_entry`, requeues, DLQ moves, janitor maintenance, and
+    /// non-blocking or single-lease reads.
     cached_conn: Arc<Mutex<Option<RedisConnectionOwned>>>,
+    /// Dedicated connection for blocking `XREADGROUP ... BLOCK ... >` fresh
+    /// reads on handles that process leases concurrently (such as `hot_worker`).
+    /// Created lazily once a blocking read runs while leases are in flight, so
+    /// a parked claimer never stalls in-flight `record_attempt`, `XACK`,
+    /// `touch_pending_entry`, or `enqueue` commands on `cached_conn`, while
+    /// producers and sequential consumers (such as `hot_task_worker` slots)
+    /// keep a single Redis connection.
+    blocking_read_conn: Arc<Mutex<Option<RedisConnectionOwned>>>,
+    /// Latched to `true` the first time this handle performs a blocking fresh
+    /// read while leases are in flight, routing subsequent blocking fresh reads
+    /// through `blocking_read_conn`.
+    use_blocking_read_conn: Arc<AtomicBool>,
     stream_name: String,
     consumer_group: String,
     consumer_name: String,
@@ -881,10 +920,6 @@ pub struct RedisStreamQueue<T> {
     /// entry into the buffer. Cleared per-entry by the success/DLQ paths
     /// in `process_inner`.
     in_flight: Arc<Mutex<HashSet<String>>>,
-    /// Wakes a claimer parked behind in-flight PEL entries as soon as a lease
-    /// completes. This avoids repeatedly issuing non-blocking PEL/fresh reads
-    /// for the entire duration of a handler execution.
-    lease_completed: Arc<Notify>,
     /// Max entries claimed by one XREADGROUP for this queue handle.
     read_batch_size: usize,
     /// Idle time in milliseconds before XAUTOCLAIM treats a pending message as
@@ -919,6 +954,8 @@ impl<T> Clone for RedisStreamQueue<T> {
         Self {
             client: self.client.clone(),
             cached_conn: Arc::new(Mutex::new(None)), // Fresh cache for this worker
+            blocking_read_conn: Arc::new(Mutex::new(None)),
+            use_blocking_read_conn: Arc::new(AtomicBool::new(false)),
             stream_name: self.stream_name.clone(),
             consumer_group: self.consumer_group.clone(),
             consumer_name: format!("consumer-{}", Uuid::new_v4()), // NEW unique name!
@@ -928,7 +965,6 @@ impl<T> Clone for RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
-            lease_completed: Arc::new(Notify::new()),
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
@@ -957,6 +993,8 @@ impl<T> RedisStreamQueue<T> {
         Self {
             client: RedisClient::Standalone(Box::new(client)),
             cached_conn: Arc::new(Mutex::new(None)),
+            blocking_read_conn: Arc::new(Mutex::new(None)),
+            use_blocking_read_conn: Arc::new(AtomicBool::new(false)),
             stream_name,
             consumer_group: DEFAULT_CONSUMER_GROUP.to_string(),
             consumer_name,
@@ -966,7 +1004,6 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
-            lease_completed: Arc::new(Notify::new()),
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
@@ -993,6 +1030,8 @@ impl<T> RedisStreamQueue<T> {
         Self {
             client: RedisClient::Cluster(Box::new(cluster_client)),
             cached_conn: Arc::new(Mutex::new(None)),
+            blocking_read_conn: Arc::new(Mutex::new(None)),
+            use_blocking_read_conn: Arc::new(AtomicBool::new(false)),
             stream_name,
             consumer_group: DEFAULT_CONSUMER_GROUP.to_string(),
             consumer_name,
@@ -1002,7 +1041,6 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
-            lease_completed: Arc::new(Notify::new()),
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
@@ -1012,13 +1050,15 @@ impl<T> RedisStreamQueue<T> {
         }
     }
 
-    /// Get a connection, creating one if necessary. Connections marked
-    /// broken by a previous command failure are evicted here, so the caller
-    /// always gets a connection that is at least freshly established.
-    async fn get_connection(
-        &self,
-    ) -> Result<tokio::sync::MutexGuard<'_, Option<RedisConnectionOwned>>, StreamsQueueError> {
-        let mut guard = self.cached_conn.lock().await;
+    /// Get a connection from `slot`, creating one if necessary. Connections
+    /// marked broken by a previous command failure or cancelled blocking read
+    /// are evicted here, so the caller always gets a connection that is at
+    /// least freshly established.
+    async fn get_connection_from<'a>(
+        &'a self,
+        slot: &'a Mutex<Option<RedisConnectionOwned>>,
+    ) -> Result<tokio::sync::MutexGuard<'a, Option<RedisConnectionOwned>>, StreamsQueueError> {
+        let mut guard = slot.lock().await;
         if guard.as_ref().is_some_and(|conn| conn.broken) {
             *guard = None;
         }
@@ -1027,6 +1067,12 @@ impl<T> RedisStreamQueue<T> {
             *guard = Some(conn);
         }
         Ok(guard)
+    }
+
+    async fn get_connection(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<RedisConnectionOwned>>, StreamsQueueError> {
+        self.get_connection_from(&self.cached_conn).await
     }
 
     pub fn with_serialization(mut self, format: Serialization) -> Self {
@@ -1048,6 +1094,8 @@ impl<T> RedisStreamQueue<T> {
         Self {
             client: self.client.clone(),
             cached_conn: Arc::clone(&self.cached_conn),
+            blocking_read_conn: Arc::clone(&self.blocking_read_conn),
+            use_blocking_read_conn: Arc::clone(&self.use_blocking_read_conn),
             stream_name: self.stream_name.clone(),
             consumer_group: self.consumer_group.clone(),
             consumer_name: self.consumer_name.clone(),
@@ -1057,7 +1105,6 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::clone(&self.prefetched),
             refill_lock: Arc::clone(&self.refill_lock),
             in_flight: Arc::clone(&self.in_flight),
-            lease_completed: Arc::clone(&self.lease_completed),
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
@@ -2681,7 +2728,24 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         // N parallel waiters would each park inside Redis on their own
         // XREADGROUP > and wake together when *any* message arrives,
         // re-creating the original duplication on the new-message path.
-        let fresh_block_ms = if pending_all_inflight { 0 } else { block_ms };
+        //
+        // When leases are in flight, run the blocking fresh read on the
+        // dedicated `blocking_read_conn` so in-flight `record_attempt`,
+        // `XACK`, `touch_pending_entry`, and `enqueue` on `cached_conn` never
+        // stall behind `XREADGROUP BLOCK`. Blocking inside Redis wakes new
+        // arrivals immediately instead of polling every 50 ms, while capping
+        // the block at `IN_FLIGHT_BLOCK_MS` bounds how long a failed/dropped
+        // lease's PEL retry or a newly scheduled delayed retry waits before
+        // the next `read_own_pending` / `promote_due_delayed` pass.
+        let has_in_flight = pending_all_inflight || !in_flight.is_empty();
+        let fresh_block_ms = if has_in_flight {
+            block_ms.min(IN_FLIGHT_BLOCK_MS)
+        } else {
+            block_ms
+        };
+        if has_in_flight && fresh_block_ms > 0 {
+            self.use_blocking_read_conn.store(true, Ordering::Release);
+        }
         self.drain_stats.fresh_reads.fetch_add(1, Ordering::Relaxed);
         let fresh_read_started = Instant::now();
         let fresh = self
@@ -2697,18 +2761,6 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 &self.consumer_name,
                 self.read_batch_size,
             );
-            if pending_all_inflight && block_ms > 0 {
-                // A non-blocking fresh read keeps new backlog from being
-                // starved by the PEL. If there is none, park until a worker
-                // finishes or a short safety interval elapses instead of
-                // hot-looping on the same in-flight PEL entry.
-                tokio::select! {
-                    _ = self.lease_completed.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(
-                        block_ms.min(IN_FLIGHT_RECHECK_MS),
-                    )) => {}
-                }
-            }
             return Ok(false);
         }
         self.drain_stats
@@ -2836,7 +2888,12 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         }
         cmd.arg("STREAMS").arg(&self.stream_name).arg(">");
 
-        let result = self.cmd_on_group(&cmd).await?;
+        let slot = if block_ms > 0 && self.use_blocking_read_conn.load(Ordering::Acquire) {
+            &self.blocking_read_conn
+        } else {
+            &self.cached_conn
+        };
+        let result = self.cmd_on_group_using(slot, &cmd, block_ms > 0).await?;
         let delivered_at = tokio::time::Instant::now();
         Ok(parse_stream_messages(&result)
             .into_iter()
@@ -2853,18 +2910,34 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             .collect())
     }
 
-    /// Run a consumer-group command, recreating the group once when it has
-    /// gone missing.
+    /// Run a consumer-group command on the control connection, recreating the
+    /// group once when it has gone missing.
     async fn cmd_on_group(&self, cmd: &redis::Cmd) -> Result<redis::Value, StreamsQueueError> {
-        // Hold the cached-connection lock only for the command itself: the
-        // NOGROUP recovery below re-enters `ensure_consumer_group()` and
-        // `get_connection()`, which re-lock the same non-reentrant mutex —
-        // recovering while this guard was still alive would permanently
-        // deadlock the worker future.
+        self.cmd_on_group_using(&self.cached_conn, cmd, false).await
+    }
+
+    /// Run a consumer-group command on `slot`, recreating the group once when
+    /// it has gone missing. When `evict_on_cancel` is true (blocking
+    /// `XREADGROUP BLOCK`), dropping the future mid-await marks the connection
+    /// broken so the next caller opens a fresh socket instead of queuing behind
+    /// the still-blocked command on Redis.
+    async fn cmd_on_group_using(
+        &self,
+        slot: &Mutex<Option<RedisConnectionOwned>>,
+        cmd: &redis::Cmd,
+        evict_on_cancel: bool,
+    ) -> Result<redis::Value, StreamsQueueError> {
+        // Hold the connection lock only for the command itself: the NOGROUP
+        // recovery below re-enters `ensure_consumer_group()` (which locks
+        // `cached_conn`) and re-acquires `slot`, so recovering while this guard
+        // was still alive would permanently deadlock the worker future.
         let first_attempt = {
-            let mut guard = self.get_connection().await?;
+            let mut guard = self.get_connection_from(slot).await?;
             let conn = guard.as_mut().unwrap();
-            conn.cmd(cmd).await
+            let mut cancel_guard = conn.arm_cancel_eviction(evict_on_cancel);
+            let result = cancel_guard.conn.cmd(cmd).await;
+            cancel_guard.armed = false;
+            result
         };
 
         match first_attempt {
@@ -2880,9 +2953,12 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     .nogroup_recoveries
                     .fetch_add(1, Ordering::Relaxed);
                 self.ensure_consumer_group().await?;
-                let mut guard = self.get_connection().await?;
+                let mut guard = self.get_connection_from(slot).await?;
                 let conn = guard.as_mut().unwrap();
-                conn.cmd(cmd).await
+                let mut cancel_guard = conn.arm_cancel_eviction(evict_on_cancel);
+                let result = cancel_guard.conn.cmd(cmd).await;
+                cancel_guard.armed = false;
+                result
             }
             Err(e) => Err(e),
         }
@@ -3960,7 +4036,6 @@ where
             FetchSource::Pending => Ok(false),
         };
         self.queue.in_flight.lock().await.remove(&msg_id);
-        self.queue.lease_completed.notify_one();
         self.msg_id.take();
         self.completed = true;
         handed_back
@@ -3999,7 +4074,6 @@ where
             )
             .await;
         self.queue.in_flight.lock().await.remove(&msg_id);
-        self.queue.lease_completed.notify_one();
         self.msg_id.take();
         self.completed = true;
         result
@@ -4020,17 +4094,14 @@ where
         match self.queue.in_flight.try_lock() {
             Ok(mut in_flight) => {
                 in_flight.remove(&msg_id);
-                self.queue.lease_completed.notify_one();
             }
             Err(_) => {
                 let in_flight = Arc::clone(&self.queue.in_flight);
-                let lease_completed = Arc::clone(&self.queue.lease_completed);
                 let queue = self.queue.stream_name.clone();
                 let message_id = msg_id.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         in_flight.lock().await.remove(&message_id);
-                        lease_completed.notify_one();
                         tracing::warn!(
                             queue = queue,
                             message_id = message_id,
@@ -4058,9 +4129,9 @@ where
 /// so a keepalive whose entry has been ACKed, trimmed or reclaimed by another
 /// consumer observes that outcome and should stop touching.
 ///
-/// The handle shares the lease's cached connection (and its mutex) with the
-/// claiming queue handle, so a touch may briefly wait behind an in-flight
-/// `XREADGROUP BLOCK` — bounded and negligible at keepalive cadences.
+/// The handle uses the queue's control connection (`cached_conn`), while
+/// concurrent blocking `XREADGROUP BLOCK` reads run on a separate
+/// `blocking_read_conn`, so touches do not wait behind a parked claimer.
 pub struct RedisLeaseKeepalive<T> {
     queue: RedisStreamQueue<T>,
     msg_id: String,
@@ -4190,6 +4261,7 @@ fn parse_stream_entry(msg_val: &redis::Value) -> Option<(String, Vec<u8>, bool, 
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     /// Open a Redis client, returning None when no local Redis is reachable.
     /// Lets tests skip cleanly in environments without Redis (CI without the
@@ -7400,5 +7472,279 @@ mod tests {
         ] {
             admin_cmd(&client, redis::cmd("DEL").arg(claimer.attempts_key(msg_id))).await;
         }
+    }
+
+    /// Regression test for the busy-queue `IN_FLIGHT_RECHECK_MS` polling delay:
+    /// when leases are already in flight on a concurrent claimer handle, the
+    /// next `claim_blocking()` must park inside Redis on its dedicated
+    /// `blocking_read_conn` so:
+    ///   1. in-flight `keepalive.touch()`, `XACK` (`lease.process()`), and
+    ///      `enqueue()` on `cached_conn` never stall behind `XREADGROUP BLOCK`,
+    ///   2. fresh arrivals wake the parked claimer immediately (< 40 ms) instead
+    ///      of sleeping on a 50 ms recheck timer.
+    #[tokio::test]
+    async fn in_flight_leases_do_not_delay_fresh_claim_or_block_ack_and_touch() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_inflight_blocking_{}", Uuid::new_v4());
+        let queue = Arc::new(
+            RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+                .with_read_batch_size(1),
+        );
+
+        queue.enqueue(1).await.unwrap();
+        queue.enqueue(2).await.unwrap();
+        let lease_a = queue.claim_blocking().await.unwrap().expect("claim 1");
+        let lease_b = queue.claim_blocking().await.unwrap().expect("claim 2");
+        let keepalive_a = lease_a.keepalive().expect("keepalive");
+
+        // Park a claimer while both leases are still in flight.
+        let claimer_queue = Arc::clone(&queue);
+        let claimer = tokio::spawn(async move {
+            loop {
+                if let Some(lease) = claimer_queue.claim_blocking().await.unwrap() {
+                    return (Instant::now(), lease);
+                }
+            }
+        });
+
+        // Wait until the claimer has entered blocking read on blocking_read_conn.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !queue.use_blocking_read_conn.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("concurrent claimer should activate dedicated blocking read connection");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        // Keepalive touch and lease ACK must complete immediately on cached_conn
+        // without waiting for the 250 ms XREADGROUP BLOCK to expire.
+        let touch_started = Instant::now();
+        assert_eq!(keepalive_a.touch().await.unwrap(), PendingTouch::Touched);
+        assert!(
+            touch_started.elapsed() < Duration::from_millis(100),
+            "keepalive.touch() stalled behind XREADGROUP BLOCK ({:?})",
+            touch_started.elapsed()
+        );
+
+        let ack_started = Instant::now();
+        let got_a = lease_a
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got_a, Some(1));
+        assert!(
+            ack_started.elapsed() < Duration::from_millis(100),
+            "lease.process() / XACK stalled behind XREADGROUP BLOCK ({:?})",
+            ack_started.elapsed()
+        );
+
+        // With lease_b still in flight, enqueuing item 3 on the same queue
+        // handle must neither stall on blocking_read_conn nor wait out a poll
+        // interval before the parked claimer wakes up.
+        let enqueued_at = Instant::now();
+        queue.enqueue(3).await.unwrap();
+        let (claimed_at, lease_c) = tokio::time::timeout(Duration::from_secs(1), claimer)
+            .await
+            .expect("parked claimer should wake on fresh enqueue")
+            .unwrap();
+        let wake_latency = claimed_at.saturating_duration_since(enqueued_at);
+        assert!(
+            wake_latency < Duration::from_millis(40),
+            "fresh arrival should wake parked XREADGROUP immediately while lease is in flight; waited {wake_latency:?}"
+        );
+        assert!(
+            queue.blocking_read_conn.lock().await.is_some(),
+            "dedicated blocking read connection should be open"
+        );
+
+        let got_c = lease_c
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got_c, Some(3));
+        let got_b = lease_b
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got_b, Some(2));
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Sequential single-lease consumers (such as `hot_task_worker` processor
+    /// slots) never call `claim_blocking()` while a lease is in flight and
+    /// must not open a second Redis connection.
+    #[tokio::test]
+    async fn sequential_consumer_keeps_single_redis_connection() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_single_conn_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+
+        for i in 1..=3 {
+            queue.enqueue(i).await.unwrap();
+            let lease = queue.claim_blocking().await.unwrap().expect("claimed");
+            let got = lease
+                .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+                .await
+                .unwrap();
+            assert_eq!(got, Some(i));
+        }
+
+        assert!(
+            !queue.use_blocking_read_conn.load(Ordering::Acquire),
+            "sequential consumer must not opt into a second blocking connection"
+        );
+        assert!(
+            queue.blocking_read_conn.lock().await.is_none(),
+            "sequential consumer must keep blocking_read_conn unopened"
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// A failed lease leaves its entry in the PEL without ACKing. Even while a
+    /// sibling lease remains in flight and the claimer is parked in
+    /// `XREADGROUP BLOCK`, the bounded `IN_FLIGHT_BLOCK_MS` window ensures the
+    /// failed entry is redelivered promptly.
+    #[tokio::test]
+    async fn worker_error_retry_still_redelivers_while_sibling_is_in_flight() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_inflight_retry_{}", Uuid::new_v4());
+        let queue = Arc::new(
+            RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+                .with_read_batch_size(1),
+        );
+
+        queue.enqueue(10).await.unwrap();
+        queue.enqueue(20).await.unwrap();
+        let lease_hold = queue.claim_blocking().await.unwrap().expect("claim 10");
+        let lease_fail = queue.claim_blocking().await.unwrap().expect("claim 20");
+
+        let claimer_queue = Arc::clone(&queue);
+        let claimer = tokio::spawn(async move {
+            loop {
+                if let Some(lease) = claimer_queue.claim_blocking().await.unwrap() {
+                    return lease;
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let err = lease_fail
+            .process(|_| async move { Err::<i64, Box<dyn Error + Send + Sync>>("boom".into()) })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<QueueProcessingError>(),
+            Some(QueueProcessingError::WorkerError(_))
+        ));
+
+        let retried = tokio::time::timeout(Duration::from_secs(1), claimer)
+            .await
+            .expect("failed lease must be redelivered within IN_FLIGHT_BLOCK_MS")
+            .unwrap();
+        assert!(retried.reclaimed(), "PEL retry must be marked reclaimed");
+        let got = retried
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(20));
+
+        let got_hold = lease_hold
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got_hold, Some(10));
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Cancelling a parked `claim_blocking()` mid-`XREADGROUP BLOCK` must mark
+    /// the connection broken so the next claim reconnects immediately rather
+    /// than queuing behind the still-blocked command on Redis.
+    #[tokio::test]
+    async fn cancelled_blocking_read_evicts_connection() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_cancel_block_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone())
+            .with_read_batch_size(1);
+        queue.ensure_consumer_group().await.unwrap();
+
+        // Park inside XREADGROUP BLOCK 5000, then cancel after 40 ms.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), queue.claim_blocking())
+                .await
+                .is_err(),
+            "empty queue claim_blocking should time out"
+        );
+        assert!(
+            queue
+                .cached_conn
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|conn| conn.broken),
+            "cancelled blocking read must mark its connection broken"
+        );
+
+        // Next enqueue + claim must succeed right away instead of waiting 5s.
+        queue.enqueue(99).await.unwrap();
+        let lease = tokio::time::timeout(Duration::from_millis(500), queue.claim_blocking())
+            .await
+            .expect("next claim after cancellation must not stall behind old BLOCK")
+            .unwrap()
+            .expect("enqueued item should be claimed");
+        let got = lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(99));
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// NOGROUP recovery must also work without deadlock when `read_fresh` runs
+    /// on the dedicated `blocking_read_conn`.
+    #[tokio::test]
+    async fn nogroup_recovery_does_not_deadlock_blocking_read_conn() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_nogroup_blocking_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+        queue.use_blocking_read_conn.store(true, Ordering::Release);
+
+        queue.enqueue("first".to_string()).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+        lease
+            .process(|item| async move { Ok::<String, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+
+        admin_cmd(&client, redis::cmd("DEL").arg(&stream_key)).await;
+
+        let batch = tokio::time::timeout(Duration::from_secs(2), queue.read_fresh(1, 50))
+            .await
+            .expect("NOGROUP recovery on blocking_read_conn must not deadlock")
+            .expect("recovery should recreate the group and retry the blocking read");
+        assert!(batch.is_empty());
+
+        cleanup(&client, &queue_name).await;
     }
 }
