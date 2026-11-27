@@ -435,8 +435,6 @@ pub enum Instruction {
     StoreVar {
         var_name: ConstantId,
         value: RegisterId,
-        /// Optional metadata for emitter events (boxed to reduce enum size)
-        metadata: Option<Box<VariableMetadata>>,
     },
 
     /// Set current namespace for variable storage
@@ -1089,24 +1087,6 @@ pub struct SourceLocation {
     pub length: usize,
 }
 
-/// Variable metadata for emitter events
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct VariableMetadata {
-    /// Variable name (without $ prefix)
-    pub name: String,
-    /// Namespace path (for backward compatibility)
-    pub namespace: String,
-    /// Static scope path (hierarchical: "::ns/func/lambda") - for AST metadata lookup
-    pub static_scope: Option<String>,
-    /// Variable metadata (from AST)
-    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_opt_serde")]
-    pub meta: Option<crate::val::Val>,
-    /// Source location information
-    pub source: Option<SourceLocation>,
-}
-
 impl SourceMap {
     /// Create a new empty source map
     pub fn new() -> Self {
@@ -1194,8 +1174,6 @@ pub struct BytecodeProgram {
     pub namespaces: NamespaceRegistry,
     /// Source map for runtime error reporting
     pub source_map: SourceMap,
-    /// Variable metadata registry for emitter events
-    pub variable_metadata: AHashMap<String, VariableMetadata>,
     /// Types with `where` constraints: qualified type name and the constant
     /// holding its constraint spec. `CheckConstraint` specs refer to named
     /// types through this table.
@@ -1546,20 +1524,8 @@ impl fmt::Display for Instruction {
                 "LOAD_VAR_OR_DEFAULT r{}, c{}, c{}",
                 dest, var_name, default_value
             ),
-            Instruction::StoreVar {
-                var_name,
-                value,
-                metadata,
-            } => {
-                if let Some(metadata) = metadata {
-                    write!(
-                        f,
-                        "STORE_VAR c{}, r{} metadata={}",
-                        var_name, value, metadata.name
-                    )
-                } else {
-                    write!(f, "STORE_VAR c{}, r{}", var_name, value)
-                }
+            Instruction::StoreVar { var_name, value } => {
+                write!(f, "STORE_VAR c{}, r{}", var_name, value)
             }
             Instruction::SetNamespace { namespace } => {
                 write!(f, "SET_NAMESPACE c{}", namespace)
@@ -1672,7 +1638,6 @@ impl BytecodeProgram {
             entry_register_count: 0,
             namespaces: NamespaceRegistry::new(),
             source_map: SourceMap::new(),
-            variable_metadata: AHashMap::new(),
             constraint_types: Vec::new(),
             local_functions: AHashSet::new(),
             result_params: AHashMap::new(),
@@ -1689,16 +1654,6 @@ impl BytecodeProgram {
     /// Deserialize the bytecode program from postcard bytes
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
         postcard::from_bytes(data).map_err(|e| format!("Bytecode deserialization failed: {}", e))
-    }
-
-    /// Add variable metadata for emitter events
-    pub fn add_variable_metadata(&mut self, key: String, metadata: VariableMetadata) {
-        self.variable_metadata.insert(key, metadata);
-    }
-
-    /// Get variable metadata by key (namespace::variable_name)
-    pub fn get_variable_metadata(&self, key: &str) -> Option<&VariableMetadata> {
-        self.variable_metadata.get(key)
     }
 
     /// Hash a constant for the dedup index. Distinct-but-equal constants can

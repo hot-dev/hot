@@ -5045,18 +5045,9 @@ fn bytecode_has_function(
     cache_key: &str,
     function_name: &str,
 ) -> CacheCheckResult {
-    // Only check if cache exists to avoid expensive disk I/O
-    if !cache.exists(cache_key) {
-        tracing::debug!(
-            "ROUTING: Cache does not exist for key {}",
-            &cache_key[..12.min(cache_key.len())]
-        );
-        return CacheCheckResult::CacheNotFound;
-    }
-
-    // Try to load from cache
-    match cache.load(cache_key) {
-        Ok(cached) => {
+    // Check in-memory cache first via `try_load` without probing disk `stat()`.
+    match cache.try_load(cache_key) {
+        Ok(Some(cached)) => {
             // Check if the function exists in the function mapping
             // Function names in mapping are like "::namespace/function" or "::namespace/function/arity"
             if cached.function_mapping.contains_key(function_name) {
@@ -5092,6 +5083,13 @@ fn bytecode_has_function(
                 sample_functions
             );
             CacheCheckResult::NotFound
+        }
+        Ok(None) => {
+            tracing::debug!(
+                "ROUTING: Cache does not exist for key {}",
+                &cache_key[..12.min(cache_key.len())]
+            );
+            CacheCheckResult::CacheNotFound
         }
         Err(e) => {
             // Check if this is a version mismatch error
@@ -6438,12 +6436,7 @@ async fn find_build_for_function(
                             let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(
                                 bundle_cache_dir.clone(),
                             );
-                            let cache_exists = bundle_cache.exists(cache_key);
-                            tracing::debug!(
-                                "ROUTING: Bundle cache dir={:?}, cache_exists={}",
-                                bundle_cache_dir,
-                                cache_exists
-                            );
+                            tracing::debug!("ROUTING: Bundle cache dir={:?}", bundle_cache_dir);
 
                             let mut check_result =
                                 bytecode_has_function(&bundle_cache, cache_key, function_name);
@@ -7484,9 +7477,9 @@ async fn execute_single_event_handler_inner(
     let effective_cache =
         hot::lang::cache::bytecode_cache::BytecodeCache::new(effective_cache_dir.clone());
 
-    let cached_bytecode = if !cache_key.is_empty() && effective_cache.exists(&cache_key) {
-        match effective_cache.load(&cache_key) {
-            Ok(cached) => {
+    let cached_bytecode = if !cache_key.is_empty() {
+        match effective_cache.try_load(&cache_key) {
+            Ok(Some(cached)) => {
                 // Both bundle manifests and live builds already address the
                 // cache by a fresh content hash of all compiled inputs (sources
                 // plus dependencies), so a key hit is already hash-validated.
@@ -7501,6 +7494,13 @@ async fn execute_single_event_handler_inner(
                     &cache_key[..cache_key.len().min(12)]
                 );
                 Some(cached)
+            }
+            Ok(None) => {
+                debug!(
+                    "✗ No cache found for project '{}', will compile and cache",
+                    project.name
+                );
+                None
             }
             Err(e) => {
                 tracing::warn!("Failed to load cache: {}, will compile from source", e);
@@ -7840,12 +7840,11 @@ async fn execute_single_event_handler_inner(
 
                     // Re-check cache after acquiring in-process lock (another thread may have just finished)
                     let reload_started = std::time::Instant::now();
-                    let cached_after_lock =
-                        if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
-                            cache_for_locking.load(&cache_key).ok()
-                        } else {
-                            None
-                        };
+                    let cached_after_lock = if !cache_key.is_empty() {
+                        cache_for_locking.try_load(&cache_key).ok().flatten()
+                    } else {
+                        None
+                    };
                     debug!(
                         "TIMING [{}]: bytecode_reload_after_lock: {:?}",
                         run_id_for_timing.as_simple(),
@@ -7878,12 +7877,11 @@ async fn execute_single_event_handler_inner(
 
                         // Re-check cache after acquiring file lock (another process may have just finished)
                         let reload_started = std::time::Instant::now();
-                        let cached_after_file_lock =
-                            if !cache_key.is_empty() && cache_for_locking.exists(&cache_key) {
-                                cache_for_locking.load(&cache_key).ok()
-                            } else {
-                                None
-                            };
+                        let cached_after_file_lock = if !cache_key.is_empty() {
+                            cache_for_locking.try_load(&cache_key).ok().flatten()
+                        } else {
+                            None
+                        };
                         debug!(
                             "TIMING [{}]: bytecode_reload_after_file_lock: {:?}",
                             run_id_for_timing.as_simple(),
@@ -7933,8 +7931,10 @@ async fn execute_single_event_handler_inner(
 
                             match compile_result {
                                 Ok((_init_result, artifacts)) => {
-                                    // Save to cache before calling function
-                                    // Use bundle-specific cache for bundle builds, shared cache otherwise
+                                    // Build the runtime-ready CachedBytecode once (including
+                                    // tool/skill specs, call-graph ctx requirements, and core
+                                    // variables), persist it if cacheable, and reuse the same
+                                    // Arc directly for handler execution below.
                                     if !cache_key.is_empty() && !file_hashes.is_empty() {
                                         let metadata =
                                             hot::lang::cache::bytecode_cache::create_cache_metadata(
@@ -7942,62 +7942,60 @@ async fn execute_single_event_handler_inner(
                                                 file_hashes.clone(),
                                                 cache_key.clone(),
                                             );
+                                        let artifacts_convert_started = std::time::Instant::now();
+                                        let cached = hot::lang::engine::Engine::artifacts_to_cached_bytecode_with_metadata(
+                                            metadata,
+                                            artifacts,
+                                        );
+                                        debug!(
+                                            "TIMING [{}]: artifacts_to_cached_bytecode: {:?}",
+                                            run_id_for_timing.as_simple(),
+                                            artifacts_convert_started.elapsed()
+                                        );
 
                                         let cache_for_save =
                                             hot::lang::cache::bytecode_cache::BytecodeCache::new(
                                                 effective_cache_dir.clone(),
                                             );
-                                        // Bake tool/skill spec registries into the on-disk
-                                        // cache so that fresh worker processes (and zip
-                                        // builds) can serve `::hot::internal::mcp/schema-from-fn`
-                                        // without recompiling.
-                                        let spec_compiler = hot::lang::compiler::Compiler::new();
-                                        let tool_specs =
-                                            spec_compiler.build_tool_specs(&artifacts.ast_program);
-                                        let skill_specs =
-                                            spec_compiler.build_skill_specs(&artifacts.ast_program);
                                         let cache_save_started = std::time::Instant::now();
-                                        if let Err(e) = cache_for_save.save(
-                                            &cache_key,
-                                            &artifacts.program,
-                                            metadata,
-                                            &artifacts.function_mapping,
-                                            &artifacts.core_functions,
-                                            &artifacts.type_implementations,
-                                            &artifacts.ast_program,
-                                            &artifacts.hot_ast,
-                                            &tool_specs,
-                                            &skill_specs,
-                                        ) {
-                                            tracing::warn!("Failed to save bytecode cache: {}", e);
-                                        } else {
-                                            debug!(
-                                                "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
-                                                project_name,
-                                                &cache_key[..12.min(cache_key.len())],
-                                                artifacts.function_mapping.len(),
-                                            );
+                                        let fn_count = cached.function_mapping.len();
+                                        match cache_for_save
+                                            .save_cached(&cache_key, Arc::clone(&cached))
+                                        {
+                                            Ok(_) => {
+                                                debug!(
+                                                    "✓ Saved bytecode cache for project '{}' (key: {}) with {} functions",
+                                                    project_name,
+                                                    &cache_key[..12.min(cache_key.len())],
+                                                    fn_count,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to save bytecode cache: {}",
+                                                    e
+                                                );
+                                            }
                                         }
                                         debug!(
                                             "TIMING [{}]: bytecode_cache_save: {:?}",
                                             run_id_for_timing.as_simple(),
                                             cache_save_started.elapsed()
                                         );
-                                    }
-
-                                    // Convert artifacts to cached bytecode before releasing
-                                    // the compile lock; handler execution happens below.
-                                    let artifacts_convert_started = std::time::Instant::now();
-                                    let cached =
-                                        hot::lang::engine::Engine::artifacts_to_cached_bytecode(
-                                            artifacts,
+                                        Ok(cached)
+                                    } else {
+                                        let artifacts_convert_started = std::time::Instant::now();
+                                        let cached =
+                                            hot::lang::engine::Engine::artifacts_to_cached_bytecode(
+                                                artifacts,
+                                            );
+                                        debug!(
+                                            "TIMING [{}]: artifacts_to_cached_bytecode: {:?}",
+                                            run_id_for_timing.as_simple(),
+                                            artifacts_convert_started.elapsed()
                                         );
-                                    debug!(
-                                        "TIMING [{}]: artifacts_to_cached_bytecode: {:?}",
-                                        run_id_for_timing.as_simple(),
-                                        artifacts_convert_started.elapsed()
-                                    );
-                                    Ok(cached)
+                                        Ok(cached)
+                                    }
                                 }
                                 Err(e) => Err(e),
                             }

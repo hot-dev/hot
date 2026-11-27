@@ -41,7 +41,7 @@ mod tests;
 pub use artifacts::*;
 
 use crate::lang::ast::{
-    BuiltinType, Flow, FlowType, FnCall, FnDef, Meta, Namespace, Program, Ref, TypeExpr, Value, Var,
+    BuiltinType, Flow, FlowType, FnCall, FnDef, Namespace, Program, Ref, TypeExpr, Value, Var,
 };
 use crate::lang::bytecode::{
     BytecodeProgram, CompilationStats, Constant, ConstantId, FunctionId, FunctionInfo, Instruction,
@@ -93,6 +93,15 @@ pub struct RuntimeParts {
     pub core_functions: std::sync::Arc<IndexMap<String, FunctionId>>,
     pub type_implementations: std::sync::Arc<IndexMap<(String, String), String>>,
     pub core_variables: std::sync::Arc<CoreVariableRegistry>,
+}
+
+/// Owned compiler outputs returned when consuming a finished [`Compiler`]
+/// (e.g. for caching without cloning bytecode or mapping tables).
+pub struct CompiledParts {
+    pub program: BytecodeProgram,
+    pub function_mapping: IndexMap<String, FunctionId>,
+    pub core_functions: IndexMap<String, FunctionId>,
+    pub type_implementations: IndexMap<(String, String), String>,
 }
 
 /// Bytecode compiler for Hot programs.
@@ -826,7 +835,6 @@ impl Compiler {
             self.emit_instruction(Instruction::StoreVar {
                 var_name: ns_var_name_constant,
                 value: reg,
-                metadata: None, // Namespace metadata is not emitted here yet.
             });
 
             tracing::trace!(
@@ -1748,6 +1756,17 @@ impl Compiler {
         }
     }
 
+    /// Move compiled bytecode and lookup tables out of the compiler without
+    /// cloning them.
+    pub fn into_compiled_parts(self) -> CompiledParts {
+        CompiledParts {
+            program: self.program,
+            function_mapping: self.function_mapping,
+            core_functions: self.core_functions,
+            type_implementations: self.type_implementations,
+        }
+    }
+
     /// Get type implementations as Arc (for efficient sharing)
     pub fn get_type_implementations_arc(
         &self,
@@ -1870,7 +1889,7 @@ impl Compiler {
                 ..constraint_specs::Boundary::new("binding")
             };
             let checked = self.emit_constraint_check(reg, spec, &boundary, false);
-            self.store_variable_with_meta(var.sym.name(), checked, var.meta.as_ref());
+            self.store_variable(var.sym.name(), checked);
             return Ok(checked);
         }
 
@@ -2113,7 +2132,7 @@ impl Compiler {
                         value: reg,
                     });
                 } else {
-                    self.store_definition(var.sym.name(), reg, var.meta.as_ref());
+                    self.store_definition(var.sym.name(), reg);
                 }
                 Ok(reg)
             }
@@ -2258,10 +2277,10 @@ impl Compiler {
                         type_constructor_reg,
                     );
                 } else {
-                    self.store_definition(var.sym.name(), type_constructor_reg, var.meta.as_ref());
+                    self.store_definition(var.sym.name(), type_constructor_reg);
 
                     // Also add to the namespace registry for compile-time type resolution
-                    // (store_variable_global does this automatically, but store_variable_with_meta doesn't)
+                    // (store_variable_global does this automatically, but store_variable doesn't)
                     let full_name = format!("{}/{}", self.current_namespace, var.sym.name());
                     let var_info = crate::lang::bytecode::VariableInfo {
                         name: full_name.clone(),
@@ -3291,7 +3310,7 @@ impl Compiler {
                                 &values[1],
                                 Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
                             ) {
-                                self.store_definition(var_name, value_reg, None);
+                                self.store_definition(var_name, value_reg);
                             } else {
                                 self.store_variable(var_name, value_reg);
                             }
@@ -4941,7 +4960,6 @@ impl Compiler {
             self.emit_instruction(Instruction::StoreVar {
                 var_name: capture_name_id,
                 value: piped_value_reg,
-                metadata: None,
             });
 
             // Create lambda instructions that load the captured variable and return it
@@ -7974,27 +7992,17 @@ impl Compiler {
         self.program.entry_point.push(instruction);
     }
 
-    /// Store a variable with basic metadata for emitter events
-    fn store_variable(&mut self, name: &str, register: RegisterId) {
-        self.store_variable_with_meta(name, register, None);
-    }
-
     /// Store a named function, type constructor or type implementation that
     /// a body defines. Those resolve statically under their qualified names,
     /// so the name is not recorded as a shadowing local (see `local_names`).
-    fn store_definition(&mut self, name: &str, register: RegisterId, ast_meta: Option<&Meta>) {
+    fn store_definition(&mut self, name: &str, register: RegisterId) {
         let local_names_len = self.local_names.len();
-        self.store_variable_with_meta(name, register, ast_meta);
+        self.store_variable(name, register);
         self.local_names.truncate(local_names_len);
     }
 
-    /// Store a variable with optional AST metadata for emitter events
-    fn store_variable_with_meta(
-        &mut self,
-        name: &str,
-        register: RegisterId,
-        ast_meta: Option<&Meta>,
-    ) {
+    /// Store a variable in the current scope
+    fn store_variable(&mut self, name: &str, register: RegisterId) {
         tracing::trace!("Storing variable '{}' in register {}", name, register);
         if self.emitting_function_body {
             self.enclosing_bindings.push(name.to_string());
@@ -8009,30 +8017,17 @@ impl Compiler {
             .program
             .add_constant(Constant::Val(Val::from(name.to_string())));
 
-        // Create metadata for emitter events, including AST metadata if available
-        let metadata = Some(Box::new(crate::lang::bytecode::VariableMetadata {
-            name: name.to_string(),
-            namespace: self.current_namespace.clone(),
-            static_scope: Some(self.current_namespace.clone()), // Use namespace as static scope for now
-            meta: ast_meta
-                .filter(|m| !crate::lang::ast::is_spaced_paren_binding_meta(m))
-                .map(|m| m.val.clone()),
-            source: self.current_source_location.clone(),
-        }));
-
         // Generate a StoreVar instruction to store the variable
         self.emit_instruction(Instruction::StoreVar {
             var_name: var_name_constant,
             value: register,
-            metadata,
         });
 
         tracing::trace!(
-            "Compiler: Generated StoreVar instruction for '{}' with var_name_constant={}, value_register=r{}, has_metadata=true, has_ast_meta={}",
+            "Compiler: Generated StoreVar instruction for '{}' with var_name_constant={}, value_register=r{}",
             name,
             var_name_constant,
             register,
-            ast_meta.is_some()
         );
     }
 
@@ -8868,7 +8863,7 @@ impl Compiler {
                         value_expr,
                         Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
                     ) {
-                        self.store_definition(var_name, value_reg, None);
+                        self.store_definition(var_name, value_reg);
                     } else {
                         let value_reg = self.constrain_binding(&var_ref.var, value_expr, value_reg);
                         self.store_variable(var_name, value_reg);
@@ -9149,7 +9144,7 @@ impl Compiler {
                             if let Value::Fn(function_defs) = value_expr {
                                 let value_reg =
                                     self.compile_named_function_in_flow(var_name, function_defs)?;
-                                self.store_definition(var_name, value_reg, None);
+                                self.store_definition(var_name, value_reg);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;
@@ -9164,7 +9159,7 @@ impl Compiler {
                                 );
                                 let value_reg =
                                     self.compile_type_constructor(var_name, type_def, false)?;
-                                self.store_definition(var_name, value_reg, None);
+                                self.store_definition(var_name, value_reg);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;
@@ -9178,7 +9173,7 @@ impl Compiler {
                                     type_impl.target_type
                                 );
                                 let value_reg = self.compile_type_implementation(type_impl)?;
-                                self.store_definition(var_name, value_reg, None);
+                                self.store_definition(var_name, value_reg);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;

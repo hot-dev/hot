@@ -305,9 +305,7 @@ impl ErrPath {
                     None => Step::Done(Kept),
                 }
             }
-            Instruction::StoreVar {
-                var_name, value, ..
-            } => {
+            Instruction::StoreVar { var_name, value } => {
                 if let Some(index) = self.vars.iter().position(|(name, _)| name == var_name) {
                     // Shadowed in an inner scope, the binding returns when
                     // that scope ends.
@@ -750,7 +748,6 @@ mod tests {
             Instruction::StoreVar {
                 var_name: X,
                 value: 0,
-                metadata: None,
             },
             load(1, TRUE),
             Instruction::Return { value: 1 },
@@ -766,7 +763,6 @@ mod tests {
             Instruction::StoreVar {
                 var_name: X,
                 value: 0,
-                metadata: None,
             },
             Instruction::LoadVar {
                 dest: 2,
@@ -896,7 +892,6 @@ mod tests {
             Instruction::StoreVar {
                 var_name: X,
                 value: 0,
-                metadata: None,
             },
             begin,
             Instruction::LoadVar {

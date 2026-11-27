@@ -10,6 +10,7 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::hash::Hasher;
+use std::sync::Arc;
 
 // Source tracking for parsed syntax.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -663,8 +664,7 @@ impl AstVarIndex {
 // Hot AST wrapper with fast lookup index
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HotAst {
-    pub program: Program,
-    pub namespaces: Namespaces,
+    pub program: Arc<Program>,
     /// Fast O(1) variable lookup index
     pub var_index: AstVarIndex,
 }
@@ -677,31 +677,24 @@ impl Default for HotAst {
 
 impl HotAst {
     pub fn new() -> Self {
-        let program = Program {
+        let program = Arc::new(Program {
             namespaces: indexmap::IndexMap::new(),
             current_namespace: NsPath::new(),
-        };
+        });
         let var_index = AstVarIndex::build(&program);
 
-        Self {
-            program,
-            namespaces: Namespaces::new(),
-            var_index,
-        }
+        Self { program, var_index }
     }
 
     /// Create HotAst from a Program, building the index
     pub fn from_program(program: Program) -> Self {
+        Self::from_program_arc(Arc::new(program))
+    }
+
+    /// Create HotAst from a shared Program without cloning the AST.
+    pub fn from_program_arc(program: Arc<Program>) -> Self {
         let var_index = AstVarIndex::build(&program);
-        // Copy namespaces from program into the HotAst wrapper
-        let namespaces = Namespaces {
-            namespaces: program.namespaces.clone(),
-        };
-        Self {
-            program,
-            namespaces,
-            var_index,
-        }
+        Self { program, var_index }
     }
 
     /// Fast O(1) lookup of variable metadata

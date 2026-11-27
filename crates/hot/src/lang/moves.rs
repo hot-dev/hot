@@ -1440,11 +1440,7 @@ mod tests {
     #[test]
     fn a_local_is_taken_only_when_its_binding_covers_every_read() {
         let constants = strings(&["t", "u"]);
-        let store = |var_name, value| Instruction::StoreVar {
-            var_name,
-            value,
-            metadata: None,
-        };
+        let store = |var_name, value| Instruction::StoreVar { var_name, value };
         // `t` is read before the body binds it, so the body may be reading
         // a capture; `u` is bound first.
         let body = [load(1, 0), store(0, 1), store(1, 1), load(2, 0), load(3, 1)];
@@ -1524,7 +1520,6 @@ mod tests {
         let store = Instruction::StoreVar {
             var_name: 0,
             value: 1,
-            metadata: None,
         };
         // The local is read, and only then is the lambda created.
         let body = [constant(1, 2), store, load(2, 0), constant(3, 1)];

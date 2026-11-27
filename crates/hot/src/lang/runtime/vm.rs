@@ -3615,11 +3615,7 @@ impl VirtualMachine {
                 self.instruction_pointer += 1;
             }
 
-            Instruction::StoreVar {
-                var_name,
-                value,
-                metadata: _,
-            } => {
+            Instruction::StoreVar { var_name, value } => {
                 let var_name = *var_name;
                 let value = *value;
                 let name = self.get_constant_string(var_name)?;
@@ -6056,7 +6052,7 @@ impl VirtualMachine {
             // 2) Fall back to Hot AST, if available
             if let Some(hot_ast) = &self.hot_ast {
                 let ns_path = crate::lang::ast::NsPath::from_string(&full_namespace);
-                if let Some(namespace) = hot_ast.namespaces.namespaces.get(&ns_path) {
+                if let Some(namespace) = hot_ast.program.namespaces.get(&ns_path) {
                     for (var, value) in namespace.scope.vars.iter() {
                         if var.sym.name() == var_name {
                             let qualified = format!("{}/{}", full_namespace, var_name);

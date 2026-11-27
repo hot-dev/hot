@@ -966,7 +966,6 @@ impl Compiler {
             self.emit_instruction(Instruction::StoreVar {
                 var_name,
                 value: checked,
-                metadata: None,
             });
         }
         if let Some(spec) = &checks.precondition {

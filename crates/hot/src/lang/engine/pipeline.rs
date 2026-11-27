@@ -2095,6 +2095,28 @@ impl Engine {
             .compile_program(&mut combined_program)
             .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
 
+        // Cache construction has no runtime principal or service handles. Even
+        // module initializers are user code: defer them until the cached program
+        // is invoked with its authorized scope and configured storage services.
+        // Skip building throwaway tool/skill spec registries and move all
+        // compiler outputs directly into `CompilationArtifacts` without cloning.
+        if !execute_program {
+            tracing::debug!(" Base compilation successful, extracting artifacts for caching...");
+            let hot_ast = crate::lang::ast::HotAst::from_program(combined_program);
+            let parts = compiler.into_compiled_parts();
+            let artifacts = CompilationArtifacts {
+                program: parts.program,
+                function_mapping: parts.function_mapping,
+                core_functions: parts.core_functions,
+                type_implementations: parts.type_implementations,
+                hot_ast,
+            };
+            return Ok(ExecutionWithArtifacts {
+                result: crate::val::Val::Null,
+                artifacts: Some(artifacts),
+            });
+        }
+
         // Registry authority is the complete program, never the additive
         // process-global tooling registry shared with other builds.
         let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
@@ -2106,6 +2128,9 @@ impl Engine {
 
         tracing::debug!(" Base compilation successful, extracting artifacts for caching...");
 
+        let ast_program = Arc::new(combined_program);
+        let hot_ast = crate::lang::ast::HotAst::from_program_arc(Arc::clone(&ast_program));
+
         // Extract compilation artifacts from BASE program (without eval code)
         // This is critical: cached artifacts must NOT include eval code
         let artifacts = CompilationArtifacts {
@@ -2113,19 +2138,8 @@ impl Engine {
             function_mapping: compiler.get_function_mapping().clone(),
             core_functions: compiler.get_core_functions().clone(),
             type_implementations: compiler.get_type_implementations().clone(),
-            ast_program: combined_program.clone(),
-            hot_ast: crate::lang::ast::HotAst::from_program(combined_program.clone()),
+            hot_ast: hot_ast.clone(),
         };
-
-        // Cache construction has no runtime principal or service handles. Even
-        // module initializers are user code: defer them until the cached program
-        // is invoked with its authorized scope and configured storage services.
-        if !execute_program {
-            return Ok(ExecutionWithArtifacts {
-                result: crate::val::Val::Null,
-                artifacts: Some(artifacts),
-            });
-        }
 
         // Eval extends the base through the same seeded compiler path used by
         // persisted bytecode cache hits. Cacheable artifacts remain base-only.
@@ -2133,7 +2147,7 @@ impl Engine {
             let result = Self::execute_eval_extension(
                 code,
                 compiler.seed(),
-                &combined_program,
+                &ast_program,
                 super::cache::EvalRuntimeOptions {
                     conf,
                     emitter,
@@ -2156,28 +2170,21 @@ impl Engine {
             });
         }
 
-        let final_program = compiler.get_program_arc();
-        let final_combined_program = combined_program;
-
-        // Extract ctx requirements via call graph before consuming final_combined_program
+        // Extract ctx requirements via call graph
         let ctx_requirements =
             crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &final_combined_program,
+                &ast_program,
             );
 
-        // Build HotAst from final combined program
-        let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(
-            final_combined_program,
-        ));
-
-        // Execute the program
+        // Execute the program, moving compiler parts into the VM
+        let runtime_parts = compiler.into_runtime_parts();
         let mut vm = crate::lang::VirtualMachine::new(
-            final_program,
-            Some(hot_ast),
-            compiler.get_function_mapping_arc(),
-            compiler.get_core_functions_arc(),
-            compiler.get_type_implementations_arc(),
-            compiler.get_core_variables_arc(),
+            runtime_parts.program,
+            Some(Arc::new(hot_ast)),
+            runtime_parts.function_mapping,
+            runtime_parts.core_functions,
+            runtime_parts.type_implementations,
+            runtime_parts.core_variables,
             conf.cloned(),
         );
 
@@ -2871,7 +2878,8 @@ fn (): Str { "unused" }
         )
         .unwrap();
         let loaded: Vec<String> = artifacts
-            .ast_program
+            .hot_ast
+            .program
             .namespaces
             .keys()
             .map(|ns| ns.to_string())
