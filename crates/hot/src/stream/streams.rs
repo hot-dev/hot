@@ -13,6 +13,7 @@
 //! - Cancel-safe subscribers that resume from their last entry after a
 //!   connection failure (see `StreamReader`)
 
+use super::wakeup::{TaskWakeupGuard, TaskWakeupHub};
 use super::{
     EnvEvent, EnvPublisher, EnvSubscriber, EnvSubscriberFactory, McpSseTransportSessionBinding,
     McpSseTransportSessionStore, StreamEvent, StreamNext, StreamPubSubError, StreamPublisher,
@@ -25,9 +26,9 @@ use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
 use redis::streams::{StreamRangeReply, StreamReadReply};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
 /// Maximum number of entries to keep per stream (approximate)
@@ -59,6 +60,21 @@ const READER_BUFFER: usize = 256;
 /// so an outage costs one dial per subscriber every few seconds.
 const READER_RECONNECT_MIN: Duration = Duration::from_millis(250);
 const READER_RECONNECT_MAX: Duration = Duration::from_secs(5);
+/// Shared Redis Stream carrying lightweight task-completion wakeup hints
+/// (task UUIDs only, no payloads or tenant data). A single key maps to one
+/// hash slot in Redis Cluster, allowing every worker pod to multiplex all
+/// concurrent `::hot::task/await` calls over ONE shared subscriber connection.
+pub(crate) const TASK_WAKEUP_STREAM_KEY: &str = "hot:task:wakeup";
+const TASK_WAKEUP_STREAM_MAXLEN: usize = 4096;
+const TASK_WAKEUP_STREAM_IDLE_TTL_SECS: u64 = 60 * 60;
+/// Cap on how long the first cold `watch_task_completion` waits for the shared
+/// Redis reader to connect and establish its initial cursor before continuing
+/// into the DB lookup and polling fallback.
+const TASK_WAKEUP_COLD_START_WAIT: Duration = Duration::from_millis(250);
+/// Continuous wall-clock duration with zero active in-process waiters before
+/// the shared wakeup reader parks itself and closes its Redis connection, even
+/// when other pods continue writing completions to `hot:task:wakeup`.
+const TASK_WAKEUP_IDLE_STOP_AFTER: Duration = Duration::from_secs(60);
 
 fn mcp_sse_transport_session_key(transport_session_id: &Uuid) -> String {
     format!(
@@ -384,28 +400,431 @@ impl SubscriberConnection {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WakeupReaderReadiness {
+    Starting,
+    Ready,
+    Failed,
+}
+
+struct WakeupReaderState {
+    task: Option<tokio::task::JoinHandle<()>>,
+    generation: u64,
+    readiness: Option<watch::Receiver<WakeupReaderReadiness>>,
+}
+
+/// Shared per-`RedisStreamsPubSub` multiplexer for `::hot::task/await` wakeup
+/// hints.
+///
+/// Opens at most ONE dedicated Redis subscriber connection per `StreamPubSub`
+/// (lazily on the first waiter, parked after `idle_stop_after` with no local
+/// waiters regardless of remote traffic, aborted on drop) and fans out
+/// received `task_id` hints to matching in-process `TaskWakeupGuard` waiters.
+struct RedisTaskWakeupMux {
+    pool: Arc<RedisConnectionPool>,
+    hub: Arc<TaskWakeupHub>,
+    stream_key: String,
+    xread_block: Duration,
+    idle_stop_after: Duration,
+    reader: parking_lot::Mutex<WakeupReaderState>,
+}
+
+impl Drop for RedisTaskWakeupMux {
+    fn drop(&mut self) {
+        if let Some(task) = self.reader.get_mut().task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl RedisTaskWakeupMux {
+    fn new(pool: Arc<RedisConnectionPool>, stream_key: String) -> Self {
+        Self::with_timings(
+            pool,
+            stream_key,
+            Duration::from_millis(XREAD_BLOCK_MS),
+            TASK_WAKEUP_IDLE_STOP_AFTER,
+        )
+    }
+
+    fn with_timings(
+        pool: Arc<RedisConnectionPool>,
+        stream_key: String,
+        xread_block: Duration,
+        idle_stop_after: Duration,
+    ) -> Self {
+        Self {
+            pool,
+            hub: Arc::new(TaskWakeupHub::new()),
+            stream_key,
+            xread_block,
+            idle_stop_after,
+            reader: parking_lot::Mutex::new(WakeupReaderState {
+                task: None,
+                generation: 0,
+                readiness: None,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_reader_running(&self) -> bool {
+        let state = self.reader.lock();
+        state.task.as_ref().is_some_and(|task| !task.is_finished())
+    }
+
+    async fn watch(self: &Arc<Self>, task_id: Uuid, cold_start_wait: Duration) -> TaskWakeupGuard {
+        // Register BEFORE ensuring the reader is running so `active_waiter_count`
+        // is already >= 1 before any concurrent idle-stop check runs, and so any
+        // hint delivered while the initial DB check runs is stored as a permit.
+        let guard = self.hub.register(task_id);
+        let mut readiness = self.ensure_reader_started();
+
+        if *readiness.borrow() == WakeupReaderReadiness::Starting {
+            let wait_cap = cold_start_wait.min(TASK_WAKEUP_COLD_START_WAIT);
+            if !wait_cap.is_zero() {
+                let _ = tokio::time::timeout(wait_cap, async {
+                    let _ = readiness
+                        .wait_for(|state| *state != WakeupReaderReadiness::Starting)
+                        .await;
+                })
+                .await;
+            }
+        }
+
+        guard
+    }
+
+    fn ensure_reader_started(self: &Arc<Self>) -> watch::Receiver<WakeupReaderReadiness> {
+        let mut state = self.reader.lock();
+        if let Some(task) = state.task.as_ref()
+            && !task.is_finished()
+            && let Some(readiness) = state.readiness.as_ref()
+        {
+            return readiness.clone();
+        }
+
+        state.generation = state.generation.wrapping_add(1);
+        let generation = state.generation;
+        let (ready_tx, ready_rx) = watch::channel(WakeupReaderReadiness::Starting);
+        let weak = Arc::downgrade(self);
+        let handle = tokio::spawn(run_task_wakeup_reader(weak, generation, ready_tx));
+        state.task = Some(handle);
+        state.readiness = Some(ready_rx.clone());
+        ready_rx
+    }
+
+    /// Stop this reader generation if no waiters are currently registered.
+    /// Serialized under `self.reader` so it cannot race with `watch()`.
+    fn try_stop_if_idle(&self, generation: u64) -> bool {
+        let mut state = self.reader.lock();
+        if state.generation != generation {
+            return true;
+        }
+        if self.hub.active_waiter_count() == 0 {
+            state.task = None;
+            state.readiness = None;
+            return true;
+        }
+        false
+    }
+}
+
+async fn run_task_wakeup_reader(
+    mux: Weak<RedisTaskWakeupMux>,
+    generation: u64,
+    ready_tx: watch::Sender<WakeupReaderReadiness>,
+) {
+    let mut conn: Option<SubscriberConnection> = None;
+    let mut last_id: Option<String> = None;
+    let mut failures: u32 = 0;
+    let mut idle_since: Option<tokio::time::Instant> = None;
+    let mut signalled_initial = false;
+
+    loop {
+        let Some(mux_strong) = mux.upgrade() else {
+            return;
+        };
+        let pool = Arc::clone(&mux_strong.pool);
+        let stream_key = mux_strong.stream_key.clone();
+        let xread_block = mux_strong.xread_block;
+        let idle_stop_after = mux_strong.idle_stop_after;
+        let default_block_ms = xread_block.as_millis().clamp(1, u64::MAX as u128) as u64;
+
+        // Track idle duration across ALL iterations (including non-empty XREAD
+        // replies carrying other pods' completions) so an idle pod on a busy
+        // multi-tenant deployment still parks and releases its Redis connection.
+        let block_ms = if mux_strong.hub.active_waiter_count() == 0 {
+            let since = *idle_since.get_or_insert_with(tokio::time::Instant::now);
+            let elapsed = since.elapsed();
+            if elapsed >= idle_stop_after {
+                if mux_strong.try_stop_if_idle(generation) {
+                    return;
+                }
+                // A new waiter raced in before we locked `reader`.
+                idle_since = None;
+                default_block_ms
+            } else {
+                let remaining = idle_stop_after.saturating_sub(elapsed);
+                // Redis interprets `XREAD BLOCK 0` as "block forever", so
+                // always clamp to at least 1 ms.
+                remaining
+                    .min(xread_block)
+                    .as_millis()
+                    .clamp(1, u64::MAX as u128) as u64
+            }
+        } else {
+            idle_since = None;
+            default_block_ms
+        };
+
+        // Release the strong Arc before awaiting I/O so dropping all
+        // `RedisStreamsPubSub` handles drops `RedisTaskWakeupMux` and aborts
+        // this background reader immediately.
+        drop(mux_strong);
+
+        let reader = match conn.as_mut() {
+            Some(reader) => reader,
+            None => {
+                if failures > 0 {
+                    tokio::time::sleep(reconnect_delay(failures)).await;
+                    let Some(mux_strong) = mux.upgrade() else {
+                        return;
+                    };
+                    if mux_strong.try_stop_if_idle(generation) {
+                        return;
+                    }
+                }
+                match pool.create_subscriber_connection().await {
+                    Ok(mut fresh) => {
+                        if last_id.is_none() {
+                            match newest_entry_id(&mut fresh, &stream_key).await {
+                                Ok(id) => last_id = Some(id),
+                                Err(e) => {
+                                    if !signalled_initial {
+                                        signalled_initial = true;
+                                        ready_tx.send_replace(WakeupReaderReadiness::Failed);
+                                    }
+                                    if failures == 0 {
+                                        tracing::warn!(
+                                            "Task wakeup Redis reader failed initial XREVRANGE on {}: {}",
+                                            stream_key,
+                                            e
+                                        );
+                                    }
+                                    failures = failures.saturating_add(1);
+                                    continue;
+                                }
+                            }
+                        }
+                        if !signalled_initial {
+                            signalled_initial = true;
+                            ready_tx.send_replace(WakeupReaderReadiness::Ready);
+                        }
+                        // Do NOT reset `failures` or call `hub.notify_all()` here:
+                        // wait until `XREAD` itself succeeds below (matching
+                        // `read_stream`) so persistent XREAD errors (e.g. ACL
+                        // NOPERM or WRONGTYPE) still back off instead of
+                        // spinning every 250ms and waking waiters on every loop.
+                        conn.insert(fresh)
+                    }
+                    Err(e) => {
+                        if !signalled_initial {
+                            signalled_initial = true;
+                            ready_tx.send_replace(WakeupReaderReadiness::Failed);
+                        }
+                        if failures == 0 {
+                            tracing::warn!(
+                                "Task wakeup Redis reader connect failed on {}: {}; falling back to DB polling while reconnecting",
+                                stream_key,
+                                e
+                            );
+                        }
+                        failures = failures.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let read_after = last_id.as_deref().unwrap_or("$");
+        let mut xread = redis::cmd("XREAD");
+        xread
+            .arg("BLOCK")
+            .arg(block_ms)
+            .arg("COUNT")
+            .arg(XREAD_COUNT)
+            .arg("STREAMS")
+            .arg(&stream_key)
+            .arg(read_after);
+
+        let result = reader.blocking_cmd(&xread).await;
+        let reply = result.and_then(|value| {
+            redis::from_redis_value::<Option<StreamReadReply>>(value)
+                .map_err(|e| StreamPubSubError::SubscribeError(e.to_string()))
+        });
+
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(e) => {
+                if failures == 0 {
+                    tracing::warn!(
+                        "Task wakeup Redis XREAD error on {}; reconnecting after {:?}: {}",
+                        stream_key,
+                        last_id,
+                        e
+                    );
+                }
+                conn = None;
+                failures = failures.saturating_add(1);
+                continue;
+            }
+        };
+
+        let Some(mux_strong) = mux.upgrade() else {
+            return;
+        };
+
+        if failures > 0 {
+            tracing::info!(
+                "Task wakeup Redis reader on {} resumed after {:?}",
+                stream_key,
+                last_id
+            );
+            failures = 0;
+            // Wake active waiters once after an outage in case their
+            // completion occurred while disconnected and was trimmed past
+            // `TASK_WAKEUP_STREAM_MAXLEN`.
+            mux_strong.hub.notify_all();
+        }
+
+        let entries: Vec<_> = reply
+            .map(|reply| reply.keys.into_iter().flat_map(|key| key.ids).collect())
+            .unwrap_or_default();
+
+        for entry in entries {
+            last_id = Some(entry.id.clone());
+            let Some(payload) = entry.get::<String>("event") else {
+                continue;
+            };
+            if let Ok(task_id) = Uuid::parse_str(&payload) {
+                mux_strong.hub.notify(task_id);
+            }
+        }
+    }
+}
+
 /// Redis Streams pub/sub implementation
 #[derive(Clone)]
 pub struct RedisStreamsPubSub {
     connection_pool: Arc<RedisConnectionPool>,
     run_idle_ttl_secs: u64,
+    task_wakeups: Arc<RedisTaskWakeupMux>,
 }
 
 impl RedisStreamsPubSub {
     /// Create a new Redis Streams pub/sub with a standalone client
     pub fn new(client: Client) -> Self {
+        let connection_pool = Arc::new(RedisConnectionPool::new_standalone(client));
+        let task_wakeups = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
-            connection_pool: Arc::new(RedisConnectionPool::new_standalone(client)),
+            connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
+            task_wakeups,
         }
     }
 
     /// Create a new Redis Streams pub/sub with a cluster client
     pub fn new_cluster(cluster_client: ClusterClient) -> Self {
+        let connection_pool = Arc::new(RedisConnectionPool::new_cluster(cluster_client));
+        let task_wakeups = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
-            connection_pool: Arc::new(RedisConnectionPool::new_cluster(cluster_client)),
+            connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
+            task_wakeups,
         }
+    }
+
+    #[cfg(test)]
+    fn with_wakeup_stream_key(client: Client, stream_key: String) -> Self {
+        let connection_pool = Arc::new(RedisConnectionPool::new_standalone(client));
+        let task_wakeups = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            stream_key,
+        ));
+        Self {
+            connection_pool,
+            run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
+            task_wakeups,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_wakeup_test_config(
+        client: Client,
+        stream_key: String,
+        xread_block: Duration,
+        idle_stop_after: Duration,
+    ) -> Self {
+        let connection_pool = Arc::new(RedisConnectionPool::new_standalone(client));
+        let task_wakeups = Arc::new(RedisTaskWakeupMux::with_timings(
+            Arc::clone(&connection_pool),
+            stream_key,
+            xread_block,
+            idle_stop_after,
+        ));
+        Self {
+            connection_pool,
+            run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
+            task_wakeups,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_task_wakeup_reader_running(&self) -> bool {
+        self.task_wakeups.is_reader_running()
+    }
+
+    /// Register a wakeup waiter for `task_id` on this pub/sub's shared
+    /// background reader.
+    pub async fn watch_task_completion(
+        &self,
+        task_id: Uuid,
+        cold_start_wait: Duration,
+    ) -> TaskWakeupGuard {
+        self.task_wakeups.watch(task_id, cold_start_wait).await
+    }
+
+    /// Publish a best-effort task-completion wakeup hint both in-process and
+    /// onto the shared Redis wakeup stream for remote pods.
+    pub async fn notify_task_wakeup(&self, task_id: Uuid) -> Result<(), StreamPubSubError> {
+        self.task_wakeups.hub.notify(task_id);
+
+        let mut conn = self.connection_pool.get_connection().await?;
+        let _: redis::Value = conn
+            .cmd(
+                &redis::cmd("EVAL")
+                    .arg(PUBLISH_STREAM_SCRIPT)
+                    .arg(1)
+                    .arg(&self.task_wakeups.stream_key)
+                    .arg(TASK_WAKEUP_STREAM_MAXLEN)
+                    .arg(task_id.to_string())
+                    .arg(TASK_WAKEUP_STREAM_IDLE_TTL_SECS)
+                    .clone(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_wakeup_waiter_count(&self) -> usize {
+        self.task_wakeups.hub.active_waiter_count()
     }
 
     /// Keep run notifications through the configured maximum run plus delivery grace.
@@ -821,6 +1240,14 @@ impl StreamSubscriber for RedisStreamsSubscriber {
 #[async_trait]
 impl EnvPublisher for RedisStreamsPubSub {
     async fn publish_env(&self, event: EnvEvent) -> Result<(), StreamPubSubError> {
+        let completed_task_id = match &event {
+            EnvEvent::TaskComplete { task_id, .. } => {
+                // Wake same-process waiters immediately even before Redis I/O.
+                self.task_wakeups.hub.notify(*task_id);
+                Some(*task_id)
+            }
+            _ => None,
+        };
         let env_id = event.env_id();
         let stream_key = env_channel_name(&env_id);
 
@@ -849,6 +1276,32 @@ impl EnvPublisher for RedisStreamsPubSub {
             "Published env event to Redis Streams channel {}",
             stream_key
         );
+
+        if let Some(task_id) = completed_task_id {
+            // Best-effort cross-pod wakeup hint; `::hot::task/await` keeps a
+            // DB polling fallback so a transient wakeup publish error never
+            // fails `publish_env`.
+            if let Err(e) = conn
+                .cmd(
+                    &redis::cmd("EVAL")
+                        .arg(PUBLISH_STREAM_SCRIPT)
+                        .arg(1)
+                        .arg(&self.task_wakeups.stream_key)
+                        .arg(TASK_WAKEUP_STREAM_MAXLEN)
+                        .arg(task_id.to_string())
+                        .arg(TASK_WAKEUP_STREAM_IDLE_TTL_SECS)
+                        .clone(),
+                )
+                .await
+            {
+                tracing::debug!(
+                    task_id = %task_id,
+                    "Failed to publish task completion wakeup hint to {}: {}",
+                    self.task_wakeups.stream_key,
+                    e
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1533,6 +1986,560 @@ mod tests {
             "{event:?}"
         );
 
+        delete_key(&client, &env_channel_name(&env_id)).await;
+    }
+
+    /// Parse one RESP2 array command from `buf`, returning its uppercased
+    /// command name if a full frame is present and draining the consumed bytes.
+    fn try_take_resp_command(buf: &mut Vec<u8>) -> Option<String> {
+        let text = std::str::from_utf8(buf).ok()?;
+        if !text.starts_with('*') {
+            return None;
+        }
+        let first_crlf = text.find("\r\n")?;
+        let arg_count: usize = text[1..first_crlf].parse().ok()?;
+        let mut cursor = first_crlf + 2;
+        let mut cmd_name: Option<String> = None;
+        for idx in 0..arg_count {
+            let rest = text.get(cursor..)?;
+            if !rest.starts_with('$') {
+                return None;
+            }
+            let len_end = rest.find("\r\n")?;
+            let bulk_len: usize = rest[1..len_end].parse().ok()?;
+            let body_start = cursor + len_end + 2;
+            let body_end = body_start + bulk_len;
+            if text.len() < body_end + 2 {
+                return None;
+            }
+            if idx == 0 {
+                cmd_name = Some(text[body_start..body_end].to_ascii_uppercase());
+            }
+            cursor = body_end + 2;
+        }
+        buf.drain(..cursor);
+        cmd_name
+    }
+
+    fn encode_xread_single_wakeup(stream_key: &str, entry_id: &str, task_id: Uuid) -> Vec<u8> {
+        let payload = task_id.to_string();
+        format!(
+            "*1\r\n*2\r\n${}\r\n{}\r\n*1\r\n*2\r\n${}\r\n{}\r\n*2\r\n$5\r\nevent\r\n${}\r\n{}\r\n",
+            stream_key.len(),
+            stream_key,
+            entry_id.len(),
+            entry_id,
+            payload.len(),
+            payload
+        )
+        .into_bytes()
+    }
+
+    /// Minimal mock RESP server supporting `XREVRANGE` and blocking `XREAD`
+    /// delivery of task wakeup IDs, counting every accepted TCP connection.
+    async fn mock_wakeup_redis_server(
+        stream_key: String,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicUsize>,
+        mpsc::UnboundedSender<Uuid>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept_count = Arc::new(AtomicUsize::new(0));
+        let accept_count_bg = Arc::clone(&accept_count);
+        let (tx, rx) = mpsc::unbounded_channel::<Uuid>();
+        let rx = Arc::new(Mutex::new(rx));
+
+        tokio::spawn(async move {
+            let seq = Arc::new(AtomicUsize::new(1));
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accept_count_bg.fetch_add(1, Ordering::SeqCst);
+                let rx = Arc::clone(&rx);
+                let seq = Arc::clone(&seq);
+                let stream_key = stream_key.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        while let Some(cmd) = try_take_resp_command(&mut buf) {
+                            let reply: Vec<u8> = match cmd.as_str() {
+                                "XREVRANGE" => b"*0\r\n".to_vec(),
+                                "XREAD" => {
+                                    let Some(task_id) = rx.lock().await.recv().await else {
+                                        return;
+                                    };
+                                    let id = format!(
+                                        "1700000000000-{}",
+                                        seq.fetch_add(1, Ordering::SeqCst)
+                                    );
+                                    encode_xread_single_wakeup(&stream_key, &id, task_id)
+                                }
+                                _ => b"+OK\r\n".to_vec(),
+                            };
+                            if socket.write_all(&reply).await.is_err() {
+                                return;
+                            }
+                        }
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                });
+            }
+        });
+
+        (address, accept_count, tx)
+    }
+
+    #[tokio::test]
+    async fn redis_task_wakeup_multiplexes_many_waiters_over_one_connection_and_cleans_up() {
+        use std::sync::atomic::Ordering;
+
+        let stream_key = format!("hot:task:wakeup:test:{}", Uuid::now_v7());
+        let (address, accept_count, push_wakeup) =
+            mock_wakeup_redis_server(stream_key.clone()).await;
+        let client = redis::Client::open(format!("redis://{address}/")).unwrap();
+        let pubsub = RedisStreamsPubSub::with_wakeup_stream_key(client, stream_key);
+
+        let task_ids: Vec<Uuid> = (0..10).map(|_| Uuid::now_v7()).collect();
+        let mut guards = Vec::with_capacity(task_ids.len());
+        for &id in &task_ids {
+            guards.push(
+                pubsub
+                    .watch_task_completion(id, Duration::from_secs(1))
+                    .await,
+            );
+        }
+        // A second waiter on the first task through a cloned handle must reuse
+        // the exact same hub and single background subscriber connection.
+        let cloned = pubsub.clone();
+        let dup_guard = cloned
+            .watch_task_completion(task_ids[0], Duration::from_secs(1))
+            .await;
+
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 11);
+        assert_eq!(pubsub.task_wakeups.hub.tracked_task_count(), 10);
+        assert_eq!(
+            accept_count.load(Ordering::SeqCst),
+            1,
+            "all concurrent task/await waiters must share ONE Redis subscriber connection"
+        );
+
+        let started = std::time::Instant::now();
+        push_wakeup.send(task_ids[0]).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), guards[0].notified())
+            .await
+            .expect("first waiter for task_ids[0] must wake");
+        tokio::time::timeout(Duration::from_millis(200), dup_guard.notified())
+            .await
+            .expect("second waiter for task_ids[0] must wake");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "wakeup should arrive well below the 100ms poll floor (took {:?})",
+            started.elapsed()
+        );
+
+        // Unrelated waiter stays silent until its own task_id is published.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), guards[1].notified())
+                .await
+                .is_err()
+        );
+        push_wakeup.send(task_ids[1]).unwrap();
+        tokio::time::timeout(Duration::from_millis(200), guards[1].notified())
+            .await
+            .expect("waiter for task_ids[1] must wake on its own id");
+
+        assert_eq!(
+            accept_count.load(Ordering::SeqCst),
+            1,
+            "still only one subscriber connection after multiple deliveries"
+        );
+
+        drop(dup_guard);
+        drop(guards);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+        assert_eq!(pubsub.task_wakeups.hub.tracked_task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn redis_task_wakeup_cold_start_does_not_hang_on_stalling_server() {
+        let address = stalling_server("XREVRANGE").await;
+        let client = redis::Client::open(format!("redis://{address}/")).unwrap();
+        let pubsub = RedisStreamsPubSub::new(client);
+
+        let started = std::time::Instant::now();
+        let guard = pubsub
+            .watch_task_completion(Uuid::now_v7(), Duration::from_millis(40))
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "stalling Redis must not delay task/await past its cold-start cap: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 1);
+        drop(guard);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn redis_task_wakeup_delivers_cross_pod_publish_env_over_shared_reader() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let stream_key = format!("hot:task:wakeup:test:{}", Uuid::now_v7());
+        // Two independent instances simulate Pod A awaiting and Pod B completing.
+        let pod_a = RedisStreamsPubSub::with_wakeup_stream_key(client.clone(), stream_key.clone());
+        let pod_b = RedisStreamsPubSub::with_wakeup_stream_key(client.clone(), stream_key.clone());
+
+        let env_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let guard = pod_a
+            .watch_task_completion(task_id, Duration::from_secs(1))
+            .await;
+
+        let started = std::time::Instant::now();
+        pod_b
+            .publish_env(EnvEvent::TaskComplete {
+                task_id,
+                env_id,
+                stream_id: Uuid::now_v7(),
+                function_name: "::app/work".to_string(),
+                status: "completed".to_string(),
+                duration_ms: Some(12),
+                error: None,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), guard.notified())
+            .await
+            .expect("Pod A must receive cross-pod wakeup from Pod B's publish_env");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "cross-pod wakeup should beat the 100ms poll floor: {:?}",
+            started.elapsed()
+        );
+
+        drop(guard);
+        assert_eq!(pod_a.task_wakeup_waiter_count(), 0);
+        delete_key(&client, &stream_key).await;
+        delete_key(&client, &env_channel_name(&env_id)).await;
+    }
+
+    /// When connecting succeeds but `XREAD` persistently fails (for example
+    /// ACL `NOPERM` or `WRONGTYPE`), the reader must NOT reset its failure
+    /// counter on connect (which would spin every 250ms) and must NOT call
+    /// `notify_all()` on failed reconnects. Once `XREAD` finally succeeds, it
+    /// recovers and wakes waiting callers once.
+    #[tokio::test]
+    async fn redis_task_wakeup_backs_off_without_waking_waiters_on_persistent_xread_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fail_xread = Arc::new(AtomicBool::new(true));
+        let fail_xread_bg = Arc::clone(&fail_xread);
+        let xread_times: Arc<parking_lot::Mutex<Vec<std::time::Instant>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let xread_times_bg = Arc::clone(&xread_times);
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let fail_xread = Arc::clone(&fail_xread_bg);
+                let xread_times = Arc::clone(&xread_times_bg);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        while let Some(cmd) = try_take_resp_command(&mut buf) {
+                            let reply: Vec<u8> = match cmd.as_str() {
+                                "XREVRANGE" => b"*0\r\n".to_vec(),
+                                "XREAD" => {
+                                    xread_times.lock().push(std::time::Instant::now());
+                                    if fail_xread.load(Ordering::SeqCst) {
+                                        b"-NOPERM this user has no permissions to run the 'xread' command\r\n".to_vec()
+                                    } else {
+                                        // Empty XREAD reply: signals healthy recovery.
+                                        b"$-1\r\n".to_vec()
+                                    }
+                                }
+                                _ => b"+OK\r\n".to_vec(),
+                            };
+                            if socket.write_all(&reply).await.is_err() {
+                                return;
+                            }
+                        }
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                });
+            }
+        });
+
+        let stream_key = format!("hot:task:wakeup:noperm:{}", Uuid::now_v7());
+        let client = redis::Client::open(format!("redis://{address}/")).unwrap();
+        let pubsub = RedisStreamsPubSub::with_wakeup_stream_key(client, stream_key);
+
+        let guard = pubsub
+            .watch_task_completion(Uuid::now_v7(), Duration::from_secs(1))
+            .await;
+
+        // Wait until 3 failing XREAD attempts have occurred:
+        // attempt 1 @ ~0ms -> fail (failures=1) -> sleep 250ms
+        // attempt 2 @ ~250ms -> fail (failures=2) -> sleep 500ms
+        // attempt 3 @ ~750ms -> fail (failures=3) -> sleep 1000ms
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if xread_times.lock().len() >= 3 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for 3 XREAD attempts; saw {}",
+                xread_times.lock().len()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let times = xread_times.lock().clone();
+        let first_gap = times[1].saturating_duration_since(times[0]);
+        let second_gap = times[2].saturating_duration_since(times[1]);
+        assert!(
+            first_gap >= Duration::from_millis(200),
+            "first backoff should be ~250ms, got {first_gap:?}"
+        );
+        assert!(
+            second_gap >= Duration::from_millis(420),
+            "second backoff must double to ~500ms instead of resetting to 250ms; got {second_gap:?}"
+        );
+
+        // Waiter must NOT have been spuriously woken during the failing-XREAD
+        // reconnect loop.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), guard.notified())
+                .await
+                .is_err(),
+            "failing reconnects must not spam hub.notify_all() before XREAD succeeds"
+        );
+
+        // Now allow XREAD to succeed: the next retry must recover and wake the
+        // waiter once so it re-checks DB after the outage.
+        fail_xread.store(false, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), guard.notified())
+            .await
+            .expect("waiter must be woken once XREAD recovers after an outage");
+    }
+
+    /// Even on a busy multi-tenant stream where other pods keep publishing
+    /// completions continuously, a pod with zero local waiters must park its
+    /// wakeup reader and close its Redis connection once the idle window
+    /// elapses, then transparently reconnect when a new waiter arrives.
+    #[tokio::test]
+    async fn redis_task_wakeup_parks_and_closes_connection_when_idle_even_on_busy_stream() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let stream_key = format!("hot:task:wakeup:busy:{}", Uuid::now_v7());
+        let stream_key_bg = stream_key.clone();
+        let accept_count = Arc::new(AtomicUsize::new(0));
+        let accept_count_bg = Arc::clone(&accept_count);
+        let open_connections = Arc::new(AtomicUsize::new(0));
+        let open_connections_bg = Arc::clone(&open_connections);
+        let target_override: Arc<parking_lot::Mutex<Option<Uuid>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let target_override_bg = Arc::clone(&target_override);
+
+        tokio::spawn(async move {
+            let seq = Arc::new(AtomicUsize::new(1));
+            while let Ok((mut socket, _)) = listener.accept().await {
+                accept_count_bg.fetch_add(1, Ordering::SeqCst);
+                open_connections_bg.fetch_add(1, Ordering::SeqCst);
+                let open_connections = Arc::clone(&open_connections_bg);
+                let seq = Arc::clone(&seq);
+                let stream_key = stream_key_bg.clone();
+                let target_override = Arc::clone(&target_override_bg);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    'conn: loop {
+                        while let Some(cmd) = try_take_resp_command(&mut buf) {
+                            let reply: Vec<u8> = match cmd.as_str() {
+                                "XREVRANGE" => b"*0\r\n".to_vec(),
+                                "XREAD" => {
+                                    // Continuously stream non-empty remote task
+                                    // completions so `entries` is never empty.
+                                    tokio::time::sleep(Duration::from_millis(15)).await;
+                                    let task_id =
+                                        target_override.lock().take().unwrap_or_else(Uuid::now_v7);
+                                    let id = format!(
+                                        "1700000000000-{}",
+                                        seq.fetch_add(1, Ordering::SeqCst)
+                                    );
+                                    encode_xread_single_wakeup(&stream_key, &id, task_id)
+                                }
+                                _ => b"+OK\r\n".to_vec(),
+                            };
+                            if socket.write_all(&reply).await.is_err() {
+                                break 'conn;
+                            }
+                        }
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break 'conn,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    open_connections.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        let client = redis::Client::open(format!("redis://{address}/")).unwrap();
+        let pubsub = RedisStreamsPubSub::with_wakeup_test_config(
+            client,
+            stream_key,
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+        );
+
+        let guard = pubsub
+            .watch_task_completion(Uuid::now_v7(), Duration::from_secs(1))
+            .await;
+        assert!(pubsub.is_task_wakeup_reader_running());
+        assert_eq!(accept_count.load(Ordering::SeqCst), 1);
+        assert_eq!(open_connections.load(Ordering::SeqCst), 1);
+
+        // Drop the only local waiter while remote traffic keeps arriving.
+        drop(guard);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !pubsub.is_task_wakeup_reader_running()
+                && open_connections.load(Ordering::SeqCst) == 0
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "idle wakeup reader failed to park and close its connection on a busy stream \
+                 (running={}, open_conns={})",
+                pubsub.is_task_wakeup_reader_running(),
+                open_connections.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // A new waiter must transparently restart the reader on a fresh
+        // connection and receive its wakeup.
+        let next_task = Uuid::now_v7();
+        let next_guard = pubsub
+            .watch_task_completion(next_task, Duration::from_secs(1))
+            .await;
+        assert_eq!(accept_count.load(Ordering::SeqCst), 2);
+        *target_override.lock() = Some(next_task);
+        tokio::time::timeout(Duration::from_secs(1), next_guard.notified())
+            .await
+            .expect("restarted wakeup reader must deliver wakeup to new waiter");
+    }
+
+    #[tokio::test]
+    async fn redis_task_wakeup_resumes_after_connection_killed_on_real_redis() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let stream_key = format!("hot:task:wakeup:kill:{}", Uuid::now_v7());
+        let pod_a = RedisStreamsPubSub::with_wakeup_stream_key(client.clone(), stream_key.clone());
+        let pod_b = RedisStreamsPubSub::with_wakeup_stream_key(client.clone(), stream_key.clone());
+
+        let env_id = Uuid::now_v7();
+        let task_1 = Uuid::now_v7();
+        let guard_1 = pod_a
+            .watch_task_completion(task_1, Duration::from_secs(1))
+            .await;
+
+        pod_b.notify_task_wakeup(task_1).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), guard_1.notified())
+            .await
+            .expect("first wakeup must arrive before connection kill");
+        drop(guard_1);
+
+        // Register a second waiter, then kill all blocked XREAD clients on
+        // Redis (simulating an LB idle drop or failover).
+        let task_2 = Uuid::now_v7();
+        let guard_2 = pod_a
+            .watch_task_completion(task_2, Duration::from_secs(1))
+            .await;
+
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let mut killed_any = false;
+        while tokio::time::Instant::now() < deadline {
+            let list: String = redis::cmd("CLIENT")
+                .arg("LIST")
+                .query_async(&mut admin)
+                .await
+                .unwrap();
+            for line in list.lines() {
+                if line.contains("cmd=xread")
+                    && let Some(id_token) = line.split_whitespace().find(|t| t.starts_with("id="))
+                {
+                    let id: i64 = id_token.trim_start_matches("id=").parse().unwrap();
+                    let killed: i64 = redis::cmd("CLIENT")
+                        .arg("KILL")
+                        .arg("ID")
+                        .arg(id)
+                        .query_async(&mut admin)
+                        .await
+                        .unwrap();
+                    if killed > 0 {
+                        killed_any = true;
+                    }
+                }
+            }
+            if killed_any {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            killed_any,
+            "expected to find and kill the blocked XREAD reader"
+        );
+
+        // Publish completion while the reader is reconnecting; it must recover
+        // and deliver the wakeup well within the reconnect window.
+        pod_b
+            .publish_env(EnvEvent::TaskComplete {
+                task_id: task_2,
+                env_id,
+                stream_id: Uuid::now_v7(),
+                function_name: "::app/work".to_string(),
+                status: "completed".to_string(),
+                duration_ms: Some(7),
+                error: None,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), guard_2.notified())
+            .await
+            .expect("reader must reconnect after connection kill and wake task_2");
+
+        drop(guard_2);
+        delete_key(&client, &stream_key).await;
         delete_key(&client, &env_channel_name(&env_id)).await;
     }
 }

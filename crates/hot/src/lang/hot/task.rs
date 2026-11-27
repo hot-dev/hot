@@ -750,6 +750,15 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                     tracing::warn!(task_id = %task_id, "::hot::task/cancel: cancel publish timed out");
                 }
             }
+            // Also wake any `::hot::task/await` callers immediately (especially
+            // when the cancelled task was still queued and no task worker will
+            // publish `EnvEvent::TaskComplete` for it).
+            if let Ok(Err(e)) =
+                tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.notify_task_wakeup(task_id))
+                    .await
+            {
+                tracing::debug!(task_id = %task_id, "::hot::task/cancel: failed to publish wakeup hint: {}", e);
+            }
         }
 
         Ok::<bool, Val>(was_cancelled)
@@ -823,6 +832,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let execution_context = vm.get_execution_context().clone();
+    let stream_publisher = vm.get_stream_publisher();
 
     // Capture the cancellation token so the poll loop can release the blocking
     // VM thread promptly on worker shutdown or run timeout instead of pinning it
@@ -841,6 +851,30 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         // Preserve the finalization reserve during the initial lookup too. A
         // fixed five-second read here could otherwise consume the entire
         // reserve before the polling loop even began.
+        let lookup_budget = match initial_await_lookup_budget(execution_context.as_ref()) {
+            Some(budget) => budget,
+            None => {
+                return Err(err_val(
+                    "::hot::task/await: parent execution deadline is too close to look up task"
+                        .to_string(),
+                ));
+            }
+        };
+
+        // Register for completion wakeup hints BEFORE the initial DB lookup so
+        // a task completing between `Task::get_in_env` and entering the wait
+        // loop cannot lose its wakeup. Cap any cold-start subscriber setup to a
+        // quarter of `lookup_budget` so most of the budget stays available for
+        // the DB lookup even if Redis is unreachable.
+        let initial_wakeup = match stream_publisher.as_ref() {
+            Some(pub_sub) => Some(
+                pub_sub
+                    .watch_task_completion(task_id, lookup_budget / 4)
+                    .await,
+            ),
+            None => None,
+        };
+
         let lookup_budget = match initial_await_lookup_budget(execution_context.as_ref()) {
             Some(budget) => budget,
             None => {
@@ -897,6 +931,7 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let deadline = tokio::time::Instant::now() + wait_budget;
 
         let db = &db;
+        let watch_pub_sub = stream_publisher.as_ref();
         // A retry is a fresh attempt with its own retry delay and timeout, so
         // following one extends the wait, still inside the parent's deadline.
         let retry_deadline = |retry: &crate::db::Task| {
@@ -918,6 +953,13 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             task,
             deadline,
             &is_cancelled,
+            initial_wakeup,
+            move |id: Uuid, remaining: std::time::Duration| async move {
+                match watch_pub_sub {
+                    Some(pub_sub) => Some(pub_sub.watch_task_completion(id, remaining / 4).await),
+                    None => None,
+                }
+            },
             move |id: Uuid, read_timeout| async move {
                 match tokio::time::timeout(
                     read_timeout,
@@ -1107,6 +1149,36 @@ async fn sleep_backoff_capped(
     false
 }
 
+/// Wait for either an event-driven completion wakeup hint or the capped
+/// polling-fallback backoff delay.
+///
+/// The polling backoff timer always stays armed alongside `wakeup` so a
+/// dropped notification or Redis outage falls back cleanly to DB polling,
+/// cancellation is still observed every `poll_slice_ms`, and `deadline` is
+/// never overshot. Returns `true` if `is_cancelled` observed cancellation.
+async fn wait_for_wakeup_or_backoff(
+    delay_ms: u64,
+    poll_slice_ms: u64,
+    deadline: tokio::time::Instant,
+    is_cancelled: &dyn Fn() -> bool,
+    wakeup: Option<&crate::stream::TaskWakeupGuard>,
+) -> bool {
+    match wakeup {
+        Some(guard) => {
+            tokio::select! {
+                biased;
+                cancelled = sleep_backoff_capped(delay_ms, poll_slice_ms, deadline, is_cancelled) => {
+                    cancelled
+                }
+                _ = guard.notified() => {
+                    is_cancelled()
+                }
+            }
+        }
+        None => sleep_backoff_capped(delay_ms, poll_slice_ms, deadline, is_cancelled).await,
+    }
+}
+
 /// A single failed status poll inside `::hot::task/await`'s wait loop,
 /// classified by how the loop must respond to it.
 #[derive(Debug)]
@@ -1153,18 +1225,23 @@ fn await_poll_delay_ms(elapsed: std::time::Duration) -> u64 {
         .clamp(AWAIT_POLL_MIN_DELAY_MS, AWAIT_POLL_MAX_DELAY_MS)
 }
 
+const TERMINAL_TASK_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
+
 /// Drive `poll` until `task` reaches a terminal status, the await `deadline`
 /// passes, or `is_cancelled` observes a cancellation.
 ///
-/// Polls are spaced by [`await_poll_delay_ms`], counted from this call.
-/// `await_task_lineage` calls it again for each retry it follows, so the
-/// spacing starts over at 100ms there: a retry is a fresh attempt and a
-/// fresh wait, however long the attempt before it ran.
+/// When `wakeup` is provided, completion notifications wake the loop
+/// immediately to re-read the authoritative row via `poll`; the adaptive
+/// [`await_poll_delay_ms`] timer stays armed as a polling fallback so lost
+/// notifications or pub/sub outages never hang the await.
+/// `await_task_lineage` calls this again for each retry it follows, so the
+/// fallback spacing starts over at 100ms there: a retry is a fresh attempt and
+/// a fresh wait, however long the attempt before it ran.
 ///
 /// A timed-out or transport-errored poll is a MISSED poll, not a fatal error:
 /// while the await deadline still has budget the task may yet complete, so
-/// the failure is logged at warn and the next backoff tick retries. Each
-/// poll's timeout slice is capped at the remaining budget, so failed polls
+/// the failure is logged at warn and the next wakeup or backoff tick retries.
+/// Each poll's timeout slice is capped at the remaining budget, so failed polls
 /// can never extend the wait past `deadline` — the deadline check at the top
 /// of the loop fires instead, mentioning the last poll failure.
 /// `PollFailure::NotFound` stays fatal: task rows exist before enqueue, so a
@@ -1173,13 +1250,13 @@ async fn await_task_poll_loop<F, Fut>(
     mut task: crate::db::Task,
     deadline: tokio::time::Instant,
     is_cancelled: &dyn Fn() -> bool,
+    wakeup: Option<&crate::stream::TaskWakeupGuard>,
     mut poll: F,
 ) -> Result<crate::db::Task, Val>
 where
     F: FnMut(std::time::Duration) -> Fut,
     Fut: std::future::Future<Output = Result<crate::db::Task, PollFailure>>,
 {
-    const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
     // Cap each sleep slice so cancellation is observed within ~250ms
     // whatever the poll delay is.
     const CANCEL_POLL_SLICE_MS: u64 = 250;
@@ -1187,7 +1264,7 @@ where
     let started = tokio::time::Instant::now();
     let mut last_poll_failure: Option<String> = None;
 
-    while !TERMINAL_STATUSES.contains(&task.status.as_str()) {
+    while !TERMINAL_TASK_STATUSES.contains(&task.status.as_str()) {
         if is_cancelled() {
             return Err(err_val(
                 "::hot::task/await: cancelled while waiting for task".to_string(),
@@ -1206,7 +1283,15 @@ where
         }
 
         let delay_ms = await_poll_delay_ms(started.elapsed());
-        if sleep_backoff_capped(delay_ms, CANCEL_POLL_SLICE_MS, deadline, is_cancelled).await {
+        if wait_for_wakeup_or_backoff(
+            delay_ms,
+            CANCEL_POLL_SLICE_MS,
+            deadline,
+            is_cancelled,
+            wakeup,
+        )
+        .await
+        {
             return Err(err_val(
                 "::hot::task/await: cancelled while waiting for task".to_string(),
             ));
@@ -1374,10 +1459,13 @@ where
 /// attempt fails or times out and was retried, the wait moves to the retry,
 /// and so on, returning the last attempt's row. `retry_deadline` gives the
 /// wait a retry is allowed; the deadline only ever moves later.
-async fn await_task_lineage<P, PFut, C, CFut>(
+#[allow(clippy::too_many_arguments)]
+async fn await_task_lineage<P, PFut, C, CFut, W, WFut>(
     mut task: crate::db::Task,
     mut deadline: tokio::time::Instant,
     is_cancelled: &dyn Fn() -> bool,
+    mut wakeup: Option<crate::stream::TaskWakeupGuard>,
+    mut watch_task: W,
     mut poll: P,
     mut retry_child: C,
     retry_deadline: &dyn Fn(&crate::db::Task) -> Option<tokio::time::Instant>,
@@ -1387,13 +1475,21 @@ where
     PFut: std::future::Future<Output = Result<crate::db::Task, PollFailure>>,
     C: FnMut(Uuid, std::time::Duration) -> CFut,
     CFut: std::future::Future<Output = Result<Option<crate::db::Task>, PollFailure>>,
+    W: FnMut(Uuid, std::time::Duration) -> WFut,
+    WFut: std::future::Future<Output = Option<crate::stream::TaskWakeupGuard>>,
 {
     loop {
         let current = task.task_id;
-        task = await_task_poll_loop(task, deadline, is_cancelled, |read_timeout| {
-            poll(current, read_timeout)
-        })
+        task = await_task_poll_loop(
+            task,
+            deadline,
+            is_cancelled,
+            wakeup.as_ref(),
+            |read_timeout| poll(current, read_timeout),
+        )
         .await?;
+        // Release the completed attempt's wakeup registration before moving on.
+        wakeup = None;
         if !is_retryable_terminal(&task.status) {
             return Ok(task);
         }
@@ -1409,6 +1505,10 @@ where
         );
         if let Some(extended) = retry_deadline(&retry) {
             deadline = deadline.max(extended);
+        }
+        if !TERMINAL_TASK_STATUSES.contains(&retry.status.as_str()) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            wakeup = watch_task(retry.task_id, remaining).await;
         }
         task = retry;
     }
@@ -2002,6 +2102,7 @@ mod tests {
             poll_loop_task("completed"),
             deadline,
             &|| false,
+            None,
             |_read_timeout: std::time::Duration| {
                 polls.set(polls.get() + 1);
                 async { Ok(poll_loop_task("completed")) }
@@ -2024,6 +2125,7 @@ mod tests {
             poll_loop_task("running"),
             deadline,
             &|| false,
+            None,
             |_read_timeout: std::time::Duration| {
                 let attempt = polls.get();
                 polls.set(attempt + 1);
@@ -2052,6 +2154,7 @@ mod tests {
             poll_loop_task("running"),
             deadline,
             &|| false,
+            None,
             |read_timeout: std::time::Duration| async move {
                 // Model a hung read: tokio::time::timeout consumes the whole
                 // slice before reporting Elapsed.
@@ -2085,6 +2188,7 @@ mod tests {
             poll_loop_task("running"),
             deadline,
             &|| false,
+            None,
             |_read_timeout: std::time::Duration| async { Err(PollFailure::NotFound) },
         )
         .await
@@ -2120,6 +2224,7 @@ mod tests {
             poll_loop_task("running"),
             deadline,
             &|| false,
+            None,
             |_read_timeout: std::time::Duration| {
                 times.borrow_mut().push(start.elapsed().as_millis() as u64);
                 let done = times.borrow().len() == polls;
@@ -2167,6 +2272,8 @@ mod tests {
             lineage_task(parent, "running"),
             deadline,
             &|| false,
+            None,
+            |_id, _remaining| async { None },
             |id: Uuid, _read_timeout: std::time::Duration| {
                 let now = tokio::time::Instant::now();
                 let row = if id == parent {
@@ -2239,6 +2346,8 @@ mod tests {
             first,
             deadline,
             &|| false,
+            None,
+            |_id, _remaining| async { None },
             |id: Uuid, _read_timeout: std::time::Duration| {
                 let row = rows.iter().find(|row| row.task_id == id).map(|row| {
                     let mut copy = lineage_task(row.task_id, &row.status);
@@ -2385,6 +2494,8 @@ mod tests {
             infra_interrupted(lineage_task(parent, "failed")),
             start + std::time::Duration::from_secs(1),
             &|| false,
+            None,
+            |_id, _remaining| async { None },
             |id: Uuid, _read_timeout: std::time::Duration| {
                 let done = tokio::time::Instant::now() - start >= std::time::Duration::from_secs(5);
                 async move { Ok(lineage_task(id, if done { "completed" } else { "running" })) }
@@ -2403,6 +2514,8 @@ mod tests {
             infra_interrupted(lineage_task(parent, "failed")),
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
             &|| false,
+            None,
+            |_id, _remaining| async { None },
             |id: Uuid, _read_timeout: std::time::Duration| async move {
                 Ok(lineage_task(id, "running"))
             },
@@ -2496,6 +2609,8 @@ mod tests {
             running,
             tokio::time::Instant::now() + std::time::Duration::from_secs(30),
             &|| false,
+            None,
+            |_id, _remaining| async { None },
             |id: Uuid, _read_timeout: std::time::Duration| {
                 let db = &db;
                 async move {
@@ -2738,5 +2853,424 @@ mod tests {
         vm.set_task_id(uuid::Uuid::now_v7());
         let result = restore(&mut vm, &[]);
         assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Event-driven task/await wakeup + polling fallback tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_poll_loop_wakes_promptly_on_notification() {
+        use crate::stream::{EnvEvent, EnvPublisher, StreamPubSub, StreamPubSubType};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let task_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let wakeup = pubsub
+            .watch_task_completion(task_id, std::time::Duration::from_millis(50))
+            .await;
+
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_bg = Arc::clone(&completed);
+        let pubsub_bg = Arc::clone(&pubsub);
+
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            completed_bg.store(true, Ordering::SeqCst);
+            pubsub_bg
+                .publish_env(EnvEvent::TaskComplete {
+                    task_id,
+                    env_id,
+                    stream_id: Uuid::now_v7(),
+                    function_name: "::app/work".to_string(),
+                    status: "completed".to_string(),
+                    duration_ms: Some(2),
+                    error: None,
+                })
+                .await
+                .unwrap();
+        });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let completed_poll = Arc::clone(&completed);
+        let task = await_task_poll_loop(
+            lineage_task(task_id, "running"),
+            deadline,
+            &|| false,
+            Some(&wakeup),
+            move |_read_timeout: std::time::Duration| {
+                let is_done = completed_poll.load(Ordering::SeqCst);
+                async move {
+                    Ok(lineage_task(
+                        task_id,
+                        if is_done { "completed" } else { "running" },
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("wakeup must drive await_task_poll_loop to completion");
+
+        let elapsed = started.elapsed();
+        assert_eq!(task.status, "completed");
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "event-driven wakeup must complete well under the 100ms AWAIT_POLL_MIN_DELAY_MS floor (took {:?})",
+            elapsed
+        );
+
+        drop(wakeup);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_loop_handles_notification_before_loop_entry_without_lost_wakeup() {
+        use crate::stream::{StreamPubSub, StreamPubSubType};
+
+        let pubsub = StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap();
+        let task_id = Uuid::now_v7();
+
+        // Register BEFORE DB lookup; completion notification arrives before
+        // `await_task_poll_loop` even begins waiting.
+        let wakeup = pubsub
+            .watch_task_completion(task_id, std::time::Duration::from_millis(50))
+            .await;
+        pubsub.notify_task_wakeup(task_id).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let task =
+            await_task_poll_loop(
+                lineage_task(task_id, "running"),
+                deadline,
+                &|| false,
+                Some(&wakeup),
+                |_read_timeout: std::time::Duration| async move {
+                    Ok(lineage_task(task_id, "completed"))
+                },
+            )
+            .await
+            .expect("stored wakeup permit must prevent lost-wakeup race");
+
+        assert_eq!(task.status, "completed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(20),
+            "pre-existing wakeup permit must wake immediately (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_absent_notification_falls_back_to_polling() {
+        use crate::stream::{StreamPubSub, StreamPubSubType};
+
+        let pubsub = StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap();
+        let task_id = Uuid::now_v7();
+        let wakeup = pubsub
+            .watch_task_completion(task_id, std::time::Duration::from_millis(50))
+            .await;
+
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(60);
+        let polls = std::cell::Cell::new(0u32);
+        // No notification is ever sent: the polling fallback must still finish.
+        let task = await_task_poll_loop(
+            lineage_task(task_id, "running"),
+            deadline,
+            &|| false,
+            Some(&wakeup),
+            |_read_timeout: std::time::Duration| {
+                let n = polls.get() + 1;
+                polls.set(n);
+                async move {
+                    Ok(lineage_task(
+                        task_id,
+                        if n >= 3 { "completed" } else { "running" },
+                    ))
+                }
+            },
+        )
+        .await
+        .expect("polling fallback must complete even when no wakeup arrives");
+
+        assert_eq!(task.status, "completed");
+        assert_eq!(polls.get(), 3);
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            std::time::Duration::from_millis(300)
+        );
+        drop(wakeup);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_cancellation_and_deadline_fire_promptly_while_waiting_on_wakeup() {
+        use crate::stream::{StreamPubSub, StreamPubSubType};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pubsub = StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap();
+
+        // 1. Cancellation must still be observed on the 250ms slice even when
+        // the wakeup guard stays completely silent.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_bg = Arc::clone(&cancel_flag);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_bg.store(true, Ordering::Relaxed);
+        });
+
+        let task_id = Uuid::now_v7();
+        let wakeup = pubsub
+            .watch_task_completion(task_id, std::time::Duration::from_millis(50))
+            .await;
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(600);
+        let cancel_check = Arc::clone(&cancel_flag);
+        let err = await_task_poll_loop(
+            lineage_task(task_id, "running"),
+            deadline,
+            &move || cancel_check.load(Ordering::Relaxed),
+            Some(&wakeup),
+            |_read_timeout: std::time::Duration| async move {
+                Ok(lineage_task(task_id, "running"))
+            },
+        )
+        .await
+        .expect_err("cancellation must interrupt a quiet wakeup wait");
+        assert!(format!("{err:?}").contains("cancelled while waiting for task"));
+        assert!(
+            tokio::time::Instant::now() - start <= std::time::Duration::from_millis(350),
+            "cancellation must fire promptly, elapsed={:?}",
+            tokio::time::Instant::now() - start
+        );
+        drop(wakeup);
+
+        // 2. Deadline capping must still land exactly at `deadline` without
+        // overshooting into PARENT_COMPLETION_RESERVE.
+        let task_id2 = Uuid::now_v7();
+        let wakeup2 = pubsub
+            .watch_task_completion(task_id2, std::time::Duration::from_millis(50))
+            .await;
+        let start2 = tokio::time::Instant::now();
+        let deadline2 = start2 + std::time::Duration::from_millis(600);
+        let err2 = await_task_poll_loop(
+            lineage_task(task_id2, "running"),
+            deadline2,
+            &|| false,
+            Some(&wakeup2),
+            move |_read_timeout: std::time::Duration| async move {
+                Ok(lineage_task(task_id2, "running"))
+            },
+        )
+        .await
+        .expect_err("deadline must fire while waiting on a quiet wakeup");
+        assert!(format!("{err2:?}").contains("timeout waiting for task to complete"));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            deadline2,
+            "quiet wakeup wait must not overshoot deadline"
+        );
+        drop(wakeup2);
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_lineage_registers_wakeup_for_retry_child_and_cleans_up_guards() {
+        use crate::stream::{EnvEvent, EnvPublisher, StreamPubSub, StreamPubSubType};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let env_id = Uuid::now_v7();
+        let (parent_id, child_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let parent_failed = Arc::new(AtomicBool::new(false));
+        let child_completed = Arc::new(AtomicBool::new(false));
+
+        let initial_wakeup = pubsub
+            .watch_task_completion(parent_id, std::time::Duration::from_millis(50))
+            .await;
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 1);
+
+        let pubsub_bg = Arc::clone(&pubsub);
+        let parent_failed_bg = Arc::clone(&parent_failed);
+        let child_completed_bg = Arc::clone(&child_completed);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            parent_failed_bg.store(true, Ordering::SeqCst);
+            pubsub_bg
+                .publish_env(EnvEvent::TaskComplete {
+                    task_id: parent_id,
+                    env_id,
+                    stream_id: Uuid::now_v7(),
+                    function_name: "::app/work".to_string(),
+                    status: "failed".to_string(),
+                    duration_ms: Some(2),
+                    error: None,
+                })
+                .await
+                .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            child_completed_bg.store(true, Ordering::SeqCst);
+            pubsub_bg
+                .publish_env(EnvEvent::TaskComplete {
+                    task_id: child_id,
+                    env_id,
+                    stream_id: Uuid::now_v7(),
+                    function_name: "::app/work".to_string(),
+                    status: "completed".to_string(),
+                    duration_ms: Some(2),
+                    error: None,
+                })
+                .await
+                .unwrap();
+        });
+
+        let started = std::time::Instant::now();
+        let pubsub_watch = Arc::clone(&pubsub);
+        let parent_failed_poll = Arc::clone(&parent_failed);
+        let child_completed_poll = Arc::clone(&child_completed);
+        let task = await_task_lineage(
+            lineage_task(parent_id, "running"),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            &|| false,
+            Some(initial_wakeup),
+            move |id: Uuid, remaining: std::time::Duration| {
+                let pubsub_watch = Arc::clone(&pubsub_watch);
+                async move { Some(pubsub_watch.watch_task_completion(id, remaining / 4).await) }
+            },
+            move |id: Uuid, _read_timeout: std::time::Duration| {
+                let p_done = parent_failed_poll.load(Ordering::SeqCst);
+                let c_done = child_completed_poll.load(Ordering::SeqCst);
+                async move {
+                    if id == parent_id {
+                        Ok(infra_interrupted(lineage_task(
+                            parent_id,
+                            if p_done { "failed" } else { "running" },
+                        )))
+                    } else {
+                        Ok(lineage_task(
+                            child_id,
+                            if c_done { "completed" } else { "running" },
+                        ))
+                    }
+                }
+            },
+            move |parent: Uuid, _read_timeout: std::time::Duration| async move {
+                Ok((parent == parent_id).then(|| lineage_task(child_id, "running")))
+            },
+            &|_retry| None,
+        )
+        .await
+        .expect("retry lineage must complete via wakeups");
+
+        assert_eq!(
+            (task.task_id, task.status.as_str()),
+            (child_id, "completed")
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(80),
+            "both parent failure and retry child completion must wake under 100ms (took {:?})",
+            started.elapsed()
+        );
+        assert_eq!(
+            pubsub.task_wakeup_waiter_count(),
+            0,
+            "parent and retry guards must both be cleaned up after lineage completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_awaits_share_stream_pubsub_and_clean_up_on_drop() {
+        use crate::stream::{EnvEvent, EnvPublisher, StreamPubSub, StreamPubSubType};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let env_id = Uuid::now_v7();
+        let task_ids: Vec<Uuid> = (0..8).map(|_| Uuid::now_v7()).collect();
+        let flags: Vec<Arc<AtomicBool>> =
+            (0..8).map(|_| Arc::new(AtomicBool::new(false))).collect();
+
+        let mut guards = Vec::with_capacity(task_ids.len());
+        for &task_id in &task_ids {
+            guards.push(
+                pubsub
+                    .watch_task_completion(task_id, std::time::Duration::from_millis(50))
+                    .await,
+            );
+        }
+        assert_eq!(pubsub.task_wakeup_waiter_count(), 8);
+
+        let started = std::time::Instant::now();
+        let pubsub_bg = Arc::clone(&pubsub);
+        let task_ids_bg = task_ids.clone();
+        let flags_bg = flags.clone();
+        let publisher_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            for (&task_id, flag) in task_ids_bg.iter().zip(flags_bg.iter()) {
+                flag.store(true, Ordering::SeqCst);
+                pubsub_bg
+                    .publish_env(EnvEvent::TaskComplete {
+                        task_id,
+                        env_id,
+                        stream_id: Uuid::now_v7(),
+                        function_name: "::app/work".to_string(),
+                        status: "completed".to_string(),
+                        duration_ms: Some(1),
+                        error: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let wait_futs: Vec<_> = task_ids
+            .iter()
+            .zip(flags.iter())
+            .zip(guards.into_iter())
+            .map(|((&task_id, flag), wakeup)| {
+                let flag = Arc::clone(flag);
+                async move {
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                    let result = await_task_poll_loop(
+                        lineage_task(task_id, "running"),
+                        deadline,
+                        &|| false,
+                        Some(&wakeup),
+                        move |_read_timeout: std::time::Duration| {
+                            let done = flag.load(Ordering::SeqCst);
+                            async move {
+                                Ok(lineage_task(
+                                    task_id,
+                                    if done { "completed" } else { "running" },
+                                ))
+                            }
+                        },
+                    )
+                    .await;
+                    drop(wakeup);
+                    result
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(wait_futs).await;
+        publisher_handle.await.unwrap();
+
+        for result in results {
+            let task = result.unwrap();
+            assert_eq!(task.status, "completed");
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(80),
+            "all concurrent awaits must complete promptly via shared pubsub (took {:?})",
+            started.elapsed()
+        );
+        assert_eq!(
+            pubsub.task_wakeup_waiter_count(),
+            0,
+            "all RAII wakeup guards must be cleaned up"
+        );
     }
 }

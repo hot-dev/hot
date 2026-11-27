@@ -27,6 +27,9 @@ use uuid::Uuid;
 
 pub mod mem;
 pub mod streams;
+pub mod wakeup;
+
+pub use wakeup::TaskWakeupGuard;
 
 /// Stream event types that can be published/subscribed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,6 +558,51 @@ impl StreamPubSub {
         match self {
             StreamPubSub::Memory(_) => Ok(()),
             StreamPubSub::Redis(r) => r.ping().await,
+        }
+    }
+
+    /// Register a completion wakeup waiter for `task_id`.
+    ///
+    /// Callers must register BEFORE checking the authoritative task row in the
+    /// database so completions racing between the DB read and entering the
+    /// wait loop cannot be missed. In Redis mode, all waiters on this
+    /// `StreamPubSub` multiplex over a single shared background reader
+    /// connection; `cold_start_wait` caps how long the very first caller waits
+    /// for that reader to establish its initial cursor before proceeding with
+    /// polling fallback.
+    pub async fn watch_task_completion(
+        &self,
+        task_id: Uuid,
+        cold_start_wait: Duration,
+    ) -> TaskWakeupGuard {
+        match self {
+            StreamPubSub::Memory(m) => m.watch_task_completion(task_id),
+            StreamPubSub::Redis(r) => r.watch_task_completion(task_id, cold_start_wait).await,
+        }
+    }
+
+    /// Publish a best-effort wakeup hint that `task_id` reached a terminal
+    /// state.
+    ///
+    /// `publish_env(EnvEvent::TaskComplete { .. })` triggers this
+    /// automatically; callers that transition a task row to terminal without
+    /// publishing `EnvEvent::TaskComplete` (such as `::hot::task/cancel`) can
+    /// call this directly to wake any `::hot::task/await` waiters promptly.
+    pub async fn notify_task_wakeup(&self, task_id: Uuid) -> Result<(), StreamPubSubError> {
+        match self {
+            StreamPubSub::Memory(m) => {
+                m.notify_task_wakeup(task_id);
+                Ok(())
+            }
+            StreamPubSub::Redis(r) => r.notify_task_wakeup(task_id).await,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_wakeup_waiter_count(&self) -> usize {
+        match self {
+            StreamPubSub::Memory(m) => m.task_wakeup_waiter_count(),
+            StreamPubSub::Redis(r) => r.task_wakeup_waiter_count(),
         }
     }
 
