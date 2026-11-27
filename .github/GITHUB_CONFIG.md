@@ -4,9 +4,10 @@ This public repository has these workflow groups:
 
 - `hot.yml`: check/test CI for pushes and pull requests.
 - `codeql.yml`: CodeQL Advanced Setup (`security-extended`) for `rust`, `actions`,
-  `javascript-typescript`, and `python`. Skips draft PRs, gates language scans by
-  changed files on PRs (always keeping `actions` active for `Require CodeQL`),
-  caches the Rust extractor's `cargo_target_dir`, and runs `Analyze (rust)` on
+  `javascript-typescript`, and `python`. Skips draft PRs and scans every language
+  on all other PRs, because the `Require CodeQL` ruleset blocks a PR that is
+  missing any language main has. Caches the Rust extractor's `cargo_target_dir`,
+  and runs `Analyze (rust)` on
   `ubuntu-24.04-8core` in `hot-ci` while lightweight languages use `ubuntu-24.04`.
 - `cross-platform.yml`: macOS/Windows tests called by Hot releases, plus weekly
   and manual runs. Pull requests and pushes to `main` run Linux CI only.
