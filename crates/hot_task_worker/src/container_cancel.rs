@@ -41,7 +41,7 @@ impl CancelWatch {
         // `next()` can lose a message on some backends.
         let message_tx = Arc::clone(&tx);
         let messages = tokio::spawn(async move {
-            let mut subscription = match publisher.subscribe(task_id).await {
+            let mut subscription = match publisher.subscribe_task(task_id).await {
                 Ok(subscription) => subscription,
                 Err(error) => {
                     tracing::warn!(%task_id, %error, "Cannot subscribe to container task messages; watching its row for a cancel");

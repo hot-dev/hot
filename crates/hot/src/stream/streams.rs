@@ -25,6 +25,7 @@ use redis::aio::MultiplexedConnection;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
 use redis::streams::{StreamRangeReply, StreamReadReply};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -65,12 +66,33 @@ const READER_RECONNECT_MAX: Duration = Duration::from_secs(5);
 /// hash slot in Redis Cluster, allowing every worker pod to multiplex all
 /// concurrent `::hot::task/await` calls over ONE shared subscriber connection.
 pub(crate) const TASK_WAKEUP_STREAM_KEY: &str = "hot:task:wakeup";
+/// Shared Redis Stream carrying lightweight task-inbox wakeup hints
+/// (task UUIDs only, no payloads or tenant data). A single key maps to one
+/// hash slot in Redis Cluster, allowing task workers to multiplex all
+/// concurrent `subscribe_task` inboxes over ONE shared subscriber connection
+/// while durable payloads stay in per-task `stream:{task_id}` keys.
+///
+/// Follows the same cluster-wide capped stream design as `hot:task:wakeup`:
+/// each `TaskMessage` publish adds one best-effort `EVAL` round trip, every
+/// active worker pod reads hints from this key, and entries are capped at
+/// `MAXLEN ~ 4096`. If a slow reader falls more than 4,096 hints behind, the
+/// per-subscriber fallback `XRANGE` poll recovers delivery.
+pub(crate) const TASK_INBOX_WAKEUP_STREAM_KEY: &str = "hot:task:inbox:wakeup";
 const TASK_WAKEUP_STREAM_MAXLEN: usize = 4096;
 const TASK_WAKEUP_STREAM_IDLE_TTL_SECS: u64 = 60 * 60;
-/// Cap on how long the first cold `watch_task_completion` waits for the shared
-/// Redis reader to connect and establish its initial cursor before continuing
-/// into the DB lookup and polling fallback.
+/// Cap on how long the first cold `watch_task_completion` or `subscribe_task`
+/// waits for the shared Redis reader to connect and establish its initial
+/// cursor before continuing.
 const TASK_WAKEUP_COLD_START_WAIT: Duration = Duration::from_millis(250);
+/// Fallback `XRANGE` interval for a task inbox before a wakeup hint has been
+/// confirmed for it (covers rolling upgrades with older producers that write
+/// only `stream:{task_id}`, and recovers quickly after a missed hint).
+const TASK_INBOX_UNCONFIRMED_FALLBACK_POLL: Duration = Duration::from_secs(2);
+/// Relaxed fallback `XRANGE` interval once a wakeup hint has been observed for
+/// this subscription, cutting steady-state idle `XRANGE` traffic on long-running
+/// tasks by 15x while still self-healing if a hint is ever trimmed past
+/// `TASK_WAKEUP_STREAM_MAXLEN`.
+const TASK_INBOX_HINTED_FALLBACK_POLL: Duration = Duration::from_secs(30);
 /// Continuous wall-clock duration with zero active in-process waiters before
 /// the shared wakeup reader parks itself and closes its Redis connection, even
 /// when other pods continue writing completions to `hot:task:wakeup`.
@@ -473,6 +495,11 @@ impl RedisTaskWakeupMux {
         state.task.as_ref().is_some_and(|task| !task.is_finished())
     }
 
+    #[cfg(test)]
+    fn reader_generation(&self) -> u64 {
+        self.reader.lock().generation
+    }
+
     async fn watch(self: &Arc<Self>, task_id: Uuid, cold_start_wait: Duration) -> TaskWakeupGuard {
         // Register BEFORE ensuring the reader is running so `active_waiter_count`
         // is already >= 1 before any concurrent idle-stop check runs, and so any
@@ -720,6 +747,10 @@ pub struct RedisStreamsPubSub {
     connection_pool: Arc<RedisConnectionPool>,
     run_idle_ttl_secs: u64,
     task_wakeups: Arc<RedisTaskWakeupMux>,
+    task_inboxes: Arc<RedisTaskWakeupMux>,
+    task_inbox_fallback_poll: Duration,
+    task_inbox_hinted_fallback_poll: Duration,
+    task_inbox_idle_interval: Duration,
 }
 
 impl RedisStreamsPubSub {
@@ -730,10 +761,18 @@ impl RedisStreamsPubSub {
             Arc::clone(&connection_pool),
             TASK_WAKEUP_STREAM_KEY.to_string(),
         ));
+        let task_inboxes = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_INBOX_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
             connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
             task_wakeups,
+            task_inboxes,
+            task_inbox_fallback_poll: TASK_INBOX_UNCONFIRMED_FALLBACK_POLL,
+            task_inbox_hinted_fallback_poll: TASK_INBOX_HINTED_FALLBACK_POLL,
+            task_inbox_idle_interval: Duration::from_millis(XREAD_BLOCK_MS),
         }
     }
 
@@ -744,10 +783,18 @@ impl RedisStreamsPubSub {
             Arc::clone(&connection_pool),
             TASK_WAKEUP_STREAM_KEY.to_string(),
         ));
+        let task_inboxes = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_INBOX_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
             connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
             task_wakeups,
+            task_inboxes,
+            task_inbox_fallback_poll: TASK_INBOX_UNCONFIRMED_FALLBACK_POLL,
+            task_inbox_hinted_fallback_poll: TASK_INBOX_HINTED_FALLBACK_POLL,
+            task_inbox_idle_interval: Duration::from_millis(XREAD_BLOCK_MS),
         }
     }
 
@@ -758,10 +805,18 @@ impl RedisStreamsPubSub {
             Arc::clone(&connection_pool),
             stream_key,
         ));
+        let task_inboxes = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_INBOX_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
             connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
             task_wakeups,
+            task_inboxes,
+            task_inbox_fallback_poll: TASK_INBOX_UNCONFIRMED_FALLBACK_POLL,
+            task_inbox_hinted_fallback_poll: TASK_INBOX_HINTED_FALLBACK_POLL,
+            task_inbox_idle_interval: Duration::from_millis(XREAD_BLOCK_MS),
         }
     }
 
@@ -779,16 +834,91 @@ impl RedisStreamsPubSub {
             xread_block,
             idle_stop_after,
         ));
+        let task_inboxes = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_INBOX_WAKEUP_STREAM_KEY.to_string(),
+        ));
         Self {
             connection_pool,
             run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
             task_wakeups,
+            task_inboxes,
+            task_inbox_fallback_poll: TASK_INBOX_UNCONFIRMED_FALLBACK_POLL,
+            task_inbox_hinted_fallback_poll: TASK_INBOX_HINTED_FALLBACK_POLL,
+            task_inbox_idle_interval: Duration::from_millis(XREAD_BLOCK_MS),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_inbox_test_config(
+        client: Client,
+        inbox_wakeup_stream_key: String,
+        xread_block: Duration,
+        idle_stop_after: Duration,
+        fallback_poll: Duration,
+        idle_interval: Duration,
+    ) -> Self {
+        Self::with_inbox_test_config_full(
+            client,
+            inbox_wakeup_stream_key,
+            xread_block,
+            idle_stop_after,
+            fallback_poll,
+            TASK_INBOX_HINTED_FALLBACK_POLL.max(fallback_poll),
+            idle_interval,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_inbox_test_config_full(
+        client: Client,
+        inbox_wakeup_stream_key: String,
+        xread_block: Duration,
+        idle_stop_after: Duration,
+        fallback_poll: Duration,
+        hinted_fallback_poll: Duration,
+        idle_interval: Duration,
+    ) -> Self {
+        let connection_pool = Arc::new(RedisConnectionPool::new_standalone(client));
+        let task_wakeups = Arc::new(RedisTaskWakeupMux::new(
+            Arc::clone(&connection_pool),
+            TASK_WAKEUP_STREAM_KEY.to_string(),
+        ));
+        let task_inboxes = Arc::new(RedisTaskWakeupMux::with_timings(
+            Arc::clone(&connection_pool),
+            inbox_wakeup_stream_key,
+            xread_block,
+            idle_stop_after,
+        ));
+        Self {
+            connection_pool,
+            run_idle_ttl_secs: DEFAULT_RUN_STREAM_IDLE_TTL_SECS,
+            task_wakeups,
+            task_inboxes,
+            task_inbox_fallback_poll: fallback_poll,
+            task_inbox_hinted_fallback_poll: hinted_fallback_poll,
+            task_inbox_idle_interval: idle_interval,
         }
     }
 
     #[cfg(test)]
     fn is_task_wakeup_reader_running(&self) -> bool {
         self.task_wakeups.is_reader_running()
+    }
+
+    #[cfg(test)]
+    fn is_task_inbox_reader_running(&self) -> bool {
+        self.task_inboxes.is_reader_running()
+    }
+
+    #[cfg(test)]
+    fn task_inbox_waiter_count(&self) -> usize {
+        self.task_inboxes.hub.active_waiter_count()
+    }
+
+    #[cfg(test)]
+    fn task_inbox_reader_generation(&self) -> u64 {
+        self.task_inboxes.reader_generation()
     }
 
     /// Register a wakeup waiter for `task_id` on this pub/sub's shared
@@ -915,6 +1045,10 @@ impl McpSseTransportSessionStore for RedisStreamsPubSub {
 impl StreamPublisher for RedisStreamsPubSub {
     async fn publish(&self, event: StreamEvent) -> Result<(), StreamPubSubError> {
         let stream_key = event.channel_name();
+        let task_inbox_id = match &event {
+            StreamEvent::TaskMessage { task_id, .. } => Uuid::parse_str(task_id).ok(),
+            _ => None,
+        };
         let idle_ttl = if matches!(event, StreamEvent::TaskMessage { .. }) {
             TASK_STREAM_IDLE_TTL_SECS
         } else {
@@ -942,6 +1076,36 @@ impl StreamPublisher for RedisStreamsPubSub {
             )
             .await?;
 
+        if let Some(task_id) = task_inbox_id {
+            // Wake same-process inbox subscribers AFTER `stream:{task_id}` is
+            // durable so their immediate `XRANGE` sees this entry.
+            self.task_inboxes.hub.notify(task_id);
+            // Best-effort cross-pod wakeup hint onto the single shared inbox
+            // wakeup stream; `MultiplexedTaskSubscriber` keeps a fallback
+            // `XRANGE` poll so a transient wakeup publish error never fails
+            // durable message delivery.
+            if let Err(e) = conn
+                .cmd(
+                    &redis::cmd("EVAL")
+                        .arg(PUBLISH_STREAM_SCRIPT)
+                        .arg(1)
+                        .arg(&self.task_inboxes.stream_key)
+                        .arg(TASK_WAKEUP_STREAM_MAXLEN)
+                        .arg(task_id.to_string())
+                        .arg(TASK_WAKEUP_STREAM_IDLE_TTL_SECS)
+                        .clone(),
+                )
+                .await
+            {
+                tracing::debug!(
+                    task_id = %task_id,
+                    "Failed to publish task inbox wakeup hint to {}: {}",
+                    self.task_inboxes.stream_key,
+                    e
+                );
+            }
+        }
+
         tracing::debug!(
             "Published stream event to Redis Streams channel {}",
             stream_key
@@ -958,15 +1122,31 @@ impl StreamSubscriberFactory for RedisStreamsPubSub {
         task_id: Uuid,
     ) -> Result<Box<dyn StreamSubscriber>, StreamPubSubError> {
         let stream_key = legacy_channel_name(&task_id);
-        let conn = self.connection_pool.create_subscriber_connection().await?;
-        let reader = StreamReader::start_on_at(
-            Arc::clone(&self.connection_pool),
-            conn,
-            &stream_key,
-            Some("0-0"),
-        )
-        .await?;
-        Ok(Box::new(RedisStreamsSubscriber { reader, stream_key }))
+        // Register on the shared wakeup mux BEFORE the initial `XRANGE` replay
+        // so any message published while replaying leaves a stored wakeup
+        // permit and cannot be lost between replay and live delivery.
+        let guard = self
+            .task_inboxes
+            .watch(task_id, TASK_WAKEUP_COLD_START_WAIT)
+            .await;
+        let (next_last_id, events, full_page) =
+            drain_task_stream(&self.connection_pool, &stream_key, "0-0").await?;
+        let last_id = next_last_id.unwrap_or_else(|| "0-0".to_string());
+        Ok(Box::new(MultiplexedTaskSubscriber {
+            pool: Arc::clone(&self.connection_pool),
+            stream_key,
+            guard,
+            last_id,
+            buffered: events.into(),
+            needs_drain: full_page,
+            drain_triggered_by_fallback: false,
+            hint_confirmed: false,
+            failures: 0,
+            fallback_poll_interval: self.task_inbox_fallback_poll,
+            hinted_fallback_poll_interval: self.task_inbox_hinted_fallback_poll,
+            next_fallback_at: tokio::time::Instant::now() + self.task_inbox_fallback_poll,
+            idle_interval: self.task_inbox_idle_interval,
+        }))
     }
     async fn subscribe(
         &self,
@@ -1200,6 +1380,171 @@ async fn read_stream(
             };
             if tx.send(ReaderItem::Entry(payload)).await.is_err() {
                 return;
+            }
+        }
+    }
+}
+
+/// Fetch up to `XREAD_COUNT` entries from a per-task inbox stream strictly
+/// after `last_id` (`"0-0"` reads from the beginning) using the shared pooled
+/// connection — no dedicated subscriber TCP connection required.
+async fn drain_task_stream(
+    pool: &RedisConnectionPool,
+    stream_key: &str,
+    last_id: &str,
+) -> Result<(Option<String>, Vec<StreamEvent>, bool), StreamPubSubError> {
+    let start_arg = if last_id == "0-0" {
+        "-".to_string()
+    } else {
+        format!("({last_id}")
+    };
+    let mut conn = pool.get_connection().await?;
+    let value = conn
+        .cmd(
+            redis::cmd("XRANGE")
+                .arg(stream_key)
+                .arg(&start_arg)
+                .arg("+")
+                .arg("COUNT")
+                .arg(XREAD_COUNT),
+        )
+        .await?;
+    let range: StreamRangeReply = redis::from_redis_value(value)
+        .map_err(|e| StreamPubSubError::SubscribeError(e.to_string()))?;
+    let entry_count = range.ids.len();
+    let mut next_last_id = None;
+    let mut events = Vec::with_capacity(entry_count);
+    for entry in range.ids {
+        next_last_id = Some(entry.id.clone());
+        let Some(payload) = entry.get::<String>("event") else {
+            continue;
+        };
+        match serde_json::from_str::<StreamEvent>(&payload) {
+            Ok(event) => events.push(event),
+            Err(e) => tracing::warn!(
+                "Skipping undecodable task inbox event from Redis Streams on {}: {}",
+                stream_key,
+                e
+            ),
+        }
+    }
+    Ok((next_last_id, events, entry_count >= XREAD_COUNT))
+}
+
+/// Task inbox subscriber backed by one shared `RedisTaskWakeupMux` reader plus
+/// pooled `XRANGE` reads on `stream:{task_id}`.
+///
+/// Opens zero per-task Redis connections and spawns zero per-task background
+/// tasks. Cancel-safe across `tokio::select!`: `needs_drain` is cleared only
+/// after `XRANGE` succeeds and advances `last_id`, so cancelling `next()`
+/// mid-read retries from the same `last_id` with no lost or duplicate entries.
+struct MultiplexedTaskSubscriber {
+    pool: Arc<RedisConnectionPool>,
+    stream_key: String,
+    guard: TaskWakeupGuard,
+    last_id: String,
+    buffered: VecDeque<StreamEvent>,
+    needs_drain: bool,
+    /// True when the pending drain was scheduled by the fallback timer rather
+    /// than a wakeup hint; if that drain finds unhinted messages, we revert to
+    /// the shorter unconfirmed fallback interval.
+    drain_triggered_by_fallback: bool,
+    /// True once a wakeup hint has woken this subscription, allowing steady-state
+    /// fallback `XRANGE` polling to relax from 2s to 30s.
+    hint_confirmed: bool,
+    failures: u32,
+    fallback_poll_interval: Duration,
+    hinted_fallback_poll_interval: Duration,
+    /// Persistent fallback deadline so cancelling `next()` in a caller's
+    /// `tokio::select!` (such as the 2s DB cancel poll) never starves the
+    /// rolling-upgrade `XRANGE` fallback.
+    next_fallback_at: tokio::time::Instant,
+    idle_interval: Duration,
+}
+
+impl MultiplexedTaskSubscriber {
+    fn active_fallback_interval(&self) -> Duration {
+        if self.hint_confirmed {
+            self.hinted_fallback_poll_interval
+        } else {
+            self.fallback_poll_interval
+        }
+    }
+}
+
+#[async_trait]
+impl StreamSubscriber for MultiplexedTaskSubscriber {
+    async fn next(&mut self) -> StreamNext {
+        let idle_deadline = tokio::time::Instant::now() + self.idle_interval;
+        loop {
+            if let Some(event) = self.buffered.pop_front() {
+                return StreamNext::Event(event);
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= self.next_fallback_at {
+                self.needs_drain = true;
+                self.drain_triggered_by_fallback = true;
+            }
+
+            if self.needs_drain {
+                if self.failures > 0 {
+                    tokio::time::sleep(reconnect_delay(self.failures)).await;
+                }
+                match drain_task_stream(&self.pool, &self.stream_key, &self.last_id).await {
+                    Ok((next_last_id, events, full_page)) => {
+                        self.failures = 0;
+                        if let Some(id) = next_last_id {
+                            self.last_id = id;
+                        }
+                        if self.drain_triggered_by_fallback && !events.is_empty() {
+                            // A message arrived without a wakeup hint (e.g. mixed-version
+                            // producer or trimmed hint stream); revert to fast fallback.
+                            self.hint_confirmed = false;
+                        }
+                        self.drain_triggered_by_fallback = false;
+                        self.buffered.extend(events);
+                        self.needs_drain = full_page;
+                        self.next_fallback_at =
+                            tokio::time::Instant::now() + self.active_fallback_interval();
+                        if let Some(event) = self.buffered.pop_front() {
+                            return StreamNext::Event(event);
+                        }
+                    }
+                    Err(e) => {
+                        if self.failures == 0 {
+                            tracing::warn!(
+                                "Redis task inbox XRANGE error on {} after {}: {}",
+                                self.stream_key,
+                                self.last_id,
+                                e
+                            );
+                        }
+                        self.failures = self.failures.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= idle_deadline {
+                return StreamNext::Idle;
+            }
+            let fallback_at = self.next_fallback_at.min(idle_deadline);
+
+            tokio::select! {
+                biased;
+                _ = self.guard.notified() => {
+                    self.hint_confirmed = true;
+                    self.drain_triggered_by_fallback = false;
+                    self.needs_drain = true;
+                }
+                _ = tokio::time::sleep_until(fallback_at) => {
+                    if tokio::time::Instant::now() >= self.next_fallback_at {
+                        self.drain_triggered_by_fallback = true;
+                        self.needs_drain = true;
+                    }
+                }
             }
         }
     }
@@ -2541,5 +2886,284 @@ mod tests {
         drop(guard_2);
         delete_key(&client, &stream_key).await;
         delete_key(&client, &env_channel_name(&env_id)).await;
+    }
+
+    #[tokio::test]
+    async fn task_inbox_multiplexes_concurrent_tasks_over_one_reader_and_parks_when_idle() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let wakeup_key = format!("hot:task:inbox:wakeup:test:{}", Uuid::now_v7());
+        let pod_a = RedisStreamsPubSub::with_inbox_test_config(
+            client.clone(),
+            wakeup_key.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+        let pod_b = RedisStreamsPubSub::with_inbox_test_config(
+            client.clone(),
+            wakeup_key.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+
+        let env_id = Uuid::now_v7();
+        let tasks: Vec<Uuid> = (0..5).map(|_| Uuid::now_v7()).collect();
+
+        // Publish an early message on tasks[0] before subscribing.
+        pod_b
+            .publish(StreamEvent::TaskMessage {
+                task_id: tasks[0].to_string(),
+                env_id: Some(env_id),
+                payload: serde_json::json!("early-0"),
+            })
+            .await
+            .unwrap();
+
+        let mut subs = Vec::new();
+        for &task_id in &tasks {
+            subs.push(pod_a.subscribe_task(task_id).await.unwrap());
+        }
+        assert!(pod_a.is_task_inbox_reader_running());
+        assert_eq!(pod_a.task_inbox_waiter_count(), tasks.len());
+        assert_eq!(
+            pod_a.task_inbox_reader_generation(),
+            1,
+            "all 5 concurrent task inboxes must share one reader generation"
+        );
+
+        // Early message is replayed on tasks[0] without duplicates.
+        let early = tokio::time::timeout(Duration::from_secs(2), subs[0].next())
+            .await
+            .expect("early message should replay immediately");
+        assert!(
+            matches!(&early, StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) if payload.as_str() == Some("early-0")),
+            "{early:?}"
+        );
+
+        // Publish live messages from remote pod_b to every task.
+        for (idx, &task_id) in tasks.iter().enumerate() {
+            pod_b
+                .publish(StreamEvent::TaskMessage {
+                    task_id: task_id.to_string(),
+                    env_id: Some(env_id),
+                    payload: serde_json::json!(format!("live-{idx}")),
+                })
+                .await
+                .unwrap();
+        }
+        for (idx, sub) in subs.iter_mut().enumerate() {
+            let expected = format!("live-{idx}");
+            let item = tokio::time::timeout(Duration::from_secs(2), sub.next())
+                .await
+                .expect("live task message should arrive via shared wakeup reader");
+            assert!(
+                matches!(&item, StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) if payload.as_str() == Some(expected.as_str())),
+                "task {idx}: {item:?}"
+            );
+        }
+
+        // Dropping all subscribers lets the shared inbox reader park and close
+        // its Redis connection after `idle_stop_after`.
+        drop(subs);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while pod_a.is_task_inbox_reader_running() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !pod_a.is_task_inbox_reader_running(),
+            "shared task inbox reader must park once all subscribers drop"
+        );
+
+        delete_key(&client, &wakeup_key).await;
+        for task_id in tasks {
+            delete_key(&client, &legacy_channel_name(&task_id)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn task_inbox_fallback_delivers_messages_without_wakeup_hint_across_select_cancels() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let wakeup_key = format!("hot:task:inbox:wakeup:fallback:{}", Uuid::now_v7());
+        let pubsub = RedisStreamsPubSub::with_inbox_test_config(
+            client.clone(),
+            wakeup_key.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+            Duration::from_millis(120),
+            Duration::from_secs(30),
+        );
+
+        let env_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let mut sub = pubsub.subscribe_task(task_id).await.unwrap();
+
+        // Simulate an older producer during a rolling upgrade: append directly
+        // to `stream:{task_id}` without writing to `hot:task:inbox:wakeup`.
+        let legacy_event = StreamEvent::TaskMessage {
+            task_id: task_id.to_string(),
+            env_id: Some(env_id),
+            payload: serde_json::json!("from-old-producer"),
+        };
+        let payload = serde_json::to_string(&legacy_event).unwrap();
+        let stream_key = legacy_channel_name(&task_id);
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: redis::Value = redis::cmd("XADD")
+            .arg(&stream_key)
+            .arg("*")
+            .arg("event")
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Repeatedly cancel `sub.next()` with a faster 30ms timer (mirroring
+        // `inbox_forwarder`'s periodic DB poll) and verify the persistent
+        // fallback timer still fires and delivers the message cleanly.
+        let mut cancel_tick = tokio::time::interval(Duration::from_millis(30));
+        cancel_tick.tick().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let received = loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fallback poll must not be starved by select! cancellations"
+            );
+            tokio::select! {
+                biased;
+                next = sub.next() => {
+                    if let StreamNext::Event(event) = next {
+                        break event;
+                    }
+                }
+                _ = cancel_tick.tick() => {}
+            }
+        };
+        assert!(
+            matches!(&received, StreamEvent::TaskMessage { payload, .. } if payload == "from-old-producer"),
+            "{received:?}"
+        );
+
+        drop(sub);
+        delete_key(&client, &wakeup_key).await;
+        delete_key(&client, &stream_key).await;
+    }
+
+    #[tokio::test]
+    async fn task_inbox_relaxes_fallback_poll_after_hint_and_reverts_on_missed_hint() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let wakeup_key = format!("hot:task:inbox:wakeup:adaptive:{}", Uuid::now_v7());
+        let short_poll = Duration::from_millis(80);
+        let hinted_poll = Duration::from_millis(450);
+        let pubsub = RedisStreamsPubSub::with_inbox_test_config_full(
+            client.clone(),
+            wakeup_key.clone(),
+            Duration::from_millis(50),
+            Duration::from_millis(120),
+            short_poll,
+            hinted_poll,
+            Duration::from_secs(30),
+        );
+
+        let env_id = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let stream_key = legacy_channel_name(&task_id);
+        let mut sub = pubsub.subscribe_task(task_id).await.unwrap();
+
+        // 1) Deliver a normal hinted message so the subscriber promotes to the
+        // longer hinted fallback interval.
+        pubsub
+            .publish(StreamEvent::TaskMessage {
+                task_id: task_id.to_string(),
+                env_id: Some(env_id),
+                payload: serde_json::json!("hinted-1"),
+            })
+            .await
+            .unwrap();
+        let item = tokio::time::timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("hinted message should arrive quickly");
+        assert!(
+            matches!(&item, StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) if payload == "hinted-1"),
+            "{item:?}"
+        );
+
+        // 2) Write an unhinted message directly to stream:{task_id}; it should
+        // NOT be polled at `short_poll` (80ms) because hints were confirmed,
+        // and SHOULD arrive once `hinted_poll` (450ms) elapses.
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let unhinted_1 = serde_json::to_string(&StreamEvent::TaskMessage {
+            task_id: task_id.to_string(),
+            env_id: Some(env_id),
+            payload: serde_json::json!("unhinted-1"),
+        })
+        .unwrap();
+        let _: redis::Value = redis::cmd("XADD")
+            .arg(&stream_key)
+            .arg("*")
+            .arg("event")
+            .arg(&unhinted_1)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let item = tokio::time::timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("hinted fallback must still deliver unhinted message");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(&item, StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) if payload == "unhinted-1"),
+            "{item:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "after confirming hints, fallback should wait for hinted_poll (450ms), not short_poll (80ms); elapsed={elapsed:?}"
+        );
+
+        // 3) Because the fallback discovered an unhinted message, the next
+        // unhinted message should revert to `short_poll` (80ms).
+        let unhinted_2 = serde_json::to_string(&StreamEvent::TaskMessage {
+            task_id: task_id.to_string(),
+            env_id: Some(env_id),
+            payload: serde_json::json!("unhinted-2"),
+        })
+        .unwrap();
+        let _: redis::Value = redis::cmd("XADD")
+            .arg(&stream_key)
+            .arg("*")
+            .arg("event")
+            .arg(&unhinted_2)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let item = tokio::time::timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("reverted short fallback should deliver quickly");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(&item, StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) if payload == "unhinted-2"),
+            "{item:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "after discovering an unhinted message, fallback should revert to short_poll (80ms); elapsed={elapsed:?}"
+        );
+
+        drop(sub);
+        delete_key(&client, &wakeup_key).await;
+        delete_key(&client, &stream_key).await;
     }
 }
