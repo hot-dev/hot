@@ -126,13 +126,6 @@ fn scope_lookup_status(error: &sqlx::Error) -> StatusCode {
     }
 }
 
-fn env_scope_status(error: hot::db::env::EnvError) -> StatusCode {
-    match error {
-        hot::db::env::EnvError::Database(error) => scope_lookup_status(&error),
-        hot::db::env::EnvError::NotFound => StatusCode::FORBIDDEN,
-    }
-}
-
 fn org_scope_status(error: hot::db::org::OrgError) -> StatusCode {
     match error {
         hot::db::org::OrgError::Database(error) => scope_lookup_status(&error),
@@ -401,31 +394,22 @@ pub async fn runtime_database_scope(
     db: &DatabasePool,
     env_id: Uuid,
 ) -> Result<DatabaseScope, StatusCode> {
-    let db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
-    let db = &db;
     with_database_scope(
         DatabaseScope::Bootstrap(BootstrapOperation::Authentication),
         async {
-            let env = hot::db::Env::get_env_uncached(db, &env_id)
-                .await
-                .map_err(env_scope_status)?;
-            let org = hot::db::Org::get_org_uncached(db, &env.org_id)
-                .await
-                .map_err(org_scope_status)?;
-            if !env.active || !org.is_admitting() {
+            let Some(env_info) =
+                hot::db::Org::resolve_admitted_env(db, &env_id, BootstrapOperation::Authentication)
+                    .await
+                    .map_err(org_scope_status)?
+            else {
+                return Err(StatusCode::FORBIDDEN);
+            };
+            if !env_info.admitted {
                 return Err(StatusCode::FORBIDDEN);
             }
-            if let Some(root_id) = org.parent_org_id {
-                let root = hot::db::Org::get_org_uncached(db, &root_id)
-                    .await
-                    .map_err(org_scope_status)?;
-                if !root.is_admitting() || root.parent_org_id.is_some() {
-                    return Err(StatusCode::FORBIDDEN);
-                }
-            }
             Ok(DatabaseScope::Environment {
-                org_id: env.org_id,
-                env_id,
+                org_id: env_info.org_id,
+                env_id: env_info.env_id,
             })
         },
     )
@@ -1061,7 +1045,7 @@ mod scope_tests {
 
     #[test]
     fn database_failures_are_unavailable_but_missing_rows_deny() {
-        use hot::db::{env::EnvError, org::OrgError, session::SessionError};
+        use hot::db::{org::OrgError, session::SessionError};
         assert_eq!(
             session_status(SessionError::Database(sqlx::Error::PoolTimedOut)),
             StatusCode::SERVICE_UNAVAILABLE
@@ -1071,7 +1055,7 @@ mod scope_tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            env_scope_status(EnvError::Database(sqlx::Error::RowNotFound)),
+            org_scope_status(OrgError::Database(sqlx::Error::RowNotFound)),
             StatusCode::FORBIDDEN
         );
         assert_eq!(

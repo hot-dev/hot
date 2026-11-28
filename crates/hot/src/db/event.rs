@@ -735,7 +735,38 @@ impl Event {
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
     ) -> Result<(), EventError> {
-        let inserted = Self::insert_row(
+        Self::insert_event_returning_stored(
+            db,
+            event_id,
+            env_id,
+            stream_id,
+            event_type,
+            event_data,
+            event_time,
+            created_by_user_id,
+            access_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Insert a new event and return its durable `(event_time, created_at,
+    /// event_data)` values as stored by the database (e.g. PostgreSQL
+    /// microsecond timestamps and normalized `jsonb`) so callers can build
+    /// their response without a follow-up `Event::get_event`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_event_returning_stored(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        event_type: &str,
+        event_data: &JsonValue,
+        event_time: DateTime<Utc>,
+        created_by_user_id: &Uuid,
+        access_id: Option<&Uuid>,
+    ) -> Result<(DateTime<Utc>, DateTime<Utc>, JsonValue), EventError> {
+        match Self::insert_row(
             db,
             event_id,
             env_id,
@@ -748,11 +779,10 @@ impl Event {
             None,
             None,
         )
-        .await?;
-        if inserted {
-            Ok(())
-        } else {
-            Err(EventError::AlreadyExists(*event_id))
+        .await?
+        {
+            Some(stored) => Ok(stored),
+            None => Err(EventError::AlreadyExists(*event_id)),
         }
     }
 
@@ -773,6 +803,39 @@ impl Event {
         access_id: Option<&Uuid>,
         enqueue_leased_until: DateTime<Utc>,
     ) -> Result<bool, EventError> {
+        Self::insert_event_if_absent_returning_stored(
+            db,
+            event_id,
+            env_id,
+            stream_id,
+            event_type,
+            event_data,
+            event_time,
+            created_by_user_id,
+            access_id,
+            enqueue_leased_until,
+        )
+        .await
+        .map(|stored| stored.is_some())
+    }
+
+    /// Like [`Event::insert_event_if_absent`], returning
+    /// `Some((event_time, created_at, event_data))` as stored by the database
+    /// when the row was inserted so callers can build their response without
+    /// a follow-up `Event::get_event`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_event_if_absent_returning_stored(
+        db: &crate::db::DatabasePool,
+        event_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        event_type: &str,
+        event_data: &JsonValue,
+        event_time: DateTime<Utc>,
+        created_by_user_id: &Uuid,
+        access_id: Option<&Uuid>,
+        enqueue_leased_until: DateTime<Utc>,
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)>, EventError> {
         Self::insert_row(
             db,
             event_id,
@@ -818,6 +881,7 @@ impl Event {
             Some(payload),
         )
         .await
+        .map(|stored| stored.is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -833,40 +897,40 @@ impl Event {
         access_id: Option<&Uuid>,
         enqueue_leased_until: Option<DateTime<Utc>>,
         enqueue_payload: Option<&JsonValue>,
-    ) -> Result<bool, EventError> {
-        // Ensure the stream exists (create if it doesn't)
-        crate::db::stream::Stream::create_or_get_stream(db, *stream_id, *env_id)
-            .await
-            .map_err(|e| {
-                EventError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to create stream: {}",
-                    e
-                )))
-            })?;
-
-        // The row and its stream counters commit together. A caller told the
-        // insert failed must be able to rely on the row, and with it the outbox
-        // lease that would still deliver the event, not being there.
-        let inserted = match db {
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)>, EventError> {
+        // The stream row, event row, and stream counters commit together in one
+        // transaction. A caller told the insert failed must be able to rely on
+        // the row, and with it the outbox lease that would still deliver the
+        // event, not being there.
+        match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let mut tx = pg_pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 // Keep PostgreSQL's database-clock DEFAULT now() as the
-                // authoritative durable-creation timestamp.
-                let inserted = sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING")
-                    .bind(event_id)
-                    .bind(env_id)
-                    .bind(stream_id)
-                    .bind(event_type)
-                    .bind(event_data)
-                    .bind(event_time)
-                    .bind(created_by_user_id)
-                    .bind(access_id)
-                    .bind(enqueue_leased_until)
-                    .bind(enqueue_payload)
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected();
-                if inserted > 0 {
+                // authoritative durable-creation timestamp and return stored
+                // microsecond event_time + normalized jsonb event_data.
+                let stored: Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)> = sqlx::query_as(
+                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING RETURNING event_time, created_at, event_data",
+                )
+                .bind(event_id)
+                .bind(env_id)
+                .bind(stream_id)
+                .bind(event_type)
+                .bind(event_data)
+                .bind(event_time)
+                .bind(created_by_user_id)
+                .bind(access_id)
+                .bind(enqueue_leased_until)
+                .bind(enqueue_payload)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if stored.is_some() {
                     // A successful insert only changes the event count and activity time.
                     sqlx::query("UPDATE stream SET total_events = total_events + 1, last_activity_at = now() WHERE stream_id = $1")
                         .bind(stream_id)
@@ -874,7 +938,7 @@ impl Event {
                         .await?;
                 }
                 tx.commit().await?;
-                inserted
+                Ok(stored)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 // Bind this explicitly so SQLite retains sub-second precision
@@ -894,6 +958,13 @@ impl Event {
                     })?;
 
                 let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 let inserted = sqlx::query(
                     "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING",
                 )
@@ -919,11 +990,9 @@ impl Event {
                         .await?;
                 }
                 tx.commit().await?;
-                inserted
+                Ok((inserted > 0).then(|| (event_time, created_at, event_data.clone())))
             }
-        };
-
-        Ok(inserted > 0)
+        }
     }
 
     pub async fn enqueue_payload(

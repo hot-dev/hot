@@ -435,6 +435,311 @@ impl Task {
         Ok(())
     }
 
+    /// Ensure the stream and origin run placeholder exist and insert a queued
+    /// task in a single database transaction. Used by `::hot::task/start` to
+    /// guarantee FK integrity without paying for three separate scoped
+    /// transactions on PostgreSQL.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_with_origin_run(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        env_id: &Uuid,
+        stream_id: &Uuid,
+        build_id: &Uuid,
+        origin_run_id: &Uuid,
+        origin_run_type_id: i16,
+        origin_parent_run_id: Option<&Uuid>,
+        origin_user_id: &Uuid,
+        origin_access_id: Option<&Uuid>,
+        function_name: &str,
+        args: Option<&serde_json::Value>,
+        options: Option<&serde_json::Value>,
+        task_type: &str,
+        timeout_ms: i64,
+        by_user_id: Option<&Uuid>,
+    ) -> Result<(), TaskError> {
+        for value in args.into_iter().chain(options) {
+            crate::val::check_json_shape(value, "task write").map_err(TaskError::InvalidValue)?;
+        }
+        let now = Utc::now();
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                     ON CONFLICT (run_id) DO NOTHING",
+                )
+                .bind(origin_run_id)
+                .bind(env_id)
+                .bind(stream_id)
+                .bind(build_id)
+                .bind(origin_run_type_id)
+                .bind(origin_parent_run_id)
+                .bind(now)
+                .bind(crate::db::run::RunStatus::Running.as_id())
+                .bind(origin_user_id)
+                .bind(origin_access_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, by_user_id) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                )
+                .bind(task_id)
+                .bind(env_id)
+                .bind(stream_id)
+                .bind(build_id)
+                .bind(origin_run_id)
+                .bind(TaskStatus::Queued.as_id())
+                .bind(function_name)
+                .bind(args)
+                .bind(options)
+                .bind(task_type)
+                .bind(timeout_ms)
+                .bind(by_user_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let args_str = args.map(|a| serde_json::to_string(a).unwrap_or_default());
+                let options_str = options.map(|o| serde_json::to_string(o).unwrap_or_default());
+                let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(origin_run_id)
+                .bind(env_id)
+                .bind(stream_id)
+                .bind(build_id)
+                .bind(origin_run_type_id)
+                .bind(origin_parent_run_id)
+                .bind(now)
+                .bind(crate::db::run::RunStatus::Running.as_id())
+                .bind(origin_user_id)
+                .bind(origin_access_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, by_user_id, created_at) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(task_id)
+                .bind(env_id)
+                .bind(stream_id)
+                .bind(build_id)
+                .bind(origin_run_id)
+                .bind(TaskStatus::Queued.as_id())
+                .bind(function_name)
+                .bind(args_str)
+                .bind(options_str)
+                .bind(task_type)
+                .bind(timeout_ms)
+                .bind(by_user_id)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Lightweight check for whether a task row is in a terminal state, without
+    /// joining `run`/`event` or fetching payload blobs.
+    pub async fn is_terminal(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+    ) -> Result<bool, TaskError> {
+        let status_id: Option<i16> = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar("SELECT task_status_id FROM task WHERE task_id = $1")
+                    .bind(task_id)
+                    .fetch_optional(pg_pool)
+                    .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_scalar("SELECT task_status_id FROM task WHERE task_id = ?")
+                    .bind(task_id)
+                    .fetch_optional(sqlite_pool)
+                    .await?
+            }
+        };
+        Ok(status_id.is_some_and(|id| {
+            matches!(
+                TaskStatus::from_id(id),
+                Some(
+                    TaskStatus::Completed
+                        | TaskStatus::Failed
+                        | TaskStatus::Cancelled
+                        | TaskStatus::TimedOut
+                )
+            )
+        }))
+    }
+
+    /// Finalize terminal task timing fields and return `duration_ms` in a
+    /// single scoped transaction, replacing separate `Task::get` +
+    /// `Task::merge_timing` + `Task::get` round trips on task completion.
+    pub async fn finalize_timing_and_get_duration(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+    ) -> Result<Option<i64>, TaskError> {
+        let build_patch = |created_at: DateTime<Utc>,
+                           stop_time: DateTime<Utc>,
+                           timing: Option<&serde_json::Value>| {
+            let workload_started_at = timing
+                .and_then(|t| t.get("workload_started_at"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.with_timezone(&Utc));
+            let (waiting_ms, execution_ms) = if let Some(workload_started_at) = workload_started_at
+            {
+                (
+                    workload_started_at
+                        .signed_duration_since(created_at)
+                        .num_milliseconds()
+                        .max(0),
+                    stop_time
+                        .signed_duration_since(workload_started_at)
+                        .num_milliseconds()
+                        .max(0),
+                )
+            } else {
+                (
+                    stop_time
+                        .signed_duration_since(created_at)
+                        .num_milliseconds()
+                        .max(0),
+                    0,
+                )
+            };
+            let total_ms = stop_time
+                .signed_duration_since(created_at)
+                .num_milliseconds()
+                .max(0);
+            let mut patch = serde_json::json!({
+                "completed_at": stop_time.to_rfc3339(),
+                "waiting_ms": waiting_ms,
+                "execution_ms": execution_ms,
+                "total_ms": total_ms,
+            });
+            if workload_started_at.is_some()
+                && timing
+                    .and_then(|t| t.get("workload_execution_ms"))
+                    .is_none()
+            {
+                patch["workload_execution_ms"] = serde_json::json!(execution_ms);
+            }
+            patch
+        };
+
+        type TimingRow<T> = (DateTime<Utc>, Option<DateTime<Utc>>, Option<i64>, Option<T>);
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                let row: Option<TimingRow<serde_json::Value>> = sqlx::query_as(
+                    "SELECT created_at, stop_time, duration_ms, timing FROM task WHERE task_id = $1",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some((created_at, stop_time, duration_ms, timing)) = row else {
+                    tx.rollback().await?;
+                    return Ok(None);
+                };
+                if let Some(stop_time) = stop_time {
+                    let patch = build_patch(created_at, stop_time, timing.as_ref());
+                    sqlx::query(
+                        "UPDATE task SET timing = COALESCE(timing, '{}'::jsonb) || $2 WHERE task_id = $1",
+                    )
+                    .bind(task_id)
+                    .bind(&patch)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(duration_ms)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+                let row: Option<TimingRow<String>> = sqlx::query_as(
+                    "SELECT created_at, stop_time, duration_ms, timing FROM task WHERE task_id = ?",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some((created_at, stop_time, duration_ms, timing_raw)) = row else {
+                    tx.rollback().await?;
+                    return Ok(None);
+                };
+                if let Some(stop_time) = stop_time {
+                    let timing = timing_raw
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+                    let patch = build_patch(created_at, stop_time, timing.as_ref());
+                    sqlx::query(
+                        "WITH patch AS (
+                             SELECT key, value, type FROM json_each(?1)
+                         ),
+                         existing AS (
+                             SELECT old.key, old.value, old.type
+                             FROM task, json_each(COALESCE(task.timing, '{}')) AS old
+                             WHERE task.task_id = ?2
+                               AND old.key NOT IN (SELECT key FROM patch)
+                         ),
+                         merged AS (
+                             SELECT * FROM existing
+                             UNION ALL
+                             SELECT * FROM patch
+                         ),
+                         replacement AS (
+                             SELECT COALESCE(
+                                 json_group_object(
+                                     key,
+                                     CASE
+                                         WHEN type IN ('array', 'object') THEN json(value)
+                                         WHEN type = 'true' THEN json('true')
+                                         WHEN type = 'false' THEN json('false')
+                                         WHEN type = 'null' THEN json('null')
+                                         ELSE value
+                                     END
+                                 ),
+                                 '{}'
+                             ) AS timing
+                             FROM merged
+                         )
+                         UPDATE task
+                         SET timing = (SELECT timing FROM replacement)
+                         WHERE task_id = ?2",
+                    )
+                    .bind(patch.to_string())
+                    .bind(task_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(duration_ms)
+            }
+        }
+    }
+
     /// Insert a retry task — copies fields from the original but with a new ID
     /// and the caller's attempt number, recording `original` as the parent.
     ///

@@ -1563,18 +1563,16 @@ impl Run {
     ) -> Result<(), RunError> {
         let start_time = start_time.unwrap_or_else(Utc::now);
 
-        // Ensure the stream exists (create if it doesn't)
-        crate::db::stream::Stream::create_or_get_stream(db, *stream_id, *env_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to create stream: {}",
-                    e
-                )))
-            })?;
-
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query("INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
                     .bind(run_id)
                     .bind(env_id)
@@ -1586,10 +1584,30 @@ impl Run {
                     .bind(RunStatus::Running.as_id())
                     .bind(by_user_id)
                     .bind(access_id)
-                    .execute(pg_pool)
+                    .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = $1), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = $1), \
+                        total_duration_ms = (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (stop_time - start_time)) * 1000), 0) FROM run WHERE stream_id = $1 AND stop_time IS NOT NULL), \
+                        last_activity_at = now() \
+                     WHERE stream_id = $1",
+                )
+                .bind(stream_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query("INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                     .bind(run_id)
                     .bind(env_id)
@@ -1601,20 +1619,25 @@ impl Run {
                     .bind(RunStatus::Running.as_id())
                     .bind(by_user_id)
                     .bind(access_id)
-                    .execute(sqlite_pool)
+                    .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = ?), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = ?), \
+                        total_duration_ms = (SELECT CAST(ROUND(COALESCE(SUM((julianday(stop_time) - julianday(start_time)) * 86400000), 0)) AS INTEGER) FROM run WHERE stream_id = ? AND stop_time IS NOT NULL), \
+                        last_activity_at = datetime('now') \
+                     WHERE stream_id = ?",
+                )
+                .bind(stream_id)
+                .bind(stream_id)
+                .bind(stream_id)
+                .bind(stream_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
             }
         }
-
-        // Update stream metrics after inserting the run
-        crate::db::stream::Stream::update_metrics(db, stream_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to update stream metrics: {}",
-                    e
-                )))
-            })?;
 
         Ok(())
     }
@@ -1638,18 +1661,16 @@ impl Run {
     ) -> Result<(), RunError> {
         let now = Utc::now();
 
-        // Ensure the stream exists first (same as insert_run)
-        crate::db::stream::Stream::create_or_get_stream(db, *stream_id, *env_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to create stream: {}",
-                    e
-                )))
-            })?;
-
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(
                     "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
@@ -1665,10 +1686,19 @@ impl Run {
                 .bind(RunStatus::Running.as_id())
                 .bind(by_user_id)
                 .bind(access_id)
-                .execute(pg_pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(
                     "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, start_time, status_id, by_user_id, access_id) \
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1683,8 +1713,9 @@ impl Run {
                 .bind(RunStatus::Running.as_id())
                 .bind(by_user_id)
                 .bind(access_id)
-                .execute(sqlite_pool)
+                .execute(&mut *tx)
                 .await?;
+                tx.commit().await?;
             }
         }
 
@@ -2204,21 +2235,20 @@ impl Run {
             (RunStatus::Failed, Some(now))
         };
 
-        crate::db::stream::Stream::create_or_get_stream(db, run.stream_id, run.env_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to create stream: {}",
-                    e
-                )))
-            })?;
-
         let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, by_user_id, retry_attempt, result, event_handler_fn) \
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
                    ON CONFLICT (run_id) DO UPDATE SET status_id = excluded.status_id, stop_time = excluded.stop_time, result = excluded.result, next_retry_at = NULL \
                    WHERE run.status_id = 1 OR (run.status_id = 5 AND run.next_retry_at IS NULL)";
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(run.stream_id)
+                .bind(run.env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(sql)
                     .bind(run.run_id)
                     .bind(run.env_id)
@@ -2234,10 +2264,30 @@ impl Run {
                     .bind(run.retry_attempt)
                     .bind(&result_val)
                     .bind(&run.event_handler_fn)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = $1), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = $1), \
+                        total_duration_ms = (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (stop_time - start_time)) * 1000), 0) FROM run WHERE stream_id = $1 AND stop_time IS NOT NULL), \
+                        last_activity_at = now() \
+                     WHERE stream_id = $1",
+                )
+                .bind(run.stream_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
             }
             crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(run.stream_id)
+                .bind(run.env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(sql)
                     .bind(run.run_id)
                     .bind(run.env_id)
@@ -2253,19 +2303,25 @@ impl Run {
                     .bind(run.retry_attempt)
                     .bind(result_val.to_string())
                     .bind(&run.event_handler_fn)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                sqlx::query(
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = ?), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = ?), \
+                        total_duration_ms = (SELECT CAST(ROUND(COALESCE(SUM((julianday(stop_time) - julianday(start_time)) * 86400000), 0)) AS INTEGER) FROM run WHERE stream_id = ? AND stop_time IS NOT NULL), \
+                        last_activity_at = datetime('now') \
+                     WHERE stream_id = ?",
+                )
+                .bind(run.stream_id)
+                .bind(run.stream_id)
+                .bind(run.stream_id)
+                .bind(run.stream_id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
             }
         }
-
-        crate::db::stream::Stream::update_metrics(db, &run.stream_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to update stream metrics: {}",
-                    e
-                )))
-            })?;
         Ok(())
     }
 
@@ -2277,19 +2333,19 @@ impl Run {
         db: &crate::db::DatabasePool,
         run: &UnstartedRun,
     ) -> Result<(), RunError> {
-        crate::db::stream::Stream::create_or_get_stream(db, run.stream_id, run.env_id)
-            .await
-            .map_err(|e| {
-                RunError::Database(sqlx::Error::Protocol(format!(
-                    "Failed to create stream: {}",
-                    e
-                )))
-            })?;
         let sql = "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, event_handler_fn) \
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
                    ON CONFLICT (run_id) DO NOTHING";
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(run.stream_id)
+                .bind(run.env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(sql)
                     .bind(run.run_id)
                     .bind(run.env_id)
@@ -2303,10 +2359,19 @@ impl Run {
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
                     .bind(&run.event_handler_fn)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
             }
             crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(run.stream_id)
+                .bind(run.env_id)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(sql)
                     .bind(run.run_id)
                     .bind(run.env_id)
@@ -2320,8 +2385,9 @@ impl Run {
                     .bind(run.by_user_id)
                     .bind(run.retry_attempt)
                     .bind(&run.event_handler_fn)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
             }
         }
         Ok(())

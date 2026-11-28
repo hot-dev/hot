@@ -101,14 +101,6 @@ pub(crate) fn is_transient_db_error(error: &sqlx::Error) -> bool {
     }
 }
 
-/// A stream write's error, kept as the database error when a retry can help.
-fn stream_write_error(context: &str, error: crate::db::stream::StreamError) -> sqlx::Error {
-    match error {
-        crate::db::stream::StreamError::Database(error) if is_transient_db_error(&error) => error,
-        error => sqlx::Error::Protocol(format!("{context}: {error}")),
-    }
-}
-
 /// Run a run lifecycle write, retrying transient database errors within
 /// `RUN_WRITE_RETRY_BUDGET`. Each write is idempotent: inserts ignore an
 /// existing run, and terminal updates only move a run that is still running.
@@ -1845,29 +1837,31 @@ WHERE hot.call.run_id = EXCLUDED.run_id
             ctx.user_id
         );
 
-        // Ensure stream exists
-        crate::db::stream::Stream::create_or_get_stream(
-            pool,
-            ctx.stream_id,
-            ctx.env_id.unwrap_or_default(),
-        )
-        .await
-        .map_err(|e| stream_write_error("Failed to create stream", e))?;
-
         // Retry logic for foreign key violations on origin_run_id
         // This handles race conditions where the parent run's run:start hasn't been written yet
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY_MS: u64 = 50;
 
         let mut last_error: Option<sqlx::Error> = None;
+        let stream_env_id = ctx.env_id.unwrap_or_default();
 
         for attempt in 0..MAX_RETRIES {
+            // Batch stream creation, run insert, stream metrics update, and
+            // event handled marking into a single scoped transaction.
             let result: Result<u64, sqlx::Error> = match pool {
                 DatabasePool::Postgres(pg_pool) => {
+                    let mut tx = pg_pool.begin().await?;
                     sqlx::query(
+                        "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                    )
+                    .bind(ctx.stream_id)
+                    .bind(stream_env_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let inserted = sqlx::query(
                         "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-                         ON CONFLICT (run_id) DO NOTHING"
+                         ON CONFLICT (run_id) DO NOTHING",
                     )
                     .bind(ctx.run_id)
                     .bind(ctx.env_id)
@@ -1884,14 +1878,48 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                     .bind(&ctx.agent_type)
                     .bind(&timing_info)
                     .bind(&ctx.event_handler_fn)
-                    .execute(pg_pool)
+                    .execute(&mut *tx)
                     .await
-                    .map(|result| result.rows_affected())
+                    .map(|result| result.rows_affected());
+                    match inserted {
+                        Ok(rows_affected) => {
+                            if rows_affected > 0 {
+                                sqlx::query(
+                                    "UPDATE stream SET total_runs = total_runs + 1, last_activity_at = now() WHERE stream_id = $1",
+                                )
+                                .bind(ctx.stream_id)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            if let Some(evt_id) = ctx.event_id {
+                                sqlx::query(
+                                    "UPDATE event SET handled = true WHERE event_id = $1 AND handled = false",
+                                )
+                                .bind(evt_id)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            tx.commit().await?;
+                            Ok(rows_affected)
+                        }
+                        Err(e) => {
+                            let _ = tx.rollback().await;
+                            Err(e)
+                        }
+                    }
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
+                    let mut tx = sqlite_pool.begin().await?;
                     sqlx::query(
+                        "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                    )
+                    .bind(ctx.stream_id)
+                    .bind(stream_env_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let inserted = sqlx::query(
                         "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )
                     .bind(ctx.run_id)
                     .bind(ctx.env_id)
@@ -1908,9 +1936,35 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                     .bind(&ctx.agent_type)
                     .bind(timing_info.as_ref().map(serde_json::Value::to_string))
                     .bind(&ctx.event_handler_fn)
-                    .execute(sqlite_pool)
+                    .execute(&mut *tx)
                     .await
-                    .map(|result| result.rows_affected())
+                    .map(|result| result.rows_affected());
+                    match inserted {
+                        Ok(rows_affected) => {
+                            if rows_affected > 0 {
+                                sqlx::query(
+                                    "UPDATE stream SET total_runs = total_runs + 1, last_activity_at = datetime('now') WHERE stream_id = ?",
+                                )
+                                .bind(ctx.stream_id)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            if let Some(evt_id) = ctx.event_id {
+                                sqlx::query(
+                                    "UPDATE event SET handled = 1 WHERE event_id = ? AND handled = 0",
+                                )
+                                .bind(evt_id)
+                                .execute(&mut *tx)
+                                .await?;
+                            }
+                            tx.commit().await?;
+                            Ok(rows_affected)
+                        }
+                        Err(e) => {
+                            let _ = tx.rollback().await;
+                            Err(e)
+                        }
+                    }
                 }
             };
 
@@ -1923,16 +1977,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                             attempt + 1
                         );
                     }
-                    if rows_affected > 0 {
-                        crate::db::stream::Stream::record_run_started(pool, &ctx.stream_id)
-                            .await
-                            .map_err(|e| {
-                                sqlx::Error::Protocol(format!(
-                                    "Failed to update stream run metrics: {}",
-                                    e
-                                ))
-                            })?;
-                    } else {
+                    if rows_affected == 0 {
                         // Row already exists: either a placeholder from
                         // ensure_run_exists (task/file provenance) or a
                         // duplicate run:start. Backfill authoritative fields
@@ -1978,16 +2023,6 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         // If we exited the loop with an error, return it
         if let Some(e) = last_error {
             return Err(e);
-        }
-
-        if let Some(evt_id) = ctx.event_id
-            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
-        {
-            tracing::error!(
-                "DatabaseWriter: Failed to mark event {} as handled: {}",
-                evt_id,
-                e
-            );
         }
 
         Ok(())
@@ -2098,18 +2133,20 @@ WHERE hot.call.run_id = EXCLUDED.run_id
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
         let timing_info = Self::run_start_info(ctx, start_time);
-
-        crate::db::stream::Stream::create_or_get_stream(
-            pool,
-            ctx.stream_id,
-            ctx.env_id.unwrap_or_default(),
-        )
-        .await
-        .map_err(|e| stream_write_error("Failed to create stream", e))?;
+        let stream_env_id = ctx.env_id.unwrap_or_default();
+        let duration_ms = duration_ms_between(start_time, stop_time).max(0);
 
         let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
                 sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(ctx.stream_id)
+                .bind(stream_env_id)
+                .execute(&mut *tx)
+                .await?;
+                let rows_affected = sqlx::query(
                     "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)
                      ON CONFLICT (run_id) DO UPDATE
@@ -2117,7 +2154,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                          status_id = EXCLUDED.status_id,
                          result = EXCLUDED.result,
                          info = COALESCE(hot.run.info, '{}'::jsonb) || COALESCE(EXCLUDED.info, '{}'::jsonb)
-                     WHERE hot.run.status_id = 1"
+                     WHERE hot.run.status_id = 1",
                 )
                 .bind(ctx.run_id)
                 .bind(ctx.env_id)
@@ -2136,14 +2173,41 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(&ctx.agent_type)
                 .bind(&timing_info)
                 .bind(&ctx.event_handler_fn)
-                .execute(pg_pool)
+                .execute(&mut *tx)
                 .await?
-                .rows_affected()
+                .rows_affected();
+                if rows_affected > 0 {
+                    sqlx::query(
+                        "UPDATE stream SET total_runs = total_runs + 1, total_duration_ms = total_duration_ms + $2, last_activity_at = now() WHERE stream_id = $1",
+                    )
+                    .bind(ctx.stream_id)
+                    .bind(duration_ms)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                if let Some(evt_id) = ctx.event_id {
+                    sqlx::query(
+                        "UPDATE event SET handled = true WHERE event_id = $1 AND handled = false",
+                    )
+                    .bind(evt_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await?;
+                rows_affected
             }
             DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
                 sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(ctx.stream_id)
+                .bind(stream_env_id)
+                .execute(&mut *tx)
+                .await?;
+                let rows_affected = sqlx::query(
                     "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info, event_handler_fn)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(ctx.run_id)
                 .bind(ctx.env_id)
@@ -2162,9 +2226,26 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 .bind(&ctx.agent_type)
                 .bind(timing_info.as_ref().map(serde_json::Value::to_string))
                 .bind(&ctx.event_handler_fn)
-                .execute(sqlite_pool)
+                .execute(&mut *tx)
                 .await?
-                .rows_affected()
+                .rows_affected();
+                if rows_affected > 0 {
+                    sqlx::query(
+                        "UPDATE stream SET total_runs = total_runs + 1, total_duration_ms = total_duration_ms + ?, last_activity_at = datetime('now') WHERE stream_id = ?",
+                    )
+                    .bind(duration_ms)
+                    .bind(ctx.stream_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                if let Some(evt_id) = ctx.event_id {
+                    sqlx::query("UPDATE event SET handled = 1 WHERE event_id = ? AND handled = 0")
+                        .bind(evt_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                rows_affected
             }
         };
 
@@ -2181,26 +2262,6 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                 );
             }
             Self::write_run_stop(pool, ctx.run_id, stop_time, result).await?;
-        } else {
-            crate::db::stream::Stream::record_run_started_and_finished(
-                pool,
-                &ctx.stream_id,
-                duration_ms_between(start_time, stop_time),
-            )
-            .await
-            .map_err(|e| {
-                sqlx::Error::Protocol(format!("Failed to update stream run metrics: {}", e))
-            })?;
-        }
-
-        if let Some(evt_id) = ctx.event_id
-            && let Err(e) = crate::db::Event::mark_event_as_handled(pool, &evt_id).await
-        {
-            tracing::error!(
-                "DatabaseWriter: Failed to mark event {} as handled: {}",
-                evt_id,
-                e
-            );
         }
 
         Ok(())

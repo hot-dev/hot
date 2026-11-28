@@ -35,6 +35,17 @@ pub struct OrgAccess {
     pub runtime_allowed: bool,
 }
 
+/// Environment ownership, display metadata, and fresh admission state resolved
+/// in a single uncached bootstrap query.
+#[derive(Debug, Clone)]
+pub struct AdmittedEnvInfo {
+    pub env_id: Uuid,
+    pub org_id: Uuid,
+    pub env_name: String,
+    pub org_slug: String,
+    pub admitted: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateChild {
     pub name: String,
@@ -238,6 +249,61 @@ impl Org {
             .fetch_one(pool)
             .await?),
         }
+    }
+
+    /// Resolve an environment, its owning org metadata, and fresh admission
+    /// state (env, org, and billing root all active with `lifecycle_state = 'active'`
+    /// and no nested 3-level org hierarchy) in a single uncached query under
+    /// `Bootstrap(operation)`.
+    pub async fn resolve_admitted_env(
+        db: &DatabasePool,
+        env_id: &Uuid,
+        operation: BootstrapOperation,
+    ) -> Result<Option<AdmittedEnvInfo>, OrgError> {
+        let db = db.with_scope(DatabaseScope::Bootstrap(operation));
+        let row: Option<(Uuid, Uuid, String, String, bool)> = match &db {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_as(
+                    "SELECT e.env_id, e.org_id, e.name, o.slug, \
+                            (e.active AND o.active AND r.active \
+                             AND o.lifecycle_state = 'active' \
+                             AND r.lifecycle_state = 'active' \
+                             AND r.parent_org_id IS NULL) \
+                     FROM env e \
+                     JOIN org o ON o.org_id = e.org_id \
+                     JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END \
+                     WHERE e.env_id = $1",
+                )
+                .bind(env_id)
+                .fetch_optional(pool)
+                .await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_as(
+                    "SELECT e.env_id, e.org_id, e.name, o.slug, \
+                            (e.active AND o.active AND r.active \
+                             AND o.lifecycle_state = 'active' \
+                             AND r.lifecycle_state = 'active' \
+                             AND r.parent_org_id IS NULL) \
+                     FROM env e \
+                     JOIN org o ON o.org_id = e.org_id \
+                     JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END \
+                     WHERE e.env_id = ?",
+                )
+                .bind(env_id)
+                .fetch_optional(pool)
+                .await?
+            }
+        };
+        Ok(row.map(
+            |(env_id, org_id, env_name, org_slug, admitted)| AdmittedEnvInfo {
+                env_id,
+                org_id,
+                env_name,
+                org_slug,
+                admitted,
+            },
+        ))
     }
 
     /// Caller must authorize root discovery before returning these records.

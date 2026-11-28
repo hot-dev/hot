@@ -108,6 +108,55 @@ impl Stream {
         }
     }
 
+    /// Create `stream_id` in `env_id` if absent and verify that it belongs to
+    /// `env_id` in a single scoped transaction.
+    pub async fn ensure_stream_in_env(
+        db: &crate::db::DatabasePool,
+        stream_id: Uuid,
+        env_id: Uuid,
+    ) -> Result<bool, StreamError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                sqlx::query(
+                    "INSERT INTO stream (stream_id, env_id, started_at) VALUES ($1, $2, now()) ON CONFLICT (stream_id) DO NOTHING",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
+                let owned: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM stream WHERE stream_id = $1 AND env_id = $2)",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(owned)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let mut tx = sqlite_pool.begin().await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO stream (stream_id, env_id, started_at) VALUES (?, ?, datetime('now'))",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .execute(&mut *tx)
+                .await?;
+                let owned: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM stream WHERE stream_id = ? AND env_id = ?)",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(owned)
+            }
+        }
+    }
+
     /// Whether `stream_id` names a stream in `env_id`. A caller-supplied ID
     /// can name another environment's stream: PostgreSQL RLS hides that row,
     /// and `create_or_get_stream` leaves it alone, so ingress checks here.
