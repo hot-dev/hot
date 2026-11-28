@@ -162,7 +162,7 @@ impl Engine {
         } else {
             crate::val::Val::Null
         };
-        let new_state = vm.get_all_namespace_vars().clone();
+        let new_state = vm.get_all_namespace_vars_owned();
         let current_namespace = vm.get_current_namespace().to_string();
         let retained = ReplCompilationState {
             compiler_seed: compiler.seed(),
@@ -318,7 +318,7 @@ impl Engine {
         };
 
         // Extract updated state
-        let new_state = vm.get_all_namespace_vars().clone();
+        let new_state = vm.get_all_namespace_vars_owned();
         let current_namespace = vm.get_current_namespace().to_string();
 
         // Return result with updated state, instruction count, and namespace
@@ -542,7 +542,7 @@ impl Engine {
     /// Get all namespaces and their variables from a running VM (for debugging)
     pub fn get_all_vars_from_vm(
         vm: &crate::lang::runtime::vm::VirtualMachine,
-    ) -> &indexmap::IndexMap<String, indexmap::IndexMap<String, crate::val::Val>> {
+    ) -> &crate::lang::runtime::vm::NamespaceVars {
         vm.get_all_namespace_vars()
     }
 }

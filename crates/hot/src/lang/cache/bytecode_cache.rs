@@ -6,12 +6,14 @@
 use crate::hasher::{CacheKeyBuilder, CacheType, HotHasher};
 use crate::lang::bytecode::BytecodeProgram;
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
+use crate::lang::runtime::native_core::NativeCoreShadows;
+use crate::lang::runtime::static_init::StaticInitPlan;
 use ahash::{AHashMap, AHashSet};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Metadata stored with cached bytecode for validation
@@ -122,6 +124,15 @@ pub struct CachedBytecode {
     pub runtime_ctx_defaults: Arc<AHashMap<String, crate::val::Val>>,
     /// Secret context keys extracted once from the cached AST call graph.
     pub runtime_secret_keys: Arc<AHashSet<String>>,
+    /// Lazily derived static initialization snapshot for fast cached VM startup.
+    /// Shared across clones via `Arc<OnceLock<_>>`; not persisted on disk.
+    static_init_plan: Arc<OnceLock<StaticInitPlan>>,
+    /// Lazily derived sorted index order over `function_mapping` for O(log N)
+    /// runtime overload lookup without re-sorting every key on each VM.
+    sorted_function_key_indices: Arc<OnceLock<Arc<Vec<usize>>>>,
+    /// Lazily derived native-core shadow table shared across all VMs running
+    /// this build.
+    native_core_shadows: Arc<OnceLock<Arc<NativeCoreShadows>>>,
 }
 
 pub struct CachedBytecodeArtifacts {
@@ -185,7 +196,41 @@ impl CachedBytecode {
             runtime_core_variables,
             runtime_ctx_defaults,
             runtime_secret_keys,
+            static_init_plan: Arc::new(OnceLock::new()),
+            sorted_function_key_indices: Arc::new(OnceLock::new()),
+            native_core_shadows: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Precomputed static initialization plan for `self.program.entry_point`.
+    /// Computed once on first cached run and shared across subsequent runs.
+    pub fn static_init_plan(&self) -> &StaticInitPlan {
+        self.static_init_plan
+            .get_or_init(|| StaticInitPlan::build(&self.program))
+    }
+
+    /// Pre-sorted indices into `self.function_mapping` for binary-searched
+    /// overload discovery. Computed once per build and shared across VMs.
+    pub fn sorted_function_key_indices(&self) -> Arc<Vec<usize>> {
+        Arc::clone(self.sorted_function_key_indices.get_or_init(|| {
+            let mapping = &self.function_mapping;
+            let mut order: Vec<usize> = (0..mapping.len()).collect();
+            order.sort_unstable_by(|&a, &b| {
+                let key = |i| mapping.get_index(i).map(|(key, _)| key.as_str());
+                key(a).cmp(&key(b))
+            });
+            Arc::new(order)
+        }))
+    }
+
+    /// Precomputed [`NativeCoreShadows`] table for `self.program` and
+    /// `self.core_functions`. Computed once per build and shared across VMs.
+    pub fn native_core_shadows(&self) -> Arc<NativeCoreShadows> {
+        Arc::clone(
+            self.native_core_shadows.get_or_init(|| {
+                Arc::new(NativeCoreShadows::new(&self.program, &self.core_functions))
+            }),
+        )
     }
 }
 

@@ -896,7 +896,10 @@ fn shared_code_is_taken_only_where_its_facts_hold() {
     let mut bound = indexmap::IndexMap::new();
     bound.insert(
         "::t".to_string(),
-        indexmap::IndexMap::from([("first".to_string(), Val::Int(1))]),
+        std::sync::Arc::new(indexmap::IndexMap::from([(
+            "first".to_string(),
+            Val::Int(1),
+        )])),
     );
     let names = CallNames::new(&bound, &core_functions, &shadows).param_arrows(&arrows);
     assert!(

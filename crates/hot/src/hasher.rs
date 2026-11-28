@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 23, // Bumped for removing VariableMetadata and HotAst namespace duplication
+            CacheType::Bytecode => 24, // Bumped for per-frame 0-based register windows and entry scratch reuse
             CacheType::Ast => 7, // Bumped for expression spreads in vector literals (Value::Spread)
         }
     }

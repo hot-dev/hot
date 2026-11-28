@@ -168,7 +168,7 @@ impl ExecutedEngine {
     }
 
     /// Extract all variables from all namespaces (for debugging)
-    pub fn extract_all_vars(&self) -> &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>> {
+    pub fn extract_all_vars(&self) -> &crate::lang::runtime::vm::NamespaceVars {
         self.vm.get_all_namespace_vars()
     }
 

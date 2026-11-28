@@ -19,4 +19,5 @@ pub mod limits;
 pub mod native_core;
 pub mod oom_logger;
 pub mod resolution;
+pub mod static_init;
 pub mod vm;

@@ -1944,8 +1944,15 @@ impl Engine {
     ) -> Result<ExecutionWithArtifacts, String> {
         tracing::debug!(" Unified Pipeline (with artifacts): Loading Hot dependencies...");
 
-        // Collect all .hot files in the correct loading order
-        let mut all_hot_files = Vec::new();
+        // Discover compilation units so stable units (`hot-std`, project
+        // dependencies, and live-project source/test paths) hit `UnitCache`
+        // instead of reparsing all 100+ std/package files on every cold compile.
+        // For packaged bundle builds (`conf.is_none()`), `hot-std` still hits
+        // the machine-scoped `UnitCache`, while ephemeral `build-<uuid>` source
+        // directories parse directly via bounded `PARSE_CACHE` without writing
+        // throwaway `.ast.zst` files to disk.
+        let mut cached_units: Vec<super::discover::DiscoveredUnit> = Vec::new();
+        let mut uncached_files: Vec<String> = Vec::new();
         let mut loaded_packages = AHashSet::new();
 
         // Always inject hot-std FIRST from system location
@@ -1973,7 +1980,13 @@ impl Engine {
                         hot_std_path,
                         files.len()
                     );
-                    all_hot_files.extend(files);
+                    cached_units.push(super::discover::DiscoveredUnit {
+                        unit: crate::lang::cache::unit_cache::CompilationUnit::Package {
+                            name: "hot-std".to_string(),
+                            path: hot_std.resolved_path.clone(),
+                        },
+                        files,
+                    });
                     loaded_packages.insert("hot-std".to_string());
                 }
                 Ok(_) => {
@@ -2003,8 +2016,18 @@ impl Engine {
                         }
                         // Use discover_dependency_source_files to only load src_paths, not test_paths
                         match Self::discover_dependency_source_files(&dep.resolved_path) {
-                            Ok(files) => {
-                                all_hot_files.extend(files);
+                            Ok(files) if !files.is_empty() => {
+                                cached_units.push(super::discover::DiscoveredUnit {
+                                    unit:
+                                        crate::lang::cache::unit_cache::CompilationUnit::Package {
+                                            name: dep.name.clone(),
+                                            path: dep.resolved_path.clone(),
+                                        },
+                                    files,
+                                });
+                                loaded_packages.insert(dep.name.clone());
+                            }
+                            Ok(_) => {
                                 loaded_packages.insert(dep.name.clone());
                             }
                             Err(e) => {
@@ -2023,10 +2046,29 @@ impl Engine {
             }
         }
 
+        let cache_source_units = conf.is_some();
+
         // Load source files
-        for src_path in src_paths {
+        for (idx, src_path) in src_paths.iter().enumerate() {
             match Self::discover_hot_files(src_path) {
-                Ok(files) => all_hot_files.extend(files),
+                Ok(files) if !files.is_empty() => {
+                    if cache_source_units {
+                        let name = std::path::Path::new(src_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| format!("src-{}", idx));
+                        cached_units.push(super::discover::DiscoveredUnit {
+                            unit: crate::lang::cache::unit_cache::CompilationUnit::SourcePath {
+                                name,
+                                path: std::path::PathBuf::from(src_path),
+                            },
+                            files,
+                        });
+                    } else {
+                        uncached_files.extend(files);
+                    }
+                }
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Warning: Failed to discover files in {}: {}", src_path, e)
                 }
@@ -2034,41 +2076,60 @@ impl Engine {
         }
 
         // Load test files
-        for test_path in test_paths {
+        for (idx, test_path) in test_paths.iter().enumerate() {
             match Self::discover_hot_files(test_path) {
-                Ok(files) => all_hot_files.extend(files),
+                Ok(files) if !files.is_empty() => {
+                    if cache_source_units {
+                        let name = std::path::Path::new(test_path)
+                            .file_name()
+                            .map(|n| format!("test-{}", n.to_string_lossy()))
+                            .unwrap_or_else(|| format!("test-{}", idx));
+                        cached_units.push(super::discover::DiscoveredUnit {
+                            unit: crate::lang::cache::unit_cache::CompilationUnit::SourcePath {
+                                name,
+                                path: std::path::PathBuf::from(test_path),
+                            },
+                            files,
+                        });
+                    } else {
+                        uncached_files.extend(files);
+                    }
+                }
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Warning: Failed to discover files in {}: {}", test_path, e)
                 }
             }
         }
 
-        // Remove duplicates while preserving order
-        let mut seen = AHashSet::new();
-        all_hot_files.retain(|file| seen.insert(file.clone()));
-
-        // Parse all files into a combined program
-        let mut combined_program = crate::lang::ast::Program {
-            namespaces: indexmap::IndexMap::new(),
-            current_namespace: crate::lang::ast::NsPath::hot_main(),
+        // Load cached units (hot-std, project deps, and live-project sources)
+        let (mut namespaces, mut parsed_files) = if cached_units.is_empty() {
+            (indexmap::IndexMap::new(), Vec::new())
+        } else {
+            parse_units_with_cache(&cached_units, color)?
         };
 
-        // Parse all source files in parallel for better performance
-        let (parsed_files, parse_errors) = parse_files_parallel(&all_hot_files, color);
-
-        if !parse_errors.is_empty() {
-            return Err(format!("Parse errors:\n{}", parse_errors.join("\n")));
+        // Parse any uncached bundle source/test files in parallel (deduped)
+        if !uncached_files.is_empty() {
+            let mut seen = AHashSet::new();
+            uncached_files.retain(|file| seen.insert(file.clone()));
+            let (bundle_parsed, parse_errors) = parse_files_parallel(&uncached_files, color);
+            if !parse_errors.is_empty() {
+                return Err(format!("Parse errors:\n{}", parse_errors.join("\n")));
+            }
+            for parsed in &bundle_parsed {
+                super::discover::merge_program_namespaces_strict(
+                    &mut namespaces,
+                    parsed.namespaces.clone(),
+                )?;
+            }
+            parsed_files.extend(bundle_parsed);
         }
 
-        // Merge parsed namespaces member-by-member using the same strict
-        // policy as the regular pipeline. Whole-namespace replacement here
-        // made worker/std artifacts silently drop declarations.
-        for parsed in &parsed_files {
-            super::discover::merge_program_namespaces_strict(
-                &mut combined_program.namespaces,
-                parsed.namespaces.clone(),
-            )?;
-        }
+        let mut combined_program = crate::lang::ast::Program {
+            namespaces,
+            current_namespace: crate::lang::ast::NsPath::hot_main(),
+        };
 
         // Resolve variable references on the BASE program (before eval code)
         crate::lang::compiler::resolver::resolve_all_variable_references(&mut combined_program);

@@ -288,6 +288,7 @@ pub(crate) struct VmHostContext {
     run_start_time: chrono::DateTime<chrono::Utc>,
     run_start_instant: std::time::Instant,
     native_core_shadows: Arc<NativeCoreShadows>,
+    sorted_key_indices: Option<Arc<Vec<usize>>>,
     meta_calls_read: Arc<AtomicBool>,
 }
 
@@ -989,10 +990,17 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     parts
 }
 
+/// Copy-on-write namespace variable registry shared across cached VM runs and
+/// parallel worker branches via `Arc`.
+pub type NamespaceVars = indexmap::IndexMap<String, Arc<indexmap::IndexMap<String, Val>>>;
+
 /// High-performance virtual machine for Hot bytecode
 pub struct VirtualMachine {
     pub program: Arc<BytecodeProgram>,
     registers: Vec<Val>,
+    /// Base offset in `registers` for the currently executing frame (0 for
+    /// top-level `entry_point`; pushed to `registers.len()` per function/lambda call).
+    register_base: usize,
     /// Baseline register capacity for the entry context
     initial_register_capacity: usize,
     /// Instrumentation: peak registers vector length observed during execution
@@ -1029,7 +1037,7 @@ pub struct VirtualMachine {
     /// Type implementations for dispatch: (source_type, target_type) -> constructor_function_name (ordered)
     type_implementations: Arc<IndexMap<(String, String), String>>,
     /// Global namespace variables registry: namespace -> (variable_name -> value)
-    pub(crate) namespace_variables: indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
+    pub(crate) namespace_variables: Arc<NamespaceVars>,
     /// Simple namespace registry for context variables: variable_name -> value
     pub namespace_registry: AHashMap<String, Val>,
     /// Current namespace for variable storage
@@ -1124,8 +1132,9 @@ pub struct VirtualMachine {
     /// hash, so repeated calls skip ranking.
     overload_choice_cache: AHashMap<u64, FunctionId>,
     /// Indices into `function_mapping` sorted by key, so the keys sharing a
-    /// `name/N` prefix are found by binary search. Built on first use.
-    sorted_key_indices: Option<Vec<usize>>,
+    /// `name/N` prefix are found by binary search. Built on first use or
+    /// shared directly from `CachedBytecode`.
+    sorted_key_indices: Option<Arc<Vec<usize>>>,
     /// JIT configuration, code-memory status, and per-function profiling state.
     jit: JitRuntimeState,
     /// For each function compiled code has called: its short name when it
@@ -1144,23 +1153,9 @@ pub struct VirtualMachine {
     /// Whether this run has read a meta value that still holds a call (see
     /// `note_meta_read`). Shared with worker VMs, which can hand one back.
     meta_calls_read: Arc<AtomicBool>,
-    /// Number of currently-active `execute_user_function` frames per
-    /// FunctionId. Register indices are unique per function but shared across
-    /// invocations of the *same* function, so a re-entrant (recursive) call
-    /// must save/restore the function's own registers or it clobbers the
-    /// pending intermediates of the outer frame (e.g. the first operand of
-    /// `add(fib(n-1), fib(n-2))`). Non-recursive calls skip the save entirely.
-    function_active_depth: Vec<u32>,
-    /// Lazily computed written-register sets per FunctionId (for the
-    /// re-entrant save/restore above).
-    function_used_registers_cache: AHashMap<FunctionId, std::rc::Rc<[u32]>>,
     /// The name of a binding that was read after its value was taken (see
     /// `note_moved_read`), until the instruction that read it fails.
     moved_read: std::cell::RefCell<Option<String>>,
-    /// The registers re-entrant calls have set aside, innermost last. A call
-    /// pushes its own on entry and takes them back on exit, so recursion
-    /// reuses one buffer where each call used to allocate a vector.
-    saved_registers: Vec<(usize, Val)>,
     /// Failure state (thread-safe for parallel execution)
     failure_state: Arc<VmFailureState>,
     /// Cancellation state (thread-safe for parallel execution)
@@ -1390,13 +1385,17 @@ impl VirtualMachine {
 
         let mut jit = JitRuntimeState::new(program.functions.len(), &conf);
         jit.attach_shared(&program);
-        let function_count = program.functions.len();
+
+        let initial_len = register_count.max(1);
+        let mut registers = Vec::with_capacity(initial_len.max(64));
+        registers.resize(initial_len, Val::Null);
 
         let mut vm = Self {
             program,
-            registers: vec![Val::Null; register_count.max(256)],
-            initial_register_capacity: register_count.max(256),
-            peak_registers_len: register_count.max(256),
+            registers,
+            register_base: 0,
+            initial_register_capacity: initial_len,
+            peak_registers_len: initial_len,
             peak_namespace_var_count: 0,
             instruction_pointer: 0,
             scope_stack,
@@ -1411,7 +1410,7 @@ impl VirtualMachine {
             core_functions,
             core_variables,
             type_implementations,
-            namespace_variables: IndexMap::new(),
+            namespace_variables: Arc::new(IndexMap::new()),
             namespace_registry: AHashMap::new(),
             current_namespace: "::hot::main".to_string(),
             emitter: None,
@@ -1453,10 +1452,7 @@ impl VirtualMachine {
             hof_plan_cache: AHashMap::new(),
             native_core_shadows: std::cell::OnceCell::new(),
             meta_calls_read: Arc::new(AtomicBool::new(false)),
-            function_active_depth: vec![0; function_count],
-            function_used_registers_cache: AHashMap::new(),
             moved_read: std::cell::RefCell::new(None),
-            saved_registers: Vec::new(),
             failure_state: Arc::new(VmFailureState {
                 failed: AtomicBool::new(false),
                 failure: RwLock::new(None),
@@ -1632,6 +1628,7 @@ impl VirtualMachine {
             run_start_time: self.run_start_time,
             run_start_instant: self.run_start_instant,
             native_core_shadows: self.native_core_shadows(),
+            sorted_key_indices: self.sorted_key_indices.as_ref().map(Arc::clone),
             meta_calls_read: Arc::clone(&self.meta_calls_read),
         }
     }
@@ -1660,6 +1657,23 @@ impl VirtualMachine {
         let _ = self
             .native_core_shadows
             .set(Arc::clone(&context.native_core_shadows));
+        if self.sorted_key_indices.is_none()
+            && let Some(ref indices) = context.sorted_key_indices
+        {
+            self.sorted_key_indices = Some(Arc::clone(indices));
+        }
+    }
+
+    /// Attach immutable dispatch tables precomputed on [`crate::lang::cache::CachedBytecode`]
+    /// so every cached VM avoids re-sorting `function_mapping` keys and
+    /// rescanning `NativeCoreShadows` on its first call.
+    pub fn attach_cached_dispatch_tables(
+        &mut self,
+        sorted_key_indices: Arc<Vec<usize>>,
+        native_core_shadows: Arc<NativeCoreShadows>,
+    ) {
+        self.sorted_key_indices = Some(sorted_key_indices);
+        let _ = self.native_core_shadows.set(native_core_shadows);
     }
 
     /// Where bare calls to the core functions every tier runs natively reach
@@ -1673,24 +1687,31 @@ impl VirtualMachine {
             .get_or_init(|| Arc::new(NativeCoreShadows::new(&self.program, &self.core_functions)))
     }
 
-    /// Capture realized namespace state for a worker VM.
-    pub(crate) fn namespace_variables_snapshot(
-        &self,
-    ) -> indexmap::IndexMap<String, indexmap::IndexMap<String, Val>> {
-        self.namespace_variables.clone()
+    /// Insert a variable into `namespace` using copy-on-write on the shared
+    /// `NamespaceVars` map so untouched static namespaces remain zero-copy shared.
+    pub(crate) fn insert_namespace_var(&mut self, namespace: &str, name: String, value: Val) {
+        let outer = Arc::make_mut(&mut self.namespace_variables);
+        if let Some(ns_arc) = outer.get_mut(namespace) {
+            Arc::make_mut(ns_arc).insert(name, value);
+        } else {
+            let mut ns_map = IndexMap::new();
+            ns_map.insert(name, value);
+            outer.insert(namespace.to_string(), Arc::new(ns_map));
+        }
+    }
+
+    /// Capture realized namespace state for a worker VM (zero-copy `Arc` clone).
+    pub(crate) fn namespace_variables_snapshot(&self) -> Arc<NamespaceVars> {
+        Arc::clone(&self.namespace_variables)
     }
 
     /// Inherit realized namespace variables when a worker VM is forked.
     ///
     /// Worker VMs execute the same program as the parent, but they do not run
-    /// top-level namespace initialization. Restoring the parent registry keeps
-    /// package/global variables available when a branch calls into another
-    /// namespace.
-    pub(crate) fn inherit_namespace_variables(
-        &mut self,
-        state: &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
-    ) {
-        self.namespace_variables = state.clone();
+    /// top-level namespace initialization. Sharing the parent registry via `Arc`
+    /// keeps package/global variables available with zero deep-cloning.
+    pub(crate) fn inherit_namespace_variables(&mut self, state: &Arc<NamespaceVars>) {
+        self.namespace_variables = Arc::clone(state);
     }
 
     /// Get the thread count for parallel execution
@@ -1843,7 +1864,11 @@ impl VirtualMachine {
         &mut self,
         state: &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
     ) {
-        self.inherit_namespace_variables(state);
+        let owned: NamespaceVars = state
+            .iter()
+            .map(|(ns, vars)| (ns.clone(), Arc::new(vars.clone())))
+            .collect();
+        self.namespace_variables = Arc::new(owned);
     }
 
     /// Execute a range of instructions (for incremental REPL execution)
@@ -1923,31 +1948,37 @@ impl VirtualMachine {
     ) -> Result<crate::val::Val, crate::lang::runtime::vm::VmError> {
         // Save current state
         let saved_namespace = self.current_namespace.clone();
-        let saved_namespace_vars = self
-            .namespace_variables
-            .get(captured_namespace)
-            .cloned()
-            .unwrap_or_default();
+        let saved_namespace_vars = self.namespace_variables.get(captured_namespace).cloned();
 
         // Temporarily set the captured namespace as current
         self.current_namespace = captured_namespace.to_string();
 
         // Temporarily inject captured namespace variables
-        self.namespace_variables
-            .entry(captured_namespace.to_string())
-            .or_default()
-            .extend(captured_namespace_vars.clone());
+        if !captured_namespace_vars.is_empty() {
+            let outer = Arc::make_mut(&mut self.namespace_variables);
+            if let Some(ns_arc) = outer.get_mut(captured_namespace) {
+                Arc::make_mut(ns_arc).extend(captured_namespace_vars.clone());
+            } else {
+                outer.insert(
+                    captured_namespace.to_string(),
+                    Arc::new(captured_namespace_vars.clone()),
+                );
+            }
+        }
 
         // Evaluate the expression
         let result = self.convert_ast_value_to_runtime_val(expr);
 
         // Restore original state
         self.current_namespace = saved_namespace;
-        if saved_namespace_vars.is_empty() {
-            self.namespace_variables.shift_remove(captured_namespace);
-        } else {
-            self.namespace_variables
-                .insert(captured_namespace.to_string(), saved_namespace_vars);
+        let outer = Arc::make_mut(&mut self.namespace_variables);
+        match saved_namespace_vars {
+            None => {
+                outer.shift_remove(captured_namespace);
+            }
+            Some(vars) => {
+                outer.insert(captured_namespace.to_string(), vars);
+            }
         }
 
         result
@@ -2204,7 +2235,7 @@ impl VirtualMachine {
         }
 
         // Return the value from the last result register
-        let reg_idx = last_result_register as usize;
+        let reg_idx = self.register_base + last_result_register as usize;
         if reg_idx < self.registers.len() {
             Ok(self.registers[reg_idx].clone())
         } else {
@@ -2602,6 +2633,88 @@ impl VirtualMachine {
         );
 
         execution_result
+    }
+
+    /// Initialize module state from a precomputed [`super::static_init::StaticInitPlan`].
+    ///
+    /// Applies pre-evaluated pure static namespace bindings in bulk and executes
+    /// only the remaining dynamic ranges of `program.entry_point` against the
+    /// live VM (preserving exact IPs, cancellation polling, instruction limits,
+    /// and namespace-visibility ordering).
+    pub fn execute_static_init_plan(
+        &mut self,
+        plan: &super::static_init::StaticInitPlan,
+    ) -> VmResult<()> {
+        self.admit_execution()?;
+        self.peak_registers_len = self.registers.len();
+        self.peak_namespace_var_count = self.namespace_variables.values().map(|ns| ns.len()).sum();
+
+        let program = Arc::clone(&self.program);
+        let ext_cancel = self.external_cancel.clone();
+        let mut instruction_count: usize = 0;
+
+        let result = (|| -> VmResult<()> {
+            for step in &plan.steps {
+                match step {
+                    super::static_init::StaticInitStep::ApplyStatic {
+                        namespace_variables,
+                        current_namespace,
+                        replace_all,
+                    } => {
+                        if *replace_all {
+                            self.namespace_variables = Arc::clone(namespace_variables);
+                        } else {
+                            let target_all = Arc::make_mut(&mut self.namespace_variables);
+                            for (ns, vars) in namespace_variables.iter() {
+                                if let Some(existing) = target_all.get_mut(ns) {
+                                    let existing_map = Arc::make_mut(existing);
+                                    for (k, v) in vars.iter() {
+                                        existing_map.insert(k.clone(), v.clone());
+                                    }
+                                } else {
+                                    target_all.insert(ns.clone(), Arc::clone(vars));
+                                }
+                            }
+                        }
+                        self.current_namespace = current_namespace.clone();
+                    }
+                    super::static_init::StaticInitStep::ExecuteDynamic(range) => {
+                        self.instruction_pointer = range.start;
+                        while self.instruction_pointer < range.end {
+                            instruction_count += 1;
+                            if instruction_count > 10_000_000 {
+                                return Err(VmError::runtime_with_ip(
+                                    "Instruction limit reached - too many instructions executed"
+                                        .to_string(),
+                                    self.instruction_pointer,
+                                ));
+                            }
+                            if instruction_count & 0x3FF == 0
+                                && let Some(ref token) = ext_cancel
+                                && token.load(Ordering::Relaxed)
+                            {
+                                return Err(VmError::runtime_with_ip(
+                                    "Execution cancelled".to_string(),
+                                    self.instruction_pointer,
+                                ));
+                            }
+                            let instruction = &program.entry_point[self.instruction_pointer];
+                            self.execute_instruction(instruction, 0)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if self.registers.len() > self.initial_register_capacity {
+            self.registers.truncate(self.initial_register_capacity);
+        }
+        let total_ns_vars: usize = self.namespace_variables.values().map(|ns| ns.len()).sum();
+        if total_ns_vars > self.peak_namespace_var_count {
+            self.peak_namespace_var_count = total_ns_vars;
+        }
+        result
     }
 
     /// Run one instruction. `moves` is its entry in the plan of the body it
@@ -3722,10 +3835,7 @@ impl VirtualMachine {
                 );
 
                 // Store directly in the specified namespace
-                self.namespace_variables
-                    .entry(namespace_name.to_string())
-                    .or_default()
-                    .insert(name.to_string(), val);
+                self.insert_namespace_var(&namespace_name, name.to_string(), val);
 
                 self.instruction_pointer += 1;
             }
@@ -4726,9 +4836,10 @@ impl VirtualMachine {
     }
 
     fn get_register(&self, reg_id: RegisterId) -> VmResult<&Val> {
+        let idx = self.register_base + reg_id as usize;
         let value = self
             .registers
-            .get(reg_id as usize)
+            .get(idx)
             .ok_or(VmError::InvalidRegister(reg_id))?;
         #[cfg(debug_assertions)]
         if let Val::Box(boxed) = value
@@ -4746,10 +4857,8 @@ impl VirtualMachine {
     /// returns copies a collection only if something else still holds it.
     fn take_register(&mut self, reg_id: RegisterId) -> VmResult<Val> {
         self.get_register(reg_id)?;
-        Ok(std::mem::replace(
-            &mut self.registers[reg_id as usize],
-            Val::Null,
-        ))
+        let idx = self.register_base + reg_id as usize;
+        Ok(std::mem::replace(&mut self.registers[idx], Val::Null))
     }
 
     /// Read a register for the last time when its instruction's plan entry
@@ -4759,10 +4868,8 @@ impl VirtualMachine {
             return self.get_register(reg_id).cloned();
         }
         self.get_register(reg_id)?;
-        Ok(std::mem::replace(
-            &mut self.registers[reg_id as usize],
-            moved_out(),
-        ))
+        let idx = self.register_base + reg_id as usize;
+        Ok(std::mem::replace(&mut self.registers[idx], moved_out()))
     }
 
     /// The values of `count` consecutive registers from `start`: a call's
@@ -4797,7 +4904,8 @@ impl VirtualMachine {
         };
         for (position, register) in operands.reads.iter().enumerate() {
             if moves & (1 << position) != 0
-                && let Some(slot) = register.and_then(|id| self.registers.get_mut(id as usize))
+                && let Some(slot) =
+                    register.and_then(|id| self.registers.get_mut(self.register_base + id as usize))
             {
                 *slot = moved_out();
             }
@@ -4805,11 +4913,12 @@ impl VirtualMachine {
     }
 
     fn set_register(&mut self, reg_id: RegisterId, value: Val) -> VmResult<()> {
-        if reg_id as usize >= self.registers.len() {
-            self.registers.resize(reg_id as usize + 1, Val::Null);
+        let idx = self.register_base + reg_id as usize;
+        if idx >= self.registers.len() {
+            self.registers.resize(idx + 1, Val::Null);
         }
 
-        self.registers[reg_id as usize] = value;
+        self.registers[idx] = value;
         // Instrumentation: track peak registers length
         if self.registers.len() > self.peak_registers_len {
             self.peak_registers_len = self.registers.len();
@@ -6023,14 +6132,22 @@ impl VirtualMachine {
             None => self.current_namespace.clone(),
         };
 
-        self.namespace_variables.get(&namespace)
+        self.namespace_variables.get(&namespace).map(Arc::as_ref)
     }
 
     /// Get all namespaces and their variables (for debugging/inspection)
-    pub fn get_all_namespace_vars(
-        &self,
-    ) -> &indexmap::IndexMap<String, indexmap::IndexMap<String, Val>> {
+    pub fn get_all_namespace_vars(&self) -> &NamespaceVars {
         &self.namespace_variables
+    }
+
+    /// Clone all namespaces and their variables into an owned plain map (for REPL state).
+    pub fn get_all_namespace_vars_owned(
+        &self,
+    ) -> indexmap::IndexMap<String, indexmap::IndexMap<String, Val>> {
+        self.namespace_variables
+            .iter()
+            .map(|(ns, vars)| (ns.clone(), (**vars).clone()))
+            .collect()
     }
 
     /// Look up a qualified variable reference (::namespace/var)
@@ -8657,7 +8774,7 @@ impl VirtualMachine {
                 let key = |i| mapping.get_index(i).map(|(key, _)| key.as_str());
                 key(a).cmp(&key(b))
             });
-            self.sorted_key_indices = Some(order);
+            self.sorted_key_indices = Some(Arc::new(order));
         }
         let set = self.build_overload_set(function_id).map(std::rc::Rc::new);
         self.overload_set_cache.insert(function_id, set.clone());
@@ -8672,7 +8789,10 @@ impl VirtualMachine {
         // Declared types per overload, from its longest typed key: the
         // signature as written (constructors also register a key that keeps
         // only the first member of a union).
-        let order = self.sorted_key_indices.as_deref().unwrap_or(&[]);
+        let order = self
+            .sorted_key_indices
+            .as_deref()
+            .map_or(&[][..], Vec::as_slice);
         let key_at = |i: usize| self.function_mapping.get_index(i);
         let start = order
             .partition_point(|&i| key_at(i).is_some_and(|(key, _)| key.as_str() < prefix.as_str()));
@@ -10080,27 +10200,13 @@ impl VirtualMachine {
             self.current_namespace
         );
 
-        // Save current instruction pointer and register state
+        // Save current instruction pointer and push a disjoint register frame
+        // for the lambda body so nested/recursive calls never clobber caller registers.
         let saved_instruction_pointer = self.instruction_pointer;
+        let saved_register_base = self.register_base;
         let saved_register_count = self.registers.len();
-
-        // Ensure we have enough registers for lambda execution
-        self.ensure_register_capacity(lambda_info.register_count as usize);
-
-        // Save registers that will be used by this lambda to prevent nested calls from overwriting them
-        // This is critical for recursive lambdas that use the same register IDs
-        // Use pre-computed used_registers to avoid O(N) instruction scan on every call.
-        // Take the values out (leaving Null) instead of cloning: the lambda only
-        // reads registers it wrote itself, and a deep clone of large caller
-        // collections on every lambda call is pure waste.
-        let saved_from = self.saved_registers.len();
-        for &reg in lambda_info.used_registers.iter() {
-            let reg_idx = reg as usize;
-            if reg_idx < self.registers.len() {
-                let value = std::mem::replace(&mut self.registers[reg_idx], Val::Null);
-                self.saved_registers.push((reg_idx, value));
-            }
-        }
+        self.register_base = saved_register_count;
+        self.ensure_register_capacity(saved_register_count + lambda_info.register_count as usize);
 
         // Execute lambda instructions with proper instruction pointer management
         let mut lambda_ip = 0;
@@ -10375,18 +10481,11 @@ impl VirtualMachine {
             Ok(())
         })();
 
-        // Restore instruction pointer and register state
+        // Restore instruction pointer and pop the lambda's register frame.
         self.instruction_pointer = saved_instruction_pointer;
         self.flow_frame_base = saved_flow_frame_base;
-
-        // Restore saved registers before truncating (for recursive lambdas)
-        for (reg_idx, saved_val) in self.saved_registers.drain(saved_from..) {
-            if reg_idx < self.registers.len() {
-                self.registers[reg_idx] = saved_val;
-            }
-        }
-
         self.registers.truncate(saved_register_count);
+        self.register_base = saved_register_base;
 
         // Pop the lambda scope. An error also leaves the scopes and flow
         // contexts the body opened, so drop those too.
@@ -10817,53 +10916,16 @@ impl VirtualMachine {
         }
         // A `where` predicate has its own, smaller call-depth budget.
         self.check_constraint_depth()?;
-        // Re-entrant (recursive) calls share the outer frame's register
-        // indices, so save the function's own registers before re-entering
-        // and restore them after — otherwise the inner call clobbers pending
-        // intermediates of the outer expression (e.g. the first operand of
-        // `add(fib(n-1), fib(n-2))`). First-entry calls skip this entirely.
-        //
-        // A lambda, or a function defined in another function's body, also
-        // runs as a lambda value (`execute_lambda`), on the same registers
-        // and without counting as active here. A call of it by id can
-        // arrive while that form is running (a local function that recurses,
-        // passed to `map`), so its registers are always saved.
-        let fid = function_id as usize;
-        let reentrant = self.function_active_depth.get(fid).copied().unwrap_or(0) > 0
-            || self.program.local_functions.contains(&function_id);
-        let saved_from = self.saved_registers.len();
-        if reentrant {
-            let used = self.function_used_registers(function_id);
-            for &reg in used.iter() {
-                let idx = reg as usize;
-                if idx < self.registers.len() {
-                    let value = std::mem::replace(&mut self.registers[idx], Val::Null);
-                    self.saved_registers.push((idx, value));
-                }
-            }
-        }
-        if let Some(slot) = self.function_active_depth.get_mut(fid) {
-            *slot += 1;
-        }
 
         let saved_proven = std::mem::replace(&mut self.entry_proven, proven);
         self.user_function_depth += 1;
-        let result = self.execute_user_function_impl(function_id, args, reentrant);
+        let result = self.execute_user_function_impl(function_id, args);
         self.user_function_depth -= 1;
         self.entry_proven = saved_proven;
         if result.is_err() {
             // A call that failed after its `ProvenArgs` never reached the
             // callee; its proof must not reach whatever the caller runs next.
             self.pending_proven = None;
-        }
-
-        if let Some(slot) = self.function_active_depth.get_mut(fid) {
-            *slot = slot.saturating_sub(1);
-        }
-        // Restore even on error so a failed call can't leak clobbered
-        // registers into an outer frame (VMs are reused across REPL runs).
-        for (idx, val) in self.saved_registers.drain(saved_from..) {
-            self.registers[idx] = val;
         }
         result
     }
@@ -11165,17 +11227,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Empty `registers`: those a function's body writes, at the end of a
-    /// call of it.
-    fn clear_registers(&mut self, registers: &[u32]) {
-        for &register in registers {
-            if let Some(slot) = self.registers.get_mut(register as usize) {
-                *slot = Val::Null;
-            }
-        }
-    }
-
-    /// Written-register set for a function body (lazily computed and cached).
     /// The name of the function whose instructions ran last.
     fn current_debug_function_name(&self) -> Option<&str> {
         self.current_debug_function
@@ -11183,31 +11234,10 @@ impl VirtualMachine {
             .map(|function| function.name.as_str())
     }
 
-    fn function_used_registers(&mut self, function_id: FunctionId) -> std::rc::Rc<[u32]> {
-        if let Some(cached) = self.function_used_registers_cache.get(&function_id) {
-            return std::rc::Rc::clone(cached);
-        }
-        let used: std::rc::Rc<[u32]> = self
-            .program
-            .functions
-            .get(function_id as usize)
-            .map(|info| {
-                crate::lang::bytecode::LambdaInfo::compute_used_registers(&info.instructions)
-            })
-            .unwrap_or_default()
-            .into();
-        self.function_used_registers_cache
-            .insert(function_id, std::rc::Rc::clone(&used));
-        used
-    }
-
-    /// `registers_saved` is whether the caller saved the registers this
-    /// function writes and puts them back when the call ends.
     fn execute_user_function_impl(
         &mut self,
         function_id: u32,
         mut args: CallArgs<'_>,
-        registers_saved: bool,
     ) -> VmResult<Val> {
         if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
             self.jit.record_call(function_id, args.as_slice());
@@ -11407,12 +11437,13 @@ impl VirtualMachine {
             // Parameters live in the function scope only. They are never
             // written to the namespace, where other functions would see them.
 
-            // Execute function instructions
-            // Snapshot register usage to avoid unbounded growth across many function calls
+            // Push a disjoint register frame for this call so caller and
+            // recursive frames never share or clobber register slots.
+            let saved_register_base = self.register_base;
             let saved_register_count_for_call = self.registers.len();
-            // Ensure capacity for this function
             let needed = function_info.register_count as usize;
-            self.ensure_register_capacity(needed);
+            self.register_base = saved_register_count_for_call;
+            self.ensure_register_capacity(saved_register_count_for_call + needed);
             // Prevent outer branch skipping from leaking into function execution
             let saved_skip_flag = self.skip_until_branch_end;
             self.skip_until_branch_end = None;
@@ -11449,9 +11480,6 @@ impl VirtualMachine {
                 // Parameters were already bound into the function scope above,
                 // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
-                // The registers the body writes, once a tail call needs
-                // them emptied.
-                let mut written: Option<std::rc::Rc<[u32]>> = None;
                 // The body runs in a closure so that an error still reaches
                 // the cleanup below. A caller that contains the error (a JIT
                 // trampoline, `contain`) then carries on with its own
@@ -11460,10 +11488,11 @@ impl VirtualMachine {
                     Ok(loop {
                         if let Some(mut current_args) = tail_args.take() {
                             // The iteration before is over, as a call that
-                            // returned would be.
-                            let written = written
-                                .get_or_insert_with(|| self.function_used_registers(function_id));
-                            self.clear_registers(written);
+                            // returned would be: drop this frame's register values
+                            // so collections have no lingering extra reference.
+                            for slot in &mut self.registers[self.register_base..] {
+                                *slot = Val::Null;
+                            }
                             // A tail call is a new call: a fresh frame with the
                             // tail call's args, without the previous
                             // iteration's locals or leftover flow scopes.
@@ -11629,17 +11658,10 @@ impl VirtualMachine {
             self.skip_until_branch_end = saved_skip_flag;
             self.skip_remaining_cond_flow = saved_skip_cond_flow;
 
-            // Restore register usage to pre-call values to prevent accumulation
-            if self.registers.len() > saved_register_count_for_call {
-                self.registers.truncate(saved_register_count_for_call);
-            }
-            // Nothing the call wrote outlives it: a register left holding a
-            // collection would make the next writer of that collection copy
-            // it. (Saved registers are an outer call's, and are put back.)
-            if !registers_saved {
-                let written = self.function_used_registers(function_id);
-                self.clear_registers(&written);
-            }
+            // Pop the callee's register frame, dropping all values it wrote
+            // so collections hold no lingering references past the call.
+            self.registers.truncate(saved_register_count_for_call);
+            self.register_base = saved_register_base;
 
             // Restore the caller's namespace, if the call left it
             let restored = match saved_namespace {
@@ -11996,7 +12018,9 @@ impl VirtualMachine {
 
     /// Get a snapshot of variables mirrored in the current namespace (for VM-aware libs)
     pub fn get_current_namespace_locals(&self) -> Option<&indexmap::IndexMap<String, Val>> {
-        self.namespace_variables.get(&self.current_namespace)
+        self.namespace_variables
+            .get(&self.current_namespace)
+            .map(Arc::as_ref)
     }
 
     /// Ensure a namespace has a ns variable pointing to itself
@@ -12017,10 +12041,7 @@ impl VirtualMachine {
         let ns_value = Val::Box(Box::new(namespace_ref));
 
         // Store the ns variable in this namespace
-        self.namespace_variables
-            .entry(namespace_name.to_string())
-            .or_default()
-            .insert("ns".to_string(), ns_value.clone());
+        self.insert_namespace_var(namespace_name, "ns".to_string(), ns_value);
 
         Ok(())
     }
@@ -12206,7 +12227,7 @@ impl VirtualMachine {
             // Worker VMs need the whole realized namespace registry, not just
             // the caller namespace. Branches may call package functions that
             // switch namespaces and read package-level constants.
-            let namespace_snapshot = StdArc::new(self.namespace_variables_snapshot());
+            let namespace_snapshot = self.namespace_variables_snapshot();
 
             // Clone computed vars from previous levels for task VMs
             let computed_vars_snapshot = computed_vars.clone();
@@ -12525,10 +12546,8 @@ impl VirtualMachine {
                 name,
                 self.current_namespace
             );
-            self.namespace_variables
-                .entry(self.current_namespace.clone())
-                .or_default()
-                .insert(name.to_string(), value);
+            let ns = self.current_namespace.clone();
+            self.insert_namespace_var(&ns, name.to_string(), value);
             Ok(())
         } else if self.scope_stack.len() == 1 {
             // Top-level namespace variable - store in global namespace registry
@@ -12537,10 +12556,8 @@ impl VirtualMachine {
                 name,
                 self.current_namespace
             );
-            self.namespace_variables
-                .entry(self.current_namespace.clone())
-                .or_default()
-                .insert(name.to_string(), value);
+            let ns = self.current_namespace.clone();
+            self.insert_namespace_var(&ns, name.to_string(), value);
             Ok(())
         } else {
             // Lexical scope variable (function parameter, local variable)
@@ -12850,7 +12867,7 @@ impl VirtualMachine {
         self.constraint = None;
         self.moved_read.borrow_mut().take();
         // Clear accumulated namespace variables (but keep core ones)
-        self.namespace_variables.clear();
+        self.namespace_variables = Arc::new(indexmap::IndexMap::new());
 
         // Clear namespace registry
         self.namespace_registry.clear();
@@ -12862,6 +12879,7 @@ impl VirtualMachine {
         )];
 
         // Clear all registers to prevent accumulation, and shrink back to initial capacity
+        self.register_base = 0;
         if self.registers.len() > self.initial_register_capacity {
             self.registers.truncate(self.initial_register_capacity);
         }
