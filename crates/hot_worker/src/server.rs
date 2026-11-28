@@ -1672,16 +1672,74 @@ mod graceful_shutdown {
 
 use graceful_shutdown::{RunRegistration, ShutdownCoordinator};
 
-/// Cache for extracted build paths
-/// Maps build_id -> extracted directory path
+/// Cached per-build metadata for a completed immutable bundle extraction.
+///
+/// Populated once per extracted `build_id` and evicted alongside its directory
+/// entry in `BuildPathCache` (on sweep or when a sibling process removes
+/// `.extraction_complete`). `ResourceRegistry` re-validates symlink safety on
+/// every actual resource read (`resource_path_for_read`), so caching the
+/// parsed manifest, pre-canonicalized `BytecodeCache`, and `ResourceRegistry`
+/// preserves full bundle resource isolation while avoiding per-event
+/// `manifest.hot` parses, `canonicalize()`, and directory walks.
+struct LoadedBundleMeta {
+    extract_dir: PathBuf,
+    src_paths: Vec<String>,
+    effective_cache_dir: PathBuf,
+    bytecode_cache: Arc<hot::lang::cache::bytecode_cache::BytecodeCache>,
+    manifest: Option<Arc<hot::bundle::BundleManifest>>,
+    resource_registry: Arc<hot::lang::hot::resource::ResourceRegistry>,
+}
+
+impl LoadedBundleMeta {
+    fn load(extract_dir: PathBuf) -> Self {
+        let build_src_path = extract_dir.join("hot/src");
+        let build_pkg_path = extract_dir.join("hot/pkg");
+        let mut src_paths = vec![build_src_path.to_string_lossy().to_string()];
+        if build_pkg_path.exists() {
+            src_paths.push(build_pkg_path.to_string_lossy().to_string());
+        }
+        let manifest = hot::bundle::read_bundle_manifest(&extract_dir)
+            .ok()
+            .map(Arc::new);
+        Self::from_parts(extract_dir, src_paths, manifest)
+    }
+
+    fn from_parts(
+        extract_dir: PathBuf,
+        src_paths: Vec<String>,
+        manifest: Option<Arc<hot::bundle::BundleManifest>>,
+    ) -> Self {
+        let effective_cache_dir = extract_dir.join(".hot").join("cache");
+        let bytecode_cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            effective_cache_dir.clone(),
+        ));
+        let resource_registry = Arc::new(build_event_resource_registry(&extract_dir));
+        Self {
+            extract_dir,
+            src_paths,
+            effective_cache_dir,
+            bytecode_cache,
+            manifest,
+            resource_registry,
+        }
+    }
+}
+
+struct CachedBundleEntry {
+    extract_dir: PathBuf,
+    meta: Option<Arc<LoadedBundleMeta>>,
+}
+
+/// Cache for extracted build paths and lazily hydrated `LoadedBundleMeta`.
+/// Maps build_id -> extracted directory path (+ cached manifest, registry, and bytecode cache).
 /// Uses per-build locks to prevent race conditions during extraction (both in-process and cross-process).
 ///
 /// The outer `extraction_locks` map uses parking_lot (no poisoning) because it is shared
 /// across worker requests and a panic in one extraction must not permanently break the cache.
 #[derive(Clone)]
 struct BuildPathCache {
-    /// Completed extractions: build_id -> extracted path
-    paths: Arc<RwLock<AHashMap<Uuid, PathBuf>>>,
+    /// Completed extractions: build_id -> extracted path + lazily hydrated metadata
+    paths: Arc<RwLock<AHashMap<Uuid, CachedBundleEntry>>>,
     /// Per-build extraction locks to ensure only one thread extracts at a time (in-process)
     extraction_locks: Arc<parking_lot::Mutex<AHashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     /// The extracted directories themselves, and the runs using them
@@ -1727,13 +1785,58 @@ impl BuildPathCache {
     }
 
     fn get(&self, build_id: &Uuid) -> Option<PathBuf> {
-        self.paths.read().ok()?.get(build_id).cloned()
+        self.paths
+            .read()
+            .ok()?
+            .get(build_id)
+            .map(|entry| entry.extract_dir.clone())
+    }
+
+    fn get_meta(&self, build_id: &Uuid) -> Option<Arc<LoadedBundleMeta>> {
+        self.paths
+            .read()
+            .ok()?
+            .get(build_id)
+            .and_then(|entry| entry.meta.as_ref().map(Arc::clone))
     }
 
     fn insert(&self, build_id: Uuid, path: PathBuf) {
         if let Ok(mut paths) = self.paths.write() {
-            paths.insert(build_id, path);
+            paths.insert(
+                build_id,
+                CachedBundleEntry {
+                    extract_dir: path,
+                    meta: None,
+                },
+            );
         }
+    }
+
+    fn insert_meta(&self, build_id: Uuid, meta: Arc<LoadedBundleMeta>) {
+        if let Ok(mut paths) = self.paths.write() {
+            paths.insert(
+                build_id,
+                CachedBundleEntry {
+                    extract_dir: meta.extract_dir.clone(),
+                    meta: Some(meta),
+                },
+            );
+        }
+    }
+
+    fn get_or_load_meta(
+        &self,
+        build_id: &Uuid,
+        extract_dir: &std::path::Path,
+    ) -> Arc<LoadedBundleMeta> {
+        if let Some(meta) = self.get_meta(build_id)
+            && meta.extract_dir == extract_dir
+        {
+            return meta;
+        }
+        let meta = Arc::new(LoadedBundleMeta::load(extract_dir.to_path_buf()));
+        self.insert_meta(*build_id, Arc::clone(&meta));
+        meta
     }
 
     fn remove(&self, build_id: &Uuid) {
@@ -2000,6 +2103,16 @@ fn acquire_file_write_lock_blocking(
     }
 }
 
+fn build_event_resource_registry(
+    directory: &std::path::Path,
+) -> hot::lang::hot::resource::ResourceRegistry {
+    let resources = hot::bundle::read_bundle_resources(directory).unwrap_or_else(|error| {
+        tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
+        Val::Null
+    });
+    hot::lang::hot::resource::build_registry_from_manifest(&resources, directory)
+}
+
 /// Bundle execution must never inherit the host's process-global resources,
 /// including when a legacy bundle has no resource manifest.
 fn install_event_resource_scope(
@@ -2010,13 +2123,7 @@ fn install_event_resource_scope(
         return None;
     }
     let registry = extract_dir
-        .map(|directory| {
-            let resources = hot::bundle::read_bundle_resources(directory).unwrap_or_else(|error| {
-                tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
-                Val::Null
-            });
-            hot::lang::hot::resource::build_registry_from_manifest(&resources, directory)
-        })
+        .map(build_event_resource_registry)
         .unwrap_or_default();
     Some(hot::lang::hot::resource::ThreadRegistryGuard::install(
         Arc::new(registry),
@@ -5242,6 +5349,55 @@ fn get_completed_bundle_extracted_path(
     None
 }
 
+/// Warm-path bundle metadata + optional RAM bytecode lookup.
+///
+/// Requires the caller to hold a `BundleLease` for `build.build_id` first so
+/// an extraction verified by `is_extraction_complete` stays pinned on disk.
+/// When `LoadedBundleMeta` is already cached and its bytecode is hot in
+/// `GLOBAL_MEMORY_CACHE`, this avoids `read_dir(".hot/cache")`, `manifest.hot`
+/// parsing, `BytecodeCache::new` canonicalization, and `ResourceRegistry`
+/// rebuilding — doing only one `stat(".extraction_complete")` check against
+/// cross-process eviction.
+fn get_completed_bundle_meta(
+    build: &Build,
+    build_path_cache: &Arc<BuildPathCache>,
+) -> Option<(
+    Arc<LoadedBundleMeta>,
+    Option<Arc<hot::lang::cache::bytecode_cache::CachedBytecode>>,
+)> {
+    if let Some(meta) = build_path_cache.get_meta(&build.build_id) {
+        if BuildPathCache::is_extraction_complete(&meta.extract_dir) {
+            if let Some(cache_key) = meta
+                .manifest
+                .as_ref()
+                .and_then(|m| m.cache_key.as_deref())
+                .filter(|k| !k.is_empty())
+                && let Some(cached) = meta.bytecode_cache.load_from_memory(cache_key)
+            {
+                return Some((meta, Some(cached)));
+            }
+            if bundle_bytecode_ready(&meta.extract_dir) {
+                return Some((meta, None));
+            }
+        }
+        tracing::debug!(
+            "ROUTING: Bundle {} cached metadata no longer ready on disk, removing",
+            build.build_id
+        );
+        build_path_cache.remove(&build.build_id);
+    }
+
+    let extract_dir = get_completed_bundle_extracted_path(build, build_path_cache)?;
+    let meta = build_path_cache.get_or_load_meta(&build.build_id, &extract_dir);
+    let cached = meta
+        .manifest
+        .as_ref()
+        .and_then(|m| m.cache_key.as_deref())
+        .filter(|k| !k.is_empty())
+        .and_then(|key| meta.bytecode_cache.load_from_memory(key));
+    Some((meta, cached))
+}
+
 fn bundle_source_paths(extracted_path: &std::path::Path) -> Result<Vec<String>, String> {
     let build_src_path = extracted_path.join("hot/src");
     if !build_src_path.exists() {
@@ -6421,25 +6577,28 @@ async fn find_build_for_function(
                     continue;
                 };
 
-                // Use manifest's pre-computed cache key
-                // This is critical - the bundle's bytecode was compiled with specific file hashes
-                // that are stored in the manifest. Recalculating would produce different keys.
-                match hot::bundle::read_bundle_manifest(&extracted_path) {
-                    Ok(manifest) => {
+                // Use cached bundle metadata (manifest + pre-canonicalized BytecodeCache)
+                // so warm legacy hot:call lookups do not re-parse manifest.hot per build.
+                let bundle_meta =
+                    build_path_cache.get_or_load_meta(&build.build_id, &extracted_path);
+                match bundle_meta.manifest.as_ref() {
+                    Some(manifest) => {
                         tracing::debug!(
-                            "ROUTING: Read manifest for bundle {}, cache_key={:?}",
+                            "ROUTING: Loaded manifest for bundle {}, cache_key={:?}",
                             manifest.bundle_name,
                             manifest.cache_key.as_ref().map(|k| &k[..12.min(k.len())])
                         );
                         if let Some(ref cache_key) = manifest.cache_key {
-                            let bundle_cache_dir = extracted_path.join(".hot").join("cache");
-                            let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                bundle_cache_dir.clone(),
+                            tracing::debug!(
+                                "ROUTING: Bundle cache dir={:?}",
+                                bundle_meta.effective_cache_dir
                             );
-                            tracing::debug!("ROUTING: Bundle cache dir={:?}", bundle_cache_dir);
 
-                            let mut check_result =
-                                bytecode_has_function(&bundle_cache, cache_key, function_name);
+                            let mut check_result = bytecode_has_function(
+                                &bundle_meta.bytecode_cache,
+                                cache_key,
+                                function_name,
+                            );
 
                             // If cache doesn't exist or needs recompilation, compile it now
                             if check_result == CacheCheckResult::NeedsRecompile
@@ -6455,14 +6614,9 @@ async fn find_build_for_function(
                                     build.build_id,
                                     reason
                                 );
-                                if recompile_bundle_cache(&extracted_path, &manifest) {
-                                    // Create a fresh cache instance after compilation to avoid stale memory cache
-                                    let fresh_cache =
-                                        hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                            bundle_cache_dir.clone(),
-                                        );
+                                if recompile_bundle_cache(&extracted_path, manifest) {
                                     check_result = bytecode_has_function(
-                                        &fresh_cache,
+                                        &bundle_meta.bytecode_cache,
                                         cache_key,
                                         function_name,
                                     );
@@ -6510,12 +6664,11 @@ async fn find_build_for_function(
                             unavailable_builds += 1;
                         }
                     }
-                    Err(e) => {
+                    None => {
                         tracing::warn!(
-                            "ROUTING: Failed to read manifest for bundle build {} at {:?}: {}",
+                            "ROUTING: Failed to read manifest for bundle build {} at {:?}",
                             build.build_id,
-                            extracted_path,
-                            e
+                            extracted_path
                         );
                         unavailable_builds += 1;
                     }
@@ -6941,8 +7094,9 @@ async fn execute_single_event_handler_inner(
     // unregistration on every exit path (see `RunRegistration` docs).
     let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
     // Before the build's extraction is looked up below: the run may outlive
-    // this build's deployment.
-    let _bundle_lease = build_path_cache.lease(build.build_id);
+    // this build's deployment. Moved into `spawn_blocking` so one lease covers
+    // both setup and detached VM execution; live builds never use bundle dirs.
+    let bundle_lease = (!build.is_live()).then(|| build_path_cache.lease(build.build_id));
 
     let org_id = event_message
         .body
@@ -7238,10 +7392,19 @@ async fn execute_single_event_handler_inner(
         hot::profile::authorized_live_project(db, worker_conf, build).await?;
     }
 
-    // Get source paths for the project
-    // Also track if this is a bundle build so we skip global dependency resolution
-    // and use the bundle's own cache directory
-    let (src_paths, is_bundle_build, bundle_extract_path, bundle_manifest) = if build.is_live() {
+    // Get source paths and cached bundle metadata for the project.
+    // For warm bundle builds, `get_completed_bundle_meta` returns cached
+    // `src_paths`, `manifest`, pre-canonicalized `BytecodeCache`, and
+    // `ResourceRegistry` (plus the in-memory `CachedBytecode` on RAM hit)
+    // without re-parsing `manifest.hot` or scanning `.hot/cache/`.
+    let (
+        src_paths,
+        is_bundle_build,
+        bundle_extract_path,
+        bundle_manifest,
+        bundle_meta,
+        preloaded_bytecode,
+    ) = if build.is_live() {
         // Live builds (including local dev) always execute from configured
         // project source paths. Do not attempt bundle storage/extraction for
         // these builds; storage may not exist in local dev.
@@ -7250,35 +7413,26 @@ async fn execute_single_event_handler_inner(
             false,
             None,
             None,
+            None,
+            None,
         )
-    } else if let Some(extracted_path) =
-        get_completed_bundle_extracted_path(build, &build_path_cache)
+    } else if let Some((meta, cached_in_memory)) =
+        get_completed_bundle_meta(build, &build_path_cache)
     {
-        // Use extracted build path - source files are in hot/src, dependencies in hot/pkg
-        let build_src_path = extracted_path.join("hot/src");
-        let build_pkg_path = extracted_path.join("hot/pkg");
-        debug!(
-            "Using extracted build source path: {}",
-            build_src_path.display()
-        );
-        let mut paths = vec![build_src_path.to_string_lossy().to_string()];
-        // Include pkg path if it exists (bundled dependencies)
-        if build_pkg_path.exists() {
-            debug!(
-                "Including bundled dependencies from: {}",
-                build_pkg_path.display()
-            );
-            paths.push(build_pkg_path.to_string_lossy().to_string());
-        }
-        // Read the bundle manifest for metadata (cache key, file hashes)
-        let manifest = hot::bundle::read_bundle_manifest(&extracted_path).ok();
-        if let Some(ref m) = manifest {
+        if let Some(ref m) = meta.manifest {
             debug!(
                 "Bundle manifest (cached): name={}, cache_key={:?}",
                 m.bundle_name, m.cache_key
             );
         }
-        (paths, true, Some(extracted_path.clone()), manifest) // This is a bundle build
+        (
+            meta.src_paths.clone(),
+            true,
+            Some(meta.extract_dir.clone()),
+            meta.manifest.clone(),
+            Some(meta),
+            cached_in_memory,
+        )
     } else {
         // Build not in cache - need to extract it on-demand from storage
         // Use extraction lock to prevent race conditions between threads (in-process)
@@ -7286,20 +7440,20 @@ async fn execute_single_event_handler_inner(
         let _lock_guard = extraction_lock.lock().await;
 
         // Double-check in-memory cache after acquiring lock (another thread may have just finished)
-        if let Some(extracted_path) = get_completed_bundle_extracted_path(build, &build_path_cache)
+        if let Some((meta, cached_in_memory)) = get_completed_bundle_meta(build, &build_path_cache)
         {
             debug!(
                 "Build {} was extracted by another thread while waiting for lock",
                 build.build_id
             );
-            let build_src_path = extracted_path.join("hot/src");
-            let build_pkg_path = extracted_path.join("hot/pkg");
-            let mut paths = vec![build_src_path.to_string_lossy().to_string()];
-            if build_pkg_path.exists() {
-                paths.push(build_pkg_path.to_string_lossy().to_string());
-            }
-            let manifest = hot::bundle::read_bundle_manifest(&extracted_path).ok();
-            (paths, true, Some(extracted_path.clone()), manifest)
+            (
+                meta.src_paths.clone(),
+                true,
+                Some(meta.extract_dir.clone()),
+                meta.manifest.clone(),
+                Some(meta),
+                cached_in_memory,
+            )
         } else {
             // Acquire cross-process file lock to prevent races with other hot processes
             let extract_dir =
@@ -7315,16 +7469,15 @@ async fn execute_single_event_handler_inner(
             // Check if another process already extracted (via marker file)
             if BuildPathCache::is_extraction_complete(&extract_dir) {
                 debug!("Build {} was extracted by another process", build.build_id);
-                // Add to in-memory cache
-                build_path_cache.insert(build.build_id, extract_dir.clone());
-                let build_src_path = extract_dir.join("hot/src");
-                let build_pkg_path = extract_dir.join("hot/pkg");
-                let mut paths = vec![build_src_path.to_string_lossy().to_string()];
-                if build_pkg_path.exists() {
-                    paths.push(build_pkg_path.to_string_lossy().to_string());
-                }
-                let manifest = hot::bundle::read_bundle_manifest(&extract_dir).ok();
-                (paths, true, Some(extract_dir.clone()), manifest)
+                let meta = build_path_cache.get_or_load_meta(&build.build_id, &extract_dir);
+                (
+                    meta.src_paths.clone(),
+                    true,
+                    Some(meta.extract_dir.clone()),
+                    meta.manifest.clone(),
+                    Some(meta),
+                    None,
+                )
             } else {
                 debug!(
                     "Build {} not in cache, attempting to extract from storage",
@@ -7362,12 +7515,19 @@ async fn execute_single_event_handler_inner(
                 })
                 .await
                 .map_err(|error| format!("Bundle preparation task failed: {error}"))??;
-                build_path_cache.insert(build.build_id, prepared.extract_dir.clone());
-                (
+                let meta = Arc::new(LoadedBundleMeta::from_parts(
+                    prepared.extract_dir,
                     prepared.src_paths,
+                    prepared.manifest.map(Arc::new),
+                ));
+                build_path_cache.insert_meta(build.build_id, Arc::clone(&meta));
+                (
+                    meta.src_paths.clone(),
                     true,
-                    Some(prepared.extract_dir),
-                    prepared.manifest,
+                    Some(meta.extract_dir.clone()),
+                    meta.manifest.clone(),
+                    Some(meta),
+                    None,
                 )
             } // Close the else block for marker file check
         } // Close the else block for in-memory cache check
@@ -7459,25 +7619,44 @@ async fn execute_single_event_handler_inner(
         timing_after_cache_key - timing_after_build_path
     );
 
-    // Try to load from cache with registries
-    // IMPORTANT: For bundle builds, use the bundle's own cache directory
-    // Each extracted bundle has its own .hot/cache/ with pre-compiled bytecode
-    // We store the cache directory path so we can recreate the cache in spawn_blocking
-    let effective_cache_dir: std::path::PathBuf =
-        if let Some(ref extract_path) = bundle_extract_path {
-            let bundle_cache_dir = extract_path.join(".hot").join("cache");
-            debug!(
-                "Using bundle-specific cache directory: {}",
-                bundle_cache_dir.display()
-            );
-            bundle_cache_dir
-        } else {
-            cache.cache_dir().to_path_buf()
-        };
-    let effective_cache =
-        hot::lang::cache::bytecode_cache::BytecodeCache::new(effective_cache_dir.clone());
+    // Try to load from cache with registries.
+    // Reuse the cached pre-canonicalized `BytecodeCache` (from `LoadedBundleMeta`
+    // for bundles or the worker-shared `cache` for live builds) so warm runs
+    // avoid per-event `canonicalize()` syscalls.
+    let (effective_cache_dir, effective_cache): (
+        std::path::PathBuf,
+        Arc<hot::lang::cache::bytecode_cache::BytecodeCache>,
+    ) = if let Some(ref meta) = bundle_meta {
+        debug!(
+            "Using bundle-specific cache directory: {}",
+            meta.effective_cache_dir.display()
+        );
+        (
+            meta.effective_cache_dir.clone(),
+            Arc::clone(&meta.bytecode_cache),
+        )
+    } else if let Some(ref extract_path) = bundle_extract_path {
+        let bundle_cache_dir = extract_path.join(".hot").join("cache");
+        debug!(
+            "Using bundle-specific cache directory: {}",
+            bundle_cache_dir.display()
+        );
+        let bundle_cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            bundle_cache_dir.clone(),
+        ));
+        (bundle_cache_dir, bundle_cache)
+    } else {
+        (cache.cache_dir().to_path_buf(), Arc::clone(&cache))
+    };
 
-    let cached_bytecode = if !cache_key.is_empty() {
+    let cached_bytecode = if let Some(cached) = preloaded_bytecode {
+        debug!(
+            "✓ Bytecode RAM cache hit for bundle '{}' (key: {})",
+            project.name,
+            &cache_key[..cache_key.len().min(12)]
+        );
+        Some(cached)
+    } else if !cache_key.is_empty() {
         match effective_cache.try_load(&cache_key) {
             Ok(Some(cached)) => {
                 // Both bundle manifests and live builds already address the
@@ -7744,7 +7923,9 @@ async fn execute_single_event_handler_inner(
         let run_id_for_timing = run_id;
         let external_cancel = external_cancel.clone();
         let blocking_execution_permit = blocking_execution_permit;
-        let bundle_lease = build_path_cache.lease(build.build_id);
+        let bundle_resource_registry = bundle_meta
+            .as_ref()
+            .map(|meta| Arc::clone(&meta.resource_registry));
 
         let panic_label = format!("worker:{}", function_name);
         let spawn_scheduled = std::time::Instant::now();
@@ -7753,8 +7934,13 @@ async fn execute_single_event_handler_inner(
             let _blocking_execution_permit = blocking_execution_permit;
             // A timed-out VM keeps running detached and can still read resources.
             let _bundle_lease = bundle_lease;
-            let _resource_scope =
-                install_event_resource_scope(is_bundle_build, bundle_extract_path.as_deref());
+            let _resource_scope = if let Some(registry) = bundle_resource_registry {
+                Some(hot::lang::hot::resource::ThreadRegistryGuard::install(
+                    registry,
+                ))
+            } else {
+                install_event_resource_scope(is_bundle_build, bundle_extract_path.as_deref())
+            };
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
@@ -19323,6 +19509,86 @@ fn (event) {{ "{name}" }}
         drop(held_lock);
         cache.retain_only(&ahash::AHashSet::new());
         assert!(cache.extraction_locks.lock().is_empty());
+    }
+
+    #[test]
+    fn build_path_cache_caches_loaded_bundle_meta_and_invalidates_on_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let extract_dir = dir.path().join("build-meta");
+        std::fs::create_dir_all(extract_dir.join("hot/src")).unwrap();
+        std::fs::create_dir_all(extract_dir.join("resources")).unwrap();
+        std::fs::create_dir_all(extract_dir.join(".hot/cache")).unwrap();
+        std::fs::write(extract_dir.join("resources/note.txt"), "hello").unwrap();
+        let runtime_ver = hot::version::current_runtime_version();
+        std::fs::write(
+            extract_dir.join("manifest.hot"),
+            format!(
+                r#"{{"hot.bundle.demo":{{"engine_version":"{runtime_ver}","hot_std_version":"{runtime_ver}","files":[{{"path":"hot/src/app.hot","hash":"abc123"}}],"resources":[{{"path":"note.txt","hash":"h1","size":5}}]}}}}"#
+            ),
+        )
+        .unwrap();
+        BuildPathCache::mark_extraction_complete(&extract_dir);
+
+        let cache = BuildPathCache::new();
+        let build_id = Uuid::now_v7();
+        cache.insert(build_id, extract_dir.clone());
+
+        let meta1 = cache.get_or_load_meta(&build_id, &extract_dir);
+        let meta2 = cache.get_or_load_meta(&build_id, &extract_dir);
+        assert!(
+            Arc::ptr_eq(&meta1, &meta2),
+            "repeated calls must reuse cached LoadedBundleMeta"
+        );
+        assert!(
+            Arc::ptr_eq(&meta1.resource_registry, &meta2.resource_registry),
+            "resource registry must be shared across warm runs"
+        );
+        assert!(meta1.resource_registry.entries.contains_key("note.txt"));
+        assert!(
+            meta1
+                .manifest
+                .as_ref()
+                .and_then(|m| m.cache_key.as_deref())
+                .is_some_and(|k| !k.is_empty()),
+            "manifest cache_key should be derived from files"
+        );
+
+        // Removing the build from the cache drops LoadedBundleMeta too.
+        cache.remove(&build_id);
+        assert!(cache.get_meta(&build_id).is_none());
+
+        // If a sibling process evicts `.extraction_complete`, get_completed_bundle_meta
+        // invalidates the stale cached entry instead of returning it.
+        cache.insert_meta(build_id, Arc::clone(&meta1));
+        std::fs::remove_file(extract_dir.join(".extraction_complete")).unwrap();
+        let now = chrono::Utc::now();
+        let build = Build {
+            build_id,
+            project_id: Uuid::now_v7(),
+            hash: "abc123def456".to_string(),
+            size: 128,
+            build_type_id: 2,
+            build_type: "bundle".to_string(),
+            deployed: true,
+            active: true,
+            created_by_user_id: Uuid::now_v7(),
+            created_at: now,
+            updated_at: now,
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            storage_path: None,
+            storage_backend: None,
+            runtime_status: Build::RUNTIME_STATUS_READY.to_string(),
+            runtime_ready_at: None,
+            runtime_error: None,
+            deployment_sequence: 1,
+            engine_version: None,
+            hot_std_version: None,
+        };
+        let shared = Arc::new(cache);
+        assert!(get_completed_bundle_meta(&build, &shared).is_none());
+        assert!(shared.get_meta(&build_id).is_none());
     }
 
     #[tokio::test]
