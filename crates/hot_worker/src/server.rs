@@ -1691,16 +1691,32 @@ struct LoadedBundleMeta {
 }
 
 impl LoadedBundleMeta {
-    fn load(extract_dir: PathBuf) -> Self {
+    /// Load bundle metadata and report whether the result is healthy enough to
+    /// cache in `BuildPathCache`.
+    ///
+    /// A failed manifest or resources read (e.g. transient `EMFILE` or a race
+    /// against sibling re-extraction) — as well as legacy bundles with no
+    /// `manifest.hot` — returns `(meta, false)` so callers still get a fallback
+    /// for the current event without poisoning the cache for the build's
+    /// lifetime.
+    fn load(extract_dir: PathBuf) -> (Self, bool) {
         let build_src_path = extract_dir.join("hot/src");
         let build_pkg_path = extract_dir.join("hot/pkg");
         let mut src_paths = vec![build_src_path.to_string_lossy().to_string()];
         if build_pkg_path.exists() {
             src_paths.push(build_pkg_path.to_string_lossy().to_string());
         }
-        let manifest = hot::bundle::read_bundle_manifest(&extract_dir)
-            .ok()
-            .map(Arc::new);
+        let manifest = match hot::bundle::read_bundle_manifest(&extract_dir) {
+            Ok(manifest) => Some(Arc::new(manifest)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %extract_dir.display(),
+                    "Cannot read bundle manifest; skipping LoadedBundleMeta cache"
+                );
+                None
+            }
+        };
         Self::from_parts(extract_dir, src_paths, manifest)
     }
 
@@ -1708,20 +1724,24 @@ impl LoadedBundleMeta {
         extract_dir: PathBuf,
         src_paths: Vec<String>,
         manifest: Option<Arc<hot::bundle::BundleManifest>>,
-    ) -> Self {
+    ) -> (Self, bool) {
         let effective_cache_dir = extract_dir.join(".hot").join("cache");
         let bytecode_cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
             effective_cache_dir.clone(),
         ));
-        let resource_registry = Arc::new(build_event_resource_registry(&extract_dir));
-        Self {
-            extract_dir,
-            src_paths,
-            effective_cache_dir,
-            bytecode_cache,
-            manifest,
-            resource_registry,
-        }
+        let (resource_registry, resources_ok) = try_build_event_resource_registry(&extract_dir);
+        let cacheable = manifest.is_some() && resources_ok;
+        (
+            Self {
+                extract_dir,
+                src_paths,
+                effective_cache_dir,
+                bytecode_cache,
+                manifest,
+                resource_registry: Arc::new(resource_registry),
+            },
+            cacheable,
+        )
     }
 }
 
@@ -1831,11 +1851,15 @@ impl BuildPathCache {
     ) -> Arc<LoadedBundleMeta> {
         if let Some(meta) = self.get_meta(build_id)
             && meta.extract_dir == extract_dir
+            && meta.manifest.is_some()
         {
             return meta;
         }
-        let meta = Arc::new(LoadedBundleMeta::load(extract_dir.to_path_buf()));
-        self.insert_meta(*build_id, Arc::clone(&meta));
+        let (meta, cacheable) = LoadedBundleMeta::load(extract_dir.to_path_buf());
+        let meta = Arc::new(meta);
+        if cacheable {
+            self.insert_meta(*build_id, Arc::clone(&meta));
+        }
         meta
     }
 
@@ -2103,14 +2127,28 @@ fn acquire_file_write_lock_blocking(
     }
 }
 
+fn try_build_event_resource_registry(
+    directory: &std::path::Path,
+) -> (hot::lang::hot::resource::ResourceRegistry, bool) {
+    match hot::bundle::read_bundle_resources(directory) {
+        Ok(resources) => (
+            hot::lang::hot::resource::build_registry_from_manifest(&resources, directory),
+            true,
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
+            (
+                hot::lang::hot::resource::build_registry_from_manifest(&Val::Null, directory),
+                false,
+            )
+        }
+    }
+}
+
 fn build_event_resource_registry(
     directory: &std::path::Path,
 ) -> hot::lang::hot::resource::ResourceRegistry {
-    let resources = hot::bundle::read_bundle_resources(directory).unwrap_or_else(|error| {
-        tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
-        Val::Null
-    });
-    hot::lang::hot::resource::build_registry_from_manifest(&resources, directory)
+    try_build_event_resource_registry(directory).0
 }
 
 /// Bundle execution must never inherit the host's process-global resources,
@@ -5365,7 +5403,9 @@ fn get_completed_bundle_meta(
     Arc<LoadedBundleMeta>,
     Option<Arc<hot::lang::cache::bytecode_cache::CachedBytecode>>,
 )> {
-    if let Some(meta) = build_path_cache.get_meta(&build.build_id) {
+    if let Some(meta) = build_path_cache.get_meta(&build.build_id)
+        && meta.manifest.is_some()
+    {
         if BuildPathCache::is_extraction_complete(&meta.extract_dir) {
             if let Some(cache_key) = meta
                 .manifest
@@ -7515,12 +7555,17 @@ async fn execute_single_event_handler_inner(
                 })
                 .await
                 .map_err(|error| format!("Bundle preparation task failed: {error}"))??;
-                let meta = Arc::new(LoadedBundleMeta::from_parts(
+                let (meta, cacheable) = LoadedBundleMeta::from_parts(
                     prepared.extract_dir,
                     prepared.src_paths,
                     prepared.manifest.map(Arc::new),
-                ));
-                build_path_cache.insert_meta(build.build_id, Arc::clone(&meta));
+                );
+                let meta = Arc::new(meta);
+                if cacheable {
+                    build_path_cache.insert_meta(build.build_id, Arc::clone(&meta));
+                } else {
+                    build_path_cache.insert(build.build_id, meta.extract_dir.clone());
+                }
                 (
                     meta.src_paths.clone(),
                     true,
@@ -19589,6 +19634,68 @@ fn (event) {{ "{name}" }}
         let shared = Arc::new(cache);
         assert!(get_completed_bundle_meta(&build, &shared).is_none());
         assert!(shared.get_meta(&build_id).is_none());
+    }
+
+    #[test]
+    fn build_path_cache_does_not_cache_failed_manifest_or_resources_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let extract_dir = dir.path().join("build-bad-manifest");
+        std::fs::create_dir_all(extract_dir.join("hot/src")).unwrap();
+        std::fs::create_dir_all(extract_dir.join("resources")).unwrap();
+        std::fs::create_dir_all(extract_dir.join(".hot/cache")).unwrap();
+        std::fs::write(extract_dir.join("resources/note.txt"), "hello").unwrap();
+        // Start with a corrupt manifest.hot (simulates transient read/parse failure).
+        std::fs::write(extract_dir.join("manifest.hot"), "{not valid json").unwrap();
+
+        let cache = BuildPathCache::new();
+        let build_id = Uuid::now_v7();
+        cache.insert(build_id, extract_dir.clone());
+
+        let fallback = cache.get_or_load_meta(&build_id, &extract_dir);
+        assert!(fallback.manifest.is_none());
+        assert!(
+            cache.get_meta(&build_id).is_none(),
+            "failed manifest read must not poison BuildPathCache"
+        );
+
+        // Even when a caller supplies `manifest: Some(...)` via `from_parts`,
+        // a `read_bundle_resources` error must prevent caching.
+        let synthetic_manifest = Arc::new(hot::bundle::BundleManifest {
+            bundle_name: "demo".to_string(),
+            bundle_id: build_id.to_string(),
+            bundle_hash: "abc123".to_string(),
+            engine_version: hot::version::current_runtime_version().to_string(),
+            hot_std_version: hot::version::current_runtime_version().to_string(),
+            file_hashes: Vec::new(),
+            cache_key: Some("k".to_string()),
+        });
+        let (bad_res_meta, cacheable) = LoadedBundleMeta::from_parts(
+            extract_dir.clone(),
+            vec![extract_dir.join("hot/src").to_string_lossy().to_string()],
+            Some(synthetic_manifest),
+        );
+        assert!(bad_res_meta.resource_registry.entries.is_empty());
+        assert!(
+            !cacheable,
+            "failed resources read must mark LoadedBundleMeta uncacheable"
+        );
+
+        // Once manifest.hot is valid, the next lookup succeeds and populates the cache.
+        let runtime_ver = hot::version::current_runtime_version();
+        std::fs::write(
+            extract_dir.join("manifest.hot"),
+            format!(
+                r#"{{"hot.bundle.demo":{{"engine_version":"{runtime_ver}","hot_std_version":"{runtime_ver}","files":[{{"path":"hot/src/app.hot","hash":"abc123"}}],"resources":[{{"path":"note.txt","hash":"h1","size":5}}]}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let healthy1 = cache.get_or_load_meta(&build_id, &extract_dir);
+        assert!(healthy1.manifest.is_some());
+        assert!(healthy1.resource_registry.entries.contains_key("note.txt"));
+        assert!(cache.get_meta(&build_id).is_some());
+        let healthy2 = cache.get_or_load_meta(&build_id, &extract_dir);
+        assert!(Arc::ptr_eq(&healthy1, &healthy2));
     }
 
     #[tokio::test]

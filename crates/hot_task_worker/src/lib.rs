@@ -85,7 +85,10 @@ struct CachedTenantStore {
 /// are never re-initialized per task.
 struct TaskExecutionServices {
     db: Arc<DatabasePool>,
-    file_storage: Option<Arc<dyn hot::file_storage::FileStorage>>,
+    worker_conf: Val,
+    /// Shared file storage client initialized at startup when available, or
+    /// lazily retried on demand if startup initialization failed transiently.
+    file_storage: tokio::sync::RwLock<Option<Arc<dyn hot::file_storage::FileStorage>>>,
     embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>>,
     blob_config: hot::blob::BlobConfig,
     stores: Mutex<HashMap<TenantStoreKey, CachedTenantStore>>,
@@ -97,7 +100,9 @@ impl TaskExecutionServices {
         let file_storage = match hot::file_storage::file_storage_from_config(conf).await {
             Ok(storage) => Some(Arc::from(storage)),
             Err(error) => {
-                tracing::debug!("File storage not available for task worker: {error}");
+                tracing::warn!(
+                    "File storage failed to initialize at task worker startup (will retry on demand): {error}"
+                );
                 None
             }
         };
@@ -110,7 +115,8 @@ impl TaskExecutionServices {
 
         Self {
             db,
-            file_storage,
+            worker_conf: conf.clone(),
+            file_storage: tokio::sync::RwLock::new(file_storage),
             embedding_provider,
             blob_config,
             stores: Mutex::new(HashMap::new()),
@@ -118,24 +124,75 @@ impl TaskExecutionServices {
         }
     }
 
-    fn file_storage(&self) -> Option<Arc<dyn hot::file_storage::FileStorage>> {
-        self.file_storage.clone()
+    #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+    async fn cached_file_storage(&self) -> Option<Arc<dyn hot::file_storage::FileStorage>> {
+        self.file_storage.read().await.as_ref().map(Arc::clone)
+    }
+
+    #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+    async fn cache_file_storage(
+        &self,
+        storage: Arc<dyn hot::file_storage::FileStorage>,
+    ) -> Arc<dyn hot::file_storage::FileStorage> {
+        let mut guard = self.file_storage.write().await;
+        if let Some(existing) = guard.as_ref() {
+            return Arc::clone(existing);
+        }
+        *guard = Some(Arc::clone(&storage));
+        storage
+    }
+
+    async fn file_storage(&self) -> Option<Arc<dyn hot::file_storage::FileStorage>> {
+        if let Some(storage) = self.file_storage.read().await.as_ref() {
+            return Some(Arc::clone(storage));
+        }
+        // Only reached when startup initialization failed transiently.
+        let storage: Arc<dyn hot::file_storage::FileStorage> =
+            match hot::file_storage::file_storage_from_config(&self.worker_conf).await {
+                Ok(storage) => Arc::from(storage),
+                Err(error) => {
+                    tracing::debug!("File storage lazy retry failed for task worker: {error}");
+                    return None;
+                }
+            };
+        let mut guard = self.file_storage.write().await;
+        if let Some(existing) = guard.as_ref() {
+            return Some(Arc::clone(existing));
+        }
+        tracing::info!("File storage initialized lazily for task worker after startup failure");
+        *guard = Some(Arc::clone(&storage));
+        Some(storage)
     }
 
     fn embedding_provider(&self) -> Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> {
         self.embedding_provider.clone()
     }
 
-    fn blob_store_for(&self, scoped_db: &Arc<DatabasePool>) -> Option<Arc<hot::blob::BlobStore>> {
+    fn blob_store_with_storage(
+        &self,
+        scoped_db: &Arc<DatabasePool>,
+        storage: Option<&Arc<dyn hot::file_storage::FileStorage>>,
+    ) -> Option<Arc<hot::blob::BlobStore>> {
         if !self.blob_config.enabled() {
             return None;
         }
-        let storage = self.file_storage.as_ref()?;
+        let storage = storage?;
         Some(Arc::new(hot::blob::BlobStore::new(
             Arc::clone(scoped_db),
             Arc::clone(storage),
             self.blob_config.clone(),
         )))
+    }
+
+    async fn blob_store_for(
+        &self,
+        scoped_db: &Arc<DatabasePool>,
+    ) -> Option<Arc<hot::blob::BlobStore>> {
+        if !self.blob_config.enabled() {
+            return None;
+        }
+        let storage = self.file_storage().await?;
+        self.blob_store_with_storage(scoped_db, Some(&storage))
     }
 
     async fn store_for(
@@ -1594,7 +1651,7 @@ pub async fn run_with_stream_pubsub(
         Arc::new(TaskExecutionServices::new(Arc::clone(&db), &config.worker_conf).await);
 
     let event_publisher: Option<Arc<dyn EventPublisher>> =
-        create_event_publisher(&config, &db, execution_services.blob_store_for(&db))?;
+        create_event_publisher(&config, &db, execution_services.blob_store_for(&db).await)?;
 
     let usage_stats_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -5410,7 +5467,7 @@ async fn process_container_task(
                 return Ok(());
             }
         };
-        let fs_storage = if let Some(cached) = execution_services.file_storage() {
+        let fs_storage = if let Some(cached) = execution_services.cached_file_storage().await {
             cached
         } else {
             match await_claimed_task_deadline(
@@ -5419,7 +5476,7 @@ async fn process_container_task(
             )
             .await
             {
-                Ok(Ok(s)) => Arc::from(s),
+                Ok(Ok(s)) => execution_services.cache_file_storage(Arc::from(s)).await,
                 Ok(Err(e)) => {
                     tracing::error!("File server storage init failed: {}", e);
                     let error = task_failure_json(
@@ -6702,7 +6759,7 @@ async fn process_code_task(
             .store_for(&worker_conf, durable_org_id, env_id)
             .await;
         let embedding_provider = execution_services.embedding_provider();
-        let file_storage = execution_services.file_storage();
+        let file_storage = execution_services.file_storage().await;
 
         Ok::<_, String>((
             cached,
@@ -6761,7 +6818,7 @@ async fn process_code_task(
             }
         };
 
-    let blob_store = execution_services.blob_store_for(&db);
+    let blob_store = execution_services.blob_store_with_storage(&db, file_storage.as_ref());
 
     // Convert JSON args -> Val. Arguments in blob storage that can't be read
     // fail the task: it must not run on anything but what it was started with.
@@ -16385,8 +16442,11 @@ flaky fn (args: Any): Map {
         });
         let services = TaskExecutionServices::new(Arc::clone(&db), &conf).await;
 
-        let fs1 = services.file_storage().expect("local file storage");
-        let fs2 = services.file_storage().expect("cached local file storage");
+        let fs1 = services.file_storage().await.expect("local file storage");
+        let fs2 = services
+            .file_storage()
+            .await
+            .expect("cached local file storage");
         assert!(Arc::ptr_eq(&fs1, &fs2), "file_storage must be shared");
 
         let (org_a, env_a) = (Uuid::now_v7(), Uuid::now_v7());
@@ -16397,7 +16457,7 @@ flaky fn (args: Any): Map {
             org_id: org_a,
             env_id: env_a,
         }));
-        assert!(services.blob_store_for(&scoped_a).is_some());
+        assert!(services.blob_store_for(&scoped_a).await.is_some());
 
         let store_a1 = services.store_for(&conf, org_a, env_a).await.unwrap();
         let store_a2 = services.store_for(&conf, org_a, env_a).await.unwrap();
@@ -16427,6 +16487,39 @@ flaky fn (args: Any): Map {
             !Arc::ptr_eq(&store_b, &store_b2),
             "oldest tenant B must have been evicted by LRU cap"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn task_execution_services_lazily_recovers_after_startup_storage_failure() {
+        let db = Arc::new(hot::db::test_db().await);
+        let dir =
+            std::env::temp_dir().join(format!("hot-exec-svc-recover-{}", Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = val!({
+            "file": {
+                "storage": {
+                    "type": "local",
+                    "path": dir.to_string_lossy().to_string(),
+                }
+            },
+            "blob": {
+                "mode": "service",
+            },
+        });
+        let services = TaskExecutionServices::new(Arc::clone(&db), &conf).await;
+        // Simulate a transient startup init failure leaving `file_storage` empty.
+        *services.file_storage.write().await = None;
+
+        let recovered1 = services
+            .file_storage()
+            .await
+            .expect("lazy retry must recover file_storage");
+        let recovered2 = services
+            .file_storage()
+            .await
+            .expect("subsequent calls must reuse recovered file_storage");
+        assert!(Arc::ptr_eq(&recovered1, &recovered2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
