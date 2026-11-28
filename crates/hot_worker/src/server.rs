@@ -7170,15 +7170,6 @@ async fn execute_single_event_handler_inner(
     // the failure the VM records as it unwinds names the reason.
     let stopped = Arc::new(OnceLock::new());
     let hard_stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let emitter_for_events = emitter.clone().map(|inner| {
-        let inner = RunStartWatch::wrap(inner, run_id, Arc::clone(&run_has_started));
-        Arc::new(StoppedRunEmitter {
-            inner,
-            run_id,
-            stopped: Arc::clone(&stopped),
-            hard_stopped: Arc::clone(&hard_stopped),
-        }) as Arc<dyn EngineEventEmitter>
-    });
 
     // Create event object with type and data structure
     let event_object = val!({
@@ -7215,22 +7206,39 @@ async fn execute_single_event_handler_inner(
     // This means the run won't exist in the database even though the event was attempted.
     //
     // Stream and dashboard subscribers hear of the start from
-    // `RunStartPublisher` once the VM has recorded it.
-    let emitter_for_events = match (emitter_for_events, stream_publisher.as_ref()) {
-        (Some(inner), Some(publisher)) => Some(Arc::new(RunStartPublisher {
+    // `RunStartPublisher` asynchronously once the VM has recorded it. Keeping
+    // `StoppedRunEmitter` outside `RunStartPublisher` ensures a hard-stopped
+    // detached VM thread cannot publish a late `run:start`, while keeping
+    // `RunStartWatch` inside guarantees any path that observes
+    // `run_has_started` also waits on `RunStartPublisher` before publishing a
+    // terminal event.
+    let mut run_start_publisher = None;
+    let emitter_for_events = emitter.clone().map(|inner| {
+        let inner = RunStartWatch::wrap(inner, run_id, Arc::clone(&run_has_started));
+        let inner = if let Some(publisher) = stream_publisher.as_ref() {
+            let start_pub = Arc::new(RunStartPublisher::new(
+                inner,
+                Arc::clone(publisher),
+                run_id,
+                event_message.body.event.env_id,
+                stream_id,
+                event_message.body.execution_context.event_id,
+                Some(build.project_id),
+                function_name.clone(),
+                run_type_name(&event_message.body.event.event_type),
+            ));
+            run_start_publisher = Some(Arc::clone(&start_pub));
+            start_pub as Arc<dyn EngineEventEmitter>
+        } else {
+            inner
+        };
+        Arc::new(StoppedRunEmitter {
             inner,
-            publisher: Arc::clone(publisher),
             run_id,
-            env_id: event_message.body.event.env_id,
-            stream_id,
-            event_id: event_message.body.execution_context.event_id,
-            project_id: Some(build.project_id),
-            fn_name: function_name.clone(),
-            run_type: run_type_name(&event_message.body.event.event_type),
-            published: std::sync::atomic::AtomicBool::new(false),
-        }) as Arc<dyn EngineEventEmitter>),
-        (emitter_for_events, _) => emitter_for_events,
-    };
+            stopped: Arc::clone(&stopped),
+            hard_stopped: Arc::clone(&hard_stopped),
+        }) as Arc<dyn EngineEventEmitter>
+    });
 
     // A live build may use host files and development context only after
     // matching the current profile. Deployed bundles must resolve their own bytes.
@@ -8120,11 +8128,19 @@ async fn execute_single_event_handler_inner(
                 error: Some(masked_error),
             };
             let publisher_clone = Arc::clone(publisher);
+            let start_pub = run_start_publisher.clone();
             tokio::spawn(async move {
-                if let Err(e) = publisher_clone.publish(stream_event).await {
+                if let Some(start_pub) = start_pub {
+                    start_pub.wait_published().await;
+                }
+                let (stream_res, env_res) = tokio::join!(
+                    publisher_clone.publish(stream_event),
+                    publisher_clone.publish_env(env_event),
+                );
+                if let Err(e) = stream_res {
                     tracing::warn!("Failed to publish stream failure event: {}", e);
                 }
-                if let Err(e) = publisher_clone.publish_env(env_event).await {
+                if let Err(e) = env_res {
                     tracing::warn!("Failed to publish env failure event: {}", e);
                 }
             });
@@ -8501,13 +8517,23 @@ async fn execute_single_event_handler_inner(
             }
         };
 
-        // Spawn fire-and-forget task to publish both events (don't block execution)
+        // Spawn fire-and-forget task to publish both events (don't block execution),
+        // waiting for any in-flight asynchronous `run:start` publication first so
+        // terminal events never overtake `run:start` on stream or env channels.
         let publisher_clone = Arc::clone(publisher);
+        let start_pub = run_start_publisher.clone();
         tokio::spawn(async move {
-            if let Err(e) = publisher_clone.publish(stream_event).await {
+            if let Some(start_pub) = start_pub {
+                start_pub.wait_published().await;
+            }
+            let (stream_res, env_res) = tokio::join!(
+                publisher_clone.publish(stream_event),
+                publisher_clone.publish_env(env_event),
+            );
+            if let Err(e) = stream_res {
                 tracing::warn!("Failed to publish stream event: {}", e);
             }
-            if let Err(e) = publisher_clone.publish_env(env_event).await {
+            if let Err(e) = env_res {
                 tracing::warn!("Failed to publish env event: {}", e);
             }
         });
@@ -8844,6 +8870,12 @@ impl EngineEventEmitter for StoppedRunEmitter {
         self.inner.flush_run(run_id)
     }
 
+    fn wait_run_start_published(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.wait_run_start_published()
+    }
+
     fn shutdown(
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
@@ -8898,6 +8930,12 @@ impl EngineEventEmitter for RunStartWatch {
         run_id: Uuid,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         self.inner.flush_run(run_id)
+    }
+
+    fn wait_run_start_published(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.inner.wait_run_start_published()
     }
 
     fn shutdown(
@@ -9059,14 +9097,30 @@ fn run_type_name(event_type: &str) -> String {
     .to_string()
 }
 
+/// Signals `RunStartPublisher` waiters on drop so callers of
+/// `wait_published()` can never hang even if emitting, spawning, flushing,
+/// or publishing panics or is cancelled.
+struct ReadyOnDrop(Arc<tokio::sync::watch::Sender<bool>>);
+
+impl Drop for ReadyOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
 /// Wraps a run's emitter to publish `run:start` to the run's stream and its
-/// environment once the VM has recorded the run.
+/// environment asynchronously once the VM has recorded the run.
 ///
 /// The VM emits `run:start` on its blocking thread before the run's first
-/// instruction, and that thread also publishes the run's `stream:data`
-/// synchronously, so publishing here, before returning, puts the start ahead
-/// of every chunk and of the run's end in the subscriber's stream. The run
-/// row is flushed first because SSE handlers read it to describe the run.
+/// instruction. Instead of stalling the VM thread on `flush_run` and two
+/// pub/sub publishes, this wrapper spawns the flush + parallel stream/env
+/// publishes onto the Tokio runtime and returns immediately. Any site that
+/// publishes a subsequent `stream:data` chunk or terminal `run:stop` /
+/// `run:fail` / `run:cancel` awaits `wait_run_start_published()` /
+/// `wait_published()` first, preserving strict `run:start`-first ordering for
+/// subscribers while removing the flush + pub/sub round-trips from the
+/// first-instruction critical path. The run row is still flushed before
+/// `run:start` is published because SSE handlers read it to describe the run.
 struct RunStartPublisher {
     inner: Arc<dyn EngineEventEmitter>,
     publisher: Arc<StreamPubSub>,
@@ -9078,59 +9132,112 @@ struct RunStartPublisher {
     fn_name: String,
     run_type: String,
     published: std::sync::atomic::AtomicBool,
+    ready_tx: Arc<tokio::sync::watch::Sender<bool>>,
+    ready_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl RunStartPublisher {
-    fn publish_start(&self) {
-        // The VM runs on a blocking thread, where `block_on` is the bridge
-        // (as for `stream:data`).
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        inner: Arc<dyn EngineEventEmitter>,
+        publisher: Arc<StreamPubSub>,
+        run_id: Uuid,
+        env_id: Uuid,
+        stream_id: Uuid,
+        event_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        fn_name: String,
+        run_type: String,
+    ) -> Self {
+        let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+        Self {
+            inner,
+            publisher,
+            run_id,
+            env_id,
+            stream_id,
+            event_id,
+            project_id,
+            fn_name,
+            run_type,
+            published: std::sync::atomic::AtomicBool::new(false),
+            ready_tx: Arc::new(ready_tx),
+            ready_rx,
+        }
+    }
+
+    fn spawn_publish_start(&self, ready_guard: ReadyOnDrop) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        // This runs on the VM thread after the run's start time is taken and
-        // before its first instruction, so it is in no stored metric: the
-        // run's own duration absorbs it.
+        let inner = Arc::clone(&self.inner);
+        let publisher = Arc::clone(&self.publisher);
+        let run_id = self.run_id;
+        let env_id = self.env_id;
+        let stream_id = self.stream_id;
+        let event_id = self.event_id;
+        let project_id = self.project_id;
+        let fn_name = self.fn_name.clone();
+        let run_type = self.run_type.clone();
         let publish_started = std::time::Instant::now();
-        handle.block_on(async {
-            match tokio::time::timeout(RUN_START_FLUSH_TIMEOUT, self.inner.flush_run(self.run_id))
-                .await
-            {
+        handle.spawn(async move {
+            let _ready = ready_guard;
+            match tokio::time::timeout(RUN_START_FLUSH_TIMEOUT, inner.flush_run(run_id)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!(run_id = %self.run_id, "Failed to flush run start before publishing it: {}", e),
-                Err(_) => warn!(run_id = %self.run_id, "Flushing run start timed out; publishing it anyway"),
+                Ok(Err(e)) => warn!(
+                    run_id = %run_id,
+                    "Failed to flush run start before publishing it: {}",
+                    e
+                ),
+                Err(_) => warn!(
+                    run_id = %run_id,
+                    "Flushing run start timed out; publishing it anyway"
+                ),
             }
             debug!(
                 "TIMING [{}]: run_start_flush: {:?}",
-                self.run_id.as_simple(),
+                run_id.as_simple(),
                 publish_started.elapsed()
             );
             let stream_event = StreamEvent::RunStart {
-                run_id: self.run_id,
-                env_id: self.env_id,
-                stream_id: self.stream_id,
-                event_id: self.event_id,
+                run_id,
+                env_id,
+                stream_id,
+                event_id,
             };
-            if let Err(e) = self.publisher.publish(stream_event).await {
-                warn!(run_id = %self.run_id, "Failed to publish run start: {}", e);
-            }
             let env_event = EnvEvent::RunStart {
-                run_id: self.run_id,
-                env_id: self.env_id,
-                stream_id: self.stream_id,
-                event_id: self.event_id,
-                project_id: self.project_id,
-                fn_name: Some(self.fn_name.clone()),
-                run_type: self.run_type.clone(),
+                run_id,
+                env_id,
+                stream_id,
+                event_id,
+                project_id,
+                fn_name: Some(fn_name),
+                run_type,
             };
-            if let Err(e) = self.publisher.publish_env(env_event).await {
-                warn!(run_id = %self.run_id, "Failed to publish run start env event: {}", e);
+            let (stream_res, env_res) = tokio::join!(
+                publisher.publish(stream_event),
+                publisher.publish_env(env_event),
+            );
+            if let Err(e) = stream_res {
+                warn!(run_id = %run_id, "Failed to publish run start: {}", e);
             }
+            if let Err(e) = env_res {
+                warn!(run_id = %run_id, "Failed to publish run start env event: {}", e);
+            }
+            debug!(
+                "TIMING [{}]: run_start_publish: {:?} (async flush and both publishes)",
+                run_id.as_simple(),
+                publish_started.elapsed()
+            );
         });
-        debug!(
-            "TIMING [{}]: run_start_publish: {:?} (flush and both publishes)",
-            self.run_id.as_simple(),
-            publish_started.elapsed()
-        );
+    }
+
+    async fn wait_published(&self) {
+        if !self.published.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let mut rx = self.ready_rx.clone();
+        let _ = rx.wait_for(|done| *done).await;
     }
 }
 
@@ -9138,13 +9245,23 @@ impl EngineEventEmitter for RunStartPublisher {
     fn emit(&self, event: hot::lang::emitter::EngineEvent) {
         let starts_run =
             event.event_type == "run:start" && event.execution_context.run_id == self.run_id;
-        self.inner.emit(event);
-        if starts_run
+        // Mark `published` before forwarding to `inner` (which wraps
+        // `RunStartWatch`), so any timeout/panic path that observes
+        // `run_has_started` is guaranteed to also wait on `wait_published()`.
+        // Holding `ReadyOnDrop` across `inner.emit` ensures waiters still
+        // unblock if `inner.emit` panics.
+        let ready_guard = if starts_run
             && !self
                 .published
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
         {
-            self.publish_start();
+            Some(ReadyOnDrop(Arc::clone(&self.ready_tx)))
+        } else {
+            None
+        };
+        self.inner.emit(event);
+        if let Some(ready_guard) = ready_guard {
+            self.spawn_publish_start(ready_guard);
         }
     }
 
@@ -9163,6 +9280,12 @@ impl EngineEventEmitter for RunStartPublisher {
         run_id: Uuid,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
         self.inner.flush_run(run_id)
+    }
+
+    fn wait_run_start_published(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.wait_published())
     }
 
     fn shutdown(
@@ -15230,46 +15353,62 @@ mod tests {
         assert!(trip.await.unwrap().is_some());
     }
 
-    /// `run:start` reaches the run's stream and environment once, after the
-    /// run's row is flushed and ahead of what the VM publishes next.
+    /// `emit(run:start)` returns immediately without waiting for `flush_run`,
+    /// while `wait_run_start_published()` orders subsequent `stream:data` and
+    /// terminal events strictly after the flushed `run:start` reaches both the
+    /// stream and environment channels once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_start_publisher_publishes_once_after_the_row_is_flushed() {
         use hot::lang::emitter::EngineEvent;
         use hot::stream::{EnvSubscriberFactory, StreamNext, StreamSubscriberFactory};
 
-        #[derive(Default)]
-        struct Record(std::sync::Mutex<Vec<String>>);
-        impl EngineEventEmitter for Record {
+        struct GatedRecord {
+            log: std::sync::Mutex<Vec<String>>,
+            flush_entered: Arc<tokio::sync::Notify>,
+            allow_flush: Arc<tokio::sync::Notify>,
+        }
+        impl EngineEventEmitter for GatedRecord {
             fn emit(&self, event: EngineEvent) {
-                self.0.lock().unwrap().push(event.event_type);
+                self.log.lock().unwrap().push(event.event_type);
             }
             fn flush_run(
                 &self,
                 _run_id: Uuid,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
             {
-                self.0.lock().unwrap().push("flush".to_string());
-                Box::pin(async { Ok(()) })
+                let flush_entered = Arc::clone(&self.flush_entered);
+                let allow_flush = Arc::clone(&self.allow_flush);
+                Box::pin(async move {
+                    self.log.lock().unwrap().push("flush".to_string());
+                    flush_entered.notify_one();
+                    allow_flush.notified().await;
+                    Ok(())
+                })
             }
         }
 
-        let record = Arc::new(Record::default());
+        let flush_entered = Arc::new(tokio::sync::Notify::new());
+        let allow_flush = Arc::new(tokio::sync::Notify::new());
+        let record = Arc::new(GatedRecord {
+            log: std::sync::Mutex::new(Vec::new()),
+            flush_entered: Arc::clone(&flush_entered),
+            allow_flush: Arc::clone(&allow_flush),
+        });
         let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
         let (run_id, env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         let mut stream_sub = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
         let mut env_sub = pubsub.subscribe_env(env_id).await.unwrap();
-        let emitter = Arc::new(RunStartPublisher {
-            inner: record.clone(),
-            publisher: Arc::clone(&pubsub),
+        let emitter = Arc::new(RunStartPublisher::new(
+            record.clone(),
+            Arc::clone(&pubsub),
             run_id,
             env_id,
             stream_id,
-            event_id: None,
-            project_id: None,
-            fn_name: "::app/f".to_string(),
-            run_type: run_type_name("hot:call"),
-            published: std::sync::atomic::AtomicBool::new(false),
-        });
+            None,
+            None,
+            "::app/f".to_string(),
+            run_type_name("hot:call"),
+        ));
         let context = move |run_id| {
             ExecutionContext::new(
                 run_id,
@@ -15282,14 +15421,41 @@ mod tests {
             )
         };
 
-        let vm_pubsub = Arc::clone(&pubsub);
-        tokio::task::spawn_blocking(move || {
-            emitter.emit(EngineEvent::run_start(&context(run_id)));
-            // A repeated start, or another run's, publishes nothing more.
-            emitter.emit(EngineEvent::run_start(&context(run_id)));
-            emitter.emit(EngineEvent::run_start(&context(Uuid::now_v7())));
+        // `emit(run:start)` must return promptly on the blocking VM thread even
+        // though `flush_run` has not been allowed to complete yet.
+        let emit_emitter = Arc::clone(&emitter);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::task::spawn_blocking(move || {
+                emit_emitter.emit(EngineEvent::run_start(&context(run_id)));
+                // A repeated start, or another run's, publishes nothing more.
+                emit_emitter.emit(EngineEvent::run_start(&context(run_id)));
+                emit_emitter.emit(EngineEvent::run_start(&context(Uuid::now_v7())));
+            }),
+        )
+        .await
+        .expect("emit(run:start) must not block the VM thread on flush_run")
+        .unwrap();
+
+        // Background task enters flush_run, but nothing has been published yet.
+        tokio::time::timeout(std::time::Duration::from_secs(1), flush_entered.notified())
+            .await
+            .expect("background run:start flush should start promptly");
+        let early =
+            tokio::time::timeout(std::time::Duration::from_millis(30), stream_sub.next()).await;
+        assert!(
+            early.is_err(),
+            "run:start must wait for flush_run: {early:?}"
+        );
+
+        // A streaming chunk waiting on `wait_run_start_published()` stays behind
+        // `run:start` until the flush finishes and `run:start` is published.
+        let chunk_emitter = Arc::clone(&emitter);
+        let chunk_pubsub = Arc::clone(&pubsub);
+        let chunk_task = tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async {
-                vm_pubsub
+                chunk_emitter.wait_run_start_published().await;
+                chunk_pubsub
                     .publish(StreamEvent::StreamData {
                         stream_data_id: Uuid::now_v7(),
                         run_id,
@@ -15301,14 +15467,22 @@ mod tests {
                     .await
                     .unwrap();
             });
-        })
-        .await
-        .unwrap();
+        });
+
+        allow_flush.notify_one();
+        chunk_task.await.unwrap();
 
         assert_eq!(
-            record.0.lock().unwrap()[..2],
-            ["run:start".to_string(), "flush".to_string()]
+            record
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| *e == "flush")
+                .count(),
+            1
         );
+        assert_eq!(record.log.lock().unwrap()[0], "run:start".to_string());
         let first = stream_sub.next().await;
         assert!(
             matches!(first, StreamNext::Event(StreamEvent::RunStart { run_id: got, .. }) if got == run_id),
@@ -15330,6 +15504,178 @@ mod tests {
         let more =
             tokio::time::timeout(std::time::Duration::from_millis(50), stream_sub.next()).await;
         assert!(more.is_err(), "{more:?}");
+    }
+
+    #[tokio::test]
+    async fn run_start_publisher_wait_returns_immediately_when_run_never_started() {
+        #[derive(Default)]
+        struct Noop;
+        impl EngineEventEmitter for Noop {
+            fn emit(&self, _event: hot::lang::emitter::EngineEvent) {}
+        }
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let emitter = Arc::new(RunStartPublisher::new(
+            Arc::new(Noop),
+            pubsub,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            None,
+            None,
+            "::app/f".to_string(),
+            run_type_name("hot:call"),
+        ));
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            emitter.wait_run_start_published(),
+        )
+        .await
+        .expect("unstarted run must not stall waiters");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_run_emitter_forwards_wait_and_blocks_late_run_start_publish() {
+        use hot::lang::emitter::EngineEvent;
+        use hot::stream::{StreamNext, StreamSubscriberFactory};
+
+        struct GatedFlush {
+            entered: Arc<tokio::sync::Notify>,
+            allow: Arc<tokio::sync::Notify>,
+        }
+        impl EngineEventEmitter for GatedFlush {
+            fn emit(&self, _event: EngineEvent) {}
+            fn flush_run(
+                &self,
+                _run_id: Uuid,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+            {
+                let entered = Arc::clone(&self.entered);
+                let allow = Arc::clone(&self.allow);
+                Box::pin(async move {
+                    entered.notify_one();
+                    allow.notified().await;
+                    Ok(())
+                })
+            }
+        }
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let (run_id, env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut stream_sub = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
+
+        let ctx = ExecutionContext::new(
+            run_id,
+            stream_id,
+            hot::db::run::RunType::Call.as_id(),
+            Some(env_id),
+            None,
+            None,
+            None,
+        );
+
+        // 1. Hard-stopped run drops run:start before RunStartPublisher or RunStartWatch.
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hard_stopped = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let inner = RunStartWatch::wrap(
+            Arc::new(GatedFlush {
+                entered: Arc::new(tokio::sync::Notify::new()),
+                allow: Arc::new(tokio::sync::Notify::new()),
+            }),
+            run_id,
+            Arc::clone(&started),
+        );
+        let start_pub = Arc::new(RunStartPublisher::new(
+            inner,
+            Arc::clone(&pubsub),
+            run_id,
+            env_id,
+            stream_id,
+            None,
+            None,
+            "::app/f".to_string(),
+            run_type_name("hot:call"),
+        ));
+        let stopped_emitter: Arc<dyn EngineEventEmitter> = Arc::new(StoppedRunEmitter {
+            inner: start_pub as Arc<dyn EngineEventEmitter>,
+            run_id,
+            stopped: Arc::new(OnceLock::new()),
+            hard_stopped,
+        });
+        stopped_emitter.emit(EngineEvent::run_start(&ctx));
+
+        assert!(!started.load(std::sync::atomic::Ordering::Acquire));
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stopped_emitter.wait_run_start_published(),
+        )
+        .await
+        .expect("hard-stopped run must not wait for a dropped run:start");
+        let published =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream_sub.next()).await;
+        assert!(
+            published.is_err(),
+            "no RunStart should be published: {published:?}"
+        );
+
+        // 2. Active run forwards wait_run_start_published() through StoppedRunEmitter
+        // and records run_has_started through RunStartWatch.
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let allow = Arc::new(tokio::sync::Notify::new());
+        let started2 = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner2 = RunStartWatch::wrap(
+            Arc::new(GatedFlush {
+                entered: Arc::clone(&entered),
+                allow: Arc::clone(&allow),
+            }),
+            run_id,
+            Arc::clone(&started2),
+        );
+        let start_pub2 = Arc::new(RunStartPublisher::new(
+            inner2,
+            Arc::clone(&pubsub),
+            run_id,
+            env_id,
+            stream_id,
+            None,
+            None,
+            "::app/f".to_string(),
+            run_type_name("hot:call"),
+        ));
+        let active_emitter: Arc<dyn EngineEventEmitter> = Arc::new(StoppedRunEmitter {
+            inner: start_pub2 as Arc<dyn EngineEventEmitter>,
+            run_id,
+            stopped: Arc::new(OnceLock::new()),
+            hard_stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        active_emitter.emit(EngineEvent::run_start(&ctx));
+        assert!(started2.load(std::sync::atomic::Ordering::Acquire));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .expect("background flush should start");
+
+        let wait_emitter = Arc::clone(&active_emitter);
+        let waiter = tokio::spawn(async move {
+            wait_emitter.wait_run_start_published().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !waiter.is_finished(),
+            "StoppedRunEmitter must forward wait_run_start_published() while flush is pending"
+        );
+
+        allow.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should complete once flush and publish finish")
+            .unwrap();
+        let next = stream_sub.next().await;
+        assert!(
+            matches!(next, StreamNext::Event(StreamEvent::RunStart { run_id: got, .. }) if got == run_id),
+            "{next:?}"
+        );
     }
 
     #[test]

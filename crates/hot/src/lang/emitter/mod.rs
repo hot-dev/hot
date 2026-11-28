@@ -284,6 +284,14 @@ pub trait EngineEventEmitter: Send + Sync {
         self.flush_async()
     }
 
+    /// Wait until any asynchronous `run:start` publication for the current run
+    /// has finished. Stream-data and terminal-run publishers await this so
+    /// subscribers always observe `run:start` first without blocking the VM
+    /// before its first instruction.
+    fn wait_run_start_published(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
+
     /// Gracefully shutdown the emitter and wait for all events to be processed.
     ///
     /// Default implementation does nothing. Emitters that use background processing
@@ -357,6 +365,10 @@ impl<T: EngineEventEmitter> EngineEventEmitter for FilteredEmitter<T> {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         self.inner.flush_run(run_id)
+    }
+
+    fn wait_run_start_published(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        self.inner.wait_run_start_published()
     }
 
     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {

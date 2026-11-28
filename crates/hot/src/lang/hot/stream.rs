@@ -99,9 +99,15 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             run_id,
             stream_id
         );
-        // Publish stream data (use Handle::block_on since VM runs in spawn_blocking context)
+        // Publish stream data (use Handle::block_on since VM runs in spawn_blocking context).
+        // Wait for any in-flight asynchronous `run:start` publication first so
+        // stream subscribers always receive `run:start` before the first chunk.
         let publisher_clone = publisher.clone();
+        let emitter = vm.get_emitter();
         tokio::runtime::Handle::current().block_on(async {
+            if let Some(emitter) = emitter {
+                emitter.wait_run_start_published().await;
+            }
             if let Err(e) = publisher_clone.publish(stream_event).await {
                 tracing::warn!("Failed to publish stream data: {}", e);
             }
@@ -113,4 +119,101 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 
     HotResult::Ok(Val::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lang::Compiler;
+    use crate::lang::compiler::core_registry::CoreVariableRegistry;
+    use crate::lang::emitter::{EngineEvent, EngineEventEmitter};
+    use crate::lang::event::ExecutionContext;
+    use crate::lang::parser::parse_hot;
+    use crate::stream::{
+        StreamEvent, StreamNext, StreamPubSub, StreamPubSubType, StreamSubscriberFactory,
+    };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_data_waits_for_in_flight_run_start_publication() {
+        struct GatedStartEmitter {
+            ready: tokio::sync::watch::Receiver<bool>,
+        }
+        impl EngineEventEmitter for GatedStartEmitter {
+            fn emit(&self, _event: EngineEvent) {}
+            fn wait_run_start_published(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let mut rx = self.ready.clone();
+                Box::pin(async move {
+                    let _ = rx.wait_for(|done| *done).await;
+                })
+            }
+        }
+
+        let pubsub = Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let (run_id, env_id, stream_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let mut sub = pubsub.subscribe_in_env(env_id, stream_id).await.unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+
+        let vm_pubsub = Arc::clone(&pubsub);
+        let vm_task = tokio::task::spawn_blocking(move || {
+            let mut program = parse_hot("::test ns").expect("test source should parse");
+            let mut compiler = Compiler::new();
+            compiler
+                .compile_program_unchecked(&mut program)
+                .expect("test source should compile");
+            let mut vm = VirtualMachine::new(
+                compiler.get_program_arc(),
+                None,
+                compiler.get_function_mapping_arc(),
+                compiler.get_core_functions_arc(),
+                compiler.get_type_implementations_arc(),
+                Arc::new(CoreVariableRegistry::new()),
+                None,
+            );
+            vm.set_execution_context(ExecutionContext::new(
+                run_id,
+                stream_id,
+                crate::db::run::RunType::Call.as_id(),
+                Some(env_id),
+                None,
+                None,
+                None,
+            ));
+            vm.set_stream_publisher(vm_pubsub);
+            vm.set_emitter(Arc::new(GatedStartEmitter { ready: ready_rx }));
+
+            let res = data(&mut vm, &[Val::from("chunk"), Val::from(1i64)]);
+            assert!(matches!(res, HotResult::Ok(Val::Null)), "{res:?}");
+        });
+
+        // While run:start is still in-flight, stream:data must not overtake it.
+        let early = tokio::time::timeout(std::time::Duration::from_millis(40), sub.next()).await;
+        assert!(early.is_err(), "stream:data published early: {early:?}");
+
+        // Publish RunStart and release waiters, mimicking RunStartPublisher.
+        pubsub
+            .publish(StreamEvent::RunStart {
+                run_id,
+                env_id,
+                stream_id,
+                event_id: None,
+            })
+            .await
+            .unwrap();
+        let _ = ready_tx.send(true);
+        vm_task.await.unwrap();
+
+        let first = sub.next().await;
+        assert!(
+            matches!(first, StreamNext::Event(StreamEvent::RunStart { run_id: got, .. }) if got == run_id),
+            "{first:?}"
+        );
+        let second = sub.next().await;
+        assert!(
+            matches!(&second, StreamNext::Event(StreamEvent::StreamData { run_id: got, data_type, .. }) if *got == run_id && data_type == "chunk"),
+            "{second:?}"
+        );
+    }
 }
