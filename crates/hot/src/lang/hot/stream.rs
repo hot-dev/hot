@@ -122,7 +122,7 @@ pub fn data(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::lang::Compiler;
     use crate::lang::compiler::core_registry::CoreVariableRegistry;
@@ -136,8 +136,12 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn stream_data_waits_for_in_flight_run_start_publication() {
+    pub(in crate::lang::hot) async fn assert_waits_for_in_flight_run_start<F>(
+        expected_data_type: &str,
+        emit_chunk: F,
+    ) where
+        F: FnOnce(&mut VirtualMachine) + Send + 'static,
+    {
         struct GatedStartEmitter {
             ready: tokio::sync::watch::Receiver<bool>,
         }
@@ -184,8 +188,7 @@ mod tests {
             vm.set_stream_publisher(vm_pubsub);
             vm.set_emitter(Arc::new(GatedStartEmitter { ready: ready_rx }));
 
-            let res = data(&mut vm, &[Val::from("chunk"), Val::from(1i64)]);
-            assert!(matches!(res, HotResult::Ok(Val::Null)), "{res:?}");
+            emit_chunk(&mut vm);
         });
 
         // While run:start is still in-flight, stream:data must not overtake it.
@@ -212,8 +215,17 @@ mod tests {
         );
         let second = sub.next().await;
         assert!(
-            matches!(&second, StreamNext::Event(StreamEvent::StreamData { run_id: got, data_type, .. }) if *got == run_id && data_type == "chunk"),
+            matches!(&second, StreamNext::Event(StreamEvent::StreamData { run_id: got, data_type, .. }) if *got == run_id && data_type == expected_data_type),
             "{second:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_data_waits_for_in_flight_run_start_publication() {
+        assert_waits_for_in_flight_run_start("chunk", |vm| {
+            let res = data(vm, &[Val::from("chunk"), Val::from(1i64)]);
+            assert!(matches!(res, HotResult::Ok(Val::Null)), "{res:?}");
+        })
+        .await;
     }
 }

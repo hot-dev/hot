@@ -7207,11 +7207,13 @@ async fn execute_single_event_handler_inner(
     //
     // Stream and dashboard subscribers hear of the start from
     // `RunStartPublisher` asynchronously once the VM has recorded it. Keeping
-    // `StoppedRunEmitter` outside `RunStartPublisher` ensures a hard-stopped
-    // detached VM thread cannot publish a late `run:start`, while keeping
-    // `RunStartWatch` inside guarantees any path that observes
-    // `run_has_started` also waits on `RunStartPublisher` before publishing a
-    // terminal event.
+    // `StoppedRunEmitter` outside `RunStartPublisher` drops any `run:start`
+    // emitted after a hard stop so a detached VM thread cannot initiate a late
+    // publication (a hard stop that lands after `emit(run:start)` while the
+    // background flush is already in flight still lets `run:start` finish and
+    // orders `run:fail` behind it). Keeping `RunStartWatch` inside guarantees
+    // any path that observes `run_has_started` also waits on
+    // `RunStartPublisher` before publishing a terminal event.
     let mut run_start_publisher = None;
     let emitter_for_events = emitter.clone().map(|inner| {
         let inner = RunStartWatch::wrap(inner, run_id, Arc::clone(&run_has_started));
