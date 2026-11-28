@@ -69,6 +69,14 @@ pub(crate) fn data_volume_base_dir(conf: &Val) -> Option<String> {
 }
 
 pub(crate) async fn run_task_worker(env: Env, conf: Val) {
+    run_task_worker_with_stream_pubsub(env, conf, None).await
+}
+
+pub(crate) async fn run_task_worker_with_stream_pubsub(
+    env: Env,
+    conf: Val,
+    stream_pubsub: Option<std::sync::Arc<StreamPubSub>>,
+) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
         build_info::VERSION,
@@ -202,7 +210,12 @@ pub(crate) async fn run_task_worker(env: Env, conf: Val) {
 
     // A standalone task worker that stops on an error or a panic exits
     // non-zero so its supervisor sees the failure.
-    let failed = match tokio::spawn(hot_task_worker::run(config)).await {
+    let failed = match tokio::spawn(hot_task_worker::run_with_stream_pubsub(
+        config,
+        stream_pubsub,
+    ))
+    .await
+    {
         Ok(Ok(())) => {
             info!("hot.dev: TASK_WORKER shut down");
             false

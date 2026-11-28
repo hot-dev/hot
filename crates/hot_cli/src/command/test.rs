@@ -14,7 +14,7 @@ use crate::command::api::run_api_with_stream_pubsub;
 use crate::command::app::run_app;
 use crate::command::deploy::setup_live_build_for_dev;
 use crate::command::scheduler::run_scheduler;
-use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub};
+use crate::command::worker::{run_task_worker_with_stream_pubsub, run_worker_with_stream_pubsub};
 use crate::conf::{get_merged_src_paths, get_merged_test_paths, load_conf};
 
 fn isolate_integration_queue(conf: Val) -> Val {
@@ -341,8 +341,9 @@ async fn run_integration_test(
     if services.contains(&"task-worker".to_string()) {
         info!("hot.test: Starting task worker...");
         let tw_conf = merged_conf.clone();
+        let tw_stream = shared_stream_pubsub.clone();
         service_handles.push(tokio::spawn(async move {
-            run_task_worker(Env::Development, tw_conf).await;
+            run_task_worker_with_stream_pubsub(Env::Development, tw_conf, tw_stream).await;
         }));
     }
 
@@ -639,6 +640,182 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn shared_stream_pubsub_delivers_task_messages_and_wakes_await() {
+        use hot::db::{Build, Project};
+        use hot::store::Store;
+        use hot::stream::{StreamEvent, StreamPublisher};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("managed.db");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let base_conf = hot::val!({"db": {"uri": format!("sqlite:{}", database_path.display())}});
+        hot::db::run_migrations(&base_conf).await.unwrap();
+        let db = Arc::new(hot::db::create_db_pool(&base_conf).await.unwrap());
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let user = hot::db::User::get_user(&db, &fixture.user_id)
+            .await
+            .unwrap();
+        let org = hot::db::Org::get_org(&db, &fixture.org_id).await.unwrap();
+        let env = hot::db::Env::get_env(&db, &fixture.env_id).await.unwrap();
+        let root_project = Project::get_project(&db, &fixture.project_id)
+            .await
+            .unwrap();
+        let live = Build::insert_or_update_live_build(
+            &db,
+            &root_project.project_id,
+            "pubsub-wiring-live",
+            0,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+
+        let source = src_dir.join("pubsub_wiring.hot");
+        std::fs::write(
+            &source,
+            r#"
+            ::pubsub_wiring ns
+            state ::hot::store/Map({name: "pubsub-wiring-state"})
+            echo-inbox fn (_args: Any): Any {
+                ::hot::store/put(state, "ready", true)
+                ::hot::task/receive()
+            }
+            task-send-and-await-use-shared-pubsub meta ["test"] fn () {
+                info ::hot::task/start(::pubsub_wiring/echo-inbox)
+                ::hot::store/put(state, "task_id", info.id)
+                done ::hot::task/await(info.id)
+                assert(eq(done.status, "completed"), `task should complete, got status=${done.status} result=${done.result}`)
+                assert(eq(done.result, "ping"), `task/receive should observe message over shared StreamPubSub, got ${done.result}`)
+            }
+            "#,
+        )
+        .unwrap();
+
+        let unique_queue_name = format!("hot:task:pubsub-test-{}", uuid::Uuid::now_v7());
+        let src_path = src_dir.to_string_lossy().to_string();
+        let conf = hot::val!({
+            "db": {"uri": format!("sqlite:{}", database_path.display())},
+            "store": {"type": "sqlite"},
+            "queue": {"type": "memory", "name": unique_queue_name.clone()},
+            "redis": {"uri": ""},
+            "serialization": {"type": "json"},
+            "box": {"enabled": false, "backend": "kata"},
+            "task": {"max-concurrent": 1, "code-max-concurrent": 2},
+            "set": {"profile": "local"},
+            "profile": {
+                "local": {
+                    "user": {"email": user.email},
+                    "org": {"slug": org.slug},
+                    "env": {"name": env.name},
+                }
+            },
+            "file": {"storage": {"path": dir.path().join("files").to_string_lossy().to_string()}},
+        })
+        .set(
+            &format!("project.{}.src.paths", root_project.name),
+            hot::val!([src_path.clone()]),
+        );
+
+        let shared_stream_pubsub =
+            Arc::new(StreamPubSub::new(StreamPubSubType::Memory, None, false).unwrap());
+        let task_queue = Arc::new(
+            hot::queue::ProcessingQueue::new_with_cluster(
+                QueueType::Memory,
+                unique_queue_name,
+                None,
+                false,
+                Serialization::Json,
+            )
+            .unwrap(),
+        );
+
+        let tw_conf = conf.clone();
+        let tw_pubsub = Arc::clone(&shared_stream_pubsub);
+        let task_worker = tokio::spawn(async move {
+            run_task_worker_with_stream_pubsub(Env::Development, tw_conf, Some(tw_pubsub)).await;
+        });
+
+        // Wait for echo-inbox to register its inbox subscription and mark itself
+        // ready, then publish the inbound TaskMessage over the shared pub/sub.
+        // Without a shared StreamPubSub this message never reaches task/receive()
+        // and the test times out.
+        let sender_db = Arc::clone(&db);
+        let sender_pubsub = Arc::clone(&shared_stream_pubsub);
+        let sender_org = fixture.org_id;
+        let sender_env = fixture.env_id;
+        let sender = tokio::spawn(async move {
+            let store = hot::store::sqlite::SqliteStore::new(sender_db, sender_org, sender_env);
+            loop {
+                let ready = store
+                    .get("pubsub-wiring-state", &serde_json::json!("ready"))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|e| e.value == serde_json::json!(true));
+                let task_id = store
+                    .get("pubsub-wiring-state", &serde_json::json!("task_id"))
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.value.as_str().map(str::to_string));
+                if ready && let Some(task_id) = task_id {
+                    sender_pubsub
+                        .publish(StreamEvent::TaskMessage {
+                            task_id,
+                            env_id: Some(sender_env),
+                            payload: serde_json::json!("ping"),
+                        })
+                        .await
+                        .unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let ctx = hot::lang::event::ExecutionContext::new(
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            hot::db::run::RunType::Run.as_id(),
+            Some(fixture.env_id),
+            Some(fixture.user_id),
+            Some(fixture.org_id),
+            Some(live.build_id),
+        );
+        let paths = vec![src_path];
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            hot::lang::engine::Engine::run_tests_with_direct_discovery(
+                None,
+                true,
+                &paths,
+                &[],
+                Some(&conf),
+                Some(&root_project.name),
+                None,
+                Some((db, ctx)),
+                Some(task_queue),
+                Some(Arc::clone(&shared_stream_pubsub)),
+                false,
+            ),
+        )
+        .await
+        .expect("task/send -> task/receive and task/await should complete over shared StreamPubSub")
+        .unwrap();
+
+        task_worker.abort();
+        sender.abort();
+        let _ = task_worker.await;
+        let _ = sender.await;
+
+        assert!(matches!(result, hot::lang::engine::TestRunStatus::Passed));
     }
 
     #[test]

@@ -242,8 +242,7 @@ struct CacheFilePayloadEncode<'a> {
 }
 
 /// Decode a decompressed cache payload into a runtime-ready
-/// [`CachedBytecode`]. Shared by the on-disk cache and the hot-std
-/// release artifact. Performs no metadata validation — callers decide
+/// [`CachedBytecode`]. Performs no metadata validation — callers decide
 /// what "valid" means for their context.
 pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedBytecode>, String> {
     // Borrowed view: the byte sections alias `decompressed` directly instead
@@ -881,7 +880,9 @@ impl BytecodeCache {
         Ok(cached_bytecode)
     }
 
-    /// Save compiled bytecode to cache with compilation artifacts, AST, and HotAst
+    /// Save compiled bytecode to cache with compilation artifacts, AST, and HotAst.
+    /// Production callers use [`Self::save_cached`] to avoid cloning; kept for tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn save(
         &self,

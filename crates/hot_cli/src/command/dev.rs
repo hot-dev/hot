@@ -23,7 +23,9 @@ use crate::command::app::run_app;
 use crate::command::deploy::setup_live_build_for_dev_with_color;
 use crate::command::init::check_and_run_init_if_needed;
 use crate::command::scheduler::run_scheduler;
-use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub_shared_context};
+use crate::command::worker::{
+    run_task_worker_with_stream_pubsub, run_worker_with_stream_pubsub_shared_context,
+};
 use crate::conf::{
     apply_env_vars, create_default_conf, get_merged_src_paths, get_merged_test_paths, load_ctx,
     reload_conf_after_init, reload_dotenv_files,
@@ -719,7 +721,11 @@ pub(crate) async fn run_dev(
 
     // Start task worker for processing ::hot::task/start and ::hot::box/start tasks
     info!("hot.dev: Starting task worker...");
-    let task_worker_handle = tokio::spawn(run_task_worker(Env::Development, conf.clone()));
+    let task_worker_handle = tokio::spawn(run_task_worker_with_stream_pubsub(
+        Env::Development,
+        conf.clone(),
+        shared_stream_pubsub.clone(),
+    ));
 
     // Worker is started last to ensure everything else is ready
     // Add a small delay to let scheduler perform initial sync
