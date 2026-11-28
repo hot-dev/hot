@@ -285,9 +285,14 @@ impl EventHandler {
         build_id: &Uuid,
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        if let crate::db::DatabasePool::Postgres(pg_pool) = db {
+            return Self::get_runtime_visible_event_handlers_by_build_postgres(
+                pg_pool, build_id, event_type,
+            )
+            .await;
+        }
         let cache_key = (*build_id, event_type.to_string());
-        if matches!(db, crate::db::DatabasePool::Sqlite(_))
-            && let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+        if let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get(&cache_key)
             && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
         {
@@ -295,12 +300,7 @@ impl EventHandler {
         }
 
         let handlers = match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                Self::get_runtime_visible_event_handlers_by_build_postgres(
-                    pg_pool, build_id, event_type,
-                )
-                .await?
-            }
+            crate::db::DatabasePool::Postgres(_) => unreachable!(),
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 Self::get_runtime_visible_event_handlers_by_build_sqlite(
                     sqlite_pool,
@@ -452,13 +452,21 @@ impl EventHandler {
         env_id: &Uuid,
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        // PostgreSQL reads must always pass through RLS and observe live
+        // project/build activation state immediately; skip the SQLite-only
+        // runtime_revision lookup and cache write.
+        if let crate::db::DatabasePool::Postgres(pg_pool) = db {
+            return Self::get_event_handlers_by_env_and_event_type_postgres(
+                pg_pool, env_id, event_type,
+            )
+            .await;
+        }
         let cache_key = (*env_id, event_type.to_string());
 
         // Local deployment paths invalidate this cache synchronously. For
         // cross-process deployments, re-check the authoritative revision on a
-        // short interval instead of issuing one PostgreSQL query per event.
-        if matches!(db, crate::db::DatabasePool::Sqlite(_))
-            && let Ok(cache) = EVENT_HANDLER_CACHE.lock()
+        // short interval instead of issuing one query per event.
+        if let Ok(cache) = EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get(&cache_key)
             && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
         {
@@ -477,13 +485,12 @@ impl EventHandler {
             .map_err(|e| EventHandlerError::RuntimeRevision(e.to_string()))?;
 
         // Check cache first
-        if matches!(db, crate::db::DatabasePool::Sqlite(_))
-            && let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
+        if let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get_mut(&cache_key)
         {
             if cached.runtime_revision == runtime_revision {
                 // Defer the next revision read too. Without refreshing this
-                // timestamp, every later cache hit queries PostgreSQL.
+                // timestamp, every later cache hit queries the database.
                 cached.cached_at = std::time::Instant::now();
                 tracing::debug!(
                     "✓ Event handlers cache HIT for env={}, type={} revision={} ({} handlers)",
@@ -513,10 +520,7 @@ impl EventHandler {
 
         // Cache miss - query database
         let handlers = match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                Self::get_event_handlers_by_env_and_event_type_postgres(pg_pool, env_id, event_type)
-                    .await?
-            }
+            crate::db::DatabasePool::Postgres(_) => unreachable!(),
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 Self::get_event_handlers_by_env_and_event_type_sqlite(
                     sqlite_pool,

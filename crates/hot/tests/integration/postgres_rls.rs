@@ -2500,6 +2500,206 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(child_a)
         .execute(&admin)
         .await?;
+    // Consolidated admission, task-claim, stream/event, and env-admission fast paths under RLS.
+    {
+        // 1. Child-org replay fast path still enforces fresh root & child lifecycle.
+        let reentry_run = Uuid::new_v4();
+        db::Run::admit_execution(&db_a, &child_a, &env_a, &reentry_run).await?;
+        db::Run::admit_execution(&db_a, &child_a, &env_a, &reentry_run).await?;
+        sqlx::query("UPDATE hot.org SET lifecycle_state='suspended' WHERE org_id=$1")
+            .bind(root)
+            .execute(&admin)
+            .await?;
+        assert!(matches!(
+            db::Run::admit_execution(&db_a, &child_a, &env_a, &reentry_run).await,
+            Err(db::run::RunError::Suspended(_))
+        ));
+        let suspended_info =
+            db::Org::resolve_admitted_env(&db_a, &env_a, db::BootstrapOperation::Membership)
+                .await?
+                .expect("env_a exists");
+        assert!(!suspended_info.admitted);
+        sqlx::query("UPDATE hot.org SET lifecycle_state='active' WHERE org_id=$1")
+            .bind(root)
+            .execute(&admin)
+            .await?;
+        sqlx::query("UPDATE hot.org SET active=false WHERE org_id=$1")
+            .bind(child_a)
+            .execute(&admin)
+            .await?;
+        assert!(matches!(
+            db::Run::admit_execution(&db_a, &child_a, &env_a, &reentry_run).await,
+            Err(db::run::RunError::Suspended(_))
+        ));
+        sqlx::query("UPDATE hot.org SET active=true WHERE org_id=$1")
+            .bind(child_a)
+            .execute(&admin)
+            .await?;
+        db::Run::admit_execution(&db_a, &child_a, &env_a, &reentry_run).await?;
+        assert!(matches!(
+            db::Run::admit_execution(&db_b, &child_b, &env_b, &reentry_run).await,
+            Err(db::run::RunError::ScopeDenied)
+        ));
+
+        // 2. Root-org 1-tx replay fast path also enforces fresh lifecycle.
+        let env_root = Uuid::new_v4();
+        sqlx::query("INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'root-fast',$3)")
+            .bind(env_root)
+            .bind(root)
+            .bind(user)
+            .execute(&admin)
+            .await?;
+        let db_root =
+            db::DatabasePool::Postgres(counter_pool.with_scope(DatabaseScope::Environment {
+                org_id: root,
+                env_id: env_root,
+            }));
+        let root_run = Uuid::new_v4();
+        db::Run::admit_execution(&db_root, &root, &env_root, &root_run).await?;
+        db::Run::admit_execution(&db_root, &root, &env_root, &root_run).await?;
+        sqlx::query("UPDATE hot.org SET active=false WHERE org_id=$1")
+            .bind(root)
+            .execute(&admin)
+            .await?;
+        assert!(matches!(
+            db::Run::admit_execution(&db_root, &root, &env_root, &root_run).await,
+            Err(db::run::RunError::Suspended(_))
+        ));
+        sqlx::query("UPDATE hot.org SET active=true WHERE org_id=$1")
+            .bind(root)
+            .execute(&admin)
+            .await?;
+        db::Run::admit_execution(&db_root, &root, &env_root, &root_run).await?;
+        sqlx::query("DELETE FROM hot.run_admission WHERE run_id=ANY($1)")
+            .bind(vec![reentry_run, root_run])
+            .execute(&admin)
+            .await?;
+        sqlx::query("DELETE FROM hot.env WHERE env_id=$1")
+            .bind(env_root)
+            .execute(&admin)
+            .await?;
+
+        // 3. resolve_admitted_env, ensure_stream_in_env, insert_event_returning_created_at.
+        let active_info =
+            db::Org::resolve_admitted_env(&db_a, &env_a, db::BootstrapOperation::Authentication)
+                .await?
+                .expect("env_a exists");
+        assert_eq!(active_info.org_id, child_a);
+        assert!(active_info.admitted);
+        assert!(
+            db::Org::resolve_admitted_env(
+                &db_a,
+                &Uuid::new_v4(),
+                db::BootstrapOperation::Authentication,
+            )
+            .await?
+            .is_none()
+        );
+        assert!(db::Stream::ensure_stream_in_env(&db_a, stream_a, env_a).await?);
+        assert!(!db::Stream::ensure_stream_in_env(&db_b, stream_a, env_b).await?);
+
+        let evt_stream = Uuid::new_v4();
+        let evt_id = Uuid::new_v4();
+        let returned_created_at = db::Event::insert_event_returning_created_at(
+            &db_a,
+            &evt_id,
+            &env_a,
+            &evt_stream,
+            "rls:fast",
+            &serde_json::json!({"ok": true}),
+            chrono::Utc::now(),
+            &user,
+            None,
+        )
+        .await?;
+        let fetched_event = db::Event::get_event(&db_a, &evt_id).await?;
+        assert_eq!(fetched_event.created_at, returned_created_at);
+        sqlx::query("DELETE FROM hot.event WHERE event_id=$1")
+            .bind(evt_id)
+            .execute(&admin)
+            .await?;
+        sqlx::query("DELETE FROM hot.stream WHERE stream_id=$1")
+            .bind(evt_stream)
+            .execute(&admin)
+            .await?;
+
+        // 4. Build+project single-tx lookup, task insert_with_origin_run, unlimited claim,
+        //    finalize_timing_and_get_duration, and is_terminal under RLS.
+        let (loaded_build, loaded_project) =
+            db::Build::get_build_with_project_including_inactive(&db_a, &build_a).await?;
+        assert_eq!(loaded_build.build_id, build_a);
+        assert_eq!(loaded_project.expect("project_a").project_id, project_a);
+        assert!(matches!(
+            db::Build::get_build_with_project_including_inactive(&db_b, &build_a).await,
+            Err(db::build::BuildError::NotFound)
+        ));
+
+        let origin_run = Uuid::new_v4();
+        let fast_task = Uuid::new_v4();
+        db::Task::insert_with_origin_run(
+            &db_a,
+            &fast_task,
+            &env_a,
+            &stream_a,
+            &build_a,
+            &origin_run,
+            db::run::RunType::Event.as_id(),
+            None,
+            &user,
+            None,
+            "::rls/fast",
+            None,
+            None,
+            "code",
+            5_000,
+            Some(&user),
+        )
+        .await?;
+        assert!(!db::Task::is_terminal(&db_a, &fast_task).await?);
+        let code_reserve = db::task::TaskQuotaReservation {
+            compute_units: 0,
+            duration_ms: 5_000,
+        };
+        assert!(
+            db::Task::claim_for_worker_with_quota(&db_a, &fast_task, "rls-fast", code_reserve)
+                .await?
+        );
+        assert!(
+            !db::Task::claim_for_worker_with_quota(&db_a, &fast_task, "rls-loser", code_reserve)
+                .await?
+        );
+        assert!(
+            db::Task::complete(
+                &db_a,
+                &fast_task,
+                &db::TaskStatus::Completed,
+                Some(&serde_json::json!({"done": true})),
+                None,
+                Some("rls-fast"),
+            )
+            .await?
+        );
+        assert!(db::Task::is_terminal(&db_a, &fast_task).await?);
+        let duration_ms = db::Task::finalize_timing_and_get_duration(&db_a, &fast_task).await?;
+        assert!(duration_ms.is_some());
+        let finalized = db::Task::get(&db_a, &fast_task).await?;
+        assert!(
+            finalized
+                .timing
+                .as_ref()
+                .and_then(|t| t.get("completed_at"))
+                .is_some()
+        );
+        sqlx::query("DELETE FROM hot.task WHERE task_id=$1")
+            .bind(fast_task)
+            .execute(&admin)
+            .await?;
+        sqlx::query("DELETE FROM hot.run WHERE run_id=$1")
+            .bind(origin_run)
+            .execute(&admin)
+            .await?;
+    }
+
     sqlx::query("DELETE FROM hot.task WHERE task_id=$1")
         .bind(queued_task)
         .execute(&admin)

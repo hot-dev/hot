@@ -230,50 +230,57 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let queue = task_queue
             .ok_or_else(|| err_val("::hot::task/start: no task queue configured".to_string()))?;
 
-        // The emitter/writer pipeline is async, so run:start may not be
-        // committed yet. Bound this bridge just like the task insert itself.
-        match tokio::time::timeout(
-            TASK_NATIVE_IO_TIMEOUT,
-            crate::db::run::Run::ensure_run_exists(
-                &db,
-                &ctx.run_id,
-                &env_id,
-                &ctx.stream_id,
-                ctx.build_id.as_ref(),
-                ctx.run_type_id,
-                ctx.origin_run_id.as_ref(),
-                ctx.user_id.as_ref().unwrap_or(&Uuid::nil()),
-                ctx.access_id.as_ref(),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                return Err(err_val(format!(
-                    "::hot::task/start: failed to create origin run: {}",
-                    e
-                )));
-            }
-            Err(_) => {
-                return Err(err_val(format!(
-                    "::hot::task/start: origin run write timed out after {}s",
-                    TASK_NATIVE_IO_TIMEOUT.as_secs()
-                )));
-            }
-        }
-
         // Too large to store inline: both the row and the queue message hold a
         // reference, which the task worker reads back. Not bound by the
         // timeout, as it's as long as the value takes to write.
         let might_spill = crate::blob::estimate_val_size(&task_args)
             > crate::blob::BlobConfig::from_conf(vm_conf).max_inline_bytes
             || crate::blob::is_blob_ref_val(&task_args);
-        let blob_store = match ctx.org_id.filter(|_| might_spill) {
-            Some(org_id) => crate::blob::blob_store_from_conf(std::sync::Arc::clone(&db), vm_conf)
-                .await
-                .map(|store| (store, org_id)),
-            None => None,
+
+        // When spilling to blob storage, ensure the origin run exists first so
+        // `blob_ref.run_id` FK checks pass; otherwise combine stream + origin
+        // run + task insert into one transaction below.
+        let blob_store = if might_spill {
+            match tokio::time::timeout(
+                TASK_NATIVE_IO_TIMEOUT,
+                crate::db::run::Run::ensure_run_exists(
+                    &db,
+                    &ctx.run_id,
+                    &env_id,
+                    &ctx.stream_id,
+                    ctx.build_id.as_ref(),
+                    ctx.run_type_id,
+                    ctx.origin_run_id.as_ref(),
+                    ctx.user_id.as_ref().unwrap_or(&Uuid::nil()),
+                    ctx.access_id.as_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(err_val(format!(
+                        "::hot::task/start: failed to create origin run: {}",
+                        e
+                    )));
+                }
+                Err(_) => {
+                    return Err(err_val(format!(
+                        "::hot::task/start: origin run write timed out after {}s",
+                        TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+            match ctx.org_id {
+                Some(org_id) => {
+                    crate::blob::blob_store_from_conf(std::sync::Arc::clone(&db), vm_conf)
+                        .await
+                        .map(|store| (store, org_id))
+                }
+                None => None,
+            }
+        } else {
+            None
         };
         let args_scope = |org_id| crate::blob::BlobScope {
             org_id,
@@ -309,25 +316,50 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         } else {
             Some(&args_json)
         };
-        match tokio::time::timeout(
-            write_timeout,
-            crate::db::Task::insert(
-                &db,
-                &task_id,
-                &env_id,
-                &stream_id,
-                &build_id,
-                Some(&ctx.run_id),
-                &function_name,
-                args_json_opt,
-                options_json_opt.as_ref(),
-                &task_type,
-                timeout_ms as i64,
-                ctx.user_id.as_ref(),
-            ),
-        )
-        .await
-        {
+        let insert_res = if might_spill {
+            tokio::time::timeout(
+                write_timeout,
+                crate::db::Task::insert(
+                    &db,
+                    &task_id,
+                    &env_id,
+                    &stream_id,
+                    &build_id,
+                    Some(&ctx.run_id),
+                    &function_name,
+                    args_json_opt,
+                    options_json_opt.as_ref(),
+                    &task_type,
+                    timeout_ms as i64,
+                    ctx.user_id.as_ref(),
+                ),
+            )
+            .await
+        } else {
+            tokio::time::timeout(
+                write_timeout,
+                crate::db::Task::insert_with_origin_run(
+                    &db,
+                    &task_id,
+                    &env_id,
+                    &stream_id,
+                    &build_id,
+                    &ctx.run_id,
+                    ctx.run_type_id,
+                    ctx.origin_run_id.as_ref(),
+                    ctx.user_id.as_ref().unwrap_or(&Uuid::nil()),
+                    ctx.access_id.as_ref(),
+                    &function_name,
+                    args_json_opt,
+                    options_json_opt.as_ref(),
+                    &task_type,
+                    timeout_ms as i64,
+                    ctx.user_id.as_ref(),
+                ),
+            )
+            .await
+        };
+        match insert_res {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 // Unless the row made it anyway, as when a connection fails

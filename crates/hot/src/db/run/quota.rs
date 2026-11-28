@@ -97,35 +97,127 @@ impl Run {
         env_id: &Uuid,
         run_ids: &[Uuid],
     ) -> Result<(), RunError> {
-        if let DatabasePool::Postgres(pool) = db
-            && !matches!(pool.scope()?, DatabaseScope::Environment { org_id: o, env_id: e } if o == *org_id && e == *env_id)
-        {
-            return Err(RunError::ScopeDenied);
-        }
-        let env = crate::db::env::Env::get_env_uncached(db, env_id)
-            .await
-            .map_err(env_lookup_error)?;
-        if env.org_id != *org_id {
-            return Err(RunError::ScopeDenied);
-        }
-        let root_id = crate::db::org::Org::billing_owner_id_for(db, org_id)
-            .await
-            .map_err(org_lookup_error)?;
-        let billing = db.with_scope(DatabaseScope::Maintenance {
-            operation: MaintenanceOperation::Billing,
-            org_id: Some(root_id),
-        });
-        match &billing {
+        match db {
             DatabasePool::Postgres(pool) => {
-                // `admit_postgres` locks the account root only when the account
-                // has a run limit; the lock then holds across the whole group.
-                let mut tx = pool.begin().await?;
-                for run_id in run_ids {
-                    admit_postgres(&mut tx, *org_id, *env_id, *run_id).await?;
+                if !matches!(
+                    pool.scope()?,
+                    DatabaseScope::Environment {
+                        org_id: o,
+                        env_id: e
+                    } if o == *org_id && e == *env_id
+                ) {
+                    return Err(RunError::ScopeDenied);
                 }
+                // Verify environment/org ownership through the caller's exact
+                // Environment RLS scope in one query (instead of separate env +
+                // org lookups). For single-run admissions (such as VM entry
+                // after worker pre-admission), also probe `run_admission` under
+                // the same Environment RLS policy so already-admitted runs only
+                // pay for a fresh lifecycle check.
+                let root_id = if let [run_id] = run_ids {
+                    type EnvReplayProbe = (Option<Uuid>, bool, Option<Uuid>, Option<Uuid>);
+                    let row: Option<EnvReplayProbe> = sqlx::query_as(
+                        "SELECT o.parent_org_id, \
+                                    (e.active AND o.active AND o.lifecycle_state='active'), \
+                                    ra.org_id, ra.env_id \
+                             FROM env e \
+                             JOIN org o ON o.org_id=e.org_id \
+                             LEFT JOIN run_admission ra ON ra.run_id=$3 \
+                             WHERE e.env_id=$1 AND e.org_id=$2",
+                    )
+                    .bind(env_id)
+                    .bind(org_id)
+                    .bind(run_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    let Some((parent_org_id, local_admitted, prior_org, prior_env)) = row else {
+                        return Err(RunError::ScopeDenied);
+                    };
+                    if !local_admitted {
+                        return Err(RunError::Suspended(
+                            "Run environment or account is suspended".into(),
+                        ));
+                    }
+                    let root_id = parent_org_id.unwrap_or(*org_id);
+                    if let (Some(prior_org), Some(prior_env)) = (prior_org, prior_env) {
+                        if prior_org != *org_id || prior_env != *env_id {
+                            return Err(RunError::ScopeDenied);
+                        }
+                        if parent_org_id.is_none() {
+                            return Ok(());
+                        }
+                        // Child org: verify the billing root is still admitting
+                        // without paying for full plan/lineage/ledger re-admission.
+                        let billing_pool = pool.with_scope(DatabaseScope::Maintenance {
+                            operation: MaintenanceOperation::Billing,
+                            org_id: Some(root_id),
+                        });
+                        let root_admitted: Option<bool> = sqlx::query_scalar(
+                            "SELECT r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL \
+                             FROM org r WHERE r.org_id=$1",
+                        )
+                        .bind(root_id)
+                        .fetch_optional(&billing_pool)
+                        .await?;
+                        return match root_admitted {
+                            Some(true) => Ok(()),
+                            Some(false) => Err(RunError::Suspended(
+                                "Run environment or account is suspended".into(),
+                            )),
+                            None => Err(RunError::ScopeDenied),
+                        };
+                    }
+                    root_id
+                } else {
+                    let row: Option<(Option<Uuid>, bool)> = sqlx::query_as(
+                        "SELECT o.parent_org_id, \
+                                (e.active AND o.active AND o.lifecycle_state='active') \
+                         FROM env e \
+                         JOIN org o ON o.org_id=e.org_id \
+                         WHERE e.env_id=$1 AND e.org_id=$2",
+                    )
+                    .bind(env_id)
+                    .bind(org_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    let Some((parent_org_id, local_admitted)) = row else {
+                        return Err(RunError::ScopeDenied);
+                    };
+                    if run_ids.is_empty() {
+                        return Ok(());
+                    }
+                    if !local_admitted {
+                        return Err(RunError::Suspended(
+                            "Run environment or account is suspended".into(),
+                        ));
+                    }
+                    parent_org_id.unwrap_or(*org_id)
+                };
+                let billing_pool = pool.with_scope(DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Billing,
+                    org_id: Some(root_id),
+                });
+                let mut tx = billing_pool.begin().await?;
+                admit_executions_postgres(&mut tx, root_id, *org_id, *env_id, run_ids).await?;
                 tx.commit().await?;
             }
-            DatabasePool::Sqlite(pool) => {
+            DatabasePool::Sqlite(_) => {
+                let env = crate::db::env::Env::get_env_uncached(db, env_id)
+                    .await
+                    .map_err(env_lookup_error)?;
+                if env.org_id != *org_id {
+                    return Err(RunError::ScopeDenied);
+                }
+                let root_id = crate::db::org::Org::billing_owner_id_for(db, org_id)
+                    .await
+                    .map_err(org_lookup_error)?;
+                let billing = db.with_scope(DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Billing,
+                    org_id: Some(root_id),
+                });
+                let DatabasePool::Sqlite(pool) = &billing else {
+                    unreachable!()
+                };
                 let mut tx = pool.begin().await?;
                 // Acquire the SQLite writer lock before reading inside this tx.
                 sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=$1")
@@ -145,101 +237,333 @@ impl Run {
 // These helpers deliberately take the caller's transaction connection. Task
 // claims reserve execution time and the run slot together, or neither commits.
 //
-// `$lock` serializes admissions against the account's run count. SQLite must
-// take its writer lock before reading, so it always locks first. PostgreSQL
-// locks with NO KEY UPDATE, which doesn't block the foreign-key checks of
-// inserts that reference the org, and only when the account has a run limit:
-// an unlimited account has no count to protect, and a racing delivery of the
-// same run is settled by the ledger's primary key.
+// PostgreSQL locks with NO KEY UPDATE, which doesn't block the foreign-key
+// checks of inserts that reference the org, and only when the account has a
+// run limit: an unlimited account has no count to protect, and a racing
+// delivery of the same run is settled by the ledger's primary key. SQLite must
+// take its writer lock before reading, so it always locks first.
 
 /// The task an infrastructure retry ultimately retries: walk parent_task_id
 /// while the current row is an infrastructure retry, within the run's
 /// environment. A run that isn't a task, or isn't a retry, maps to itself.
 const LOGICAL_RUN: &str = "WITH RECURSIVE lineage(task_id,parent_task_id,infra_retry_count,depth) AS (SELECT task_id,parent_task_id,infra_retry_count,0 FROM task WHERE task_id=$1 AND env_id=$2 UNION ALL SELECT p.task_id,p.parent_task_id,p.infra_retry_count,l.depth+1 FROM task p JOIN lineage l ON p.task_id=l.parent_task_id WHERE l.infra_retry_count>0 AND l.depth<100 AND p.env_id=$2) SELECT task_id FROM lineage ORDER BY depth DESC LIMIT 1";
 
-macro_rules! admission {
-    ($name:ident, $connection:ty, $lock:literal, $lock_first:literal, $usage:ident) => {
-        pub(crate) async fn $name(
-            conn: &mut $connection,
-            org_id: Uuid,
-            env_id: Uuid,
-            run_id: Uuid,
-        ) -> Result<(), RunError> {
-            let root_id: Option<Uuid> = sqlx::query_scalar(
-                "SELECT COALESCE(o.parent_org_id,o.org_id) FROM env e JOIN org o ON o.org_id=e.org_id WHERE e.env_id=$1 AND e.org_id=$2"
-            ).bind(env_id).bind(org_id).fetch_optional(&mut *conn).await?;
-            let root_id = root_id.ok_or(RunError::ScopeDenied)?;
-            if $lock_first {
-                sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
-            }
-            let overrides: Option<String> = sqlx::query_scalar(
-                "SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1"
-            ).bind(root_id).fetch_one(&mut *conn).await?;
-            let plan: Option<(Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
-                "SELECT CASE WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
-            ).bind(root_id).fetch_optional(&mut *conn).await?;
-            let now = Utc::now();
-            let period = crate::db::subscription::monthly_usage_start(now, plan.as_ref().and_then(|p| p.1), plan.as_ref().and_then(|p| p.2));
-            let overrides = parse_features(overrides)?;
-            let plan_features = parse_features(plan.and_then(|p| p.0))?;
-            let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
-            if limit >= 0 && !$lock_first {
-                sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
-            }
-            let admitted: bool = sqlx::query_scalar(
-                "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=$1 AND e.org_id=$2"
-            ).bind(env_id).bind(org_id).fetch_one(&mut *conn).await?;
-            if !admitted {
-                return Err(RunError::Suspended("Run environment or account is suspended".into()));
-            }
-            // An infrastructure retry is the run it retries, so it reuses that
-            // admission; a user-requested retry (infra_retry_count 0) is new.
-            let logical: Option<Uuid> = sqlx::query_scalar(LOGICAL_RUN)
-                .bind(run_id).bind(env_id).fetch_optional(&mut *conn).await?;
-            let run_id = logical.unwrap_or(run_id);
-            let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
-                "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
-            ).bind(run_id).fetch_optional(&mut *conn).await?;
-            if let Some((prior_org, prior_env)) = prior {
-                return if prior_org == org_id && prior_env == env_id { Ok(()) } else { Err(RunError::ScopeDenied) };
-            }
-            if limit >= 0 {
-                let used = crate::db::usage::$usage(conn, root_id, period).await?;
-                if used >= limit {
-                    return Err(RunError::QuotaExceeded("Account monthly run limit reached".into()));
-                }
-            }
-            let inserted = sqlx::query("INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (run_id) DO NOTHING")
-                .bind(run_id).bind(root_id).bind(org_id).bind(env_id).bind(now).execute(&mut *conn).await?.rows_affected();
-            if inserted == 0 {
-                // Another delivery of this run admitted it first.
-                let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
-                    "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
-                ).bind(run_id).fetch_optional(&mut *conn).await?;
-                return match prior {
-                    Some((prior_org, prior_env)) if prior_org == org_id && prior_env == env_id => Ok(()),
-                    _ => Err(RunError::ScopeDenied),
-                };
-            }
-            Ok(())
-        }
+const PG_ACCOUNT_ADMISSION_STATE: &str = "SELECT \
+    CAST(r.features AS TEXT), \
+    CASE WHEN op.org_plan_id IS NULL THEN NULL \
+         WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) \
+         ELSE '{}' END, \
+    op.current_period_start, \
+    op.current_period_end, \
+    (e.active AND o.active AND o.lifecycle_state='active' \
+     AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL) \
+    FROM env e \
+    JOIN org o ON o.org_id=e.org_id \
+    JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) \
+    LEFT JOIN org_plan op ON op.org_id=r.org_id \
+    LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid \
+    WHERE e.env_id=$1 AND e.org_id=$2 AND r.org_id=$3";
+
+type PgAccountAdmissionRow = (
+    Option<String>,
+    Option<String>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    bool,
+);
+
+/// Fetch account plan/overrides/lifecycle once for a batch of run admissions,
+/// locking the account root (and re-reading state under the lock) only when the
+/// account enforces a monthly run limit.
+async fn admit_executions_postgres(
+    conn: &mut sqlx::PgConnection,
+    root_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    run_ids: &[Uuid],
+) -> Result<(), RunError> {
+    let now = Utc::now();
+    let row: Option<PgAccountAdmissionRow> = sqlx::query_as(PG_ACCOUNT_ADMISSION_STATE)
+        .bind(env_id)
+        .bind(org_id)
+        .bind(root_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some((overrides, plan_features, period_start, period_end, mut admitted)) = row else {
+        return Err(RunError::ScopeDenied);
     };
+    let mut period = crate::db::subscription::monthly_usage_start(now, period_start, period_end);
+    let mut limit = run_limit(
+        parse_features(plan_features)?.as_ref(),
+        parse_features(overrides)?.as_ref(),
+    )?;
+    if limit >= 0 {
+        sqlx::query("SELECT org_id FROM org WHERE org_id=$1 FOR NO KEY UPDATE")
+            .bind(root_id)
+            .execute(&mut *conn)
+            .await?;
+        let locked: Option<PgAccountAdmissionRow> = sqlx::query_as(PG_ACCOUNT_ADMISSION_STATE)
+            .bind(env_id)
+            .bind(org_id)
+            .bind(root_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some((overrides, plan_features, period_start, period_end, locked_admitted)) = locked
+        else {
+            return Err(RunError::ScopeDenied);
+        };
+        admitted = locked_admitted;
+        period = crate::db::subscription::monthly_usage_start(now, period_start, period_end);
+        limit = run_limit(
+            parse_features(plan_features)?.as_ref(),
+            parse_features(overrides)?.as_ref(),
+        )?;
+    }
+    if !admitted {
+        return Err(RunError::Suspended(
+            "Run environment or account is suspended".into(),
+        ));
+    }
+    for run_id in run_ids {
+        admit_run_with_account_postgres(conn, root_id, org_id, env_id, *run_id, limit, period, now)
+            .await?;
+    }
+    Ok(())
 }
 
-admission!(
-    admit_postgres,
-    sqlx::PgConnection,
-    "SELECT org_id FROM org WHERE org_id=$1 FOR NO KEY UPDATE",
-    false,
-    run_usage_postgres
-);
-admission!(
-    admit_sqlite,
-    sqlx::SqliteConnection,
-    "UPDATE org SET updated_at=updated_at WHERE org_id=$1",
-    true,
-    run_usage_sqlite
-);
+/// Reserve a single run on PostgreSQL inside an active Billing-scoped
+/// transaction whose caller has already verified fresh account lifecycle,
+/// resolved `limit`/`period`, and taken `org FOR NO KEY UPDATE` when
+/// `limit >= 0`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_run_with_account_postgres(
+    conn: &mut sqlx::PgConnection,
+    root_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    run_id: Uuid,
+    limit: i64,
+    period: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<(), RunError> {
+    if limit < 0 {
+        // Unlimited account: resolve infra-retry lineage and upsert the
+        // admission ledger row in a single statement.
+        let (logical_id, owner_org, owner_env): (Uuid, Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as(
+                "WITH RECURSIVE lineage(task_id,parent_task_id,infra_retry_count,depth) AS (\
+                     SELECT task_id,parent_task_id,infra_retry_count,0 FROM task \
+                     WHERE task_id=$1 AND env_id=$2 \
+                     UNION ALL \
+                     SELECT p.task_id,p.parent_task_id,p.infra_retry_count,l.depth+1 \
+                     FROM task p JOIN lineage l ON p.task_id=l.parent_task_id \
+                     WHERE l.infra_retry_count>0 AND l.depth<100 AND p.env_id=$2\
+                 ), \
+                 resolved AS (\
+                     SELECT COALESCE((SELECT task_id FROM lineage ORDER BY depth DESC LIMIT 1),$1) AS logical_id\
+                 ), \
+                 inserted AS (\
+                     INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) \
+                     SELECT logical_id,$3,$4,$2,$5 FROM resolved \
+                     ON CONFLICT (run_id) DO NOTHING \
+                     RETURNING org_id,env_id\
+                 ) \
+                 SELECT r.logical_id, COALESCE(i.org_id,ra.org_id), COALESCE(i.env_id,ra.env_id) \
+                 FROM resolved r \
+                 LEFT JOIN inserted i ON true \
+                 LEFT JOIN run_admission ra ON ra.run_id=r.logical_id",
+            )
+            .bind(run_id)
+            .bind(env_id)
+            .bind(root_id)
+            .bind(org_id)
+            .bind(now)
+            .fetch_one(&mut *conn)
+            .await?;
+        if let (Some(owner_org), Some(owner_env)) = (owner_org, owner_env) {
+            return if owner_org == org_id && owner_env == env_id {
+                Ok(())
+            } else {
+                Err(RunError::ScopeDenied)
+            };
+        }
+        // Rare concurrent race: another transaction committed `logical_id`
+        // after our CTE snapshot started (or another root account owns it and
+        // RLS hid the row). Re-read with a fresh READ COMMITTED snapshot.
+        let prior: Option<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT org_id,env_id FROM run_admission WHERE run_id=$1")
+                .bind(logical_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        return match prior {
+            Some((prior_org, prior_env)) if prior_org == org_id && prior_env == env_id => Ok(()),
+            _ => Err(RunError::ScopeDenied),
+        };
+    }
+
+    // Limited account: resolve lineage and check existing ledger row together.
+    let (logical_id, prior_org, prior_env): (Uuid, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+        "WITH RECURSIVE lineage(task_id,parent_task_id,infra_retry_count,depth) AS (\
+             SELECT task_id,parent_task_id,infra_retry_count,0 FROM task \
+             WHERE task_id=$1 AND env_id=$2 \
+             UNION ALL \
+             SELECT p.task_id,p.parent_task_id,p.infra_retry_count,l.depth+1 \
+             FROM task p JOIN lineage l ON p.task_id=l.parent_task_id \
+             WHERE l.infra_retry_count>0 AND l.depth<100 AND p.env_id=$2\
+         ), \
+         resolved AS (\
+             SELECT COALESCE((SELECT task_id FROM lineage ORDER BY depth DESC LIMIT 1),$1) AS logical_id\
+         ) \
+         SELECT r.logical_id, ra.org_id, ra.env_id \
+         FROM resolved r \
+         LEFT JOIN run_admission ra ON ra.run_id=r.logical_id",
+    )
+    .bind(run_id)
+    .bind(env_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if let (Some(prior_org), Some(prior_env)) = (prior_org, prior_env) {
+        return if prior_org == org_id && prior_env == env_id {
+            Ok(())
+        } else {
+            Err(RunError::ScopeDenied)
+        };
+    }
+    let used = crate::db::usage::run_usage_postgres(conn, root_id, period).await?;
+    if used >= limit {
+        return Err(RunError::QuotaExceeded(
+            "Account monthly run limit reached".into(),
+        ));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (run_id) DO NOTHING",
+    )
+    .bind(logical_id)
+    .bind(root_id)
+    .bind(org_id)
+    .bind(env_id)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        let prior: Option<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT org_id,env_id FROM run_admission WHERE run_id=$1")
+                .bind(logical_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        return match prior {
+            Some((prior_org, prior_env)) if prior_org == org_id && prior_env == env_id => Ok(()),
+            _ => Err(RunError::ScopeDenied),
+        };
+    }
+    Ok(())
+}
+
+pub(crate) async fn admit_sqlite(
+    conn: &mut sqlx::SqliteConnection,
+    org_id: Uuid,
+    env_id: Uuid,
+    run_id: Uuid,
+) -> Result<(), RunError> {
+    let root_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT COALESCE(o.parent_org_id,o.org_id) FROM env e JOIN org o ON o.org_id=e.org_id WHERE e.env_id=$1 AND e.org_id=$2",
+    )
+    .bind(env_id)
+    .bind(org_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let root_id = root_id.ok_or(RunError::ScopeDenied)?;
+    sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=$1")
+        .bind(root_id)
+        .execute(&mut *conn)
+        .await?;
+    let overrides: Option<String> =
+        sqlx::query_scalar("SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1")
+            .bind(root_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    type SqlitePlanRow = (Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+    let plan: Option<SqlitePlanRow> = sqlx::query_as(
+        "SELECT CASE WHEN op.status_id = 1 THEN CAST(COALESCE(p.features,'{}') AS TEXT) ELSE '{}' END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
+    )
+    .bind(root_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let now = Utc::now();
+    let period = crate::db::subscription::monthly_usage_start(
+        now,
+        plan.as_ref().and_then(|p| p.1),
+        plan.as_ref().and_then(|p| p.2),
+    );
+    let overrides = parse_features(overrides)?;
+    let plan_features = parse_features(plan.and_then(|p| p.0))?;
+    let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
+    let admitted: bool = sqlx::query_scalar(
+        "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=$1 AND e.org_id=$2",
+    )
+    .bind(env_id)
+    .bind(org_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !admitted {
+        return Err(RunError::Suspended(
+            "Run environment or account is suspended".into(),
+        ));
+    }
+    // An infrastructure retry is the run it retries, so it reuses that
+    // admission; a user-requested retry (infra_retry_count 0) is new.
+    let logical: Option<Uuid> = sqlx::query_scalar(LOGICAL_RUN)
+        .bind(run_id)
+        .bind(env_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let run_id = logical.unwrap_or(run_id);
+    let prior: Option<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT org_id,env_id FROM run_admission WHERE run_id=$1")
+            .bind(run_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some((prior_org, prior_env)) = prior {
+        return if prior_org == org_id && prior_env == env_id {
+            Ok(())
+        } else {
+            Err(RunError::ScopeDenied)
+        };
+    }
+    if limit >= 0 {
+        let used = crate::db::usage::run_usage_sqlite(conn, root_id, period).await?;
+        if used >= limit {
+            return Err(RunError::QuotaExceeded(
+                "Account monthly run limit reached".into(),
+            ));
+        }
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (run_id) DO NOTHING",
+    )
+    .bind(run_id)
+    .bind(root_id)
+    .bind(org_id)
+    .bind(env_id)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        // Another delivery of this run admitted it first.
+        let prior: Option<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT org_id,env_id FROM run_admission WHERE run_id=$1")
+                .bind(run_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        return match prior {
+            Some((prior_org, prior_env)) if prior_org == org_id && prior_env == env_id => Ok(()),
+            _ => Err(RunError::ScopeDenied),
+        };
+    }
+    Ok(())
+}
 
 /// A missing or out-of-scope owner (RLS hides it as RowNotFound) is a scope
 /// denial. Any other failure (pool timeout, I/O, statement timeout) is

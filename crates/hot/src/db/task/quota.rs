@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -111,90 +111,188 @@ impl Task {
                 "Invalid task quota reservation".into(),
             ));
         }
-        // Read through the caller's already-authorized exact task scope first.
-        let task = Self::get(db, task_id).await?;
-        if task.task_status_id != 1 {
-            return Ok(false);
-        }
-        if task.task_type == "container" && reserve.compute_units == 0 {
-            return Err(TaskError::QuotaExhausted(
-                "Container claim requires a compute reservation".into(),
-            ));
-        }
-        let env = crate::db::env::Env::get_env(db, &task.env_id)
-            .await
-            .map_err(|e| TaskError::QuotaExceeded(format!("Cannot resolve task owner: {e}")))?;
-        if let DatabasePool::Postgres(pool) = db
-            && !matches!(pool.scope()?, DatabaseScope::Environment { org_id, env_id } if org_id == env.org_id && env_id == task.env_id)
-        {
-            return Err(TaskError::QuotaExceeded(
-                "Task claim requires its exact environment scope".into(),
-            ));
-        }
-        let root_id = crate::db::org::Org::billing_owner_id_for(db, &env.org_id)
-            .await
-            .map_err(|e| TaskError::QuotaExceeded(format!("Cannot resolve task account: {e}")))?;
-        let billing = db.with_scope(DatabaseScope::Maintenance {
-            operation: MaintenanceOperation::Billing,
-            org_id: Some(root_id),
-        });
         let now = Utc::now();
-        match &billing {
+        match db {
             DatabasePool::Postgres(pool) => {
-                // Initialize a new period's counters before taking the account
-                // lock, so a rejected claim cannot discard the work. The
-                // transaction below re-reads these limits under the lock.
-                let overrides: Option<Value> =
-                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
-                        .bind(root_id)
-                        .fetch_one(pool)
-                        .await?;
-                let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END,CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
-                ).bind(root_id).fetch_optional(pool).await?;
-                let needs_usage = usage_required(
-                    plan.as_ref().and_then(|p| p.0.as_ref()),
-                    overrides.as_ref(),
-                    plan.as_ref()
-                        .is_some_and(|p| p.1.as_deref() == Some("hot-free")),
-                    task.task_type == "container",
+                // Read task status/type and resolve env/org/root ownership in
+                // one lightweight query under the caller's exact scope instead
+                // of separate Task::get + Env::get_env + Org::billing_owner_id_for.
+                let row: Option<(i16, String, Uuid, Uuid, Uuid)> = sqlx::query_as(
+                    "SELECT t.task_status_id, t.task_type, t.env_id, e.org_id, \
+                            COALESCE(o.parent_org_id, o.org_id) \
+                     FROM task t \
+                     JOIN env e ON e.env_id = t.env_id \
+                     JOIN org o ON o.org_id = e.org_id \
+                     WHERE t.task_id = $1",
+                )
+                .bind(task_id)
+                .fetch_optional(pool)
+                .await?;
+                let Some((task_status_id, task_type, task_env_id, env_org_id, root_id)) = row
+                else {
+                    return Err(TaskError::NotFound);
+                };
+                if task_status_id != 1 {
+                    return Ok(false);
+                }
+                let container = task_type == "container";
+                if container && reserve.compute_units == 0 {
+                    return Err(TaskError::QuotaExhausted(
+                        "Container claim requires a compute reservation".into(),
+                    ));
+                }
+                if !matches!(
+                    pool.scope()?,
+                    DatabaseScope::Environment { org_id, env_id }
+                        if org_id == env_org_id && env_id == task_env_id
+                ) {
+                    return Err(TaskError::QuotaExceeded(
+                        "Task claim requires its exact environment scope".into(),
+                    ));
+                }
+                let billing = db.with_scope(DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Billing,
+                    org_id: Some(root_id),
+                });
+                let DatabasePool::Postgres(billing_pool) = &billing else {
+                    unreachable!()
+                };
+
+                // Combine lifecycle, org overrides, and active plan lookup into
+                // one query inside the Billing transaction.
+                const PG_TASK_ACCOUNT_STATE: &str = "SELECT \
+                    (e.active AND o.active AND o.lifecycle_state='active' \
+                     AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL), \
+                    r.features, \
+                    CASE WHEN op.org_plan_id IS NULL THEN NULL \
+                         WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) \
+                         ELSE '{}'::jsonb END, \
+                    CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END, \
+                    op.current_period_start, \
+                    op.current_period_end \
+                    FROM env e \
+                    JOIN org o ON o.org_id=e.org_id \
+                    JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) \
+                    LEFT JOIN org_plan op ON op.org_id=r.org_id \
+                    LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid \
+                    WHERE e.env_id=$1 AND e.org_id=$2 AND r.org_id=$3";
+                type PgTaskAccountRow = (
+                    bool,
+                    Option<Value>,
+                    Option<Value>,
+                    Option<String>,
+                    Option<DateTime<Utc>>,
+                    Option<DateTime<Utc>>,
                 );
-                if needs_usage {
-                    let period = crate::db::subscription::monthly_usage_start(
+
+                let mut tx = billing_pool.begin().await?;
+                let (admitted, overrides, plan_features, plan_id, period_start, period_end): PgTaskAccountRow =
+                    sqlx::query_as(PG_TASK_ACCOUNT_STATE)
+                        .bind(task_env_id)
+                        .bind(env_org_id)
+                        .bind(root_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                let is_free = plan_id.as_deref() == Some("hot-free");
+                let needs_usage = usage_required(
+                    plan_features.as_ref(),
+                    overrides.as_ref(),
+                    is_free,
+                    container,
+                );
+                // Lock the account root only for a limit that reads usage or
+                // caps monthly runs. NO KEY UPDATE doesn't block foreign-key
+                // checks on inserts that reference the org. A malformed run
+                // limit counts as limited.
+                let run_limit_res =
+                    crate::db::run::quota::run_limit(plan_features.as_ref(), overrides.as_ref());
+                let lock_root =
+                    needs_usage || run_limit_res.as_ref().map_or(true, |limit| *limit >= 0);
+
+                if !lock_root {
+                    // Unlimited account: no root lock or usage counter needed.
+                    // Admit the run ledger row under the already-active Billing
+                    // scope, then switch once to Environment scope to atomically
+                    // claim the queued task row. A concurrent claim loser rolls
+                    // back the whole transaction including the admission insert.
+                    if !admitted {
+                        return Err(TaskError::Suspended);
+                    }
+                    let period =
+                        crate::db::subscription::monthly_usage_start(now, period_start, period_end);
+                    check_capacity(
+                        plan_features.as_ref(),
+                        overrides.as_ref(),
+                        is_free,
+                        container,
+                        &reserve,
+                        (0, 0, 0, 0, 0),
+                    )?;
+                    let limit = run_limit_res.map_err(admission_error)?;
+                    crate::db::run::quota::admit_run_with_account_postgres(
+                        &mut tx,
+                        root_id,
+                        env_org_id,
+                        task_env_id,
+                        *task_id,
+                        limit,
+                        period,
                         now,
-                        plan.as_ref().and_then(|p| p.2),
-                        plan.as_ref().and_then(|p| p.3),
-                    );
+                    )
+                    .await
+                    .map_err(admission_error)?;
+                    DatabaseScope::Environment {
+                        org_id: env_org_id,
+                        env_id: task_env_id,
+                    }
+                    .apply_to_connection(&mut tx)
+                    .await?;
+                    let changed = sqlx::query(
+                        "UPDATE task SET task_status_id=2,start_time=$2,worker_id=$3,\
+                         last_heartbeat_at=clock_timestamp(),reserved_compute_units=$4,\
+                         reserved_duration_ms=$5 WHERE task_id=$1 AND task_status_id=1",
+                    )
+                    .bind(task_id)
+                    .bind(now)
+                    .bind(worker_id)
+                    .bind(reserve.compute_units)
+                    .bind(reserve.duration_ms)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                    if changed == 0 {
+                        tx.rollback().await?;
+                        return Ok(false);
+                    }
+                    tx.commit().await?;
+                    return Ok(true);
+                }
+
+                // Metered / limited account: initialize any new period's usage
+                // counters outside the account lock so a rejected claim cannot
+                // discard the rollover work.
+                if needs_usage {
+                    let period =
+                        crate::db::subscription::monthly_usage_start(now, period_start, period_end);
+                    tx.rollback().await?;
                     if !crate::db::usage::prepare_task_period(&billing, root_id, period).await? {
                         return Err(TaskError::QuotaExceeded(
                             "Usage counters are still moving to the new billing period".into(),
                         ));
                     }
+                    tx = billing_pool.begin().await?;
                 }
-                // Lock the account root only for a limit that reads usage. NO KEY
-                // UPDATE doesn't block foreign-key checks on inserts that
-                // reference the org. A malformed run limit counts as limited.
-                let lock_root = needs_usage
-                    || crate::db::run::quota::run_limit(
-                        plan.as_ref().and_then(|p| p.0.as_ref()),
-                        overrides.as_ref(),
-                    )
-                    .map_or(true, |limit| limit >= 0);
-                let mut tx = pool.begin().await?;
-                let overrides: Option<Value> = sqlx::query_scalar(if lock_root {
-                    "SELECT features FROM org WHERE org_id=$1 FOR NO KEY UPDATE"
-                } else {
-                    "SELECT features FROM org WHERE org_id=$1"
-                })
-                .bind(root_id)
-                .fetch_one(&mut *tx)
-                .await?;
+                // Preserve strict org -> task lock order to prevent deadlocks.
+                sqlx::query("SELECT org_id FROM org WHERE org_id=$1 FOR NO KEY UPDATE")
+                    .bind(root_id)
+                    .execute(&mut *tx)
+                    .await?;
                 // Row locks also require UPDATE policy visibility. Billing
                 // authority can read sibling tasks, but may not mutate them.
                 // Lock this candidate under its verified environment first.
                 DatabaseScope::Environment {
-                    org_id: env.org_id,
-                    env_id: task.env_id,
+                    org_id: env_org_id,
+                    env_id: task_env_id,
                 }
                 .apply_to_connection(&mut tx)
                 .await?;
@@ -214,25 +312,22 @@ impl Task {
                 }
                 .apply_to_connection(&mut tx)
                 .await?;
-                let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END WHERE e.env_id=$1")
-                    .bind(task.env_id).fetch_one(&mut *tx).await?;
+                // Re-read lifecycle, overrides, and plan freshly under the root lock.
+                let (admitted, overrides, plan_features, plan_id, period_start, period_end): PgTaskAccountRow =
+                    sqlx::query_as(PG_TASK_ACCOUNT_STATE)
+                        .bind(task_env_id)
+                        .bind(env_org_id)
+                        .bind(root_id)
+                        .fetch_one(&mut *tx)
+                        .await?;
                 if !admitted {
                     return Err(TaskError::Suspended);
                 }
-                let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
-                    "SELECT CASE WHEN op.status_id = 1 THEN COALESCE(p.features,'{}'::jsonb) ELSE '{}'::jsonb END,CASE WHEN op.status_id = 1 THEN p.plan_id ELSE NULL END,op.current_period_start,op.current_period_end FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
-                ).bind(root_id).fetch_optional(&mut *tx).await?;
-                let period = crate::db::subscription::monthly_usage_start(
-                    now,
-                    plan.as_ref().and_then(|p| p.2),
-                    plan.as_ref().and_then(|p| p.3),
-                );
-                let is_free = plan
-                    .as_ref()
-                    .is_some_and(|p| p.1.as_deref() == Some("hot-free"));
-                let container = task.task_type == "container";
+                let period =
+                    crate::db::subscription::monthly_usage_start(now, period_start, period_end);
+                let is_free = plan_id.as_deref() == Some("hot-free");
                 let usage: (i64, i64, i64, i64, i64) = if !usage_required(
-                    plan.as_ref().and_then(|p| p.0.as_ref()),
+                    plan_features.as_ref(),
                     overrides.as_ref(),
                     is_free,
                     container,
@@ -242,31 +337,47 @@ impl Task {
                     crate::db::usage::task_usage_postgres(&mut tx, root_id, period).await?
                 };
                 check_capacity(
-                    plan.as_ref().and_then(|p| p.0.as_ref()),
+                    plan_features.as_ref(),
                     overrides.as_ref(),
                     is_free,
                     container,
                     &reserve,
                     usage,
                 )?;
-                {
-                    crate::db::run::quota::admit_postgres(
-                        &mut tx,
-                        env.org_id,
-                        task.env_id,
-                        *task_id,
-                    )
-                    .await
-                    .map_err(admission_error)?;
-                }
+                let limit =
+                    crate::db::run::quota::run_limit(plan_features.as_ref(), overrides.as_ref())
+                        .map_err(admission_error)?;
+                crate::db::run::quota::admit_run_with_account_postgres(
+                    &mut tx,
+                    root_id,
+                    env_org_id,
+                    task_env_id,
+                    *task_id,
+                    limit,
+                    period,
+                    now,
+                )
+                .await
+                .map_err(admission_error)?;
                 DatabaseScope::Environment {
-                    org_id: env.org_id,
-                    env_id: task.env_id,
+                    org_id: env_org_id,
+                    env_id: task_env_id,
                 }
                 .apply_to_connection(&mut tx)
                 .await?;
-                let changed = sqlx::query("UPDATE task SET task_status_id=2,start_time=$2,worker_id=$3,last_heartbeat_at=clock_timestamp(),reserved_compute_units=$4,reserved_duration_ms=$5 WHERE task_id=$1 AND task_status_id=1")
-                    .bind(task_id).bind(now).bind(worker_id).bind(reserve.compute_units).bind(reserve.duration_ms).execute(&mut *tx).await?.rows_affected();
+                let changed = sqlx::query(
+                    "UPDATE task SET task_status_id=2,start_time=$2,worker_id=$3,\
+                     last_heartbeat_at=clock_timestamp(),reserved_compute_units=$4,\
+                     reserved_duration_ms=$5 WHERE task_id=$1 AND task_status_id=1",
+                )
+                .bind(task_id)
+                .bind(now)
+                .bind(worker_id)
+                .bind(reserve.compute_units)
+                .bind(reserve.duration_ms)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
                 if changed == 0 {
                     tx.rollback().await?;
                     return Ok(false);
@@ -274,7 +385,34 @@ impl Task {
                 tx.commit().await?;
                 Ok(true)
             }
-            DatabasePool::Sqlite(pool) => {
+            DatabasePool::Sqlite(_) => {
+                // Read through the caller's already-authorized exact task scope first.
+                let task = Self::get(db, task_id).await?;
+                if task.task_status_id != 1 {
+                    return Ok(false);
+                }
+                if task.task_type == "container" && reserve.compute_units == 0 {
+                    return Err(TaskError::QuotaExhausted(
+                        "Container claim requires a compute reservation".into(),
+                    ));
+                }
+                let env = crate::db::env::Env::get_env(db, &task.env_id)
+                    .await
+                    .map_err(|e| {
+                        TaskError::QuotaExceeded(format!("Cannot resolve task owner: {e}"))
+                    })?;
+                let root_id = crate::db::org::Org::billing_owner_id_for(db, &env.org_id)
+                    .await
+                    .map_err(|e| {
+                        TaskError::QuotaExceeded(format!("Cannot resolve task account: {e}"))
+                    })?;
+                let billing = db.with_scope(DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Billing,
+                    org_id: Some(root_id),
+                });
+                let DatabasePool::Sqlite(pool) = &billing else {
+                    unreachable!()
+                };
                 let mut tx = pool.begin().await?;
                 sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root_id)

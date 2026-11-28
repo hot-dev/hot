@@ -1,5 +1,5 @@
 mod hierarchy;
-pub use hierarchy::{ChildProvisioned, CreateChild, OrgAccess, OrgLifecycle};
+pub use hierarchy::{AdmittedEnvInfo, ChildProvisioned, CreateChild, OrgAccess, OrgLifecycle};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;

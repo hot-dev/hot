@@ -189,10 +189,35 @@ async fn publish_event_to_queue(
     stream_id: Uuid,
     access_id: Option<Uuid>,
 ) -> Result<PublishedEvent, (StatusCode, Json<ApiErrorResponse>)> {
+    let (published, _) = publish_event_to_queue_with_created_at(
+        queue,
+        db,
+        auth,
+        actor_user_id,
+        event_type,
+        event_data,
+        stream_id,
+        access_id,
+    )
+    .await?;
+    Ok(published)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_event_to_queue_with_created_at(
+    queue: &dyn Queue<Message>,
+    db: &DatabasePool,
+    auth: &AuthContext,
+    actor_user_id: Uuid,
+    event_type: &str,
+    event_data: &serde_json::Value,
+    stream_id: Uuid,
+    access_id: Option<Uuid>,
+) -> Result<(PublishedEvent, chrono::DateTime<chrono::Utc>), (StatusCode, Json<ApiErrorResponse>)> {
     let event_id = Uuid::now_v7();
     let event_time = chrono::Utc::now();
 
-    Event::insert_event(
+    let created_at = Event::insert_event_returning_created_at(
         db,
         &event_id,
         &auth.env_id(),
@@ -222,12 +247,15 @@ async fn publish_event_to_queue(
     )
     .await?;
 
-    Ok(PublishedEvent {
-        event_id,
-        stream_id,
-        event_type: event_type.to_string(),
-        event_time,
-    })
+    Ok((
+        PublishedEvent {
+            event_id,
+            stream_id,
+            event_type: event_type.to_string(),
+            event_time,
+        },
+        created_at,
+    ))
 }
 
 /// An event's row, as its enqueue needs it.
@@ -260,10 +288,28 @@ async fn enqueue_event(
         access_id,
     } = *event;
 
-    // Get org_id for execution context
-    let env = hot::db::Env::get_env(db, &auth.env_id())
-        .await
-        .map_err(|e| internal_error(format!("Failed to get environment: {e}")))?;
+    // Get org_id for execution context. On PostgreSQL the request's verified
+    // Environment scope already carries the authoritative org_id, avoiding an
+    // extra scoped Env::get_env round trip on every publish.
+    let org_id = match db {
+        DatabasePool::Postgres(pool)
+            if matches!(
+                pool.scope(),
+                Ok(hot::db::DatabaseScope::Environment { env_id, .. }) if env_id == auth.env_id()
+            ) =>
+        {
+            match pool.scope() {
+                Ok(hot::db::DatabaseScope::Environment { org_id, .. }) => org_id,
+                _ => unreachable!(),
+            }
+        }
+        _ => {
+            hot::db::Env::get_env(db, &auth.env_id())
+                .await
+                .map_err(|e| internal_error(format!("Failed to get environment: {e}")))?
+                .org_id
+        }
+    };
 
     // Create execution context for the event
     let run_id = Uuid::now_v7();
@@ -274,7 +320,7 @@ async fn enqueue_event(
         env_id: Some(auth.env_id()),
         env_name: None, // Will be populated later if needed
         user_id: Some(actor_user_id),
-        org_id: Some(env.org_id),
+        org_id: Some(org_id),
         org_slug: None,     // Will be populated later if needed
         build_id: None,     // Will be resolved by worker
         build_hash: None,   // Will be populated later if needed
@@ -397,10 +443,10 @@ async fn resume_publish(
     auth: &AuthContext,
     req: &PublishEventRequest,
     event_id: Uuid,
-) -> Result<bool, PublishError> {
+) -> Result<Option<EventResponse>, PublishError> {
     let event = match Event::get_event(db, &event_id).await {
         Ok(event) => event,
-        Err(EventError::NotFound) => return Ok(false),
+        Err(EventError::NotFound) => return Ok(None),
         Err(e) => return Err(internal_error(e)),
     };
     if event.env_id != auth.env_id() || !is_same_publish(&event, req) {
@@ -449,7 +495,15 @@ async fn resume_publish(
             .await?;
         }
     }
-    Ok(true)
+    Ok(Some(EventResponse {
+        event_id: event.event_id,
+        env_id: event.env_id,
+        stream_id: event.stream_id,
+        event_type: event.event_type,
+        event_data: event.event_data,
+        event_time: event.event_time,
+        created_at: event.created_at,
+    }))
 }
 
 /// Whether `req` asks for the event already stored under its id. A request
@@ -508,7 +562,7 @@ fn number_value(number: &str) -> Option<(bool, String, i64)> {
     Some((negative, significant.to_string(), power))
 }
 
-/// Publish what `POST /v1/events` asked for and return the event's id.
+/// Publish what `POST /v1/events` asked for and return the response record.
 async fn publish_request(
     queue: &dyn Queue<Message>,
     db: &DatabasePool,
@@ -516,7 +570,7 @@ async fn publish_request(
     actor_user_id: Uuid,
     req: &PublishEventRequest,
     access_id: Option<Uuid>,
-) -> Result<Uuid, PublishError> {
+) -> Result<EventResponse, PublishError> {
     if let Some(event_id) = req.event_id {
         if event_id.is_nil() {
             return Err((
@@ -527,29 +581,32 @@ async fn publish_request(
             ));
         }
         // Before the stream: a resend that names none must not make one.
-        if resume_publish(queue, db, auth, req, event_id).await? {
-            return Ok(event_id);
+        if let Some(existing) = resume_publish(queue, db, auth, req, event_id).await? {
+            return Ok(existing);
         }
     }
 
-    // Use provided stream_id or create a new one, then bind it to the caller env.
-    let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
-    DbStream::create_or_get_stream(db, stream_id, auth.env_id())
-        .await
-        .map_err(internal_error)?;
-    if req.stream_id.is_some()
-        && !DbStream::belongs_to_env(db, stream_id, auth.env_id())
-            .await
-            .map_err(internal_error)?
-    {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Stream")),
-        ));
-    }
+    // Use provided stream_id (ensuring it exists and belongs to the caller env
+    // in one transaction) or mint a fresh one that `Event::insert_*` creates
+    // inside its own event-insert transaction.
+    let stream_id = match req.stream_id {
+        Some(stream_id) => {
+            if !DbStream::ensure_stream_in_env(db, stream_id, auth.env_id())
+                .await
+                .map_err(internal_error)?
+            {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ApiErrorResponse::not_found("Stream")),
+                ));
+            }
+            stream_id
+        }
+        None => Uuid::now_v7(),
+    };
 
     let Some(event_id) = req.event_id else {
-        let published = publish_event_to_queue(
+        let (published, created_at) = publish_event_to_queue_with_created_at(
             queue,
             db,
             auth,
@@ -560,11 +617,19 @@ async fn publish_request(
             access_id,
         )
         .await?;
-        return Ok(published.event_id);
+        return Ok(EventResponse {
+            event_id: published.event_id,
+            env_id: auth.env_id(),
+            stream_id: published.stream_id,
+            event_type: published.event_type,
+            event_data: req.event_data.clone(),
+            event_time: published.event_time,
+            created_at,
+        });
     };
 
     let event_time = chrono::Utc::now();
-    let inserted = Event::insert_event_if_absent(
+    let created_at = Event::insert_event_if_absent_returning_created_at(
         db,
         &event_id,
         &auth.env_id(),
@@ -578,15 +643,14 @@ async fn publish_request(
     )
     .await
     .map_err(internal_error)?;
-    if !inserted {
+    let Some(created_at) = created_at else {
         // Another publish got there first, or the id is in an environment
         // this caller can't see.
-        return if resume_publish(queue, db, auth, req, event_id).await? {
-            Ok(event_id)
-        } else {
-            Err(event_id_conflict())
+        return match resume_publish(queue, db, auth, req, event_id).await? {
+            Some(existing) => Ok(existing),
+            None => Err(event_id_conflict()),
         };
-    }
+    };
 
     enqueue_leased_event(
         queue,
@@ -603,7 +667,15 @@ async fn publish_request(
         },
     )
     .await?;
-    Ok(event_id)
+    Ok(EventResponse {
+        event_id,
+        env_id: auth.env_id(),
+        stream_id,
+        event_type: req.event_type.clone(),
+        event_data: req.event_data.clone(),
+        event_time,
+        created_at,
+    })
 }
 
 pub async fn publish_event(
@@ -624,7 +696,7 @@ pub async fn publish_event(
     )?;
 
     let queue = get_event_queue(&_conf).map_err(internal_error)?;
-    let event_id = publish_request(
+    let event = publish_request(
         queue.as_ref(),
         &db,
         &auth,
@@ -634,23 +706,7 @@ pub async fn publish_event(
     )
     .await?;
 
-    // Fetch the full event record to return
-    let event = Event::get_event(&db, &event_id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(ApiResponse::new(EventResponse {
-            event_id: event.event_id,
-            env_id: event.env_id,
-            stream_id: event.stream_id,
-            event_type: event.event_type,
-            event_data: event.event_data,
-            event_time: event.event_time,
-            created_at: event.created_at,
-        })),
-    ))
+    Ok((StatusCode::CREATED, Json(ApiResponse::new(event))))
 }
 
 pub async fn list_events(
@@ -1129,6 +1185,7 @@ mod tests {
             None,
         )
         .await
+        .map(|event| event.event_id)
     }
 
     fn queued_ids(queue: &FlakyQueue) -> Vec<Uuid> {

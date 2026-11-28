@@ -546,6 +546,59 @@ impl Build {
         Ok(build)
     }
 
+    /// Load a build and its owning project (even if inactive) in a single
+    /// scoped PostgreSQL transaction so task setup does not pay two scoped
+    /// round trips.
+    pub async fn get_build_with_project_including_inactive(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+    ) -> Result<(Build, Option<crate::db::Project>), BuildError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let mut tx = pg_pool.begin().await?;
+                let build = sqlx::query_as::<_, Build>(
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = $1",
+                )
+                .bind(build_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| match e {
+                    sqlx::Error::RowNotFound => BuildError::NotFound,
+                    _ => {
+                        tracing::error!("db error in Build::get_build_with_project_including_inactive: {}", e);
+                        BuildError::Database(e)
+                    }
+                })?;
+                let project = sqlx::query_as::<_, crate::db::Project>(
+                    "SELECT project_id, env_id, name, active, created_by_user_id, created_at, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id, deployment_sequence FROM project WHERE project_id = $1",
+                )
+                .bind(build.project_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(BuildError::Database)?;
+                tx.commit().await?;
+                Ok((build, project))
+            }
+            crate::db::DatabasePool::Sqlite(_) => {
+                let build = Self::get_build(db, build_id).await?;
+                let project =
+                    match crate::db::Project::get_project_including_inactive(db, &build.project_id)
+                        .await
+                    {
+                        Ok(project) => Some(project),
+                        Err(crate::db::ProjectError::NotFound) => None,
+                        Err(crate::db::ProjectError::Database(e)) => {
+                            return Err(BuildError::Database(e));
+                        }
+                        Err(e) => {
+                            return Err(BuildError::Database(sqlx::Error::Protocol(e.to_string())));
+                        }
+                    };
+                Ok((build, project))
+            }
+        }
+    }
+
     pub fn invalidate_build_cache(build_id: &Uuid) {
         BUILD_CACHE.invalidate(build_id);
     }

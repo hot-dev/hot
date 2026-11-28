@@ -3828,11 +3828,26 @@ async fn hydrate_event_message_from_db(
             ));
         }
     };
-    let stored_env = Env::get_env(db, &stored_event.env_id).await.map_err(|e| {
+    let env_info = hot::db::Org::resolve_admitted_env(
+        db,
+        &stored_event.env_id,
+        hot::db::BootstrapOperation::Membership,
+    )
+    .await
+    .map_err(|e| {
         worker_infrastructure_retry_error(
             format!(
                 "Failed to load authoritative environment {} for event {}: {}",
                 stored_event.env_id, event_id, e
+            ),
+            infra_retry_backoff_ms,
+        )
+    })?
+    .ok_or_else(|| {
+        worker_infrastructure_retry_error(
+            format!(
+                "Failed to load authoritative environment {} for event {}: Environment not found",
+                stored_event.env_id, event_id
             ),
             infra_retry_backoff_ms,
         )
@@ -3841,12 +3856,12 @@ async fn hydrate_event_message_from_db(
         .body
         .execution_context
         .org_id
-        .is_some_and(|id| id != stored_env.org_id)
+        .is_some_and(|id| id != env_info.org_id)
         || event_message
             .body
             .execution_context
             .env_id
-            .is_some_and(|id| id != stored_env.env_id)
+            .is_some_and(|id| id != env_info.env_id)
         || event_message.body.event.stream_id != stored_event.stream_id
         || event_message.body.execution_context.stream_id != stored_event.stream_id
     {
@@ -3854,27 +3869,16 @@ async fn hydrate_event_message_from_db(
             "Queued event scope does not match durable event ownership",
         ));
     }
-    if !hot::db::Org::is_environment_admitted(db, &stored_env.env_id)
-        .await
-        .map_err(|e| {
-            worker_infrastructure_retry_error(
-                format!("Failed to verify execution admission: {e}"),
-                infra_retry_backoff_ms,
-            )
-        })?
-    {
+    if !env_info.admitted {
         park_event(db, &event_message).await?;
         return Err(Box::new(ParkedEvent));
     }
     let scoped_db = db.with_scope(DatabaseScope::Environment {
-        org_id: stored_env.org_id,
-        env_id: stored_env.env_id,
+        org_id: env_info.org_id,
+        env_id: env_info.env_id,
     });
     let db = &scoped_db;
-    let org_slug = hot::db::org::Org::get_org(db, &stored_env.org_id)
-        .await
-        .ok()
-        .map(|org| org.slug);
+    let org_slug = Some(env_info.org_slug);
 
     let (target_project_id, target_project_name) =
         if let Some(project_id) = event_message.body.event.target_project_id {
@@ -4058,7 +4062,7 @@ async fn hydrate_event_message_from_db(
             return Err(worker_error(err_msg));
         };
         let scope = hot::blob::BlobScope {
-            org_id: stored_env.org_id,
+            org_id: env_info.org_id,
             env_id: Some(stored_event.env_id),
             run_id: None,
         };
@@ -4101,14 +4105,14 @@ async fn hydrate_event_message_from_db(
         run_type_id,
         Some(stored_event.env_id),
         Some(stored_event.created_by_user_id),
-        Some(stored_env.org_id),
+        Some(env_info.org_id),
         authoritative_build
             .as_ref()
             .map(|(build, _)| build.build_id),
         Some(stored_event.event_id),
         claimed_context.origin_run_id,
     )
-    .with_env_name(Some(stored_env.name))
+    .with_env_name(Some(env_info.env_name))
     .with_org_slug(org_slug)
     .with_project(
         authoritative_build

@@ -2648,6 +2648,7 @@ where
 /// has to wait for its project to be active again. So a project it does not
 /// find is looked up once more without that filter, on the same scoped pool:
 /// `NotFound` from here means no such project exists.
+#[cfg(test)]
 async fn load_task_project(
     db: &DatabasePool,
     project_id: &Uuid,
@@ -2757,24 +2758,6 @@ async fn claim_task_for_execution(
     backoff: std::time::Duration,
     reservation: hot::db::task::TaskQuotaReservation,
 ) -> Result<TaskClaim, QueueInfrastructureError> {
-    let task = Task::get(db, task_id).await.map_err(|error| {
-        QueueInfrastructureError::new(
-            format!("Cannot resolve task before claim: {error}"),
-            backoff,
-        )
-    })?;
-    match hot::db::Org::is_environment_admitted(db, &task.env_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return Ok(TaskClaim::NotClaimable);
-        }
-        Err(error) => {
-            return Err(QueueInfrastructureError::new(
-                format!("Cannot verify task admission: {error}"),
-                backoff,
-            ));
-        }
-    }
     match tokio::time::timeout(
         DB_CALL_TIMEOUT,
         Task::claim_for_worker_with_quota(db, task_id, worker_id, reservation),
@@ -3233,61 +3216,53 @@ async fn process_task_inner(
 
     // Queue fields are claims, never runtime authority. Rebuild the complete
     // request from durable task/build/project ownership before side effects.
-    let env = Env::get_env_uncached(&db, &task.env_id)
-        .await
-        .map_err(|error| {
-            // An environment that is not found defers as it always has; a
-            // database error that would recur at every delivery does not.
-            let transient = match &error {
-                hot::db::EnvError::Database(e) => db::is_unavailable_error(e),
-                hot::db::EnvError::NotFound => true,
-            };
-            pre_claim_lookup_error(
-                "Cannot resolve task environment",
-                error,
-                transient,
-                std::time::Duration::from_millis(infra_retry_backoff_ms),
-            )
-        })?;
+    let pre_claim_backoff = std::time::Duration::from_millis(infra_retry_backoff_ms);
+    let env_info = hot::db::Org::resolve_admitted_env(
+        &db,
+        &task.env_id,
+        hot::db::BootstrapOperation::Membership,
+    )
+    .await
+    .map_err(|error| {
+        let transient =
+            matches!(&error, hot::db::OrgError::Database(e) if db::is_unavailable_error(e));
+        pre_claim_lookup_error(
+            "Cannot resolve task environment",
+            error,
+            transient,
+            pre_claim_backoff,
+        )
+    })?
+    .ok_or_else(|| {
+        // An environment that is not found defers as it always has.
+        pre_claim_lookup_error(
+            "Cannot resolve task environment",
+            hot::db::EnvError::NotFound,
+            true,
+            pre_claim_backoff,
+        )
+    })?;
     if request
         .org_id
         .as_deref()
-        .is_some_and(|id| id.parse::<Uuid>().ok() != Some(env.org_id))
+        .is_some_and(|id| id.parse::<Uuid>().ok() != Some(env_info.org_id))
     {
         tracing::error!(
             task_id = %task_id,
             claimed_org_id = ?request.org_id,
-            actual_org_id = %env.org_id,
+            actual_org_id = %env_info.org_id,
             "Dropping task queue message whose org_id does not match durable ownership"
         );
         return Ok(());
     }
-    // A database that does not answer says nothing about the task: defer the
-    // delivery instead of spending its retry budget, which would dead-letter
-    // the message over a short outage. A build or project that is not there,
-    // or a database error that would recur at every delivery, is the task's
-    // own failure and stays a plain error.
-    let pre_claim_backoff = std::time::Duration::from_millis(infra_retry_backoff_ms);
-    let admitted = hot::db::Org::is_environment_admitted(&db, &env.env_id)
-        .await
-        .map_err(|error| {
-            let transient =
-                matches!(&error, hot::db::OrgError::Database(e) if db::is_unavailable_error(e));
-            pre_claim_lookup_error(
-                "Cannot check task environment admission",
-                error,
-                transient,
-                pre_claim_backoff,
-            )
-        })?;
-    if !admitted {
+    if !env_info.admitted {
         return Ok(()); // Durable queued task is rediscovered after reactivation.
     }
     let db = Arc::new(db.with_scope(DatabaseScope::Environment {
-        org_id: env.org_id,
-        env_id: env.env_id,
+        org_id: env_info.org_id,
+        env_id: env_info.env_id,
     }));
-    let build = Build::get_build(&db, &task.build_id)
+    let (build, project) = Build::get_build_with_project_including_inactive(&db, &task.build_id)
         .await
         .map_err(|error| {
             let transient =
@@ -3299,18 +3274,14 @@ async fn process_task_inner(
                 pre_claim_backoff,
             )
         })?;
-    let project = load_task_project(&db, &build.project_id)
-        .await
-        .map_err(|error| {
-            let transient =
-                matches!(&error, hot::db::ProjectError::Database(e) if db::is_unavailable_error(e));
-            pre_claim_lookup_error(
-                "Cannot load task project",
-                error,
-                transient,
-                pre_claim_backoff,
-            )
-        })?;
+    let project = project.ok_or_else(|| {
+        pre_claim_lookup_error(
+            "Cannot load task project",
+            hot::db::ProjectError::NotFound,
+            false,
+            pre_claim_backoff,
+        )
+    })?;
     if project.env_id != task.env_id {
         return Err("Task build does not belong to durable task environment".into());
     }
@@ -3338,7 +3309,7 @@ async fn process_task_inner(
         )));
     }
     let mut request = synthesize_task_request_from_row(&task);
-    request.org_id = Some(env.org_id.to_string());
+    request.org_id = Some(env_info.org_id.to_string());
     request.project_id = Some(project.project_id.to_string());
     request.project_name = Some(project.name.clone());
     let timeout_ms = request.timeout_ms;
@@ -3631,7 +3602,7 @@ async fn process_task_inner(
                 stream_id,
                 env_id,
                 build_id,
-                env.org_id,
+                env_info.org_id,
                 build,
                 project,
                 bundle_lease,
@@ -3737,8 +3708,12 @@ async fn process_task_inner(
     // owner of that fresh claim, whose fenced terminal write is rejected.
     if result.is_ok() {
         let terminal_is_durable = matches!(
-            tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(&terminal_state_db, &task_id)).await,
-            Ok(Ok(task)) if task_status_is_terminal(task.task_status_id)
+            tokio::time::timeout(
+                DB_CALL_TIMEOUT,
+                Task::is_terminal(&terminal_state_db, &task_id)
+            )
+            .await,
+            Ok(Ok(true))
         );
         if !terminal_is_durable {
             tracing::error!(
@@ -6348,82 +6323,25 @@ async fn persist_container_timings(
     }
 }
 
-async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) {
-    let task = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
-        Ok(Ok(task)) => task,
-        Ok(Err(e)) => {
-            tracing::warn!(task_id = %task_id, "Failed to load task for timing finalization: {}", e);
-            return;
-        }
-        Err(_) => {
-            tracing::warn!(
-                task_id = %task_id,
-                timeout_secs = DB_CALL_TIMEOUT.as_secs(),
-                "Task timing finalization load timed out"
-            );
-            return;
-        }
-    };
-    let Some(stop_time) = task.stop_time else {
-        return;
-    };
-    let workload_started_at = task
-        .timing
-        .as_ref()
-        .and_then(|timing| timing.get("workload_started_at"))
-        .and_then(serde_json::Value::as_str)
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&chrono::Utc));
-    let (waiting_ms, execution_ms) = if let Some(workload_started_at) = workload_started_at {
-        (
-            workload_started_at
-                .signed_duration_since(task.created_at)
-                .num_milliseconds()
-                .max(0),
-            stop_time
-                .signed_duration_since(workload_started_at)
-                .num_milliseconds()
-                .max(0),
-        )
-    } else {
-        (
-            stop_time
-                .signed_duration_since(task.created_at)
-                .num_milliseconds()
-                .max(0),
-            0,
-        )
-    };
-    let total_ms = stop_time
-        .signed_duration_since(task.created_at)
-        .num_milliseconds()
-        .max(0);
-    let mut patch = serde_json::json!({
-        "completed_at": stop_time.to_rfc3339(),
-        "waiting_ms": waiting_ms,
-        "execution_ms": execution_ms,
-        "total_ms": total_ms,
-    });
-    if workload_started_at.is_some()
-        && task
-            .timing
-            .as_ref()
-            .and_then(|timing| timing.get("workload_execution_ms"))
-            .is_none()
+async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) -> Option<i64> {
+    match tokio::time::timeout(
+        DB_CALL_TIMEOUT,
+        Task::finalize_timing_and_get_duration(db, task_id),
+    )
+    .await
     {
-        patch["workload_execution_ms"] = serde_json::json!(execution_ms);
-    }
-    match tokio::time::timeout(DB_CALL_TIMEOUT, Task::merge_timing(db, task_id, &patch)).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(duration_ms)) => duration_ms,
         Ok(Err(e)) => {
             tracing::warn!(task_id = %task_id, "Failed to finalize task timing: {}", e);
+            None
         }
         Err(_) => {
             tracing::warn!(
                 task_id = %task_id,
                 timeout_secs = DB_CALL_TIMEOUT.as_secs(),
-                "Task timing finalization write timed out"
+                "Task timing finalization timed out"
             );
+            None
         }
     }
 }
@@ -7943,21 +7861,13 @@ async fn finish_task_with_event(
         return false;
     }
 
-    finalize_task_timing(db, task_id).await;
-
-    // Re-read the row's duration_ms for the event (best-effort; null on
-    // timeout/error). For container tasks the row carries the billable
-    // execution-window snapshot persisted via `duration_ms_override` above,
-    // so the event reports the same window the user was billed for; for all
-    // other tasks it is the stop-start computation from `Task::complete`.
-    let duration_ms = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
-        Ok(Ok(t)) => t.duration_ms,
-        Ok(Err(_)) => None,
-        Err(_) => {
-            tracing::warn!(task_id = %task_id, "Task::get timed out reading duration_ms");
-            None
-        }
-    };
+    // Finalize timing and read the row's duration_ms in a single scoped
+    // transaction (best-effort; null on timeout/error). For container tasks the
+    // row carries the billable execution-window snapshot persisted via
+    // `duration_ms_override` above, so the event reports the same window the
+    // user was billed for; for all other tasks it is the stop-start computation
+    // from `Task::complete`.
+    let duration_ms = finalize_task_timing(db, task_id).await;
 
     // Build error payload for the SSE event (only for non-success statuses)
     let error = match status {
