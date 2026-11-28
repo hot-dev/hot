@@ -14,7 +14,7 @@ use crate::command::api::run_api_with_stream_pubsub;
 use crate::command::app::run_app;
 use crate::command::deploy::setup_live_build_for_dev;
 use crate::command::scheduler::run_scheduler;
-use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub};
+use crate::command::worker::{run_task_worker_with_stream_pubsub, run_worker_with_stream_pubsub};
 use crate::conf::{get_merged_src_paths, get_merged_test_paths, load_conf};
 
 fn isolate_integration_queue(conf: Val) -> Val {
@@ -341,8 +341,9 @@ async fn run_integration_test(
     if services.contains(&"task-worker".to_string()) {
         info!("hot.test: Starting task worker...");
         let tw_conf = merged_conf.clone();
+        let tw_stream = shared_stream_pubsub.clone();
         service_handles.push(tokio::spawn(async move {
-            run_task_worker(Env::Development, tw_conf).await;
+            run_task_worker_with_stream_pubsub(Env::Development, tw_conf, tw_stream).await;
         }));
     }
 
