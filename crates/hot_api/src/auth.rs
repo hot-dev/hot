@@ -126,14 +126,6 @@ fn scope_lookup_status(error: &sqlx::Error) -> StatusCode {
     }
 }
 
-#[cfg(test)]
-fn env_scope_status(error: hot::db::env::EnvError) -> StatusCode {
-    match error {
-        hot::db::env::EnvError::Database(error) => scope_lookup_status(&error),
-        hot::db::env::EnvError::NotFound => StatusCode::FORBIDDEN,
-    }
-}
-
 fn org_scope_status(error: hot::db::org::OrgError) -> StatusCode {
     match error {
         hot::db::org::OrgError::Database(error) => scope_lookup_status(&error),
@@ -1053,7 +1045,7 @@ mod scope_tests {
 
     #[test]
     fn database_failures_are_unavailable_but_missing_rows_deny() {
-        use hot::db::{env::EnvError, org::OrgError, session::SessionError};
+        use hot::db::{org::OrgError, session::SessionError};
         assert_eq!(
             session_status(SessionError::Database(sqlx::Error::PoolTimedOut)),
             StatusCode::SERVICE_UNAVAILABLE
@@ -1063,7 +1055,7 @@ mod scope_tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            env_scope_status(EnvError::Database(sqlx::Error::RowNotFound)),
+            org_scope_status(OrgError::Database(sqlx::Error::RowNotFound)),
             StatusCode::FORBIDDEN
         );
         assert_eq!(

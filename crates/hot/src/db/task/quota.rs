@@ -172,7 +172,7 @@ impl Task {
                     op.current_period_end \
                     FROM env e \
                     JOIN org o ON o.org_id=e.org_id \
-                    JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) \
+                    JOIN org r ON r.org_id=CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END \
                     LEFT JOIN org_plan op ON op.org_id=r.org_id \
                     LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid \
                     WHERE e.env_id=$1 AND e.org_id=$2 AND r.org_id=$3";
@@ -215,6 +215,9 @@ impl Task {
                     // scope, then switch once to Environment scope to atomically
                     // claim the queued task row. A concurrent claim loser rolls
                     // back the whole transaction including the admission insert.
+                    // (If a plan flips from unlimited to limited mid-claim while
+                    // two workers race on the same task_id, PostgreSQL aborts one
+                    // with 40P01 and the worker retries it as an infra error.)
                     if !admitted {
                         return Err(TaskError::Suspended);
                     }

@@ -1587,7 +1587,12 @@ impl Run {
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query(
-                    "UPDATE stream SET total_runs = total_runs + 1, last_activity_at = now() WHERE stream_id = $1",
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = $1), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = $1), \
+                        total_duration_ms = (SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (stop_time - start_time)) * 1000), 0) FROM run WHERE stream_id = $1 AND stop_time IS NOT NULL), \
+                        last_activity_at = now() \
+                     WHERE stream_id = $1",
                 )
                 .bind(stream_id)
                 .execute(&mut *tx)
@@ -1617,8 +1622,16 @@ impl Run {
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query(
-                    "UPDATE stream SET total_runs = total_runs + 1, last_activity_at = datetime('now') WHERE stream_id = ?",
+                    "UPDATE stream SET \
+                        total_runs = (SELECT COUNT(*) FROM run WHERE stream_id = ?), \
+                        total_events = (SELECT COUNT(*) FROM event WHERE stream_id = ?), \
+                        total_duration_ms = (SELECT CAST(ROUND(COALESCE(SUM((julianday(stop_time) - julianday(start_time)) * 86400000), 0)) AS INTEGER) FROM run WHERE stream_id = ? AND stop_time IS NOT NULL), \
+                        last_activity_at = datetime('now') \
+                     WHERE stream_id = ?",
                 )
+                .bind(stream_id)
+                .bind(stream_id)
+                .bind(stream_id)
                 .bind(stream_id)
                 .execute(&mut *tx)
                 .await?;

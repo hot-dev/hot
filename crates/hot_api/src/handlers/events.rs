@@ -189,7 +189,7 @@ async fn publish_event_to_queue(
     stream_id: Uuid,
     access_id: Option<Uuid>,
 ) -> Result<PublishedEvent, (StatusCode, Json<ApiErrorResponse>)> {
-    let (published, _) = publish_event_to_queue_with_created_at(
+    let (published, _, _) = publish_event_to_queue_returning_stored(
         queue,
         db,
         auth,
@@ -204,7 +204,7 @@ async fn publish_event_to_queue(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn publish_event_to_queue_with_created_at(
+async fn publish_event_to_queue_returning_stored(
     queue: &dyn Queue<Message>,
     db: &DatabasePool,
     auth: &AuthContext,
@@ -213,11 +213,18 @@ async fn publish_event_to_queue_with_created_at(
     event_data: &serde_json::Value,
     stream_id: Uuid,
     access_id: Option<Uuid>,
-) -> Result<(PublishedEvent, chrono::DateTime<chrono::Utc>), (StatusCode, Json<ApiErrorResponse>)> {
+) -> Result<
+    (
+        PublishedEvent,
+        chrono::DateTime<chrono::Utc>,
+        serde_json::Value,
+    ),
+    (StatusCode, Json<ApiErrorResponse>),
+> {
     let event_id = Uuid::now_v7();
     let event_time = chrono::Utc::now();
 
-    let created_at = Event::insert_event_returning_created_at(
+    let (stored_event_time, created_at, stored_event_data) = Event::insert_event_returning_stored(
         db,
         &event_id,
         &auth.env_id(),
@@ -240,8 +247,8 @@ async fn publish_event_to_queue_with_created_at(
             event_id,
             stream_id,
             event_type,
-            event_data,
-            event_time,
+            event_data: &stored_event_data,
+            event_time: stored_event_time,
             access_id,
         },
     )
@@ -252,9 +259,10 @@ async fn publish_event_to_queue_with_created_at(
             event_id,
             stream_id,
             event_type: event_type.to_string(),
-            event_time,
+            event_time: stored_event_time,
         },
         created_at,
+        stored_event_data,
     ))
 }
 
@@ -606,7 +614,7 @@ async fn publish_request(
     };
 
     let Some(event_id) = req.event_id else {
-        let (published, created_at) = publish_event_to_queue_with_created_at(
+        let (published, created_at, stored_event_data) = publish_event_to_queue_returning_stored(
             queue,
             db,
             auth,
@@ -622,14 +630,14 @@ async fn publish_request(
             env_id: auth.env_id(),
             stream_id: published.stream_id,
             event_type: published.event_type,
-            event_data: req.event_data.clone(),
+            event_data: stored_event_data,
             event_time: published.event_time,
             created_at,
         });
     };
 
     let event_time = chrono::Utc::now();
-    let created_at = Event::insert_event_if_absent_returning_created_at(
+    let stored = Event::insert_event_if_absent_returning_stored(
         db,
         &event_id,
         &auth.env_id(),
@@ -643,7 +651,7 @@ async fn publish_request(
     )
     .await
     .map_err(internal_error)?;
-    let Some(created_at) = created_at else {
+    let Some((stored_event_time, created_at, stored_event_data)) = stored else {
         // Another publish got there first, or the id is in an environment
         // this caller can't see.
         return match resume_publish(queue, db, auth, req, event_id).await? {
@@ -661,8 +669,8 @@ async fn publish_request(
             event_id,
             stream_id,
             event_type: &req.event_type,
-            event_data: &req.event_data,
-            event_time,
+            event_data: &stored_event_data,
+            event_time: stored_event_time,
             access_id,
         },
     )
@@ -672,8 +680,8 @@ async fn publish_request(
         env_id: auth.env_id(),
         stream_id,
         event_type: req.event_type.clone(),
-        event_data: req.event_data.clone(),
-        event_time,
+        event_data: stored_event_data,
+        event_time: stored_event_time,
         created_at,
     })
 }

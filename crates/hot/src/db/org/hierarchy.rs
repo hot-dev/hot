@@ -271,7 +271,7 @@ impl Org {
                              AND r.parent_org_id IS NULL) \
                      FROM env e \
                      JOIN org o ON o.org_id = e.org_id \
-                     JOIN org r ON r.org_id = COALESCE(o.parent_org_id, o.org_id) \
+                     JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END \
                      WHERE e.env_id = $1",
                 )
                 .bind(env_id)
@@ -287,7 +287,7 @@ impl Org {
                              AND r.parent_org_id IS NULL) \
                      FROM env e \
                      JOIN org o ON o.org_id = e.org_id \
-                     JOIN org r ON r.org_id = COALESCE(o.parent_org_id, o.org_id) \
+                     JOIN org r ON r.org_id = CASE WHEN o.parent_org_id IS NULL THEN o.org_id ELSE o.parent_org_id END \
                      WHERE e.env_id = ?",
                 )
                 .bind(env_id)

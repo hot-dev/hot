@@ -2600,20 +2600,23 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
 
         let evt_stream = Uuid::new_v4();
         let evt_id = Uuid::new_v4();
-        let returned_created_at = db::Event::insert_event_returning_created_at(
-            &db_a,
-            &evt_id,
-            &env_a,
-            &evt_stream,
-            "rls:fast",
-            &serde_json::json!({"ok": true}),
-            chrono::Utc::now(),
-            &user,
-            None,
-        )
-        .await?;
+        let (returned_event_time, returned_created_at, returned_event_data) =
+            db::Event::insert_event_returning_stored(
+                &db_a,
+                &evt_id,
+                &env_a,
+                &evt_stream,
+                "rls:fast",
+                &serde_json::json!({"ok": true, "n": 1e2}),
+                chrono::Utc::now(),
+                &user,
+                None,
+            )
+            .await?;
         let fetched_event = db::Event::get_event(&db_a, &evt_id).await?;
+        assert_eq!(fetched_event.event_time, returned_event_time);
         assert_eq!(fetched_event.created_at, returned_created_at);
+        assert_eq!(fetched_event.event_data, returned_event_data);
         sqlx::query("DELETE FROM hot.event WHERE event_id=$1")
             .bind(evt_id)
             .execute(&admin)

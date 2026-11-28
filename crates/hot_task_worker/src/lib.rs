@@ -2642,25 +2642,6 @@ where
     }
 }
 
-/// The project of a task about to be claimed, active or not.
-/// `Project::get_project` reports a deactivated project as `NotFound`, which
-/// here would read as the task's own failure and get a task failed that only
-/// has to wait for its project to be active again. So a project it does not
-/// find is looked up once more without that filter, on the same scoped pool:
-/// `NotFound` from here means no such project exists.
-#[cfg(test)]
-async fn load_task_project(
-    db: &DatabasePool,
-    project_id: &Uuid,
-) -> Result<Project, hot::db::ProjectError> {
-    match Project::get_project(db, project_id).await {
-        Err(hot::db::ProjectError::NotFound) => {
-            Project::get_project_including_inactive(db, project_id).await
-        }
-        result => result,
-    }
-}
-
 /// The queue backend recorded in a task's timing.
 fn queue_backend_label(queue: &ProcessingQueue<TaskRequest>) -> &'static str {
     match queue {
@@ -11087,8 +11068,10 @@ mod tests {
             Project::get_project(&db, &data.project_id).await,
             Err(hot::db::ProjectError::NotFound)
         ));
-        let project = load_task_project(&db, &data.project_id).await.unwrap();
-        assert!(!project.active);
+        let (_, project) = Build::get_build_with_project_including_inactive(&db, &data.build_id)
+            .await
+            .unwrap();
+        assert!(!project.expect("deactivated project is loaded").active);
         let (waiting, request) = queued(data.build_id).await;
         queue.enqueue(request).await.unwrap();
         let (_, processed) = deliver().await;
@@ -11104,10 +11087,6 @@ mod tests {
 
         // The build names a project that does not exist.
         let missing = Uuid::now_v7();
-        assert!(matches!(
-            load_task_project(&db, &missing).await,
-            Err(hot::db::ProjectError::NotFound)
-        ));
         let orphan_build = Uuid::now_v7();
         Build::insert_build(
             &db,
@@ -11120,6 +11099,11 @@ mod tests {
         )
         .await
         .unwrap();
+        let (_, missing_project) =
+            Build::get_build_with_project_including_inactive(&db, &orphan_build)
+                .await
+                .unwrap();
+        assert!(missing_project.is_none());
         let (orphan, request) = queued(orphan_build).await;
         queue.enqueue(request.clone()).await.unwrap();
         let mut deliveries = 0;

@@ -735,7 +735,7 @@ impl Event {
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
     ) -> Result<(), EventError> {
-        Self::insert_event_returning_created_at(
+        Self::insert_event_returning_stored(
             db,
             event_id,
             env_id,
@@ -750,10 +750,12 @@ impl Event {
         .map(|_| ())
     }
 
-    /// Insert a new event and return its durable `created_at` timestamp so
-    /// callers do not have to re-query the row immediately after insert.
+    /// Insert a new event and return its durable `(event_time, created_at,
+    /// event_data)` values as stored by the database (e.g. PostgreSQL
+    /// microsecond timestamps and normalized `jsonb`) so callers can build
+    /// their response without a follow-up `Event::get_event`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn insert_event_returning_created_at(
+    pub async fn insert_event_returning_stored(
         db: &crate::db::DatabasePool,
         event_id: &Uuid,
         env_id: &Uuid,
@@ -763,7 +765,7 @@ impl Event {
         event_time: DateTime<Utc>,
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
-    ) -> Result<DateTime<Utc>, EventError> {
+    ) -> Result<(DateTime<Utc>, DateTime<Utc>, JsonValue), EventError> {
         match Self::insert_row(
             db,
             event_id,
@@ -779,7 +781,7 @@ impl Event {
         )
         .await?
         {
-            Some(created_at) => Ok(created_at),
+            Some(stored) => Ok(stored),
             None => Err(EventError::AlreadyExists(*event_id)),
         }
     }
@@ -801,7 +803,7 @@ impl Event {
         access_id: Option<&Uuid>,
         enqueue_leased_until: DateTime<Utc>,
     ) -> Result<bool, EventError> {
-        Self::insert_event_if_absent_returning_created_at(
+        Self::insert_event_if_absent_returning_stored(
             db,
             event_id,
             env_id,
@@ -814,14 +816,15 @@ impl Event {
             enqueue_leased_until,
         )
         .await
-        .map(|created_at| created_at.is_some())
+        .map(|stored| stored.is_some())
     }
 
-    /// Like [`Event::insert_event_if_absent`], returning `Some(created_at)`
+    /// Like [`Event::insert_event_if_absent`], returning
+    /// `Some((event_time, created_at, event_data))` as stored by the database
     /// when the row was inserted so callers can build their response without
     /// a follow-up `Event::get_event`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn insert_event_if_absent_returning_created_at(
+    pub async fn insert_event_if_absent_returning_stored(
         db: &crate::db::DatabasePool,
         event_id: &Uuid,
         env_id: &Uuid,
@@ -832,7 +835,7 @@ impl Event {
         created_by_user_id: &Uuid,
         access_id: Option<&Uuid>,
         enqueue_leased_until: DateTime<Utc>,
-    ) -> Result<Option<DateTime<Utc>>, EventError> {
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)>, EventError> {
         Self::insert_row(
             db,
             event_id,
@@ -878,7 +881,7 @@ impl Event {
             Some(payload),
         )
         .await
-        .map(|created_at| created_at.is_some())
+        .map(|stored| stored.is_some())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -894,7 +897,7 @@ impl Event {
         access_id: Option<&Uuid>,
         enqueue_leased_until: Option<DateTime<Utc>>,
         enqueue_payload: Option<&JsonValue>,
-    ) -> Result<Option<DateTime<Utc>>, EventError> {
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)>, EventError> {
         // The stream row, event row, and stream counters commit together in one
         // transaction. A caller told the insert failed must be able to rely on
         // the row, and with it the outbox lease that would still deliver the
@@ -910,9 +913,10 @@ impl Event {
                 .execute(&mut *tx)
                 .await?;
                 // Keep PostgreSQL's database-clock DEFAULT now() as the
-                // authoritative durable-creation timestamp.
-                let created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
-                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING RETURNING created_at",
+                // authoritative durable-creation timestamp and return stored
+                // microsecond event_time + normalized jsonb event_data.
+                let stored: Option<(DateTime<Utc>, DateTime<Utc>, JsonValue)> = sqlx::query_as(
+                    "INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id, enqueue_leased_until, enqueue_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (event_id) DO NOTHING RETURNING event_time, created_at, event_data",
                 )
                 .bind(event_id)
                 .bind(env_id)
@@ -926,7 +930,7 @@ impl Event {
                 .bind(enqueue_payload)
                 .fetch_optional(&mut *tx)
                 .await?;
-                if created_at.is_some() {
+                if stored.is_some() {
                     // A successful insert only changes the event count and activity time.
                     sqlx::query("UPDATE stream SET total_events = total_events + 1, last_activity_at = now() WHERE stream_id = $1")
                         .bind(stream_id)
@@ -934,7 +938,7 @@ impl Event {
                         .await?;
                 }
                 tx.commit().await?;
-                Ok(created_at)
+                Ok(stored)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 // Bind this explicitly so SQLite retains sub-second precision
@@ -986,7 +990,7 @@ impl Event {
                         .await?;
                 }
                 tx.commit().await?;
-                Ok((inserted > 0).then_some(created_at))
+                Ok((inserted > 0).then(|| (event_time, created_at, event_data.clone())))
             }
         }
     }
