@@ -103,7 +103,7 @@ impl Engine {
     /// run instead of an admitted one with no record.
     fn initialize_cached_run(
         vm: &mut crate::lang::runtime::vm::VirtualMachine,
-        instructions: usize,
+        init_plan: &crate::lang::runtime::static_init::StaticInitPlan,
         emitter: Option<&Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
     ) -> Result<(), String> {
         vm.admit_execution()
@@ -112,8 +112,8 @@ impl Engine {
         if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
             emitter.emit(crate::lang::emitter::EngineEvent::run_start(context));
         }
-        if instructions > 0
-            && let Err(error) = vm.execute()
+        if !init_plan.steps.is_empty()
+            && let Err(error) = vm.execute_static_init_plan(init_plan)
         {
             if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
                 emitter.emit(crate::lang::emitter::EngineEvent::run_fail(
@@ -769,11 +769,18 @@ impl Engine {
             vm.set_execution_context(context.clone());
         }
         let module_init_started = std::time::Instant::now();
-        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
+        vm.attach_cached_dispatch_tables(
+            cached.sorted_function_key_indices(),
+            cached.native_core_shadows(),
+        );
+        let init_plan = cached.static_init_plan();
+        Self::initialize_cached_run(&mut vm, init_plan, emitter.as_ref())?;
         tracing::debug!(
-            "TIMING [{}]: vm_module_init_execute: {:?}",
+            "TIMING [{}]: vm_module_init_execute: {:?} (static={}, dynamic={})",
             timing_id,
-            module_init_started.elapsed()
+            module_init_started.elapsed(),
+            init_plan.static_instruction_count,
+            init_plan.dynamic_instruction_count,
         );
 
         // NOW set up the emitter for the function call. The execution context
@@ -1017,7 +1024,6 @@ impl Engine {
         let core_functions = Arc::clone(&cached.core_functions);
         let type_implementations = Arc::clone(&cached.type_implementations);
         let program = Arc::clone(&cached.program);
-        let instruction_count = program.entry_point.len();
         let hot_ast = Arc::clone(&cached.hot_ast);
         let core_variables = Arc::clone(&cached.runtime_core_variables);
 
@@ -1092,7 +1098,12 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
+        vm.attach_cached_dispatch_tables(
+            cached.sorted_function_key_indices(),
+            cached.native_core_shadows(),
+        );
+        let init_plan = cached.static_init_plan();
+        Self::initialize_cached_run(&mut vm, init_plan, emitter.as_ref())?;
 
         // Set the emitter for the function call; keep the execution context
         // module initialization left, with its secret hashes.

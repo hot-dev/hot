@@ -18,7 +18,11 @@ use crate::lang::bytecode::RegisterId;
 
 impl Compiler {
     /// Bind each top-level alias of a type or variant in `program`.
-    pub(super) fn bind_type_aliases(&mut self, program: &Program) -> Result<(), String> {
+    pub(super) fn bind_type_aliases(
+        &mut self,
+        program: &Program,
+        max_entry_register: &mut RegisterId,
+    ) -> Result<(), String> {
         for (ns_path, namespace) in &program.namespaces {
             let ns = ns_path.to_string();
             self.current_namespace = ns.clone();
@@ -43,8 +47,10 @@ impl Compiler {
             self.current_aliases = Default::default();
             for (var, target) in aliases {
                 self.set_source_location_from_var(var);
+                self.next_register = 0;
                 let register = self.load_type_alias_target(&target)?;
                 self.emit_store_global(&ns, var.sym.name(), register);
+                *max_entry_register = (*max_entry_register).max(self.next_register);
             }
         }
         Ok(())

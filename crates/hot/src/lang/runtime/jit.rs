@@ -1291,7 +1291,11 @@ impl SharedJitCode {
 pub struct JitRuntimeState {
     pub config: JitConfig,
     pub code_memory_status: CodeMemoryStatus,
-    pub function_profiles: Vec<JitFunctionProfile>,
+    function_count: usize,
+    /// Per-function profiling state, allocated sparsely only for functions
+    /// actually called in this VM (avoids allocating thousands of empty
+    /// profiles for hot-std/package functions on every VM startup).
+    pub function_profiles: AHashMap<FunctionId, JitFunctionProfile>,
     // Compiled entries are behind `Rc` on purpose: JIT-compiled code can
     // re-enter the VM (through the thread-local VM pointer) while a compiled
     // entry is mid-call, and that reentrant execution may compile and insert
@@ -1304,7 +1308,7 @@ pub struct JitRuntimeState {
     // hot signature can compile instead of interpreting forever (lookup is a
     // linear allocation-free `matches_args` scan; the vec is capped at
     // `MAX_COMPILED_SIGS_PER_FUNCTION`).
-    compiled_functions: Vec<Vec<Arc<JitCompiledFunction>>>,
+    compiled_functions: AHashMap<FunctionId, Vec<Arc<JitCompiledFunction>>>,
     lambda_profiles: AHashMap<LambdaJitKey, JitFunctionProfile>,
     compiled_lambdas: AHashMap<LambdaJitKey, Arc<JitCompiledFunction>>,
     lambda_calls: AHashMap<u64, LambdaCallCount>,
@@ -1312,9 +1316,8 @@ pub struct JitRuntimeState {
     shared: Option<Arc<SharedJitCode>>,
     /// How much of `SharedJitCode::functions` this VM has read.
     shared_seen: usize,
-    /// Published code this VM hasn't looked at yet, by function. Empty, or
-    /// as long as `compiled_functions`.
-    shared_candidates: Vec<Vec<Arc<JitCompiledFunction>>>,
+    /// Published code this VM hasn't looked at yet, by function.
+    shared_candidates: AHashMap<FunctionId, Vec<Arc<JitCompiledFunction>>>,
     /// Lambdas that had shared code when this VM attached.
     shared_lambda_hashes: AHashSet<u64>,
     /// Functions and lambdas this VM runs on code another VM compiled.
@@ -1332,14 +1335,15 @@ impl JitRuntimeState {
         Self {
             config: JitConfig::from_conf(conf),
             code_memory_status: CodeMemoryStatus::detect(),
-            function_profiles: vec![JitFunctionProfile::default(); function_count],
-            compiled_functions: vec![Vec::new(); function_count],
+            function_count,
+            function_profiles: AHashMap::new(),
+            compiled_functions: AHashMap::new(),
             lambda_profiles: AHashMap::new(),
             compiled_lambdas: AHashMap::new(),
             lambda_calls: AHashMap::new(),
             shared: None,
             shared_seen: 0,
-            shared_candidates: Vec::new(),
+            shared_candidates: AHashMap::new(),
             shared_lambda_hashes: AHashSet::new(),
             shared_taken: 0,
         }
@@ -1381,17 +1385,19 @@ impl JitRuntimeState {
         if published.len() == self.shared_seen {
             return;
         }
-        if self.shared_candidates.is_empty() {
-            self.shared_candidates = vec![Vec::new(); self.compiled_functions.len()];
-        }
         for (function_id, code) in &published[self.shared_seen..] {
-            let index = *function_id as usize;
+            if (*function_id as usize) >= self.function_count {
+                continue;
+            }
             let own = self
                 .compiled_functions
-                .get(index)
+                .get(function_id)
                 .is_some_and(|entries| entries.iter().any(|entry| Arc::ptr_eq(entry, code)));
-            if !own && let Some(candidates) = self.shared_candidates.get_mut(index) {
-                candidates.push(Arc::clone(code));
+            if !own {
+                self.shared_candidates
+                    .entry(*function_id)
+                    .or_default()
+                    .push(Arc::clone(code));
             }
         }
         self.shared_seen = published.len();
@@ -1401,25 +1407,24 @@ impl JitRuntimeState {
     /// hasn't looked at.
     #[inline]
     pub fn has_shared_candidates(&self, function_id: FunctionId) -> bool {
-        self.shared_candidates
-            .get(function_id as usize)
-            .is_some_and(|candidates| !candidates.is_empty())
+        !self.shared_candidates.is_empty()
+            && self
+                .shared_candidates
+                .get(&function_id)
+                .is_some_and(|candidates| !candidates.is_empty())
     }
 
     /// Take the code other VMs published for `function_id`, where what it
     /// was compiled on holds in this VM too.
     pub fn adopt_shared(&mut self, function_id: FunctionId, names: CallNames<'_>) {
-        let Some(candidates) = self
-            .shared_candidates
-            .get_mut(function_id as usize)
-            .map(mem::take)
-        else {
+        let Some(candidates) = self.shared_candidates.remove(&function_id) else {
             return;
         };
+        if (function_id as usize) >= self.function_count {
+            return;
+        }
         let names = names.fusing(self.config.hof_fusion_enabled());
-        let Some(entries) = self.compiled_functions.get_mut(function_id as usize) else {
-            return;
-        };
+        let entries = self.compiled_functions.entry(function_id).or_default();
         for code in candidates {
             if entries.len() >= MAX_COMPILED_SIGS_PER_FUNCTION {
                 break;
@@ -1503,41 +1508,46 @@ impl JitRuntimeState {
     }
 
     pub fn record_call(&mut self, function_id: u32, args: &[Val]) {
+        if (function_id as usize) >= self.function_count {
+            return;
+        }
         // Calls already covered by a compiled specialization don't need
         // profiling (allocation-free check).
-        if self
-            .compiled_functions
-            .get(function_id as usize)
-            .is_some_and(|entries| entries.iter().any(|e| e.matches_args(args)))
+        if !self.compiled_functions.is_empty()
+            && self
+                .compiled_functions
+                .get(&function_id)
+                .is_some_and(|entries| entries.iter().any(|e| e.matches_args(args)))
         {
             return;
         }
-        if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
-            if profile.do_not_jit
-                || profile.observed_signatures.len() >= MAX_OBSERVED_SIGNATURES
-                || profile.call_count > self.config.threshold.saturating_mul(8)
-            {
-                return;
-            }
-            profile.record_call(args);
+        let profile = self.function_profiles.entry(function_id).or_default();
+        if profile.do_not_jit
+            || profile.observed_signatures.len() >= MAX_OBSERVED_SIGNATURES
+            || profile.call_count > self.config.threshold.saturating_mul(8)
+        {
+            return;
         }
+        profile.record_call(args);
     }
 
     pub fn function_profile(&self, function_id: u32) -> Option<&JitFunctionProfile> {
-        self.function_profiles.get(function_id as usize)
+        self.function_profiles.get(&function_id)
     }
 
     pub fn has_compiled_function(&self, function_id: FunctionId) -> bool {
-        self.compiled_functions
-            .get(function_id as usize)
-            .is_some_and(|entries| !entries.is_empty())
+        !self.compiled_functions.is_empty()
+            && self
+                .compiled_functions
+                .get(&function_id)
+                .is_some_and(|entries| !entries.is_empty())
     }
 
     /// The result kind of each of a function's compiled signatures.
     #[cfg(test)]
     pub(crate) fn compiled_result_kinds(&self, function_id: FunctionId) -> Vec<JitValueKind> {
         self.compiled_functions
-            .get(function_id as usize)
+            .get(&function_id)
             .map(|entries| entries.iter().map(|entry| entry.result_kind).collect())
             .unwrap_or_default()
     }
@@ -1563,7 +1573,10 @@ impl JitRuntimeState {
         function_id: FunctionId,
         args: &[Val],
     ) -> Option<Arc<JitCompiledFunction>> {
-        let entries = self.compiled_functions.get(function_id as usize)?;
+        if self.compiled_functions.is_empty() {
+            return None;
+        }
+        let entries = self.compiled_functions.get(&function_id)?;
         if entries.is_empty() {
             return None;
         }
@@ -1574,7 +1587,8 @@ impl JitRuntimeState {
         {
             return Some(entry);
         }
-        if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
+        if (function_id as usize) < self.function_count {
+            let profile = self.function_profiles.entry(function_id).or_default();
             profile.guard_failures = profile.guard_failures.saturating_add(1);
         }
         None
@@ -1591,7 +1605,7 @@ impl JitRuntimeState {
             return false;
         }
 
-        let Some(profile) = self.function_profiles.get(function_id as usize) else {
+        let Some(profile) = self.function_profiles.get(&function_id) else {
             return false;
         };
         if profile.do_not_jit {
@@ -1599,7 +1613,7 @@ impl JitRuntimeState {
         }
         let entries = self
             .compiled_functions
-            .get(function_id as usize)
+            .get(&function_id)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         // Already covered by an existing specialization, or at the cap.
@@ -1633,7 +1647,7 @@ impl JitRuntimeState {
             self.adopt_shared(function_id, names);
             if self
                 .compiled_functions
-                .get(function_id as usize)
+                .get(&function_id)
                 .is_some_and(|entries| entries.iter().any(|entry| entry.matches_args(args)))
             {
                 return Ok(());
@@ -1662,10 +1676,12 @@ impl JitRuntimeState {
             Ok(compiled) => compiled,
             Err(err) => {
                 self.note_compile_failure(&err);
-                if is_retryable_jit_bailout(&err)
-                    && let Some(profile) = self.function_profiles.get_mut(function_id as usize)
-                {
-                    profile.failed_signatures.insert(signature);
+                if is_retryable_jit_bailout(&err) && (function_id as usize) < self.function_count {
+                    self.function_profiles
+                        .entry(function_id)
+                        .or_default()
+                        .failed_signatures
+                        .insert(signature);
                 }
                 return Err(err);
             }
@@ -1675,12 +1691,16 @@ impl JitRuntimeState {
         if let Some(shared) = &self.shared {
             shared.publish_function(function_id, &compiled);
         }
-        if let Some(entries) = self.compiled_functions.get_mut(function_id as usize) {
-            entries.push(compiled);
+        if (function_id as usize) < self.function_count {
+            self.compiled_functions
+                .entry(function_id)
+                .or_default()
+                .push(compiled);
         }
         GLOBAL_JIT_COMPILE_COUNT.fetch_add(1, Ordering::Relaxed);
 
-        if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
+        if (function_id as usize) < self.function_count {
+            let profile = self.function_profiles.entry(function_id).or_default();
             profile.cumulative_compile_time_ms = profile
                 .cumulative_compile_time_ms
                 .saturating_add(start.elapsed().as_millis() as u64);
@@ -1859,8 +1879,11 @@ impl JitRuntimeState {
     }
 
     pub fn mark_do_not_jit(&mut self, function_id: FunctionId) {
-        if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
-            profile.do_not_jit = true;
+        if (function_id as usize) < self.function_count {
+            self.function_profiles
+                .entry(function_id)
+                .or_default()
+                .do_not_jit = true;
         }
     }
 }
@@ -4874,10 +4897,7 @@ unsafe extern "C" fn hot_jit_store_global(ns_ptr: i64, name_ptr: i64, val_ptr: i
     let name_val = unsafe { &*(name_ptr as *const Val) };
     let value = unsafe { &*(val_ptr as *const Val) }.clone();
     if let (Val::Str(ns), Val::Str(name)) = (ns_val, name_val) {
-        vm.namespace_variables
-            .entry(ns.to_string())
-            .or_default()
-            .insert(name.to_string(), value);
+        vm.insert_namespace_var(ns, name.to_string(), value);
     }
 }
 
@@ -13347,7 +13367,7 @@ pub struct CallNames<'a> {
     /// What a self tail call can need for each parameter (see
     /// [`CallNames::param_arrows`]).
     param_arrows: &'a [ParamArrows],
-    namespace_variables: Option<&'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>>,
+    namespace_variables: Option<&'a crate::lang::runtime::vm::NamespaceVars>,
     core_functions: Option<&'a indexmap::IndexMap<String, FunctionId>>,
     native_shadows: Option<&'a crate::lang::runtime::native_core::NativeCoreShadows>,
     /// The VM traces its calls (see [`CallNames::traced`]).
@@ -13358,7 +13378,7 @@ pub struct CallNames<'a> {
 
 impl<'a> CallNames<'a> {
     pub fn new(
-        namespace_variables: &'a indexmap::IndexMap<String, indexmap::IndexMap<String, Val>>,
+        namespace_variables: &'a crate::lang::runtime::vm::NamespaceVars,
         core_functions: &'a indexmap::IndexMap<String, FunctionId>,
         native_shadows: &'a crate::lang::runtime::native_core::NativeCoreShadows,
     ) -> Self {
@@ -15503,10 +15523,7 @@ mod tests {
                 Arc::new(CoreVariableRegistry::new()),
                 Some(conf),
             );
-            vm.namespace_variables
-                .entry("::lib".to_string())
-                .or_default()
-                .insert("http-request".to_string(), val!("::dep/target"));
+            vm.insert_namespace_var("::lib", "http-request".to_string(), val!("::dep/target"));
             vm.set_current_namespace("::live".to_string());
             vm
         };
@@ -16233,10 +16250,7 @@ mod tests {
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut vm = make_test_vm(program, conf);
-        vm.namespace_variables
-            .entry("::test".to_string())
-            .or_default()
-            .insert("x".to_string(), val!(42));
+        vm.insert_namespace_var("::test", "x".to_string(), val!(42));
         let result = vm.execute_compiled_user_function(0, &[]).unwrap();
         assert_eq!(result, val!(42));
         assert!(!vm.jit_has_compiled_function(0));
@@ -16274,10 +16288,7 @@ mod tests {
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut vm = make_test_vm(program, conf);
-        vm.namespace_variables
-            .entry("::test".to_string())
-            .or_default()
-            .insert("x".to_string(), val!(42));
+        vm.insert_namespace_var("::test", "x".to_string(), val!(42));
         let result = vm.execute_compiled_user_function(0, &[]).unwrap();
         assert_eq!(result, val!(42));
         assert!(!vm.jit_has_compiled_function(0));

@@ -397,21 +397,102 @@ pub(super) struct ParsedFile {
     pub(super) namespaces: IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
 }
 
-/// Cached parse result with content hash (for in-memory cache)
+/// Maximum number of parsed files retained in the process-wide `PARSE_CACHE`.
+///
+/// Long-lived workers unpack deployed builds into distinct `build-<uuid>` paths;
+/// without a cap, `PARSE_CACHE` would grow unboundedly across deployments.
+const MAX_PARSE_CACHE_ENTRIES: usize = 2048;
+
+/// Cached parse result with content hash and LRU recency tick.
 struct CachedParseResult {
+    /// Monotonic access tick for LRU eviction.
+    last_used: u64,
     /// Hash of the file content
     content_hash: String,
     /// Parsed namespaces (cloneable)
     namespaces: IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
 }
 
-/// Global in-memory cache for parsed files (within same process)
-/// Key: file path, Value: cached parse result
+/// Bounded in-memory LRU cache keyed by file path (validated by content hash).
+///
+/// Keying by file path is required because parsed AST nodes embed `file_path`
+/// in `Namespace::source_file` and `Var::src.file` for duplicate-definition
+/// diagnostics and `same_source_file` checks. Bounding the cache prevents
+/// unbounded retention of dead `build-<uuid>` deployment paths.
+struct BoundedParseCache {
+    entries: AHashMap<String, CachedParseResult>,
+    tick: u64,
+    max_entries: usize,
+}
+
+impl BoundedParseCache {
+    fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            entries: AHashMap::new(),
+            tick: 0,
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    fn get(
+        &mut self,
+        file_path: &str,
+        content_hash: &str,
+    ) -> Option<IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>> {
+        let next_tick = self.tick.wrapping_add(1);
+        let entry = self.entries.get_mut(file_path)?;
+        if entry.content_hash != content_hash {
+            return None;
+        }
+        self.tick = next_tick;
+        entry.last_used = next_tick;
+        Some(entry.namespaces.clone())
+    }
+
+    fn insert(
+        &mut self,
+        file_path: String,
+        content_hash: String,
+        namespaces: IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
+    ) {
+        self.tick = self.tick.wrapping_add(1);
+        if !self.entries.contains_key(&file_path) && self.entries.len() >= self.max_entries {
+            self.evict_oldest();
+        }
+        self.entries.insert(
+            file_path,
+            CachedParseResult {
+                last_used: self.tick,
+                content_hash,
+                namespaces,
+            },
+        );
+    }
+
+    /// Evict the least-recently-used batch (~12.5% of capacity, at least 1)
+    /// so amortized insert cost stays O(1) while keeping memory bounded.
+    fn evict_oldest(&mut self) {
+        let evict_count = (self.max_entries / 8).max(1).min(self.entries.len());
+        let mut by_age: Vec<(u64, String)> = self
+            .entries
+            .iter()
+            .map(|(path, entry)| (entry.last_used, path.clone()))
+            .collect();
+        by_age.select_nth_unstable_by_key(evict_count - 1, |(tick, _)| *tick);
+        for (_, path) in by_age.into_iter().take(evict_count) {
+            self.entries.remove(&path);
+        }
+    }
+}
+
+/// Global bounded in-memory cache for parsed files (within same process).
 ///
 /// Uses parking_lot::Mutex (no poisoning) so a panic during parsing of one file
 /// doesn't permanently disable the cache for all subsequent parses.
-static PARSE_CACHE: std::sync::LazyLock<parking_lot::Mutex<AHashMap<String, CachedParseResult>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(AHashMap::new()));
+static PARSE_CACHE: std::sync::LazyLock<parking_lot::Mutex<BoundedParseCache>> =
+    std::sync::LazyLock::new(|| {
+        parking_lot::Mutex::new(BoundedParseCache::with_capacity(MAX_PARSE_CACHE_ENTRIES))
+    });
 
 /// Compute content hash using Blake3
 fn compute_content_hash(content: &str) -> String {
@@ -898,19 +979,14 @@ pub(super) fn parse_files_parallel(
                 let content_hash = compute_content_hash(&content);
 
                 // Check memory cache first (fastest)
-                {
-                    let cache = PARSE_CACHE.lock();
-                    if let Some(cached) = cache.get(file_path)
-                        && cached.content_hash == content_hash
-                    {
-                        memory_hits.fetch_add(1, Ordering::Relaxed);
-                        return Ok(ParsedFile {
-                            path: file_path.clone(),
-                            content,
-                            content_hash,
-                            namespaces: cached.namespaces.clone(),
-                        });
-                    }
+                if let Some(namespaces) = PARSE_CACHE.lock().get(file_path, &content_hash) {
+                    memory_hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(ParsedFile {
+                        path: file_path.clone(),
+                        content,
+                        content_hash,
+                        namespaces,
+                    });
                 }
 
                 // Check disk cache next
@@ -922,10 +998,8 @@ pub(super) fn parse_files_parallel(
                     // Populate memory cache for future accesses
                     PARSE_CACHE.lock().insert(
                         file_path.clone(),
-                        CachedParseResult {
-                            content_hash: content_hash.clone(),
-                            namespaces: namespaces.clone(),
-                        },
+                        content_hash.clone(),
+                        namespaces.clone(),
                     );
 
                     return Ok(ParsedFile {
@@ -943,10 +1017,8 @@ pub(super) fn parse_files_parallel(
                         // Save to memory cache
                         PARSE_CACHE.lock().insert(
                             file_path.clone(),
-                            CachedParseResult {
-                                content_hash: content_hash.clone(),
-                                namespaces: program.namespaces.clone(),
-                            },
+                            content_hash.clone(),
+                            program.namespaces.clone(),
                         );
 
                         // Save to disk cache (async-safe since we use atomic rename)
@@ -1715,5 +1787,42 @@ mod pkg_hot_tests {
             parsed_unit_key(&cache, &discovered.unit, &parsed).unwrap()
         );
         assert_ne!(parsed_key, disk_unit_key(&cache, &discovered).unwrap());
+    }
+
+    #[test]
+    fn bounded_parse_cache_evicts_lru_entries_and_checks_content_hash() {
+        let mut cache = BoundedParseCache::with_capacity(8);
+        for i in 0..8 {
+            let path = format!("/builds/build-{i}/src/app.hot");
+            let ns = crate::lang::parser::parse_hot_file("::app ns\n\nval 1\n", &path)
+                .unwrap()
+                .namespaces;
+            cache.insert(path, format!("hash-{i}"), ns);
+        }
+        assert_eq!(cache.entries.len(), 8);
+
+        // Touch entry 0 so it becomes the most recently used.
+        assert!(cache.get("/builds/build-0/src/app.hot", "hash-0").is_some());
+        // Mismatched content hash misses without evicting.
+        assert!(cache.get("/builds/build-0/src/app.hot", "wrong").is_none());
+
+        // Inserting a 9th entry evicts the least-recently-used entry (build-1),
+        // keeping build-0 and staying within capacity.
+        let path_8 = "/builds/build-8/src/app.hot".to_string();
+        let ns_8 = crate::lang::parser::parse_hot_file("::app ns\n\nval 1\n", &path_8)
+            .unwrap()
+            .namespaces;
+        cache.insert(path_8.clone(), "hash-8".to_string(), ns_8);
+
+        assert!(cache.entries.len() <= 8, "len={}", cache.entries.len());
+        assert!(
+            cache.get("/builds/build-0/src/app.hot", "hash-0").is_some(),
+            "recently touched entry should be retained"
+        );
+        assert!(
+            cache.get("/builds/build-1/src/app.hot", "hash-1").is_none(),
+            "oldest untouched entry should be evicted"
+        );
+        assert!(cache.get(&path_8, "hash-8").is_some());
     }
 }

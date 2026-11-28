@@ -1423,7 +1423,11 @@ impl Compiler {
             }
         }
 
-        // Pass 1: Compile only type definitions
+        // Pass 1: Compile only type definitions.
+        // Track the high-water mark of scratch registers across top-level
+        // entry_point declarations so each independent declaration reuses low
+        // scratch registers instead of inflating `entry_register_count`.
+        let mut max_entry_register = self.program.entry_register_count;
         tracing::debug!("Compiler: Pass 1 - Compiling type definitions");
         for (ns_path, namespace) in &program.namespaces {
             self.current_namespace = ns_path.to_string();
@@ -1457,7 +1461,9 @@ impl Compiler {
                     // Set source location from AST node
                     self.set_source_location_from_var(var);
 
+                    self.next_register = 0;
                     self.compile_variable_declaration(var, value)?;
+                    max_entry_register = max_entry_register.max(self.next_register);
                 }
             }
         }
@@ -1465,7 +1471,7 @@ impl Compiler {
         // Pass 1.5: Bind the aliases of those types, so no namespace's block
         // has to run before a function can use one.
         tracing::debug!("Compiler: Pass 1.5 - Binding type aliases");
-        self.bind_type_aliases(program)?;
+        self.bind_type_aliases(program, &mut max_entry_register)?;
 
         // Pass 2: Compile everything else (with sub-passes for proper ordering)
         tracing::debug!("Compiler: Pass 2 - Compiling all other declarations");
@@ -1543,18 +1549,28 @@ impl Compiler {
                 // Set source location from AST node
                 self.set_source_location_from_var(var);
 
+                // Preserve `last_value` across hidden `where` predicates so
+                // `track_last_value` can re-surface the previous declaration's
+                // register; all other top-level declarations start from r0.
+                self.next_register = if crate::lang::ast::is_where_predicate(var.sym.name()) {
+                    last_value.map_or(0, |prev| prev + 1)
+                } else {
+                    0
+                };
                 let reg = self.compile_variable_declaration(var, value)?;
                 self.track_last_value(var, reg, &mut last_value);
+                max_entry_register = max_entry_register.max(self.next_register);
             }
         }
 
         tracing::debug!("Compiler: Two-pass compilation completed");
 
-        // Set entry_register_count to the total number of registers allocated
-        self.program.entry_register_count = self.next_register;
+        // Set entry_register_count to the peak scratch register count needed by entry_point
+        self.program.entry_register_count = max_entry_register;
+        self.next_register = max_entry_register;
         tracing::trace!(
-            "Compiler: Set entry_register_count to {} (total registers allocated)",
-            self.next_register
+            "Compiler: Set entry_register_count to {} (peak entry registers)",
+            max_entry_register
         );
 
         Ok(())
@@ -1586,9 +1602,10 @@ impl Compiler {
         self.collect_plain_payload_variants(program);
 
         // Compile each namespace
+        let mut max_entry_register = self.program.entry_register_count;
         for (ns_path, namespace) in &program.namespaces {
             self.current_namespace = ns_path.to_unprefixed_string();
-            self.compile_namespace(namespace)?;
+            self.compile_namespace(namespace, &mut max_entry_register)?;
         }
 
         // Surface var aliases in `function_mapping`. Same rationale as
@@ -1603,8 +1620,9 @@ impl Compiler {
         self.stats.function_count = self.function_mapping.len();
         self.stats.constant_count = self.program.constants.len();
 
-        // Set entry_register_count to the total number of registers allocated
-        self.program.entry_register_count = self.next_register;
+        // Set entry_register_count to the peak scratch register count needed by entry_point
+        self.program.entry_register_count = max_entry_register;
+        self.next_register = max_entry_register;
 
         Ok(())
     }
@@ -1616,10 +1634,13 @@ impl Compiler {
             .map_err(|e| format!("Parser error in additional code: {}", e))?;
 
         // Compile the additional program into the existing bytecode
+        let mut max_entry_register = self.program.entry_register_count;
         for (ns_path, namespace) in &additional_program.namespaces {
             self.current_namespace = ns_path.to_unprefixed_string();
-            self.compile_namespace(namespace)?;
+            self.compile_namespace(namespace, &mut max_entry_register)?;
         }
+        self.program.entry_register_count = max_entry_register;
+        self.next_register = max_entry_register;
 
         Ok(())
     }
@@ -1785,7 +1806,11 @@ impl Compiler {
     }
 
     /// Compile a namespace
-    fn compile_namespace(&mut self, namespace: &Namespace) -> Result<(), String> {
+    fn compile_namespace(
+        &mut self,
+        namespace: &Namespace,
+        max_entry_register: &mut RegisterId,
+    ) -> Result<(), String> {
         // Set the current namespace's aliases for resolution during compilation
         self.current_aliases = namespace.aliases.clone();
         tracing::trace!(
@@ -1797,8 +1822,14 @@ impl Compiler {
         // Compile each variable in the namespace
         let mut last_value = None;
         for (var, value) in &namespace.scope.vars {
+            self.next_register = if crate::lang::ast::is_where_predicate(var.sym.name()) {
+                last_value.map_or(0, |prev| prev + 1)
+            } else {
+                0
+            };
             let reg = self.compile_variable_declaration(var, value)?;
             self.track_last_value(var, reg, &mut last_value);
+            *max_entry_register = (*max_entry_register).max(self.next_register);
         }
         Ok(())
     }
@@ -2753,7 +2784,7 @@ impl Compiler {
             fn_def.precondition.as_ref(),
             keeps_result,
         );
-        let function_instructions =
+        let (function_instructions, register_count) =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
 
         // TCO: Restore previous function context
@@ -2769,7 +2800,7 @@ impl Compiler {
         // Update the function info with the compiled instructions
         let moves = self.plan_function_moves(actual_function_id, &function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(actual_function_id as usize) {
-            func_info.register_count = self.next_register;
+            func_info.register_count = register_count;
             func_info.moves = moves;
             func_info.instructions = function_instructions;
             tracing::trace!(
@@ -2907,7 +2938,7 @@ impl Compiler {
             fn_def.precondition.as_ref(),
             keeps_result,
         );
-        let function_instructions =
+        let (function_instructions, register_count) =
             self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
 
         // TCO: Restore previous function context
@@ -2923,7 +2954,7 @@ impl Compiler {
         // Update the reserved slot with the compiled instructions
         let moves = self.plan_function_moves(reserved_id, &function_instructions);
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
-            func_info.register_count = self.next_register;
+            func_info.register_count = register_count;
             func_info.moves = moves;
             func_info.instructions = function_instructions;
             tracing::trace!(
@@ -2943,16 +2974,21 @@ impl Compiler {
     /// and an epilogue for a refined return type. A self tail call restarts
     /// the body, so the prologue checks every iteration's arguments; the
     /// epilogue checks the value the last iteration returns.
+    ///
+    /// Each function compiles with its own 0-based register frame; the VM
+    /// allocates a disjoint slice of its register stack per call.
     fn compile_checked_function_body(
         &mut self,
         body: &Value,
         checks: Option<&constraint_specs::SignatureChecks>,
-    ) -> Result<Vec<Instruction>, String> {
+    ) -> Result<(Vec<Instruction>, u32), String> {
         tracing::trace!("Compiler: compile_function_body called");
         // Save the current instruction context (entry point instructions)
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
+        let saved_next_register = self.next_register;
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
+        self.next_register = 0;
         self.in_tail_position = true;
         self.emitting_function_body = true;
         let saved_proven =
@@ -2976,10 +3012,14 @@ impl Compiler {
             };
             // If a TailCall was emitted this Return is dead code.
             self.emit_instruction(Instruction::Return { value: result_reg });
-            Ok(std::mem::take(&mut self.program.entry_point))
+            Ok((
+                std::mem::take(&mut self.program.entry_point),
+                self.next_register,
+            ))
         })();
 
         self.program.entry_point = saved_instructions;
+        self.next_register = saved_next_register;
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
         self.proven_params = saved_proven;
@@ -4953,7 +4993,11 @@ impl Compiler {
             tracing::trace!("Compiler: Wrapping piped value in lazy thunk (first param is lazy)");
 
             // Generate a unique variable name to capture the piped value
-            let capture_name = format!("$piped_lazy_{}", self.next_register);
+            let capture_name = format!(
+                "$piped_lazy_{}_{}",
+                self.program.entry_point.len(),
+                self.next_register
+            );
 
             // Store the piped value in a variable that the lambda will capture
             let capture_name_id = self.program.add_string_ref(capture_name.clone());
@@ -5274,6 +5318,7 @@ impl Compiler {
 
         // Save current entry point instructions
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
+        let saved_next_register = self.next_register;
         let saved_function_name = self.current_function_name.take();
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
@@ -5281,6 +5326,7 @@ impl Compiler {
         // The enclosing body's proofs don't reach into a lambda.
         let saved_proven = std::mem::take(&mut self.proven_params);
         let saved_bindings = self.enclosing_bindings.len();
+        self.next_register = 0;
         self.enclosing_bindings.extend(parameters.iter().cloned());
         self.in_tail_position = false;
         self.emitting_function_body = true;
@@ -5316,7 +5362,9 @@ impl Compiler {
             Ok(std::mem::take(&mut self.program.entry_point))
         })();
 
+        let body_next_register = self.next_register;
         self.program.entry_point = saved_instructions;
+        self.next_register = saved_next_register;
         self.current_function_name = saved_function_name;
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
@@ -5360,8 +5408,8 @@ impl Compiler {
             .max()
             .unwrap_or(0);
 
-        // Use the higher of next_register or max_reg + 1 to ensure we have enough capacity
-        let register_count = std::cmp::max(self.next_register, max_reg_in_instructions + 1);
+        // Use the higher of body_next_register or max_reg + 1 to ensure we have enough capacity
+        let register_count = std::cmp::max(body_next_register, max_reg_in_instructions + 1);
 
         // Pre-compute used registers for efficient save/restore during lambda execution
         let used_registers =
@@ -5423,20 +5471,19 @@ impl Compiler {
 
         // Save current entry point instructions
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
+        let saved_next_register = self.next_register;
         let saved_function_name = self.current_function_name.take();
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
         let saved_proven = std::mem::take(&mut self.proven_params);
         let saved_bindings = self.enclosing_bindings.len();
+        self.next_register = 0;
         self.in_tail_position = false;
         self.emitting_function_body = true;
 
-        // The thunk takes its registers from the shared counter, as a lambda
-        // does. Starting it again at 0 gave the thunk the registers of the
-        // first functions compiled (hot-std constructors): a first-entry
-        // call to one of those from inside the thunk saves nothing, so it
-        // overwrote the thunk's live temporaries.
+        // Each thunk runs in its own register frame window on the VM, so its
+        // registers are 0-based and cannot collide with caller or callee frames.
         // Bindings inside the thunk are its own locals.
         let saved_local_names_len = self.local_names.len();
 
@@ -5446,8 +5493,10 @@ impl Compiler {
             Ok(std::mem::take(&mut self.program.entry_point))
         })();
 
+        let body_next_register = self.next_register;
         self.local_names.truncate(saved_local_names_len);
         self.program.entry_point = saved_instructions;
+        self.next_register = saved_next_register;
         self.current_function_name = saved_function_name;
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
@@ -5483,7 +5532,7 @@ impl Compiler {
 
         // The scan above lists only some instructions' destinations; the
         // counter covers every register the thunk allocated.
-        let thunk_register_count = std::cmp::max(self.next_register, max_reg_in_instructions + 1);
+        let thunk_register_count = std::cmp::max(body_next_register, max_reg_in_instructions + 1);
 
         // Create closure environment
         let mut closure_env = AHashMap::new();
