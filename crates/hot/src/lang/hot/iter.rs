@@ -193,10 +193,16 @@ pub fn next(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             payload: payload_json.clone(),
         };
 
-        // Publish to stream pub/sub (fire-and-forget)
-        // Use Handle::block_on directly since VM runs in spawn_blocking context
+        // Publish to stream pub/sub (fire-and-forget).
+        // Use Handle::block_on directly since VM runs in spawn_blocking context,
+        // waiting for any in-flight `run:start` publication first so chunks
+        // never overtake `run:start` on the subscriber stream.
         let publisher_clone = publisher.clone();
+        let emitter = vm.get_emitter();
         tokio::runtime::Handle::current().block_on(async {
+            if let Some(emitter) = emitter {
+                emitter.wait_run_start_published().await;
+            }
             if let Err(e) = publisher_clone.publish(stream_event).await {
                 tracing::warn!("Failed to publish iterator stream data: {}", e);
             }
@@ -600,4 +606,20 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
     let iter_box = IteratorBox::new(Box::new(iterator));
 
     HotResult::Ok(Val::Box(Box::new(iter_box)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_iter_next_waits_for_in_flight_run_start_publication() {
+        super::super::stream::tests::assert_waits_for_in_flight_run_start("iter:chunk", |vm| {
+            let iter_box = IteratorBox::new(Box::new(RangeIterator::new(0, 2, 1)))
+                .with_stream_data(true, "iter:chunk");
+            let res = next(vm, &[Val::Box(Box::new(iter_box))]);
+            assert!(matches!(res, HotResult::Ok(_)), "{res:?}");
+        })
+        .await;
+    }
 }
