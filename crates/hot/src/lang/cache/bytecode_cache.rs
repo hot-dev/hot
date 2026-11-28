@@ -880,7 +880,9 @@ impl BytecodeCache {
         Ok(cached_bytecode)
     }
 
-    /// Save compiled bytecode to cache with compilation artifacts, AST, and HotAst
+    /// Save compiled bytecode to cache with compilation artifacts, AST, and HotAst.
+    /// Production callers use [`Self::save_cached`] to avoid cloning; kept for tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn save(
         &self,
